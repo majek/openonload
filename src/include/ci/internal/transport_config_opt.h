@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -43,11 +43,19 @@
 # define CI_CFG_KERNEL                  1
 #else
 # define CI_CFG_KERNEL                  0
-#include "libc_compat.h"
 #endif
 
 /* Maximum number of network interfaces (ports) per stack. */
 #define CI_CFG_MAX_INTERFACES           8
+
+/* Maximim number of hwports in the system */
+#define CI_CFG_MAX_HWPORTS              8
+
+/* Maximum number of local IP addresses in the system */
+#define CI_CFG_MAX_LOCAL_IPADDRS        256
+
+/* Do we need team/bond support? */
+#define CI_CFG_TEAMING                  1
 
 /* Some defaults.  These can be overridden at runtime. */
 #define CI_CFG_NETIF_MAX_ENDPOINTS     (1<<13)
@@ -335,12 +343,12 @@
 /* TCP sndbuf */
 #define CI_CFG_TCP_SNDBUF_MIN	        CI_SOCK_MIN_SNDBUF
 # define CI_CFG_TCP_SNDBUF_DEFAULT	65535
-#define CI_CFG_TCP_SNDBUF_MAX		65535
+#define CI_CFG_TCP_SNDBUF_MAX		4194304
 
 #define CI_CFG_TCP_RCVBUF_MIN           CI_SOCK_MIN_RCVBUF
 
 # define CI_CFG_TCP_RCVBUF_DEFAULT	65535
-#define CI_CFG_TCP_RCVBUF_MAX		65535
+#define CI_CFG_TCP_RCVBUF_MAX		6291456
 
 /* These configuration "options" describe whether the host O/S normally
  * inherits specific socket state when accept() is called.
@@ -363,7 +371,6 @@
  * send value.
  * Default is overriden based on receive buffer. */
 #define CI_TCP_WSCL_MAX      14     /* RFC 1323 max shift                 */
-#define CI_TCP_WSCL_DEFAULT   0     /* default advertised window scale    */
 
 /* It is supposed that 
  * CI_TCP_RETRANSMIT_THRESHOLD > CI_TCP_RETRANSMIT_THRESHOLD_SYN.
@@ -372,12 +379,8 @@
 #define CI_TCP_RETRANSMIT_THRESHOLD_ORPHAN 8   /* orphaned sock: 8 times */
 #define CI_TCP_RETRANSMIT_THRESHOLD_SYN    4   /* retransmit SYN 4 times */
 
-/* Should we send SACK/DSACK option in TCP? */
-#define CI_CFG_TCP_SACK 1
+/* Should we send DSACK option in TCP? */
 #define CI_CFG_TCP_DSACK 1
-
-/* ... and TCP timestamp option? */
-#define CI_CFG_TCP_TSO 1
 
 /* Path to the /proc/sys/ */
 #define CI_CFG_PROC_PATH		"/proc/sys/"
@@ -461,16 +464,6 @@
  * that RFC.  It should be between 1 and 2 to comply
  */ 
 #define CI_CFG_CONG_AVOID_RFC3465_L_VALUE 2
-
-/* EXPERIMENTAL
- * Enable TCP filtering in the net driver.  When enabled all unfragmented
- * TCP that is destined for a UL TCP address/port will be discarded by the
- * driverlink filter.  Rx & Tx are handled separately.
- * 
- * DEFAULTS: 0
- */
-#define CI_CFG_NET_TCP_RX_FILTER 0
-#define CI_CFG_NET_TCP_TX_FILTER 0
 
 /* Enable filtering of DHCP packets from the net driver, which the DHCP client
  * code inside the iSCSI module can register to receive.  (This is required for
@@ -639,18 +632,17 @@
 #define CI_CFG_PIO 1
 #define CI_CFG_MIN_PIO_BLOCK_ORDER 7
 
-/* Whether this build should use PIO or not.  
+/* Whether to include code to transmit packets via CTPIO */
+#define CI_CFG_CTPIO 1
+
+/* Whether this build should use PIO/CTPIO or not.
  *
- * This is needed in addition to CI_CFG_PIO as on some 32 bit systems
- * PIO is suspected to not be safe, but those builds may be sharing a
+ * This is needed in addition to CI_CFG_PIO and CI_CFG_CTPIO as on some 32 bit
+ * systems PIO is suspected to not be safe, but those builds may be sharing a
  * stack with a 64 bit system that is using PIO safely.
  */
-#if defined(__x86_64__) || defined(__PPC64__)
-#define CI_CFG_USE_PIO CI_CFG_PIO
-#else
-#define CI_CFG_USE_PIO 0
-#endif
-
+#define CI_CFG_USE_PIO  (EF_VI_CONFIG_PIO && CI_CFG_PIO)
+#define CI_CFG_USE_CTPIO (EF_VI_CONFIG_PIO && CI_CFG_CTPIO)
 
 /* Include support for an additional RXQ for UDP receives.
  */
@@ -658,11 +650,21 @@
 
 /* How many epolls sets will have a ready list maintained by the stack */
 #define CI_CFG_EPOLL1_SETS_PER_STACK 4
-/* How many ready lists are maintained - one dummy list for sockets that
- * aren't asssociated with a specific set's ready list, plus the ones assigned
- * for epolls sets - CI_CFG_EPOLL1_SETS_PER_STACK.
+/* How many ready lists are maintained */
+#define CI_CFG_N_READY_LISTS CI_CFG_EPOLL1_SETS_PER_STACK
+
+/* Control behaviour of Onload sender when receiver advertises window
+ * below 1 MSS
  */
-#define CI_CFG_N_READY_LISTS (CI_CFG_EPOLL1_SETS_PER_STACK + 1)
+#define CI_CFG_SPLIT_SEND_PACKETS_FOR_SMALL_RECEIVE_WINDOWS 0
+
+#define CI_CFG_MAX_SUPPORTED_INTERFACES 16
+
+/* Do we need SO_TIMESTAMPING, WODA, ...? */
+#define CI_CFG_TIMESTAMPING 1
+
+/* Include "extra" transport_config_opt to allow build-time profiles */
+#include TRANSPORT_CONFIG_OPT_HDR
 
 #endif /* __CI_INTERNAL_TRANSPORT_CONFIG_OPT_H__ */
 /*! \cidoxg_end */

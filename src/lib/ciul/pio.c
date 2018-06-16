@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -37,7 +37,8 @@
 #define EF10_VI_WINDOW_STEP  8192
 
 
-#if defined(__x86_64__) || defined(__PPC64__)
+#if EF_VI_CONFIG_PIO
+
 int ef_pio_alloc(ef_pio* pio, ef_driver_handle pio_dh, ef_pd* pd,
                  unsigned len_hint, ef_driver_handle pd_dh)
 {
@@ -48,8 +49,12 @@ int ef_pio_alloc(ef_pio* pio, ef_driver_handle pio_dh, ef_pd* pd,
   rc = ef_pd_capabilities_get(pio_dh, pd, pd_dh, EF_VI_CAP_PIO_BUFFER_SIZE,
                               &pio_buffer_size);
   if( rc < 0 ) {
-    LOGVV(ef_log("%s: ef_pd_capabilities_get() failed", __FUNCTION__));
-    return rc;
+    if( rc != -ENOTTY ) {
+      LOGVV(ef_log("%s: ef_pd_capabilities_get() failed", __FUNCTION__));
+      return rc;
+    }
+    /* Old driver, so must be a 7000-series. */
+    pio_buffer_size = 2048;
   }
 
   memset(pio, 0, sizeof(*pio));
@@ -79,7 +84,9 @@ int ef_pio_alloc(ef_pio* pio, ef_driver_handle pio_dh, ef_pd* pd,
   free(pio->pio_buffer);
   return rc;
 }
+
 #endif
+
 
 int ef_pio_free(ef_pio* pio, ef_driver_handle dh)
 {

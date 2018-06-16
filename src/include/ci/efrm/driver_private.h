@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -106,6 +106,9 @@ struct vi_resource_dimensions {
 	/* EF10 Only */
 	unsigned vi_min, vi_lim;
 	unsigned vi_base, vi_shift;
+#define VI_RES_MEM_BAR_UNDEFINED ((unsigned)~0)
+	unsigned mem_bar;
+	unsigned vi_stride;
 	unsigned vport_id;
 
 	/* SRIOV Only */

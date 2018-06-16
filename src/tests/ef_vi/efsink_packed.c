@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -14,7 +14,7 @@
 */
 
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -83,6 +83,7 @@ struct thread {
 
 static int cfg_hexdump;
 static int cfg_timestamping;
+static int cfg_max_fill;
 static int cfg_verbose;
 
 
@@ -214,7 +215,7 @@ static void monitor(struct thread* thread)
 
   uint64_t now_bytes, prev_bytes;
   struct timeval start, end;
-  int prev_pkts, now_pkts;
+  uint64_t prev_pkts, now_pkts;
   int ms, pkt_rate, mbps;
 
   printf("# pkt-rate  bandwidth(Mbps)  pkts\n");
@@ -230,9 +231,9 @@ static void monitor(struct thread* thread)
     gettimeofday(&end, NULL);
     ms = (end.tv_sec - start.tv_sec) * 1000;
     ms += (end.tv_usec - start.tv_usec) / 1000;
-    pkt_rate = (int) ((int64_t) (now_pkts - prev_pkts) * 1000 / ms);
+    pkt_rate = (int) ((now_pkts - prev_pkts) * 1000 / ms);
     mbps = (int) ((now_bytes - prev_bytes) * 8 / 1000 / ms);
-    printf("%10d %16d %16llu\n", pkt_rate, mbps, (unsigned long long) now_pkts);
+    printf("%10d %16d %16"PRIu64"\n", pkt_rate, mbps, now_pkts);
     fflush(stdout);
     prev_pkts = now_pkts;
     prev_bytes = now_bytes;
@@ -252,7 +253,7 @@ static void* monitor_fn(void* arg)
 static void usage(void)
 {
   fprintf(stderr, "usage:\n");
-  fprintf(stderr, "  efsink <options> <interface> <filter-spec>...\n");
+  fprintf(stderr, "  efsink_packed [options] <interface> <filter-spec>...\n");
   fprintf(stderr, "\n");
   fprintf(stderr, "filter-spec:\n");
   fprintf(stderr, "  {udp|tcp}:[mcastloop-rx,][vid=<vlan>,]<local-host>:"
@@ -268,6 +269,8 @@ static void usage(void)
   fprintf(stderr, "options:\n");
   fprintf(stderr, "  -d     hexdump received packet\n");
   fprintf(stderr, "  -t     Request hardware timestamping of packets\n");
+  fprintf(stderr, "  -F FL  set max fill level for RX ring\n");
+  fprintf(stderr, "  -v     output per-packet info\n");
   exit(1);
 }
 
@@ -280,7 +283,7 @@ int main(int argc, char* argv[])
   unsigned vi_flags;
   int c, i;
 
-  while( (c = getopt (argc, argv, "dtv")) != -1 )
+  while( (c = getopt (argc, argv, "dtvF:")) != -1 )
     switch( c ) {
     case 'd':
       cfg_hexdump = 1;
@@ -290,6 +293,9 @@ int main(int argc, char* argv[])
       break;
     case 'v':
       cfg_verbose = 1;
+      break;
+    case 'F':
+      cfg_max_fill = atoi(optarg);
       break;
     case '?':
       usage();
@@ -319,24 +325,34 @@ int main(int argc, char* argv[])
 
   ef_packed_stream_params psp;
   TRY(ef_vi_packed_stream_get_params(&t->vi, &psp));
+  if( cfg_max_fill == 0 )
+    cfg_max_fill = psp.psp_max_usable_buffers;
   fprintf(stderr, "rxq_size=%d\n", ef_vi_receive_capacity(&t->vi));
   fprintf(stderr, "evq_size=%d\n", ef_eventq_capacity(&t->vi));
+  fprintf(stderr, "max_fill=%d\n", cfg_max_fill);
   fprintf(stderr, "psp_buffer_size=%d\n", psp.psp_buffer_size);
   fprintf(stderr, "psp_buffer_align=%d\n", psp.psp_buffer_align);
   fprintf(stderr, "psp_start_offset=%d\n", psp.psp_start_offset);
   fprintf(stderr, "psp_max_usable_buffers=%d\n", psp.psp_max_usable_buffers);
   t->psp_start_offset = psp.psp_start_offset;
 
+  TEST( cfg_max_fill <= ef_vi_receive_capacity(&t->vi) );
+
   /* Packed stream mode requires large contiguous buffers, so allocate huge
    * pages.  (Also makes consuming packets more efficient of course).
    */
-  int n_bufs = psp.psp_max_usable_buffers;
+  int n_bufs = cfg_max_fill;
   size_t buf_size = psp.psp_buffer_size;
   size_t alloc_size = n_bufs * buf_size;
   alloc_size = ROUND_UP(alloc_size, huge_page_size);
   void* p;
   p = mmap(NULL, alloc_size, PROT_READ | PROT_WRITE,
            MAP_ANONYMOUS | MAP_PRIVATE | MAP_HUGETLB, -1, 0);
+  if( p == MAP_FAILED ) {
+    fprintf(stderr, "ERROR: mmap failed.  You probably need to allocate some "
+            "huge pages.\n");
+    exit(2);
+  }
   TEST(p != MAP_FAILED);
   TEST(((uintptr_t) p & (psp.psp_buffer_align - 1)) == 0);
   TRY(ef_memreg_alloc(&t->memreg, t->dh, &t->pd, t->dh, p, alloc_size));

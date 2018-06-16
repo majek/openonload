@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -32,7 +32,6 @@
 #include <ci/internal/ip.h>
 #include <onload/linux_trampoline.h>
 #include <onload/linux_onload_internal.h>
-#include <onload/efabcfg.h>
 #include <ci/internal/ip_log.h>
 #include <onload/ioctl.h>
 #include <onload/tcp_helper_fns.h>
@@ -40,6 +39,9 @@
 #include "onload_internal.h"
 #include <onload/version.h>
 #include <onload/oof_interface.h>
+#include <onload/cplane_driver.h>
+#include <onload/cplane_module_params.h>
+#include <ci/tools.h>
 #ifdef ONLOAD_OFE
 #include "ofe/onload.h"
 #endif
@@ -58,6 +60,22 @@ MODULE_AUTHOR("Solarflare Communications");
 MODULE_LICENSE("GPL");
 MODULE_VERSION(ONLOAD_VERSION);
 
+int inject_kernel_gid = 0;
+module_param(inject_kernel_gid, int, S_IRUGO | S_IWUSR);
+MODULE_PARM_DESC(inject_kernel_gid,
+                 "When Onload receives a packet, but does not have a socket "
+                 "to match, Onload can inject the packet into kernel.  "
+                 "Because of security consideration, you can disallow such "
+                 "injection using this option.\n"
+                 "\t-2 : always disallow injection;\n"
+                 "\t-1 : always allow injection;\n"
+                 "\tother values : group id to allow injection.\n"
+                 "Default is 0.\n\n"
+                 "Namespace warning: this feature makes it possible to inject "
+                 "a packet to the SFC interface from a net namespace "
+                 "which owns vlan or macvlan interface over the SFC one.  "
+                 "UID namespaces are taken into account when comparing "
+                 "the group ids.\n");
 
 /*--------------------------------------------------------------------
  *
@@ -116,48 +134,105 @@ MODULE_PARM_DESC(oof_all_ports_required,
                  "physical port - this is not necessary, and setting to 0 will "
                  "allow Onload to tolerate these filter errors.");
 
+module_param(oof_use_all_local_ip_addresses, int, S_IRUGO | S_IWUSR);
+MODULE_PARM_DESC(oof_use_all_local_ip_addresses,
+                 "By default Onload only those local IP addresses which are "
+                 "assigned to Onloadable network interfaces.  This option "
+                 "allows to tell Onload that it should handle all local IP "
+                 "addresses regardless of the network interface type.");
+
+#ifdef EFRM_DO_USER_NS
+/* The code in this function and below are based on the kernel's
+ * STANDARD_PARAM_DEF macros, but modified to add in the extra translation
+ * between user namespaces.
+ */
+static int param_gid_set(const char* val,
+                         ONLOAD_MPC_CONST struct kernel_param* kp)
+{
+  long gid_ns;
+  kgid_t gid_k;
+  int rc;
+
+  rc = ci_kstrtol(val, 0, &gid_ns);
+  if( rc != 0 || (int)gid_ns != gid_ns )
+    return rc < 0 ? rc : -EINVAL;
+
+  /* gid_ns is either a gid to be interpreted based on the current namespace,
+   * or one of the special negative values that we accept.
+   *
+   * kp->arg points to the gid parameter that is being set.
+   */
+  if( gid_ns >= 0 ) {
+    /* Translate our gid value into the global kernel gid */
+    gid_k = make_kgid(current_user_ns(), gid_ns);
+
+    /* If we found a valid gid then store the int representation */
+    if( gid_valid(gid_k) )
+      *((int*)kp->arg) = __kgid_val(gid_k);
+    else
+      rc = -EINVAL;
+  }
+  else {
+    /* It's a special value */
+    *((int*)kp->arg) = gid_ns;
+  }
+
+  return rc;
+}
+
+static int param_gid_get(char* buffer,
+                         ONLOAD_MPC_CONST struct kernel_param* kp)
+{
+  int gid_ns;
+  int stored_gid = *((int*)kp->arg);
+
+  /* kp->arg points to the gid param that we're getting.  If it's less
+   * than 0 that indicates one of the special values that we can return
+   * directly.  Otherwise we need to translate the global kernel gid that
+   * we've stored into the namespace of the getter.
+  */
+  if( stored_gid >= 0 ) {
+    /* If there's not a valid mapping of the gid in this namespace then
+     * the lookup will return the special overflow gid value, which is what
+     * the uid/gid related syscalls use to indicate the lack of mapping.
+     */
+    gid_ns = from_kgid_munged(current_user_ns(), KGIDT_INIT(stored_gid));
+  }
+  else {
+    gid_ns = stored_gid;
+  }
+
+  /* The buffer provided by the kernel is 4K, so we know that any int value
+   * can safely be printed into it.
+   */
+  return sprintf(buffer, "%d", gid_ns);
+}
+#endif
+
 int phys_mode_gid = -2;
+#ifdef EFRM_DO_USER_NS
+
+/* module_param_cb() available from Linux 2.6.36 onwards */
+#ifdef EFRM_HAVE_KERNEL_PARAM_OPS
+static const struct kernel_param_ops phys_mode_gid_ops = {
+  .set = param_gid_set,
+  .get = param_gid_get,
+};
+module_param_cb(phys_mode_gid, &phys_mode_gid_ops, 
+                &phys_mode_gid, S_IRUGO | S_IWUSR);
+#else
+module_param_call(phys_mode_gid, param_gid_set, param_gid_get,
+                  &phys_mode_gid, S_IRUGO | S_IWUSR);
+#endif
+
+#else
 module_param(phys_mode_gid, int, S_IRUGO | S_IWUSR);
+#endif
 MODULE_PARM_DESC(phys_mode_gid,
                  "Group id which may use physical buffer mode.  "
                  "-2 (default) means \"physical buffer mode forbidden\"; "
                  "-1 means \"any user may use physical buffer mode\".  "
                  "See EF_PACKET_BUFFER_MODE environment variable.");
-
-
-static int param_black_white_list_set(const char *val, struct kernel_param *kp)
-{
-  struct oo_nic_black_white_list* bwl = kp->arg;
-  return oo_nic_black_white_list_set(bwl, val);
-}
-
-
-static int param_black_white_list_get(char *buffer, struct kernel_param *kp)
-{
-  struct oo_nic_black_white_list* bwl = kp->arg;
-  /* 4096 documented in linux/moduleparam.h */
-  return oo_nic_black_white_list_get(bwl, buffer, 4096);
-}
-
-
-/* Note that module_param_call() is present but deprecated in 3.x
- * kernels.  It is superceded by module_param_cb(). */
-module_param_call(intf_white_list, param_black_white_list_set,
-                  param_black_white_list_get, &oo_nic_white_list,
-                  S_IRUGO | S_IWUSR);
-MODULE_PARM_DESC(intf_white_list,
-                 "Control which interfaces are accelerated.  "
-                 "Can be used in parallel with intf_black_list.  "
-                 "Specified as '<intf0> <intf1> ...'.  "
-                 "Changes are not accumulative.  "
-                 "Specify an empty string to reset"
-                 "Putting the same interface in both lists is undefined.");
-module_param_call(intf_black_list, param_black_white_list_set,
-                  param_black_white_list_get, &oo_nic_black_list,
-                  S_IRUGO | S_IWUSR);
-MODULE_PARM_DESC(intf_black_list,
-                 "Control which interfaces are not accelerated.  "
-                 "See intf_white_list for more detail.");
 
 int safe_signals_and_exit = 1;
 module_param(safe_signals_and_exit, int, S_IRUGO);
@@ -168,13 +243,119 @@ MODULE_PARM_DESC(safe_signals_and_exit,
                  "handlers to avoid Onload stack deadlock.");
 
 int scalable_filter_gid = -2;
+#ifdef EFRM_DO_USER_NS
+#ifdef EFRM_HAVE_KERNEL_PARAM_OPS
+static const struct kernel_param_ops scalable_filter_gid_ops = {
+  .set = param_gid_set,
+  .get = param_gid_get,
+};
+module_param_cb(scalable_filter_gid, &scalable_filter_gid_ops, 
+                &scalable_filter_gid, S_IRUGO | S_IWUSR);
+
+#else
+module_param_call(scalable_filter_gid, param_gid_set, param_gid_get,
+                  &scalable_filter_gid, S_IRUGO | S_IWUSR);
+#endif
+#else
 module_param(scalable_filter_gid, int, S_IRUGO | S_IWUSR);
+#endif
 MODULE_PARM_DESC(scalable_filter_gid,
                  "Group id which may use scalable filters.  "
                  "-2 (default) means \"CAP_NET_RAW required\"; "
                  "-1 means \"any user may use scalable filter mode\".  "
                  "See EF_SCALABLE_FILTERS environment variable.");
 
+
+module_param(cplane_init_timeout, int, S_IRUGO | S_IWUSR);
+MODULE_PARM_DESC(cplane_init_timeout,
+                 "Time in seconds to wait for the control plane to initialize "
+                 "when creating a stack.  This initialization requires that "
+                 "the user-level control plane process be spawned if one is "
+                 "not already running for the current network namespace.  "
+                 "If this parameter is zero, stack-creation will fail "
+                 "immediately if the control plane is not ready.  If it is "
+                 "negative, stack-creation will block indefinitely in wait "
+                 "for the control plane.");
+
+bool cplane_spawn_server = 1;
+module_param(cplane_spawn_server, bool, S_IRUGO | S_IWUSR);
+MODULE_PARM_DESC(cplane_spawn_server,
+                 "If true, control plane server processes are spawned "
+                 "on-demand.  Typically this occurs when a stack is created "
+                 "in a network namespace in which there are no other stacks.");
+
+char* cplane_server_path = NULL;
+
+#ifdef EFRM_HAVE_KERNEL_PARAM_OPS
+static const struct kernel_param_ops cplane_server_path_ops = {
+  .set = cplane_server_path_set,
+  .get = cplane_server_path_get,
+};
+module_param_cb(cplane_server_path, &cplane_server_path_ops, 
+                NULL, S_IRUGO | S_IWUSR);
+#else
+module_param_call(cplane_server_path, cplane_server_path_set,
+                  cplane_server_path_get, NULL, S_IRUGO | S_IWUSR);
+#endif
+MODULE_PARM_DESC(cplane_server_path,
+                 "Sets the path to the onload_cp_server binary.  Defaults to "
+                 DEFAULT_CPLANE_SERVER_PATH" if empty.");
+
+char* cplane_server_params = NULL;
+#ifdef EFRM_HAVE_KERNEL_PARAM_OPS
+static const struct kernel_param_ops cplane_server_params_ops = {
+  .set = cplane_server_params_set,
+  .get = cplane_server_params_get,
+};
+module_param_cb(cplane_server_params, &cplane_server_params_ops, 
+                NULL, S_IRUGO | S_IWUSR);
+#else
+module_param_call(cplane_server_params, cplane_server_params_set,
+                  cplane_server_params_get, NULL, S_IRUGO | S_IWUSR);
+#endif
+MODULE_PARM_DESC(cplane_server_params,
+                 "Set additional parameters for the onload_cp_server "
+                 "server when it is spawned on-demand.");
+
+#ifdef EFRM_HAVE_KERNEL_PARAM_OPS
+static const struct kernel_param_ops cplane_server_grace_timeout_ops = {
+  .set = cplane_server_grace_timeout_set,
+  .get = param_get_int,
+};
+module_param_cb(cplane_server_grace_timeout, &cplane_server_grace_timeout_ops, 
+                &cplane_server_grace_timeout, S_IRUGO | S_IWUSR);
+#else
+module_param_call(cplane_server_grace_timeout,
+                  cplane_server_grace_timeout_set, param_get_int,
+                  &cplane_server_grace_timeout, S_IRUGO | S_IWUSR);
+#endif
+MODULE_PARM_DESC(cplane_server_grace_timeout,
+                 "Time in seconds to wait before killing the control plane "
+                 "server after the last user has gone (i.e. the last Onload "
+                 "stack in this namespace have been destroyed).  It is used "
+                 "with cplane_spawn_server = Y only.");
+
+module_param(cplane_route_request_limit, int, S_IRUGO | S_IWUSR);
+MODULE_PARM_DESC(cplane_route_request_limit,
+                 "Queue depth limit for route resolution requests.");
+
+
+#ifdef EFRM_HAVE_KERNEL_PARAM_OPS
+static const struct kernel_param_ops cplane_route_request_timeout_ms_ops = {
+  .set = cplane_route_request_timeout_set,
+  .get = param_get_int,
+};
+module_param_cb(cplane_route_request_timeout_ms, 
+                &cplane_route_request_timeout_ms_ops, 
+                &cplane_route_request_timeout_ms, S_IRUGO | S_IWUSR);
+#else
+module_param_call(cplane_route_request_timeout_ms,
+                  cplane_route_request_timeout_set,
+                  param_get_int, &cplane_route_request_timeout_ms,
+                  S_IRUGO | S_IWUSR);
+#endif
+MODULE_PARM_DESC(cplane_route_request_timeout_ms,
+                 "Time out value for route resolution requests.");
 
 /**************************************************************************** 
  * 
@@ -302,6 +483,8 @@ int oo_fop_open(struct inode* inode, struct file* filp)
   CI_ZERO(priv);
   priv->_filp = filp;
   priv->fd_type = CI_PRIV_TYPE_NONE;
+  priv->priv_cp = NULL;
+  ci_dllist_init(&priv->dshm_list);
 
   filp->private_data = (void*) priv;
   filp->f_op = &oo_fops;
@@ -327,6 +510,9 @@ int oo_fop_release(struct inode* inode, struct file* filp)
     TCP_HELPER_RESOURCE_ASSERT_VALID(priv->thr, 0);
     efab_thr_release(priv->thr);
   }
+  if (priv->priv_cp != NULL)
+    cp_release(priv->priv_cp);
+
   onload_priv_free(priv);
   return 0;
 }
@@ -356,7 +542,7 @@ long oo_fop_unlocked_ioctl(struct file* filp, unsigned cmd, unsigned long arg)
   if( efab_tcp_driver.file_refs_to_drop != NULL )
     oo_file_ref_drop_list_now(NULL);
 
-  if( ioc_nr >= OO_OP_END || _IOC_TYPE(cmd) != OO_LINUX_IOC_BASE ) {
+  if( ioc_nr >= OO_OP_CONTIG_END || _IOC_TYPE(cmd) != OO_LINUX_IOC_BASE ) {
     /* If libc is used on our sockets, sometimes it may call TCGETS ioctl to
      * determine whether the file is a tty.
      * tc* functions (tcgetpgrp, tcflush, etc) use direct ioctl syscalls,
@@ -366,22 +552,34 @@ long oo_fop_unlocked_ioctl(struct file* filp, unsigned cmd, unsigned long arg)
      * Next is FIONREAD(0x541B), which we can support, but do not do this.
      * The only ioctl which was really seen in the real life is TIOCGPGRP.
      */
-
-#if ! defined (__PPC__)
-    BUILD_BUG_ON(_IOC_TYPE(TIOCSSOFTCAR) != _IOC_TYPE(TCGETS));
-    if( _IOC_TYPE(cmd) != _IOC_TYPE(TCGETS) ||
-        _IOC_NR(cmd) > _IOC_NR(TIOCSSOFTCAR) ) {
-#else 
-    /* On PPC TTY ioctls are organized in a complicated way, so for now
-     * we just shut up warnings for a few known ioctl codes
-     */
-    if( cmd != TCGETS && cmd != TIOCGPGRP) {
-#endif 
-      OO_DEBUG_ERR(ci_log("%s: bad cmd=%x type=%d(%d) nr=%d(%d)",
-                          __FUNCTION__, cmd, _IOC_TYPE(cmd), OO_LINUX_IOC_BASE,
-                          ioc_nr, OO_OP_END));
+    if( cmd == OO_IOC_CHECK_VERSION ) {
+        /* version check operation details are stored at the end fo the
+         * of the oo_operations - tell code below to pull it in from there */
+        ioc_nr = OO_OP_CHECK_VERSION_PLACEHOLDER;
     }
-    return -EINVAL;
+    else {
+#if ! defined (__PPC__)
+      BUILD_BUG_ON(_IOC_TYPE(TIOCSSOFTCAR) != _IOC_TYPE(TCGETS));
+      if( _IOC_TYPE(cmd) != _IOC_TYPE(TCGETS) ||
+          _IOC_NR(cmd) > _IOC_NR(TIOCSSOFTCAR) ) {
+#else 
+      /* On PPC TTY ioctls are organized in a complicated way, so for now
+       * we just shut up warnings for a few known ioctl codes
+       */
+      if( cmd != TCGETS && cmd != TIOCGPGRP) {
+#endif 
+        if( _IOC_TYPE(cmd) != OO_LINUX_IOC_BASE ) {
+          OO_DEBUG_ERR(ci_log("%s: Unsupported ioctl cmd=%x type=%d(%d) nr=%d",
+                              __FUNCTION__, cmd, _IOC_TYPE(cmd),
+                              OO_LINUX_IOC_BASE, ioc_nr));
+        }
+        else {
+          OO_DEBUG_ERR(ci_log("%s: bad cmd=%x nr=%d(%d)",
+                              __FUNCTION__, cmd, ioc_nr, OO_OP_END));
+        }
+      }
+      return -EINVAL;
+    }
   }
   op = &oo_operations[ioc_nr];
   if( op->ioc_cmd != cmd ) {
@@ -485,6 +683,30 @@ ci_chrdev_dtor(const char* name)
 static int onload_sanity_checks(void)
 {
   const int dma_start_off = CI_MEMBER_OFFSET(ci_ip_pkt_fmt, dma_start);
+
+  /* This 256 is chosen to match FALCON_RX_USR_BUF_SIZE and the 256 in
+   * falcon_vi_init/ef10_vi_init where we set rx_buffer_len.  If this
+   * assertion fails it means the ci_ip_pkt_fmt_s structure doesn't fit
+   * into the space reserved for it in the packet buffer.
+   */
+  CI_BUILD_ASSERT(CI_MEMBER_OFFSET(ci_ip_pkt_fmt, dma_start) <= 256);
+
+  /* Ensure that the number of interfaces we've been asked to build with in
+   * within the range that we expect to work.
+   */
+  CI_BUILD_ASSERT(CI_CFG_MAX_INTERFACES <= CI_CFG_MAX_SUPPORTED_INTERFACES);
+
+  /* This assertion is trying to check that, ignoring the padding before
+   * dma_start, there is space in the ci_ip_pkt_fmt_s structure for us
+   * to grow it to the max interfaces (the current default is 8).  This makes
+   * assumptions that other padding in the structure doesn't change by
+   * changing CI_CFG_MAX_INTERFACES to CI_CFG_MAX_SUPPORTED_INTERFACES.
+   */
+  CI_BUILD_ASSERT( (uintptr_t)
+                   (&((ci_ip_pkt_fmt*) NULL)->space_for_encap__do_not_use + 1)
+                   + (CI_CFG_MAX_SUPPORTED_INTERFACES - CI_CFG_MAX_INTERFACES)
+                   * sizeof(ef_addr) <= 256 );
+
   if( FALCON_RX_USR_BUF_SIZE + dma_start_off > CI_CFG_PKT_BUF_SIZE ) {
     ci_log("ERROR: FALCON_RX_USR_BUF_SIZE=%d dma_start_off=%d BUF_SIZE=%d",
            FALCON_RX_USR_BUF_SIZE, dma_start_off, CI_CFG_PKT_BUF_SIZE);
@@ -524,12 +746,6 @@ static int __init onload_module_init(void)
   if( rc < 0 )
     goto fail_sanity;
 
-  rc = ci_cfg_drv_ctor();
-  if( rc < 0 ) {
-    ci_log("%s: ERROR: ci_cfg_drv_ctor failed (%d)", __FUNCTION__, rc);
-    goto fail_cfg_drv_ctor;
-  }
-  
   oo_mm_tbl_init();
 
   rc = efab_tcp_driver_ctor();
@@ -571,11 +787,19 @@ static int __init onload_module_init(void)
   if( rc < 0 )
     goto failed_epolldev_ctor;
 
+  rc = oo_cp_driver_ctor();
+  if( rc < 0 ) {
+    ci_log("%s: oo_cp_driver_ctor failed (%d)", __func__, rc);
+    goto failed_cp_ctor;
+  }
+
   OO_DEBUG_LOAD(ci_log("Onload module initialised successfully."));
   return 0;
 
+  oo_cp_driver_dtor();
+ failed_cp_ctor:
   oo_epoll_chrdev_dtor();
-failed_epolldev_ctor:
+ failed_epolldev_ctor:
   ci_chrdev_dtor(EFAB_DEV_NAME);
  failed_chrdev:
   onloadfs_fini();
@@ -596,8 +820,6 @@ failed_epolldev_ctor:
   oo_nic_shutdown();
   efab_tcp_driver_dtor();
  fail_ip_ctor:
-  ci_cfg_drv_dtor();
- fail_cfg_drv_ctor:
  fail_sanity:
   return rc;
 }
@@ -613,6 +835,8 @@ static void onload_module_exit(void)
   oo_epoll_chrdev_dtor();
   ci_chrdev_dtor(oo_dev_name);
   onloadfs_fini();
+
+  oo_cp_driver_dtor();
 
   /* There are no User API now - so we do not need trampoline any more.
    * Destroy trampoline early to alleviate the race condition with RT
@@ -632,7 +856,6 @@ static void onload_module_exit(void)
 
   efab_tcp_driver_dtor();
 
-  ci_cfg_drv_dtor();
   OO_DEBUG_LOAD(ci_log("Onload module unloaded"));
 }
 

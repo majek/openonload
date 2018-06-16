@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -123,8 +123,8 @@ ci_icmp_send(ci_netif *ni, ci_ip_pkt_fmt *tx_pkt,
       + sizeof(ci_icmp_hdr) + 4 + data_len );
   tx_ip->ip_check_be16 = (ci_uint16)ci_ip_checksum(tx_ip);
   
-  tx_pkt->buf_len = tx_pkt->pay_len = 
-    CI_BSWAP_BE16(tx_ip->ip_tot_len_be16) + oo_ether_hdr_size(tx_pkt);
+  tx_pkt->buf_len = tx_pkt->pay_len =
+    oo_tx_ether_hdr_size(tx_pkt) + CI_BSWAP_BE16(tx_ip->ip_tot_len_be16);
 
   /* ?? FIXME: This will lookup the dest IP in the route table to choose
    * the interface to send on, but really we should reply back through the
@@ -174,7 +174,7 @@ extern int __ci_icmp_send_error(ci_netif *ni,
   /* Bug1729, Bug1731: LAND attack sets source addr=dest addr, thus our "trust"
    * mentioned below is utterly misplaced ...
    */
-  if( cicp_user_is_local_addr(CICP_HANDLE(ni), &rx_ip->ip_saddr_be32) ) {
+  if( cicp_user_is_local_addr(ni->cplane, rx_ip->ip_saddr_be32) ) {
     char buf[32];
     if( rx_ip->ip_protocol == IPPROTO_TCP )
       strcpy(buf, "TCP packet");

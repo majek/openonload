@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -191,7 +191,7 @@ extern int ef_vi_packed_stream_unbundle(ef_vi* vi, const ef_event* ev,
 static inline ef_packed_stream_packet*
 ef_packed_stream_packet_first(void* start_of_buffer, int psp_start_offset)
 {
-  return (void*) ((uint8_t*) (start_of_buffer) + psp_start_offset);
+  return (ef_packed_stream_packet*) ((uint8_t*) (start_of_buffer) + psp_start_offset);
 }
 
 
@@ -208,7 +208,7 @@ ef_packed_stream_packet_first(void* start_of_buffer, int psp_start_offset)
 static inline ef_packed_stream_packet*
 ef_packed_stream_packet_next(ef_packed_stream_packet* ps_pkt)
 {
-  return (void*) ((char*) ps_pkt + ps_pkt->ps_next_offset);
+  return (ef_packed_stream_packet*) ((char*) ps_pkt + ps_pkt->ps_next_offset);
 }
 
 

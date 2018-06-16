@@ -11,8 +11,6 @@
 
 case "$1" in
   start)
-    /sbin/modprobe onload_cplane
-    /sbin/onload_tool mknod onload_cplane
     /sbin/modprobe onload
     /sbin/onload_tool mknod sfc_char
     /sbin/onload_tool mknod onload

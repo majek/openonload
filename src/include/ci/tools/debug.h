@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -60,6 +60,9 @@
     __attribute__((unused))
 #endif
 
+/* verifies compile time expression is 0 or positive - no-op for runtime expressions */
+#define CI_BUILD_ASSERT_CONSTANT_NON_NEGATIVE(c) \
+  do {(void) sizeof(struct { int x[(int)(c)]; });} while(0)
 
 #ifdef _PREFAST_
 

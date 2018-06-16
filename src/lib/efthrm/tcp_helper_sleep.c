@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -164,7 +164,7 @@ int efab_tcp_helper_pkt_wait(tcp_helper_resource_t* trs,
   /* TODO: [lock_flags] is no longer used.  Should be removed. */
 
   ci_netif* ni = &trs->netif;
-  wait_queue_t wait;
+  wait_queue_entry_t wait;
   int rc;
   ci_uint64 l;
 
@@ -181,6 +181,7 @@ int efab_tcp_helper_pkt_wait(tcp_helper_resource_t* trs,
       if( ci_cas64u_fail(&ni->state->lock.lock, l,
                          l | CI_EPLOCK_NETIF_IS_PKT_WAITER) )
         continue;
+    CITP_STATS_NETIF_INC(&trs->netif, pkt_wait_primes);
     tcp_helper_request_wakeup(trs);
     schedule();
     if( signal_pending(current) ) {

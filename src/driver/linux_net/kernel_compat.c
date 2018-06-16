@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -16,7 +16,7 @@
 /****************************************************************************
  * Driver for Solarflare network controllers and boards
  * Copyright 2005-2006 Fen Systems Ltd.
- * Copyright 2006-2015 Solarflare Communications Inc.
+ * Copyright 2006-2017 Solarflare Communications Inc.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 as published
@@ -38,6 +38,9 @@
 #include <asm/uaccess.h>
 #ifdef EFX_HAVE_LINUX_EXPORT_H
 #include <linux/export.h>
+#endif
+#if defined(EFX_NEED_HWMON_DEVICE_REGISTER_WITH_INFO)
+#include <linux/hwmon.h>
 #endif
 
 /*
@@ -186,134 +189,6 @@ char *print_mac(char *buf, const u8 *addr)
 	return buf;
 }
 #endif /* EFX_NEED_PRINT_MAC */
-
-#ifdef EFX_NEED_CSUM_TCPUDP_NOFOLD
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,20)
-__wsum
-csum_tcpudp_nofold(__be32 saddr, __be32 daddr, unsigned short len,
-		   unsigned short proto, __wsum sum)
-#else
-__wsum
-csum_tcpudp_nofold(unsigned long saddr, unsigned long daddr,
-		   unsigned short len, unsigned short proto, __wsum sum)
-#endif
-{
-	unsigned long result;
-
-	result = (__force u64)saddr + (__force u64)daddr +
-		(__force u64)sum + ((len + proto) << 8);
-
-	/* Fold down to 32-bits so we don't lose in the typedef-less network stack.  */
-	/* 64 to 33 */
-	result = (result & 0xffffffff) + (result >> 32);
-	/* 33 to 32 */
-	result = (result & 0xffffffff) + (result >> 32);
-	return (__force __wsum)result;
-
-}
-#endif /* EFX_NEED_CSUM_TCPUDP_NOFOLD */
-
-#ifdef EFX_USE_I2C_LEGACY
-
-#ifdef CONFIG_SFC_HWMON
-
-struct i2c_client *i2c_new_device(struct i2c_adapter *adap,
-				  const struct i2c_board_info *info)
-{
-	return i2c_new_probed_device(adap, info, NULL);
-}
-
-struct i2c_client *i2c_new_probed_device(struct i2c_adapter *adap,
-					 const struct i2c_board_info *info,
-					 const unsigned short *addr_list)
-{
-	int (*probe)(struct i2c_client *, const struct i2c_device_id *);
-	struct i2c_client *client;
-
-	client = kzalloc(sizeof(*client), GFP_KERNEL);
-	if (!client)
-		return NULL;
-
-	client->adapter = adap;
-	client->dev.platform_data = info->platform_data;
-	client->flags = info->flags;
-	client->addr = addr_list ? addr_list[0] : info->addr; /* FIXME */
-	strlcpy(client->name, info->type, sizeof client->name);
-
-	if (!strcmp(client->name, "sfc_lm87")) {
-		client->driver = &efx_lm87_driver;
-		probe = efx_lm87_probe;
-	} else if (!strcmp(client->name, "max6646") ||
-		   !strcmp(client->name, "max6647")) {
-		client->driver = &efx_lm90_driver;
-		probe = efx_lm90_probe;
-	} else {
-		BUG();
-		probe = NULL;
-	}
-
-	if (i2c_attach_client(client))
-		goto fail_client;
-
-	if (probe(client, NULL))
-		goto fail_attached;
-
-	return client;
-
-fail_attached:
-	i2c_detach_client(client);
-fail_client:
-	kfree(client);
-	return NULL;
-}
-
-#endif /* CONFIG_SFC_HWMON */
-
-void i2c_unregister_device(struct i2c_client *client)
-{
-	if (client->driver->detach_client) {
-		client->driver->detach_client(client);
-	} else {
-		if (!i2c_detach_client(client))
-			kfree(client);
-	}
-}
-
-#endif /* EFX_USE_I2C_LEGACY */
-
-#ifdef EFX_NEED_I2C_NEW_DUMMY
-
-struct i2c_driver efx_i2c_dummy_driver = {
-#ifdef EFX_USE_I2C_DRIVER_NAME
-	.name = "sfc_i2c_dummy"
-#else
-	.driver.name = "sfc_i2c_dummy"
-#endif
-};
-
-struct i2c_client *efx_i2c_new_dummy(struct i2c_adapter *adap, u16 address)
-{
-	struct i2c_client *client;
-
-	client = kzalloc(sizeof(*client), GFP_KERNEL);
-	if (!client)
-		return NULL;
-
-	client->adapter = adap;
-	client->addr = address;
-	strcpy(client->name, efx_i2c_dummy_driver.driver.name);
-
-	client->driver = &efx_i2c_dummy_driver;
-
-	if (i2c_attach_client(client)) {
-		kfree(client);
-		return NULL;
-	}
-
-	return client;
-}
-
-#endif /* EFX_NEED_I2C_NEW_DUMMY */
 
 #ifdef EFX_NEED_USLEEP_RANGE
 
@@ -471,14 +346,14 @@ static inline s64 div_s64_rem(s64 dividend, s32 divisor, s32 *rem32)
 	 * the relevant kernel versions and 32-bit PCs should be long
 	 * obsolete.)
 	 */
-	EFX_BUG_ON_PARANOID(divisor < 0);
+	EFX_WARN_ON_ONCE_PARANOID(divisor < 0);
 
 	if (unlikely(dividend < 0)) {
-		EFX_BUG_ON_PARANOID(-dividend >> 31 >= divisor);
+		EFX_WARN_ON_ONCE_PARANOID(-dividend >> 31 >= divisor);
 		res = -div_long_long_rem(-dividend, divisor, &remainder);
 		*rem32 = -remainder;
 	} else {
-		EFX_BUG_ON_PARANOID(dividend >> 31 >= divisor);
+		EFX_WARN_ON_ONCE_PARANOID(dividend >> 31 >= divisor);
 		res = div_long_long_rem(dividend, divisor, &remainder);
 		*rem32 = remainder;
 	}
@@ -688,45 +563,6 @@ int efx_kobject_init_and_add(struct kobject *kobj, struct kobj_type *ktype,
 
 #endif /* EFX_NEED_KOBJECT_INIT_AND_ADD */
 
-#if defined(EFX_NEED_WARN) || defined(EFX_NEED_WARN_ON)
-void efx_warn_slowpath(const char *file, const int line, const char *function,
-		       const char *fmt, ...)
-{
-	va_list args;
-
-	printk(KERN_WARNING "------------[ cut here ]------------\n");
-	printk(KERN_WARNING "WARNING: CPU: %d PID:%d at %s:%d %s()\n",
-	       raw_smp_processor_id(), current->pid, file, line, function);
-
-	va_start(args, fmt);
-	vprintk(fmt, args);
-	va_end(args);
-
-	/* Can't call print_modules() as it's not exported */
-	dump_stack();
-	/* Can't call print_oops_end_marker() as it's not exported */
-	printk(KERN_WARNING "---[ end trace ]---\n");
-#ifdef TAINT_WARN
-	add_taint(TAINT_WARN);
-#endif
-}
-EXPORT_SYMBOL(efx_warn_slowpath); /* Onload */
-#endif
-
-#ifdef EFX_NEED_WARN_ON
-/* This trivial wrapper could be combined with the WARN_ON macro, except
- * that it depends on the -Wno-format-zero-length compiler option.
- * When Onload includes kernel_compat.h it does not set that option and
- * we can't really expect it to do so.
- */
-void efx_warn_on_slowpath(const char *file, const int line,
-			  const char *function)
-{
-	efx_warn_slowpath(file, line, function, "");
-}
-EXPORT_SYMBOL(efx_warn_on_slowpath); /* Onload */
-#endif
-
 #ifndef EFX_HAVE_PCI_VFS_ASSIGNED
 int pci_vfs_assigned(struct pci_dev *dev)
 {
@@ -801,14 +637,14 @@ int pci_enable_msix_range(struct pci_dev *dev, struct msix_entry *entries,
 		rc = pci_enable_msix(dev, entries, nvec);
 		if (rc < 0) {
 			return rc;
-                } else if (rc > 0) {
-                        if (rc < minvec)
-                                return -ENOSPC;
+		} else if (rc > 0) {
+			if (rc < minvec)
+				return -ENOSPC;
 			nvec = rc;
 		}
-        } while (rc);
+	} while (rc);
 
-        return nvec;
+	return nvec;
 }
 EXPORT_SYMBOL(pci_enable_msix_range);
 #endif
@@ -846,6 +682,30 @@ unsigned int cpumask_local_spread(unsigned int i, int node)
 	BUG();
 	/* silence compiler warning */
 	return -EIO;
+}
+#endif
+
+#ifdef EFX_NEED_D_HASH_AND_LOOKUP
+struct dentry *d_hash_and_lookup(struct dentry *dir, struct qstr *name)
+{
+	/* The real in-kernel function checks for an FS specific hash.
+	 * We only use this in debugfs handling, where there is no such
+	 * hash.
+	 */
+	name->hash = full_name_hash(name->name, name->len);
+	return d_lookup(dir, name);
+}
+#endif
+
+#if defined(EFX_NEED_HWMON_DEVICE_REGISTER_WITH_INFO)
+struct EFX_HWMON_DEVICE_REGISTER_TYPE *hwmon_device_register_with_info(
+	struct device *dev,
+	const char *name __always_unused,
+	void *drvdata __always_unused,
+	const struct hwmon_chip_info *info __always_unused,
+	const struct attribute_group **extra_groups __always_unused)
+{
+	return hwmon_device_register(dev);
 }
 #endif
 

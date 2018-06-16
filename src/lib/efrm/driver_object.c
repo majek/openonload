@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -137,6 +137,7 @@ int efrm_nic_ctor(struct efrm_nic *efrm_nic, int ifindex,
 		goto fail1;
 	}
 
+        efrm_nic->max_vis = max_vis;
 	efrm_nic->vis = vmalloc(max_vis * sizeof(efrm_nic->vis[0]));
 	if (efrm_nic->vis == NULL) {
 		EFRM_ERR("%s: Out of memory (max_vis=%u)",

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -283,8 +283,8 @@ int citp_pipe_splice_write(citp_fdinfo* fdi, int alien_fd, loff_t* alien_off,
   if( rc > 0 )
     return written_total;
   if( rc < 0 && errno == EPIPE && ! (flags & MSG_NOSIGNAL) ) {
-    ci_sys_ioctl(ci_netif_get_driver_handle(epi->ni),
-                 OO_IOC_KILL_SELF_SIGPIPE, NULL);
+    oo_resource_op(ci_netif_get_driver_handle(epi->ni),
+                   OO_IOC_KILL_SELF_SIGPIPE, NULL);
   }
   return rc;
 }
@@ -343,8 +343,8 @@ int citp_pipe_splice_read(citp_fdinfo* fdi, int alien_fd, loff_t* alien_off,
   } while(0);
 
   if( rc < 0 && errno == EPIPE && ! (flags & MSG_NOSIGNAL) ) {
-    ci_sys_ioctl(ci_netif_get_driver_handle(epi->ni),
-                 OO_IOC_KILL_SELF_SIGPIPE, NULL);
+    oo_resource_op(ci_netif_get_driver_handle(epi->ni),
+                   OO_IOC_KILL_SELF_SIGPIPE, NULL);
     return rc;
   }
   if( rc > 0 )
@@ -522,6 +522,10 @@ static int citp_pipe_epoll_writer(citp_fdinfo* fdinfo,
   return seq_mismatch;
 }
 
+static ci_uint64  citp_pipe_sock_sleep_seq(citp_fdinfo* fdi)
+{
+  return fdi_to_pipe_fdi(fdi)->pipe->b.sleep_seq.all;
+}
 #endif
 
 /* fixme kostik: this is partially copy-paste from citp_sock_fcntl */
@@ -602,7 +606,7 @@ static int citp_pipe_fcntl(citp_fdinfo* fdinfo, int cmd, long arg)
      */
     rc = ci_pipe_set_size(epi->ni, p, arg);
     if( rc < 0 ) {
-        errno = EINVAL;
+        errno = -rc;
         rc = CI_SOCKET_ERROR;
         break;
     }
@@ -611,7 +615,7 @@ static int citp_pipe_fcntl(citp_fdinfo* fdinfo, int cmd, long arg)
 #endif
 #ifdef F_GETPIPE_SZ
   case F_GETPIPE_SZ:
-    rc = (p->bufs_max - 1) * OO_PIPE_BUF_MAX_SIZE;
+    rc = p->bufs_max * OO_PIPE_BUF_MAX_SIZE;
     break;
 #endif
   default:
@@ -716,6 +720,7 @@ citp_protocol_impl citp_pipe_read_protocol_impl = {
     .poll	 = citp_pipe_poll_reader,
 #if CI_CFG_USERSPACE_EPOLL
     .epoll       = citp_pipe_epoll_reader,
+    .sleep_seq   = citp_pipe_sock_sleep_seq,
 #endif
 #endif
 
@@ -741,7 +746,9 @@ citp_protocol_impl citp_pipe_read_protocol_impl = {
     .tmpl_update   = citp_nonsock_tmpl_update,
     .tmpl_abort    = citp_nonsock_tmpl_abort,
 #if CI_CFG_USERSPACE_EPOLL
+#if CI_CFG_TIMESTAMPING
     .ordered_data   = citp_nonsock_ordered_data,
+#endif
 #endif
     .is_spinning   = citp_pipe_is_spinning,
 #if CI_CFG_FD_CACHING
@@ -767,6 +774,7 @@ citp_protocol_impl citp_pipe_write_protocol_impl = {
     .poll	 = citp_pipe_poll_writer,
 #if CI_CFG_USERSPACE_EPOLL
     .epoll       = citp_pipe_epoll_writer,
+    .sleep_seq   = citp_pipe_sock_sleep_seq,
 #endif
 #endif
 
@@ -792,7 +800,9 @@ citp_protocol_impl citp_pipe_write_protocol_impl = {
     .tmpl_update   = citp_nonsock_tmpl_update,
     .tmpl_abort    = citp_nonsock_tmpl_abort,
 #if CI_CFG_USERSPACE_EPOLL
+#if CI_CFG_TIMESTAMPING
     .ordered_data   = citp_nonsock_ordered_data,
+#endif
 #endif
     .is_spinning   = citp_pipe_is_spinning,
 #if CI_CFG_FD_CACHING

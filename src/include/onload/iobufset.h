@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -88,6 +88,8 @@ struct oo_buffer_pages {
   oo_atomic_t ref_count;
 #ifdef OO_DO_HUGE_PAGES
   int shmid;
+  struct file* shm_map_file;
+  void (*close)(struct vm_area_struct*);
 #endif
   struct page **pages;     /*!< array of Linux compound pages */
 };

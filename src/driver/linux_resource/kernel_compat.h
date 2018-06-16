@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -181,20 +181,24 @@ static inline int iommu_unmap_my(struct iommu_domain *domain,
 #endif
 
 
-/* VM_RESERVED prevents the MM from attempting to swap-out these
- * pages.
+/* VM_IO is used on mappings of PCI space to inform the kernel that the mapping
+ * is not backed by host memory, and so to prevent it from doing anything that
+ * it shouldn't.
  *
- * VM_IO is there to avoid people getting references to our pages to
- * do direct-IO.  This has been recommended on the LKML.
- * http://www.forbiddenweb.org/viewtopic.php?id=83167&page=3#347912
- *
- * From linux-3.7, VM_RESERVED is removed.
- * VM_DONTEXPAND | VM_DONTDUMP is recommended as a replacement.
+ * VM_DONTEXPAND prevents the MM from attempting to swap-out these
+ * pages.  On very old kernels (2.4) this property belonged instead to
+ * VM_RESERVED, but that also prevents core dumps, and we don't require it on
+ * any of our supported kernels.  We continue to set it when setting VM_IO,
+ * though, for consistency with other users in the kernel, even though its
+ * effects are implied by VM_IO.  Similarly, on modern (>= 3.7) kernels in
+ * which VM_RESERVED has been purged, we set VM_DONTDUMP if and only if we have
+ * set VM_IO.
  */
+#define EFRM_VM_BASE_FLAGS VM_DONTEXPAND
 #ifdef VM_RESERVED
-#define EFRM_VM_IO_FLAGS (VM_IO | VM_RESERVED | VM_DONTEXPAND)
+#define EFRM_VM_IO_FLAGS   (EFRM_VM_BASE_FLAGS | VM_IO | VM_RESERVED)
 #else
-#define EFRM_VM_IO_FLAGS (VM_IO | VM_DONTDUMP | VM_DONTEXPAND)
+#define EFRM_VM_IO_FLAGS   (EFRM_VM_BASE_FLAGS | VM_IO | VM_DONTDUMP)
 #endif
 
 
@@ -210,14 +214,88 @@ static inline int iommu_unmap_my(struct iommu_domain *domain,
 #define EFRM_VMA_HAS_NOPAGE
 #endif
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,27)
+#define EFRM_VMA_HAS_ACCESS
+#endif
+
 #ifndef NOPAGE_SIGBUS
 #  define NOPAGE_SIGBUS (NULL)
 #endif
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(4,6,0)
-#define get_user_pages(start, nr_pages, write, force, pages, vmas)  \
-    get_user_pages(current, current->mm,                            \
-                   start, nr_pages, write, force, pages, vmas)
+#ifndef FOLL_WRITE
+#define FOLL_WRITE	0x01
+#endif
+
+#ifndef FOLL_FORCE
+#define FOLL_FORCE	0x10
+#endif
+
+static inline long
+get_user_pages_onload_compat(unsigned long start, unsigned long nr_pages,
+			     unsigned int gup_flags, struct page **pages,
+			     struct vm_area_struct **vmas)
+{
+  /* We support four get_user_pages() function prototypes here,
+   * including an intermediate one that has one of the changes but not
+   * the other, and we assume that intermediate case if the main three
+   * are not defined:
+   *
+   * Pre-3.9: EFRM_GUP_RCINT_TASK_SEPARATE_FLAGS
+   * int get_user_pages(struct task_struct *tsk, struct mm_struct *mm,
+   *                    unsigned long start, int nr_pages, int write, int force,
+   *                    struct page **pages, struct vm_area_struct **vmas);
+   *
+   * Pre-4.6.0: EFRM_GUP_RCLONG_TASK_SEPARATEFLAGS
+   * long get_user_pages(struct task_struct *tsk, struct mm_struct *mm,
+   *                     unsigned long start, unsigned long nr_pages,
+   *                     int write, int force, struct page **pages,
+   *                     struct vm_area_struct **vmas);
+   *
+   * Intermediate (up to 4.9.0): (would be EFRM_GUP_RCLONG_NOTASK_SEPARATEFLAGS)
+   * long get_user_pages(unsigned long start, unsigned long nr_pages,
+   *                     int write, int force, struct page **pages,
+   *                     struct vm_area_struct **vmas);
+   *
+   * Post-4.9.0: EFRM_GUP_RCLONG_NOTASK_COMBINEDFLAGS
+   * long get_user_pages(unsigned long start, unsigned long nr_pages,
+   *                     unsigned int gup_flags, struct page **pages,
+   *                     struct vm_area_struct **vmas);
+   */
+
+#ifdef EFRM_GUP_RCINT_TASK_SEPARATEFLAGS
+#define EFRM_GUP_NRPAGES_CAST (int)
+#define EFRM_GUP_RC_CAST (long)
+#else
+#define EFRM_GUP_NRPAGES_CAST 
+#define EFRM_GUP_RC_CAST 
+#endif
+
+  return EFRM_GUP_RC_CAST get_user_pages(
+#if defined(EFRM_GUP_RCINT_TASK_SEPARATEFLAGS) || defined(EFRM_GUP_RCLONG_TASK_SEPARATEFLAGS)
+                                         current, current->mm,
+#endif
+                                         start, EFRM_GUP_NRPAGES_CAST nr_pages,
+#ifdef EFRM_GUP_RCLONG_NOTASK_COMBINEDFLAGS
+                                         gup_flags,
+#else
+                                         gup_flags & FOLL_WRITE, 
+                                         gup_flags & FOLL_FORCE,
+#endif
+                                         pages, vmas);
+}
+#define get_user_pages get_user_pages_onload_compat
+
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,10,0)
+#define VM_FAULT_ADDRESS(_vmf) (_vmf)->address
+#else
+#define VM_FAULT_ADDRESS(_vmf) (unsigned long)(_vmf)->virtual_address
+#endif
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,24)
+#define dev_net(a) NULL
+#define get_net(a) NULL
+#define put_net(a)
 #endif
 
 #endif /* DRIVER_LINUX_RESOURCE_KERNEL_COMPAT_H */

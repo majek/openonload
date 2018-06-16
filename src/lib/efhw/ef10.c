@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -57,6 +57,12 @@
 #include <ci/efhw/ef10.h>
 #include <ci/efhw/mc_driver_pcol.h>
 #include "ef10_mcdi.h"
+
+
+int force_ev_timer = 1;
+module_param(force_ev_timer, int, S_IRUGO);
+MODULE_PARM_DESC(force_ev_timer,
+                 "Set to 0 to avoid forcing allocation of event timer with wakeup queue");
 
 
 /* We base owner ids from 1 within Onload so that we can use owner id 0 as
@@ -385,19 +391,6 @@ ef10_nic_v3_license_check(struct efhw_nic *nic, const uint64_t app_id,
 
 
 static int
-_ef10_nic_check_licence(struct efhw_nic *nic) {
-	int licensed;
-	int rc;
-	if (nic->devtype.variant > 'A')
-		rc = ef10_nic_v3_license_check(nic, LICENSED_APP_ID_ONLOAD, &licensed);
-	else
-		rc = ef10_nic_license_check(nic, LICENSED_APP_ID_ONLOAD, &licensed);
-
-	return rc == 0 ? licensed : rc;
-}
-
-
-static int
 ef10_nic_license_challenge(struct efhw_nic *nic, 
 			   const uint32_t feature, 
 			   const uint8_t* challenge, 
@@ -548,7 +541,7 @@ static int _ef10_nic_check_capabilities(struct efhw_nic *nic,
 
 	EFHW_MCDI_DECLARE_BUF(ver_out, MC_CMD_GET_VERSION_OUT_LEN);
 	EFHW_MCDI_DECLARE_BUF(in, MC_CMD_GET_CAPABILITIES_V2_IN_LEN);
-	EFHW_MCDI_DECLARE_BUF(out, MC_CMD_GET_CAPABILITIES_V2_OUT_LEN);
+	EFHW_MCDI_DECLARE_BUF(out, MC_CMD_GET_CAPABILITIES_V3_OUT_LEN);
 	EFHW_MCDI_INITIALISE_BUF(ver_out);
 	EFHW_MCDI_INITIALISE_BUF(in);
 	EFHW_MCDI_INITIALISE_BUF(out);
@@ -558,15 +551,15 @@ static int _ef10_nic_check_capabilities(struct efhw_nic *nic,
 	MCDI_CHECK(MC_CMD_GET_CAPABILITIES, rc, out_size, 0);
 	if (rc != 0)
 		return rc;
-	flags = EFHW_MCDI_DWORD(out, GET_CAPABILITIES_V2_OUT_FLAGS1);
+	flags = EFHW_MCDI_DWORD(out, GET_CAPABILITIES_V3_OUT_FLAGS1);
 	if (flags & (1u <<
-		     MC_CMD_GET_CAPABILITIES_V2_OUT_RX_PREFIX_LEN_14_LBN))
+		     MC_CMD_GET_CAPABILITIES_V3_OUT_RX_PREFIX_LEN_14_LBN))
 		*capability_flags |= NIC_FLAG_14BYTE_PREFIX;
 	if (flags & (1u <<
-		     MC_CMD_GET_CAPABILITIES_V2_OUT_TX_MCAST_UDP_LOOPBACK_LBN))
+		     MC_CMD_GET_CAPABILITIES_V3_OUT_TX_MCAST_UDP_LOOPBACK_LBN))
 		*capability_flags |= NIC_FLAG_MCAST_LOOP_HW;
 	if (flags & (1u <<
-		     MC_CMD_GET_CAPABILITIES_V2_OUT_RX_PACKED_STREAM_LBN)) {
+		     MC_CMD_GET_CAPABILITIES_V3_OUT_RX_PACKED_STREAM_LBN)) {
 		rc = ef10_mcdi_rpc(nic, MC_CMD_GET_VERSION, 0, sizeof(ver_out),
 				   &ver_out_size, NULL, ver_out);
 		if (rc == 0 && ver_out_size == MC_CMD_GET_VERSION_OUT_LEN) {
@@ -591,32 +584,32 @@ static int _ef10_nic_check_capabilities(struct efhw_nic *nic,
 		}
 	}
 	if (flags & (1u <<
-		     MC_CMD_GET_CAPABILITIES_V2_OUT_RX_RSS_LIMITED_LBN))
+		     MC_CMD_GET_CAPABILITIES_V3_OUT_RX_RSS_LIMITED_LBN))
 		*capability_flags |= NIC_FLAG_RX_RSS_LIMITED;
 	if (flags & (1u <<
-		     MC_CMD_GET_CAPABILITIES_V2_OUT_RX_PACKED_STREAM_VAR_BUFFERS_LBN))
+		     MC_CMD_GET_CAPABILITIES_V3_OUT_RX_PACKED_STREAM_VAR_BUFFERS_LBN))
 		*capability_flags |= NIC_FLAG_VAR_PACKED_STREAM;
 	if (flags & (1u <<
-		     MC_CMD_GET_CAPABILITIES_V2_OUT_ADDITIONAL_RSS_MODES_LBN))
+		     MC_CMD_GET_CAPABILITIES_V3_OUT_ADDITIONAL_RSS_MODES_LBN))
 		*capability_flags |= NIC_FLAG_ADDITIONAL_RSS_MODES;
 	if (flags & (1u <<
-		     MC_CMD_GET_CAPABILITIES_V2_OUT_RX_TIMESTAMP_LBN))
+		     MC_CMD_GET_CAPABILITIES_V3_OUT_RX_TIMESTAMP_LBN))
 		*capability_flags |= NIC_FLAG_HW_RX_TIMESTAMPING;
 	if (flags & (1u <<
-		     MC_CMD_GET_CAPABILITIES_V2_OUT_MCAST_FILTER_CHAINING_LBN))
+		     MC_CMD_GET_CAPABILITIES_V3_OUT_MCAST_FILTER_CHAINING_LBN))
 		*capability_flags |= NIC_FLAG_MULTICAST_FILTER_CHAINING;
 	if (flags & (1u <<
-		     MC_CMD_GET_CAPABILITIES_V2_OUT_RX_PREFIX_LEN_0_LBN))
+		     MC_CMD_GET_CAPABILITIES_V3_OUT_RX_PREFIX_LEN_0_LBN))
 		*capability_flags |= NIC_FLAG_ZERO_RX_PREFIX;
 	if (flags & (1u <<
-		     MC_CMD_GET_CAPABILITIES_V2_OUT_RX_BATCHING_LBN))
+		     MC_CMD_GET_CAPABILITIES_V3_OUT_RX_BATCHING_LBN))
 		*capability_flags |= NIC_FLAG_RX_MERGE;
 
 	/* If MAC filters are policed then check we've got the right privileges
 	 * before saying we can do MAC spoofing.
 	 */
 	if (flags & (1u <<
-		MC_CMD_GET_CAPABILITIES_V2_OUT_TX_MAC_SECURITY_FILTERING_LBN)) {
+		MC_CMD_GET_CAPABILITIES_V3_OUT_TX_MAC_SECURITY_FILTERING_LBN)) {
 		if( _ef10_nic_mac_spoofing_privilege(nic) == 1 )
 			*capability_flags |= NIC_FLAG_MAC_SPOOFING;
 	}
@@ -627,16 +620,18 @@ static int _ef10_nic_check_capabilities(struct efhw_nic *nic,
 
         if (out_size >= MC_CMD_GET_CAPABILITIES_V2_OUT_LEN) {
 		nic->pio_num = EFHW_MCDI_WORD(out,
-					GET_CAPABILITIES_V2_OUT_NUM_PIO_BUFFS);
+					GET_CAPABILITIES_V3_OUT_NUM_PIO_BUFFS);
 		nic->pio_size = EFHW_MCDI_WORD(out,
-					GET_CAPABILITIES_V2_OUT_SIZE_PIO_BUFF);
-		flags = EFHW_MCDI_DWORD(out, GET_CAPABILITIES_V2_OUT_FLAGS2);
+					GET_CAPABILITIES_V3_OUT_SIZE_PIO_BUFF);
+		flags = EFHW_MCDI_DWORD(out, GET_CAPABILITIES_V3_OUT_FLAGS2);
 		if (flags & (1u <<
-			MC_CMD_GET_CAPABILITIES_V2_OUT_TX_VFIFO_ULL_MODE_LBN))
+			MC_CMD_GET_CAPABILITIES_V3_OUT_TX_VFIFO_ULL_MODE_LBN))
 			*capability_flags |= NIC_FLAG_TX_ALTERNATIVES;
 		if (flags & (1u <<
-			     MC_CMD_GET_CAPABILITIES_V2_OUT_INIT_EVQ_V2_LBN))
+			     MC_CMD_GET_CAPABILITIES_V3_OUT_INIT_EVQ_V2_LBN))
 			*capability_flags |= NIC_FLAG_EVQ_V2;
+		if (flags & (1u << MC_CMD_GET_CAPABILITIES_V2_OUT_CTPIO_LBN))
+			*capability_flags |= NIC_FLAG_TX_CTPIO;
         }
 	else {
 		/* We hard code this value, as lack of support for get caps V2
@@ -647,6 +642,23 @@ static int _ef10_nic_check_capabilities(struct efhw_nic *nic,
 		nic->pio_size = 2048;
 	}
 
+	if (out_size >= MC_CMD_GET_CAPABILITIES_V3_OUT_LEN) {
+		/* If TX alternatives are not supported, these can still be
+		 * set to non-zero values based on whatever MCFW reports.
+		 */
+		nic->tx_alts_vfifos = EFHW_MCDI_BYTE(out,
+						GET_CAPABILITIES_V3_OUT_VFIFO_STUFFING_NUM_VFIFOS);
+		nic->tx_alts_cp_bufs = EFHW_MCDI_WORD(out,
+						GET_CAPABILITIES_V3_OUT_VFIFO_STUFFING_NUM_CP_BUFFERS);
+	}
+	else {
+		nic->tx_alts_vfifos = 0;
+		nic->tx_alts_cp_bufs = 0;
+	}
+
+        nic->rx_variant = EFHW_MCDI_WORD(out, GET_CAPABILITIES_OUT_RX_DPCPU_FW_ID);
+        nic->tx_variant = EFHW_MCDI_WORD(out, GET_CAPABILITIES_OUT_TX_DPCPU_FW_ID);
+
 	return rc;
 }
 
@@ -656,7 +668,7 @@ static int ef10_nic_get_timestamp_correction(struct efhw_nic *nic,
 					     int *tx_ts_correction,
 					     const char* caller)
 {
-	int rc, tx_ticks;
+	int rc;
 	size_t out_size;
 
 	EFHW_MCDI_DECLARE_BUF(in, MC_CMD_PTP_IN_GET_TIMESTAMP_CORRECTIONS_LEN);
@@ -675,10 +687,15 @@ static int ef10_nic_get_timestamp_correction(struct efhw_nic *nic,
 		if (out_size >= MC_CMD_PTP_OUT_GET_TIMESTAMP_CORRECTIONS_V2_LEN) {
 			*rx_ts_correction =
 				EFHW_MCDI_DWORD(out, PTP_OUT_GET_TIMESTAMP_CORRECTIONS_V2_GENERAL_RX);
-			tx_ticks =
-				EFHW_MCDI_DWORD(out, PTP_OUT_GET_TIMESTAMP_CORRECTIONS_V2_GENERAL_TX);
 			*tx_ts_correction =
-				((uint64_t) tx_ticks * 1000000000) >> 27;
+				EFHW_MCDI_DWORD(out, PTP_OUT_GET_TIMESTAMP_CORRECTIONS_V2_GENERAL_TX);
+			/* NIC gives TX correction in ticks.  For hunti and
+			 * medford the caller expects ns, and for medford2
+			 * the caller expects ticks.
+			 */
+			if( nic->devtype.variant < 'C' )
+				*tx_ts_correction =
+					((uint64_t) *tx_ts_correction * 1000000000) >> 27;
 		} else {
 			*rx_ts_correction =
 				EFHW_MCDI_DWORD(out, PTP_OUT_GET_TIMESTAMP_CORRECTIONS_RECEIVE);
@@ -689,6 +706,45 @@ static int ef10_nic_get_timestamp_correction(struct efhw_nic *nic,
 		}
 	}
 	return rc;
+}
+
+
+static int ef10_nic_get_ptp_attributes(struct efhw_nic* nic,
+                                       uint32_t* ts_format,
+                                       const char* caller)
+{
+	int rc;
+	size_t out_size;
+
+	EFHW_MCDI_DECLARE_BUF(in, MC_CMD_PTP_IN_GET_ATTRIBUTES_LEN);
+	EFHW_MCDI_DECLARE_BUF(out,
+			      MC_CMD_PTP_OUT_GET_ATTRIBUTES_LEN);
+	EFHW_MCDI_INITIALISE_BUF(in);
+	EFHW_MCDI_INITIALISE_BUF(out);
+
+	EFHW_MCDI_SET_DWORD(in, PTP_IN_OP,
+			    MC_CMD_PTP_OP_GET_ATTRIBUTES);
+	EFHW_MCDI_SET_DWORD(in, PTP_IN_PERIPH_ID, 0);
+
+	rc = ef10_mcdi_rpc(nic, MC_CMD_PTP, sizeof(in), sizeof(out), &out_size,
+			   in, out);
+        if( rc != 0 )
+                return rc;
+
+        switch( EFHW_MCDI_DWORD(out, PTP_OUT_GET_ATTRIBUTES_TIME_FORMAT) ) {
+        case MC_CMD_PTP_OUT_GET_ATTRIBUTES_SECONDS_QTR_NANOSECONDS:
+                *ts_format = TS_FORMAT_SECONDS_QTR_NANOSECONDS;
+                break;
+
+        case MC_CMD_PTP_OUT_GET_ATTRIBUTES_SECONDS_27FRACTION:
+                *ts_format = TS_FORMAT_SECONDS_27FRACTION;
+                break;
+
+        default:
+                return -EOPNOTSUPP;
+        }
+
+	return 0;
 }
 
 
@@ -757,13 +813,19 @@ ef10_nic_init_hardware(struct efhw_nic *nic,
 		nic->tx_ts_correction = 178;
 	}
 
-	rc = _ef10_nic_check_licence(nic);
-	if( rc < 0 ) return rc;
-	if( rc == 0 ) {
-		EFHW_ERR("%s: Firmware reports no Onload licence present",
-			 __FUNCTION__);
-		return -EOPNOTSUPP;
-	}
+	rc = ef10_nic_get_ptp_attributes(nic, &(nic->ts_format),
+                                         __FUNCTION__);
+	if( rc < 0 ) {
+		if( rc == -EPERM || rc == -ENOSYS )
+			EFHW_TRACE("%s: WARNING: failed to get PTP "
+				   "attributes rc=%d", __FUNCTION__, rc);
+		else
+			EFHW_ERR("%s: ERROR: failed to get PTP "
+				 "attributes rc=%d", __FUNCTION__, rc);
+
+                /* As above. */
+                nic->ts_format = TS_FORMAT_SECONDS_27FRACTION;
+        }
 
 	/* No buffer_table_ctor() on EF10 */
 	/* No non_irq_evq on EF10 */
@@ -985,6 +1047,14 @@ ef10_nic_event_queue_enable(struct efhw_nic *nic, uint evq, uint evq_size,
 	int enable_rx_merging = ((flags & EFHW_VI_RX_PACKED_STREAM) != 0) ||
                                 ((flags & EFHW_VI_ENABLE_RX_MERGE) != 0);
 	int enable_timer = (flags & EFHW_VI_ENABLE_EV_TIMER);
+
+	/* See bug66017 - we'd like to sometimes be able to use
+	 * wakeups without an event timer, but that isn't currently
+	 * possible, so force the allocation of a timer
+	 */
+	if( force_ev_timer )
+		enable_timer = 1;
+
 	rc = _ef10_mcdi_cmd_event_queue_enable(nic, evq, evq_size, dma_addrs, 
 					       n_pages, interrupting,
 					       enable_dos_p, enable_cut_through,
@@ -1138,6 +1208,11 @@ ef10_handle_event(struct efhw_nic *nic, struct efhw_ev_handler *h,
 			EFHW_NOTICE("%s: unexpected MCDI RX error event "
 				    "(event code %d)",__FUNCTION__, code);
 			return -EINVAL;
+		case MCDI_EVENT_CODE_AOE:
+			/* This event doesn't signify an error case,
+			 * so just return 0 to avoid logging 
+			 */
+			return -EINVAL;
 		default:
 			EFHW_NOTICE("%s: unexpected MCDI event code %d",
 				    __FUNCTION__, code);
@@ -1220,11 +1295,11 @@ ef10_mcdi_common_pool_alloc(struct efhw_nic *nic, unsigned txq_id,
 	unsigned buf_size = 512;
 	unsigned num_bufs = (num_32b_words * 32 + buf_size - 1) / buf_size;
 
-	/* One buffer gets pre-allocated per CP, which in practice means we
-	 * need any extra one to ensure we get the buffering the user
-	 * expects.
+	/* Up to two buffers get allocated per VFIFO by the hardware,
+	 * which in practice means we need extra buffers to ensure we
+	 * get the buffering the user expects.
 	 */
-	num_bufs += num_alt;
+	num_bufs += 2 * num_alt;
 
 	EFHW_MCDI_INITIALISE_BUF(in);
 	EFHW_MCDI_INITIALISE_BUF(out);
@@ -1351,10 +1426,11 @@ _ef10_mcdi_cmd_init_txq(struct efhw_nic *nic, dma_addr_t *dma_addrs,
 			int flag_timestamp, int crc_mode, int flag_tcp_udp_only,
 			int flag_tcp_csum_dis, int flag_ip_csum_dis,
 			int flag_buff_mode, int flag_pacer_bypass,
+			int flag_ctpio, int flag_ctpio_uthresh,
 			uint32_t instance, uint32_t label,
 			uint32_t target_evq, uint32_t numentries)
 {
-	int i, rc;
+	int i, rc, inner;
 	size_t out_size;
 	EFHW_MCDI_DECLARE_BUF(in, MC_CMD_INIT_TXQ_EXT_IN_LEN);
 	EFHW_MCDI_INITIALISE_BUF(in);
@@ -1365,13 +1441,20 @@ _ef10_mcdi_cmd_init_txq(struct efhw_nic *nic, dma_addr_t *dma_addrs,
 	EFHW_MCDI_SET_DWORD(in, INIT_TXQ_EXT_IN_OWNER_ID, owner_id);
 	EFHW_MCDI_SET_DWORD(in, INIT_TXQ_EXT_IN_PORT_ID, port_id);
 
-	EFHW_MCDI_POPULATE_DWORD_7(in, INIT_TXQ_EXT_IN_FLAGS,
+	inner = nic->devtype.arch == EFHW_ARCH_EF10 &&
+		nic->devtype.variant == 'B';
+
+	EFHW_MCDI_POPULATE_DWORD_11(in, INIT_TXQ_EXT_IN_FLAGS,
 		INIT_TXQ_EXT_IN_FLAG_BUFF_MODE, flag_buff_mode ? 1 : 0,
 		INIT_TXQ_EXT_IN_FLAG_IP_CSUM_DIS, flag_ip_csum_dis ? 1 : 0,
 		INIT_TXQ_EXT_IN_FLAG_TCP_CSUM_DIS, flag_tcp_csum_dis ? 1 : 0,
+		INIT_TXQ_EXT_IN_FLAG_INNER_IP_CSUM_EN, inner,
+		INIT_TXQ_EXT_IN_FLAG_INNER_TCP_CSUM_EN, inner,
 		INIT_TXQ_EXT_IN_FLAG_TCP_UDP_ONLY, flag_tcp_udp_only ? 1 : 0,
 		INIT_TXQ_EXT_IN_CRC_MODE, crc_mode,
 		INIT_TXQ_EXT_IN_FLAG_TIMESTAMP, flag_timestamp ? 1 : 0,
+		INIT_TXQ_EXT_IN_FLAG_CTPIO, flag_ctpio ? 1 : 0,
+		INIT_TXQ_EXT_IN_FLAG_CTPIO_UTHRESH, flag_ctpio_uthresh ? 1 : 0,
 		INIT_TXQ_EXT_IN_FLAG_PACER_BYPASS, flag_pacer_bypass ? 1 : 0);
 	
 	for (i = 0; i < n_dma_addrs; ++i)
@@ -1498,6 +1581,8 @@ ef10_dmaq_tx_q_init(struct efhw_nic *nic, uint dmaq, uint evq_id, uint own_id,
 	int flag_ip_csum_dis = (flags & EFHW_VI_TX_IP_CSUM_DIS) != 0;
 	int flag_buff_mode = (flags & EFHW_VI_TX_PHYS_ADDR_EN) == 0;
 	int flag_loopback = (flags & EFHW_VI_TX_LOOPBACK) != 0;
+	int flag_ctpio = (flags & EFHW_VI_TX_CTPIO) != 0;
+	int flag_ctpio_uthresh = (flags & EFHW_VI_TX_CTPIO_NO_POISON) == 0;
 	int flag_pacer_bypass;
 
 	if (nic->flags & NIC_FLAG_MCAST_LOOP_HW) {
@@ -1512,6 +1597,11 @@ ef10_dmaq_tx_q_init(struct efhw_nic *nic, uint dmaq, uint evq_id, uint own_id,
 				return rc;
 		}
 	}
+
+	/* Pre-Medford 2 NICs will ignore the CTPIO-request bit and the call to
+	 * MC_CMD_INIT_TXQ will succeed, so force failure here ourselves. */
+	if (flag_ctpio && ~nic->flags & NIC_FLAG_TX_CTPIO)
+		return -EOPNOTSUPP;
 
 	if (stack_id)
 		vport_id = ef10_gen_port_id(vport_id, stack_id);
@@ -1553,8 +1643,8 @@ ef10_dmaq_tx_q_init(struct efhw_nic *nic, uint dmaq, uint evq_id, uint own_id,
 			 REAL_OWNER_ID(own_id), flag_timestamp,
 			 QUEUE_CRC_MODE_NONE, flag_tcp_udp_only,
 			 flag_tcp_csum_dis, flag_ip_csum_dis,
-			 flag_buff_mode, flag_pacer_bypass,
-			 dmaq, tag, evq_id, dmaq_size);
+			 flag_buff_mode, flag_pacer_bypass, flag_ctpio,
+			 flag_ctpio_uthresh, dmaq, tag, evq_id, dmaq_size);
 		if ((rc != -EPERM) || (!flag_pacer_bypass))
 			break;
 	}

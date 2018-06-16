@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -15,7 +15,7 @@
 
 /****************************************************************************
  * Driver for Solarflare network controllers and boards
- * Copyright 2008-2015 Solarflare Communications Inc.
+ * Copyright 2008-2017 Solarflare Communications Inc.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 as published
@@ -25,26 +25,10 @@
 #ifndef EFX_MCDI_H
 #define EFX_MCDI_H
 
+#include <linux/mutex.h>
+#include <linux/kref.h>
 
 #define MCDI_PROXY_AUTH_CLIENT_TIMEOUT (10 * HZ)
-
-/**
- * enum efx_mcdi_state - MCDI request handling state
- * @MCDI_STATE_QUIESCENT: No pending MCDI requests. If the caller holds the
- *	mcdi @iface_lock then they are able to move to %MCDI_STATE_RUNNING
- * @MCDI_STATE_RUNNING_SYNC: There is a synchronous MCDI request pending.
- *	Only the thread that moved into this state is allowed to move out of it.
- * @MCDI_STATE_RUNNING_ASYNC: There is an asynchronous MCDI request pending.
- * @MCDI_STATE_COMPLETED: An MCDI request has completed, but the owning thread
- *	has not yet consumed the result. For all other threads, equivalent to
- *	%MCDI_STATE_RUNNING.
- */
-enum efx_mcdi_state {
-	MCDI_STATE_QUIESCENT,
-	MCDI_STATE_RUNNING_SYNC,
-	MCDI_STATE_RUNNING_ASYNC,
-	MCDI_STATE_COMPLETED,
-};
 
 /**
  * enum efx_mcdi_mode - MCDI transaction mode
@@ -59,56 +43,113 @@ enum efx_mcdi_mode {
 };
 
 /**
+ * enum efx_mcdi_cmd_state - State for an individual MCDI command
+ * @MCDI_STATE_QUEUED: Command not started
+ * @MCDI_STATE_RETRY: Command was submitted and MC rejected with no resources.
+ *                    Command will be retried once another command returns.
+ * @MCDI_STATE_PROXY: Command needs authenticating with proxy auth. Will be sent
+ *                    again after a PROXY_COMPLETE event.
+ * @MCDI_STATE_RUNNING: Command was accepted and is running.
+ * @MCDI_STATE_ABORT: Command has been completed or aborted. Used to resolve
+ *		      race between completion in another threads and the worker.
+ */
+enum efx_mcdi_cmd_state {
+	MCDI_STATE_QUEUED,
+	MCDI_STATE_RETRY,
+	MCDI_STATE_PROXY,
+	MCDI_STATE_RUNNING,
+	MCDI_STATE_ABORT,
+};
+
+typedef void efx_mcdi_async_completer(struct efx_nic *efx,
+				      unsigned long cookie, int rc,
+				      efx_dword_t *outbuf,
+				      size_t outlen_actual);
+
+/**
+ * struct efx_mcdi_cmd - An outstanding MCDI command
+ * @ref: Reference count. There will be one reference if the command is
+ *	in the mcdi_iface cmd_list, another if it's on a cleanup list,
+ *	and a third if it's queued in the work queue.
+ * @list: The data for this entry in mcdi->cmd_list
+ * @cleanup_list: The data for this entry in a cleanup list
+ * @work: The work item for this command, queued in mcdi->workqueue
+ * @mcdi: The mcdi_iface for this command
+ * @state: The state of this command
+ * @inlen: inbuf length
+ * @inbuf: Input buffer
+ * @quiet: Whether to silence errors
+ * @polled: Whether this command is polled or evented
+ * @cancelled: Whether this command has been cancelled by the issuer
+ * @reboot_seen: Whether a reboot has been seen during this command,
+ *	to prevent duplicates
+ * @seq: Sequence number
+ * @bufid: Buffer ID from the NIC implementation
+ * @started: Jiffies this command was started at
+ * @cookie: Context for completion function
+ * @completer: Completion function
+ * @cmd: Command number
+ * @proxy_handle: Handle if this command was proxied
+ */
+struct efx_mcdi_cmd {
+	struct kref ref;
+	struct list_head list;
+	struct list_head cleanup_list;
+	struct delayed_work work;
+	struct efx_mcdi_iface *mcdi;
+	enum efx_mcdi_cmd_state state;
+	size_t inlen;
+	const efx_dword_t *inbuf;
+	bool quiet;
+	bool polled;
+	bool cancelled;
+	bool reboot_seen;
+	u8 seq;
+	u8 bufid;
+	unsigned long started;
+	unsigned long cookie;
+	efx_mcdi_async_completer *atomic_completer;
+	efx_mcdi_async_completer *completer;
+	unsigned int handle;
+	unsigned int cmd;
+	int rc;
+	size_t outlen;
+	efx_dword_t *outbuf;
+	u32 proxy_handle;
+	/* followed by inbuf data if necessary */
+};
+
+/**
  * struct efx_mcdi_iface - MCDI protocol context
  * @efx: The associated NIC.
- * @state: Request handling state. Waited for by @wq.
+ * @iface_lock: Serialise access to this structure
  * @mode: Poll for mcdi completion, or wait for an mcdi_event.
- * @wq: Wait queue for threads waiting for @state != %MCDI_STATE_RUNNING
  * @new_epoch: Indicates start of day or start of MC reboot recovery
- * @iface_lock: Serialises access to @seqno, @credits and response metadata
- * @seqno: The next sequence number to use for mcdi requests.
- * @credits: Number of spurious MCDI completion events allowed before we
- *     trigger a fatal error
- * @resprc: Response error/success code (Linux numbering)
- * @resp_cmd: Command in response (required in the case of MC_CMD_PROXY_CMD)
- * @resp_hdr_len: Response header length
- * @resp_data_len: Response data (SDU or error) length
- * @async_lock: Serialises access to @async_list while event processing is
- *	enabled
- * @async_list: Queue of asynchronous requests
- * @async_timer: Timer for asynchronous request timeout
- * @timeout: Current request timeout in jiffies
+ * @cmd_list: List of outstanding and running commands
+ * @db_held_by: Command the MC doorbell is in use by
+ * @seq_held_by: Command each sequence number is in use by
+ * @prev_seq: The last used sequence number
+ * @workqueue: Workqueue used for delayed processing
  * @logging_buffer: buffer that may be used to build MCDI tracing messages
  * @logging_enabled: whether to trace MCDI
- * @proxy_rx_handle: Most recently received proxy authorisation handle
- * @proxy_rx_status: Status of most recent proxy authorisation
- * @proxy_rx_wq: Wait queue for updates to proxy_rx_handle
  */
 struct efx_mcdi_iface {
 	struct efx_nic *efx;
-	atomic_t state;
-	enum efx_mcdi_mode mode;
-	wait_queue_head_t wq;
 	spinlock_t iface_lock;
+	struct list_head cmd_list;
+	struct workqueue_struct *workqueue;
+	unsigned int outstanding_cleanups;
+	wait_queue_head_t cmd_complete_wq;
+	struct efx_mcdi_cmd *db_held_by;
+	struct efx_mcdi_cmd *seq_held_by[16];
+	u8 prev_seq;
+	unsigned int prev_handle;
+	enum efx_mcdi_mode mode;
 	bool new_epoch;
-	unsigned int credits;
-	unsigned int seqno;
-	int resprc;
-	int resprc_raw;
-	unsigned int resp_cmd;
-	size_t resp_hdr_len;
-	size_t resp_data_len;
-	spinlock_t async_lock;
-	struct list_head async_list;
-	struct timer_list async_timer;
-	unsigned int timeout;
 #ifdef CONFIG_SFC_MCDI_LOGGING
 	char *logging_buffer;
 	bool logging_enabled;
 #endif
-	unsigned int proxy_rx_handle;
-	int proxy_rx_status;
-	wait_queue_head_t proxy_rx_wq;
 };
 
 struct efx_mcdi_mon {
@@ -123,18 +164,6 @@ struct efx_mcdi_mon {
 	struct efx_mcdi_mon_attribute *attrs;
 	unsigned int n_attrs;
 };
-
-#ifdef CONFIG_SFC_MTD
-struct efx_mcdi_mtd_partition {
-	struct efx_mtd_partition common;
-	bool updating;
-	u16 nvram_type;
-	u16 fw_subtype;
-};
-#endif
-
-#define to_efx_mcdi_mtd_partition(mtd)				\
-	container_of(mtd, struct efx_mcdi_mtd_partition, common.mtd)
 
 /**
  * struct efx_mcdi_data - extra state for NICs that implement MCDI
@@ -152,14 +181,14 @@ struct efx_mcdi_data {
 
 static inline struct efx_mcdi_iface *efx_mcdi(struct efx_nic *efx)
 {
-	EFX_BUG_ON_PARANOID(!efx->mcdi);
+	EFX_WARN_ON_PARANOID(!efx->mcdi);
 	return &efx->mcdi->iface;
 }
 
 #ifdef CONFIG_SFC_MCDI_MON
 static inline struct efx_mcdi_mon *efx_mcdi_mon(struct efx_nic *efx)
 {
-	EFX_BUG_ON_PARANOID(!efx->mcdi);
+	EFX_WARN_ON_PARANOID(!efx->mcdi);
 	return &efx->mcdi->hwmon;
 }
 #endif
@@ -176,28 +205,26 @@ int efx_mcdi_rpc_quiet(struct efx_nic *efx, unsigned int cmd,
 		       efx_dword_t *outbuf, size_t outlen,
 		       size_t *outlen_actual);
 
-int efx_mcdi_rpc_start(struct efx_nic *efx, unsigned int cmd,
-		       const efx_dword_t *inbuf, size_t inlen);
-int efx_mcdi_rpc_finish(struct efx_nic *efx, unsigned int cmd, size_t inlen,
-			efx_dword_t *outbuf, size_t outlen,
-			size_t *outlen_actual);
-int efx_mcdi_rpc_finish_quiet(struct efx_nic *efx, unsigned int cmd,
-			      size_t inlen, efx_dword_t *outbuf,
-			      size_t outlen, size_t *outlen_actual);
-
-typedef void efx_mcdi_async_completer(struct efx_nic *efx,
-				      unsigned long cookie, int rc,
-				      efx_dword_t *outbuf,
-				      size_t outlen_actual);
 int efx_mcdi_rpc_async(struct efx_nic *efx, unsigned int cmd,
-		       const efx_dword_t *inbuf, size_t inlen, size_t outlen,
+		       const efx_dword_t *inbuf, size_t inlen,
 		       efx_mcdi_async_completer *complete,
 		       unsigned long cookie);
 int efx_mcdi_rpc_async_quiet(struct efx_nic *efx, unsigned int cmd,
 			     const efx_dword_t *inbuf, size_t inlen,
-			     size_t outlen,
 			     efx_mcdi_async_completer *complete,
 			     unsigned long cookie);
+int efx_mcdi_rpc_async_ext(struct efx_nic *efx, unsigned int cmd,
+			   const efx_dword_t *inbuf, size_t inlen,
+			   efx_mcdi_async_completer *atomic_completer,
+			   efx_mcdi_async_completer *completer,
+			   unsigned long cookie, bool quiet,
+			   bool immediate_only, unsigned int *handle);
+
+/* Attempt to cancel an outstanding command.
+ * This function guarantees that the completion function will never be called
+ * after it returns. The command may or may not actually be cancelled.
+ */
+void efx_mcdi_cancel_cmd(struct efx_nic *efx, unsigned int handle);
 
 void efx_mcdi_display_error(struct efx_nic *efx, unsigned int cmd,
 			    size_t inlen, efx_dword_t *outbuf,
@@ -206,7 +233,15 @@ void efx_mcdi_display_error(struct efx_nic *efx, unsigned int cmd,
 int efx_mcdi_poll_reboot(struct efx_nic *efx);
 void efx_mcdi_mode_poll(struct efx_nic *efx);
 void efx_mcdi_mode_event(struct efx_nic *efx);
-void efx_mcdi_flush_async(struct efx_nic *efx);
+/* Wait for all commands and all cleanup for them to be complete */
+void efx_mcdi_wait_for_cleanup(struct efx_nic *efx);
+/* Wait for all commands to be complete */
+int efx_mcdi_wait_for_quiescence(struct efx_nic *efx,
+				 unsigned int timeout_jiffies);
+/* Indicate to the MCDI module that MC reset processing is complete
+ * so new commands can now be sent.
+ */
+void efx_mcdi_post_reset(struct efx_nic *efx);
 
 int efx_mcdi_process_event(struct efx_channel *channel,
 			   efx_qword_t *event, int budget);
@@ -228,13 +263,21 @@ void efx_mcdi_sensor_event(struct efx_nic *efx, efx_qword_t *ev);
 #define MCDI_PTR(_buf, _field)						\
 	_MCDI_PTR(_buf, MC_CMD_ ## _field ## _OFST)
 #define _MCDI_CHECK_ALIGN(_ofst, _align)				\
-	((_ofst) + BUILD_BUG_ON_ZERO((_ofst) & (_align - 1)))
+	((void)BUILD_BUG_ON_ZERO((_ofst) & (_align - 1)),		\
+	 (_ofst))
 #define _MCDI_DWORD(_buf, _field)					\
 	((_buf) + (_MCDI_CHECK_ALIGN(MC_CMD_ ## _field ## _OFST, 4) >> 2))
 
+#define MCDI_BYTE(_buf, _field)						\
+	((void)BUILD_BUG_ON_ZERO(MC_CMD_ ## _field ## _LEN != 1),	\
+	 *MCDI_PTR(_buf, _field))
 #define MCDI_WORD(_buf, _field)						\
-	((u16)BUILD_BUG_ON_ZERO(MC_CMD_ ## _field ## _LEN != 2) +	\
+	((void)BUILD_BUG_ON_ZERO(MC_CMD_ ## _field ## _LEN != 2),	\
 	 le16_to_cpu(*(__force const __le16 *)MCDI_PTR(_buf, _field)))
+/* Read a 16-bit field defined in the protocol as being big-endian. */
+#define MCDI_WORD_BE(_buf, _field)					\
+	((void)BUILD_BUG_ON_ZERO(MC_CMD_ ## _field ## _LEN != 2),	\
+	 *(__force const __be16 *)MCDI_PTR(_buf, _field))
 #define MCDI_SET_DWORD(_buf, _field, _value)				\
 	EFX_POPULATE_DWORD_1(*_MCDI_DWORD(_buf, _field), EFX_DWORD_0, _value)
 #define MCDI_DWORD(_buf, _field)					\
@@ -380,6 +423,7 @@ int efx_mcdi_set_mtu(struct efx_nic *efx);
 #define EFX_MC_STATS_GENERATION_INVALID ((__force __le64)(-1))
 void efx_mcdi_mac_start_stats(struct efx_nic *efx);
 void efx_mcdi_mac_stop_stats(struct efx_nic *efx);
+void efx_mcdi_mac_update_stats_period(struct efx_nic *efx);
 void efx_mcdi_mac_pull_stats(struct efx_nic *efx);
 bool efx_mcdi_mac_check_fault(struct efx_nic *efx);
 enum reset_type efx_mcdi_map_reset_reason(enum reset_type reason);

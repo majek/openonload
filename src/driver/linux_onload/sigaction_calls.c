@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -105,6 +105,10 @@ efab_signal_substitute(int sig, struct sigaction *new_act,
                          k->sa.sa_flags, k->sa.sa_restorer, type));
   signal_data->flags = k->sa.sa_flags;
   k->sa.sa_flags |= SA_SIGINFO;
+#if defined(SA_IA32_ABI) && defined(CONFIG_COMPAT)
+  if( in_ia32_syscall() )
+    k->sa.sa_flags |= SA_IA32_ABI;
+#endif
   if( type == OO_SIGHANGLER_USER )
     CI_USER_PTR_SET(signal_data->handler, k->sa.sa_handler);
   else {
@@ -351,6 +355,12 @@ efab_signal_do_sigaction(int sig, struct sigaction *act,
     rc = efab_signal_report_sigaction(sig, oact, tramp_data);
     if( rc != 0 )
       return rc;
+#if defined(SA_IA32_ABI) && defined(CONFIG_COMPAT)
+    /* efab_signal_report_sigaction is used from efab_signal_process_fini(),
+     * so it must not remove SA_IA32_ABI flag.  But we should not leak this
+     * flag to UL, see sigaction_compat_abi() in linux kernel. */
+    oact->sa_flags &= ~SA_IA32_ABI;
+#endif
   }
 
   if( act != NULL ) {

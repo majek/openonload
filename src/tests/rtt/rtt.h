@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -29,6 +29,8 @@ struct rtt_endpoint {
   void (*ping)(struct rtt_endpoint*);
   void (*pong)(struct rtt_endpoint*);
   void (*cleanup)(struct rtt_endpoint*);
+  void (*reset_stats)(struct rtt_endpoint*);
+  void (*dump_info)(struct rtt_endpoint*, FILE*);
 };
 
 

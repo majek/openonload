@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -14,7 +14,7 @@
 */
 
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -124,12 +124,9 @@ static int wait_for_some_completions(void)
 int main(int argc, char* argv[])
 {
   ef_pd pd;
-#if defined(__x86_64__) || defined(__PPC64__)
   ef_pio pio;
-#endif
   int i;
   void* p;
-  int can_use_pio = 1;
 
   TRY(parse_opts(argc, argv));
 
@@ -142,24 +139,19 @@ int main(int argc, char* argv[])
   TRY(ef_vi_alloc_from_pd(&vi, dh, &pd, dh, -1, 0, -1, NULL, -1,
       EF_VI_FLAGS_DEFAULT));
 
-#if defined(__x86_64__) || defined(__PPC64__)
-  if(vi.nic_type.arch == EF_VI_ARCH_FALCON) {
-    can_use_pio = 0;
+#if EF_VI_CONFIG_PIO
+  if( vi.nic_type.arch == EF_VI_ARCH_FALCON ) {
+    fprintf(stderr, "ERROR: PIO not available on this NIC type\n");
+    exit(1);
   }
-  else {
-    /* Allocate a PIO region and link it to our vi */
-    TRY(ef_pio_alloc(&pio, dh, &pd, -1, dh));
-    TRY(ef_pio_link_vi(&pio, dh, &vi, dh));
-  }
+  /* Allocate a PIO region and link it to our vi */
+  TRY(ef_pio_alloc(&pio, dh, &pd, -1, dh));
+  TRY(ef_pio_link_vi(&pio, dh, &vi, dh));
 #else
-  can_use_pio = 0;
+  fprintf(stderr, "ERROR: PIO not available on this CPU type\n");
+  exit(1);
+  (void) pio;
 #endif
-
-  if (!can_use_pio) {
-    fprintf(stderr, "ERROR: Cannot use PIO - NIC must be 7000 series or"
-                    " higher, and OS type must be x86_64 or PPC64\n");
-    abort();
-  }
 
   printf("txq_size=%d\n", ef_vi_transmit_capacity(&vi));
   printf("evq_size=%d\n", ef_eventq_capacity(&vi));
@@ -169,7 +161,7 @@ int main(int argc, char* argv[])
   TEST(posix_memalign(&p, CI_PAGE_SIZE, BUF_SIZE) == 0);
 
   /* Prepare packet contents */
-  tx_frame_len = init_udp_pkt(p, cfg_payload_len, &vi, dh);
+  tx_frame_len = init_udp_pkt(p, cfg_payload_len, &vi, dh, -1);
   /* Copy packet data into the NIC's PIO region.  If the -c option was
    * specified on the command line, this step is skipped, as the copy will
    * be performed later as part of the send operation.
@@ -252,6 +244,6 @@ static int parse_opts(int argc, char*argv[])
   }
 
   /* Parse arguments after options */
-  parse_args(argv, &ifindex, cfg_local_port);
+  parse_args(argv, &ifindex, cfg_local_port, -1);
   return 0;
 }

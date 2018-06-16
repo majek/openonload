@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -65,15 +65,18 @@ extern int efhw_device_type_init(struct efhw_device_type *dt,
 				 int vendor_id, int device_id, int revision);
 
 /* Initialise fields that do not involve touching hardware. */
+#define EFHW_MEM_BAR_UNDEFINED ((unsigned)~0)
 extern void efhw_nic_init(struct efhw_nic *nic, unsigned flags,
 			  unsigned options, struct efhw_device_type *dev_type,
 			  unsigned map_min, unsigned map_max, unsigned vi_base,
-			  unsigned vi_shift, unsigned vport_id);
+			  unsigned vi_shift, unsigned mem_bar, unsigned vi_stride,
+			  unsigned vport_id);
 
 /*! Destruct NIC resources */
 extern void efhw_nic_dtor(struct efhw_nic *nic);
 
 extern struct pci_dev* efhw_nic_get_pci_dev(struct efhw_nic* nic);
+extern struct net_device* efhw_nic_get_net_dev(struct efhw_nic* nic);
 
 /* Driverlink-handle management. */
 extern struct efx_dl_device* efhw_nic_acquire_dl_device(struct efhw_nic*);

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -31,6 +31,7 @@
 
 #include <ci/internal/ip.h>
 #include "netif_tx.h"
+#include "l3xudp_encap.h"
 
 
 /* Send packet to the IP layer.
@@ -93,7 +94,7 @@ ci_ip_set_mac_and_port(ci_netif* ni, const ci_ip_cached_hdrs* ipcache,
   ci_assert_equal(ipcache->ether_type, CI_ETHERTYPE_IP);
   oo_tx_pkt_layout_update(pkt, ipcache->ether_offset);
   memcpy(oo_tx_ether_hdr(pkt), ci_ip_cache_ether_hdr(ipcache),
-         oo_ether_hdr_size(pkt));
+         oo_tx_ether_hdr_size(pkt));
   pkt->intf_i = ipcache->intf_i;
 #if CI_CFG_PORT_STRIPING
   /* ?? FIXME: This code assumes that the two ports we're striping over
@@ -103,7 +104,7 @@ ci_ip_set_mac_and_port(ci_netif* ni, const ci_ip_cached_hdrs* ipcache,
   oo_ether_dhost(pkt)[5]  ^= pkt->netif.tx.intf_swap;
   oo_ether_shost(pkt)[5]  ^= pkt->netif.tx.intf_swap;
 #endif
-  ci_assert_equal(oo_ether_type_get(pkt), CI_ETHERTYPE_IP);
+  ci_assert_equal(oo_tx_ether_type_get(pkt), CI_ETHERTYPE_IP);
   ci_assert_equal(CI_IP4_IHL(oo_tx_ip_hdr(pkt)), sizeof(ci_ip4_hdr));
 }
 
@@ -120,12 +121,14 @@ __ci_ip_send_tcp(ci_netif* ni, ci_ip_pkt_fmt* pkt, ci_tcp_state* ts)
     return;
   }
   CI_IPV4_STATS_INC_OUT_REQUESTS(ni);
-  if(CI_LIKELY( cicp_ip_cache_is_valid(CICP_HANDLE(ni), &ts->s.pkt) )) {
+  if(CI_LIKELY( ts->s.pkt.status == retrrc_success &&
+                oo_cp_verinfo_is_valid(ni->cplane, &ts->s.pkt.mac_integrity) )) {
     ci_ip_set_mac_and_port(ni, &ts->s.pkt, pkt);
     ci_netif_pkt_hold(ni, pkt);
     ci_netif_send(ni, pkt);
   }
   else {
+    cicp_user_retrieve(ni, &ts->s.pkt, &ts->s.cp);
     ci_ip_send_tcp_slow(ni, ts, pkt);
   }
 }

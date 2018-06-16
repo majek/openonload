@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -49,12 +49,6 @@
 #include "char_internal.h"
 #include <linux/init.h>
 
-
-#if defined(__x86_64__) && LINUX_VERSION_CODE < KERNEL_VERSION(2,6,11)
-# define NEED_IOCTL32
-/* for ioctl32 conversion registration */
-# include <linux/ioctl32.h>
-#endif
 
 int phys_mode_gid = 0;
 module_param(phys_mode_gid, int, S_IRUGO | S_IWUSR);
@@ -296,7 +290,7 @@ static int init_etherfabric_char(void)
   int rc = 0;
   int major = 0; /* specify default major number here */
 
-  ci_set_log_prefix("[sfc_char_debug] ");
+  ci_set_log_prefix("[sfc_char] ");
 
   ci_mm_tbl_init();
 
@@ -310,17 +304,6 @@ static int init_etherfabric_char(void)
 
   ci_char_major = major;
 
-#ifdef NEED_IOCTL32
-  /* In 2.6.11 onwards, this uses the .compat_ioctl file op instead */
-  /* register 64 bit handler for 32 bit ioctls */
-  {
-    int ioc;
-    for(ioc = CI_IOC_CHAR_BASE; ioc <= CI_IOC_CHAR_MAX; ioc ++){
-      register_ioctl32_conversion(ioc, NULL);
-    }
-  }
-#endif
-
   return 0;
 }
 
@@ -332,20 +315,8 @@ static int init_etherfabric_char(void)
 static void 
 cleanup_etherfabric_char(void) 
 { 
-
   if (ci_char_major) 
     unregister_chrdev(ci_char_major, EFAB_CHAR_NAME);
-
-#ifdef NEED_IOCTL32
-  /* In 2.6.11 onwards, this uses the .compat_ioctl file op instead */
-  /* register 64 bit handler for 32 bit ioctls */
-  {
-    int ioc;
-    for(ioc = CI_IOC_CHAR_BASE; ioc <= CI_IOC_CHAR_MAX; ioc ++){
-      unregister_ioctl32_conversion(ioc);
-    }
-  }
-#endif
 }
 
 module_init(init_etherfabric_char);

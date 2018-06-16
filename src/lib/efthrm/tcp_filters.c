@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -39,19 +39,13 @@
 *//*
 \**************************************************************************/
 
-#include <cplane/exported.h>
-#include <onload/debug.h>
-#include <onload/tcp_helper_endpoint.h>
-#include <onload/driverlink_filter.h>
-#include <ci/efrm/efrm_client.h>
-#include <ci/efrm/efrm_filter.h>
-#include <ci/efrm/vi_resource.h>
-#include <ci/efrm/vi_set.h>
-#include <ci/driver/efab/hardware.h>
 #include "tcp_filters_internal.h"
-#include "oo_hw_filter.h"
-#include <driver/linux_net/driverlink_api.h>
-#include <onload/nic.h>
+
+/* All header dependencies are included via this private header to allow us
+ * to allow us to easily replace them with something useable in the user
+ * level unit tests.
+ */
+#include "tcp_filters_deps.h"
 
 #define KERNEL_REDIRECT_VI_ID 0
 
@@ -67,7 +61,7 @@ int oof_all_ports_required = 1;
 
 static struct efrm_client* get_client(int hwport)
 {
-  ci_assert((unsigned) hwport < CPLANE_MAX_REGISTER_INTERFACES);
+  ci_assert((unsigned) hwport < CI_CFG_MAX_HWPORTS);
   return oo_nics[hwport].efrm_client;
 }
 
@@ -80,7 +74,7 @@ void oo_hw_filter_init2(struct oo_hw_filter* oofilter,
   oofilter->dlfilter_handle = EFX_DLFILTER_HANDLE_BAD;
   oofilter->trs = trs;
   oofilter->thc = thc;
-  for( i = 0; i < CPLANE_MAX_REGISTER_INTERFACES; ++i )
+  for( i = 0; i < CI_CFG_MAX_HWPORTS; ++i )
     oofilter->filter_id[i] = -1;
 }
 
@@ -94,7 +88,7 @@ void oo_hw_filter_init(struct oo_hw_filter* oofilter)
 static void oo_hw_filter_clear_hwport(struct oo_hw_filter* oofilter,
                                       int hwport)
 {
-  ci_assert((unsigned) hwport < CPLANE_MAX_REGISTER_INTERFACES);
+  ci_assert((unsigned) hwport < CI_CFG_MAX_HWPORTS);
   if( oofilter->filter_id[hwport] >= 0 ) {
     efrm_filter_remove(get_client(hwport), oofilter->filter_id[hwport]);
     oofilter->filter_id[hwport] = -1;
@@ -107,25 +101,25 @@ void oo_hw_filter_clear(struct oo_hw_filter* oofilter)
   int hwport;
 
   if( oofilter->trs != NULL || oofilter->thc != NULL ) {
-    for( hwport = 0; hwport < CPLANE_MAX_REGISTER_INTERFACES; ++hwport )
+    for( hwport = 0; hwport < CI_CFG_MAX_HWPORTS; ++hwport )
       oo_hw_filter_clear_hwport(oofilter, hwport);
     oofilter->trs = NULL;
     oofilter->thc = NULL;
   }
   else {
-    for( hwport = 0; hwport < CPLANE_MAX_REGISTER_INTERFACES; ++hwport )
+    for( hwport = 0; hwport < CI_CFG_MAX_HWPORTS; ++hwport )
       ci_assert(oofilter->filter_id[hwport] < 0);
   }
 }
 
 
 void oo_hw_filter_clear_hwports(struct oo_hw_filter* oofilter,
-                                unsigned hwport_mask, int redirect)
+                                unsigned hwport_mask, int kernel_redirect)
 {
   int hwport;
 
-  if( redirect || oofilter->trs != NULL || oofilter->thc != NULL )
-    for( hwport = 0; hwport < CPLANE_MAX_REGISTER_INTERFACES; ++hwport )
+  if( kernel_redirect || oofilter->trs != NULL || oofilter->thc != NULL )
+    for( hwport = 0; hwport < CI_CFG_MAX_HWPORTS; ++hwport )
       if( hwport_mask & (1 << hwport) )
         oo_hw_filter_clear_hwport(oofilter, hwport);
 }
@@ -142,17 +136,17 @@ oo_hw_filter_set_hwport(struct oo_hw_filter* oofilter, int hwport,
   const u8* mac_ptr = NULL;
   int replace = false;
   int kernel_redirect = src_flags & OO_HW_SRC_FLAG_KERNEL_REDIRECT;
-  int drop = src_flags & OO_HW_SRC_FLAG_DROP;
-  int cluster = (oofilter->thc != NULL) && ! kernel_redirect && ! drop;
+  int redirect = src_flags & OO_HW_SRC_FLAG_REDIRECT;
+  int cluster = (oofilter->thc != NULL) && ! kernel_redirect;
+  int drop = (src_flags & OO_HW_SRC_FLAG_DROP) &&
+             ! cluster; /* drop not supported for RSS - use proper filter */
 
   if( ! kernel_redirect )
     ci_assert_nequal(oofilter->trs == NULL, oofilter->thc == NULL);
-  ci_assert(oofilter->filter_id[hwport] < 0);
+  ci_assert_equal(!!redirect, oofilter->filter_id[hwport] >= 0);
 
   if( kernel_redirect )
     vi_id = KERNEL_REDIRECT_VI_ID;
-  else if( drop )
-    vi_id = EFX_FILTER_RX_DMAQ_ID_DROP;
   else {
     vi_id = cluster ?
       tcp_helper_cluster_vi_base(oofilter->thc, hwport) :
@@ -161,21 +155,24 @@ oo_hw_filter_set_hwport(struct oo_hw_filter* oofilter, int hwport,
 
   if( vi_id  >= 0 ) {
     int flags = EFX_FILTER_FLAG_RX_SCATTER;
-    /* we might need to have loopback supported when installing drop filter */
+    /* FIXME: enable loopback when installing drop filter */
     int hw_rx_loopback_supported = (cluster || kernel_redirect || drop) ?
       0 : tcp_helper_vi_hw_rx_loopback_supported(oofilter->trs, hwport);
+
+    if( drop )
+      vi_id = EFX_FILTER_RX_DMAQ_ID_DROP;
 
     ci_assert( hw_rx_loopback_supported >= 0 );
     if( hw_rx_loopback_supported && (src_flags & OO_HW_SRC_FLAG_LOOPBACK) ) {
       flags |= EFX_FILTER_FLAG_TX;
     }
 
-    if( cluster )
+    if( cluster && ! drop && oofilter->thc->thc_cluster_size > 1 )
       flags |= EFX_FILTER_FLAG_RX_RSS;
 
     efx_filter_init_rx(&spec, EFX_FILTER_PRI_REQUIRED, flags, vi_id);
 
-    if( cluster ) {
+    if( flags & EFX_FILTER_FLAG_RX_RSS ) {
       int rss_context = -1;
       if( src_flags & OO_HW_SRC_FLAG_RSS_DST )
         rss_context = efrm_vi_set_get_rss_context
@@ -188,7 +185,7 @@ oo_hw_filter_set_hwport(struct oo_hw_filter* oofilter, int hwport,
     }
 
 #if EFX_DRIVERLINK_API_VERSION >= 15
-    if( ! kernel_redirect && ! drop ) {
+    if( ! kernel_redirect ) {
       unsigned stack_id = cluster ?
         tcp_helper_cluster_vi_hw_stack_id(oofilter->thc, hwport) :
         tcp_helper_vi_hw_stack_id(oofilter->trs, hwport);
@@ -254,6 +251,25 @@ oo_hw_filter_set_hwport(struct oo_hw_filter* oofilter, int hwport,
       rc = efx_filter_set_eth_local(&spec, efx_vlan_id, mac_ptr);
       ci_assert_equal(rc, 0);
     }
+    if( redirect ) {
+      ci_assert_ge(oofilter->filter_id[hwport], 0);
+      rc = efrm_filter_redirect(get_client(hwport), oofilter->filter_id[hwport], &spec);
+      if( rc == -ENOENT || rc == -ENODEV ) {
+        /* net driver either:
+         *  * does not know about our filter, let's better
+         *    remove reference to it and try to add new instance
+         *  * does not support move the move operation - we cannot leak the filter
+         */
+        oofilter->filter_id[hwport] = rc;
+      }
+      else {
+        /* Moving filter either:
+         *  * succeeded, or
+         *  * failed
+         *  Regardless keep existing filter anyway and pretend all went fine */
+        return 0;
+      }
+    }
     rc = efrm_filter_insert(get_client(hwport), &spec, replace);
     /* ENETDOWN indicates that the hardware has gone away. This is not a
      * failure condition at this layer as we can attempt to restore filters
@@ -272,6 +288,7 @@ oo_hw_filter_set_hwport(struct oo_hw_filter* oofilter, int hwport,
 int oo_hw_filter_add_hwports(struct oo_hw_filter* oofilter,
                              const struct oo_hw_filter_spec* oo_filter_spec,
                              unsigned set_vlan_mask, unsigned hwport_mask,
+                             unsigned redirect_mask,
                              unsigned drop_hwport_mask,
                              unsigned src_flags)
 {
@@ -284,15 +301,18 @@ int oo_hw_filter_add_hwports(struct oo_hw_filter* oofilter,
   if( (src_flags & OO_HW_SRC_FLAG_KERNEL_REDIRECT) == 0 )
     ci_assert_nequal(oofilter->trs != NULL, oofilter->thc != NULL);
 
-  for( hwport = 0; hwport < CPLANE_MAX_REGISTER_INTERFACES; ++hwport )
-    if( (hwport_mask & (1u << hwport)) && oofilter->filter_id[hwport] < 0 ) {
+  for( hwport = 0; hwport < CI_CFG_MAX_HWPORTS; ++hwport )
+    if( ((hwport_mask & (1u << hwport)) && oofilter->filter_id[hwport] < 0) ||
+        (redirect_mask & (1u << hwport)) ) {
       /* If we've been told to set the vlan when installing the filter on this
        * port then use provided vlan_id, otherwise use OO_HW_VLAN_UNSPEC.
        */
       masked_spec.vlan_id = (set_vlan_mask & (1u << hwport)) ?
         oo_filter_spec->vlan_id : OO_HW_VLAN_UNSPEC;
       rc1 = oo_hw_filter_set_hwport(oofilter, hwport, &masked_spec,
-          src_flags | ((drop_hwport_mask & (1u << hwport)) ? OO_HW_SRC_FLAG_DROP : 0));
+            src_flags |
+            ((drop_hwport_mask & (1u << hwport)) ? OO_HW_SRC_FLAG_DROP : 0) |
+            ((redirect_mask & (1u << hwport)) ? OO_HW_SRC_FLAG_REDIRECT : 0));
       /* Need to know if any interfaces are ok */
       if( ! rc1 )
         ok_seen = 1;
@@ -324,7 +344,7 @@ int oo_hw_filter_set(struct oo_hw_filter* oofilter,
   int rc;
 
   rc = oo_hw_filter_add_hwports(oofilter, oo_filter_spec, set_vlan_mask,
-                                hwport_mask, drop_hwport_mask, src_flags);
+                                hwport_mask, 0, drop_hwport_mask, src_flags);
   if( rc < 0 )
     oo_hw_filter_clear(oofilter);
   return rc;
@@ -339,8 +359,9 @@ int oo_hw_filter_update(struct oo_hw_filter* oofilter,
                         unsigned src_flags)
 {
   unsigned add_hwports = 0u;
+  unsigned redirect_hwports = 0u;
   int hwport, vi_id;
-  int redirect = src_flags & OO_HW_SRC_FLAG_KERNEL_REDIRECT;
+  int kernel_redirect = src_flags & OO_HW_SRC_FLAG_KERNEL_REDIRECT;
 
   /* TODO: clustering: This needed for handling NIC resets.
    * For clusters we can only add/remove filters from intefaces.
@@ -351,9 +372,9 @@ int oo_hw_filter_update(struct oo_hw_filter* oofilter,
     return -EINVAL;
   }
 
-  oo_hw_filter_clear_hwports(oofilter, ~hwport_mask, redirect);
+  oo_hw_filter_clear_hwports(oofilter, ~hwport_mask, kernel_redirect);
 
-  for( hwport = 0; hwport < CPLANE_MAX_REGISTER_INTERFACES; ++hwport )
+  for( hwport = 0; hwport < CI_CFG_MAX_HWPORTS; ++hwport )
     if( hwport_mask & (1 << hwport) ) {
       /* has the target stack got hwport */
       if( drop_hwport_mask & (1 << hwport) ||
@@ -364,7 +385,7 @@ int oo_hw_filter_update(struct oo_hw_filter* oofilter,
       else if( oofilter->thc != NULL )
         vi_id = tcp_helper_cluster_vi_base(oofilter->thc, hwport);
       else
-        vi_id = redirect ? 0 : -1;
+        vi_id = kernel_redirect ? 0 : -1;
 
       /* Remove filter due to lack of hardware? */
       if( vi_id < 0 ) {
@@ -390,36 +411,21 @@ int oo_hw_filter_update(struct oo_hw_filter* oofilter,
       /*
        * Only in non-clustered stack case there is work to do.
        */
-      if( redirect ) {
+      if( kernel_redirect ) {
         /* Always need to point to vi_id 0, so nothing to do */
-      }
-      else if( oofilter->thc != NULL ) {
-        /* Nothing to do. We would only enter here with new_stack == NULL,
-         * as the check is done above */
       }
       else {
         /* Move filter between stacks we attempt this even when new_stack
-         * == old_stack */
-        unsigned stack_id = vi_id == EFX_FILTER_RX_DMAQ_ID_DROP ? 0 :
-                            tcp_helper_vi_hw_stack_id(new_stack, hwport);
-        int rc;
-        ci_assert_ge( stack_id, 0 );
-        rc = efrm_filter_redirect(get_client(hwport),
-                                  oofilter->filter_id[hwport], vi_id,
-                                  stack_id);
-        if( rc == -ENOENT || rc == -ENODEV ) {
-            /* net driver does not know about our filter, let's better
-             * remove reference to it and try to add new instance */
-            oofilter->filter_id[hwport] = rc;
-            add_hwports |= 1 << hwport;
-        }
+         * == old_stack in case stack_id or rss gets updated */
+        redirect_hwports |= 1 << hwport;
       }
     }
 
   /* Insert new filters for any other interfaces in hwport_mask. */
   oofilter->trs = new_stack;
   return oo_hw_filter_add_hwports(oofilter, oo_filter_spec, set_vlan_mask,
-                                  add_hwports, drop_hwport_mask, src_flags);
+                                  add_hwports, redirect_hwports,
+                                  drop_hwport_mask, src_flags);
 }
 
 
@@ -436,7 +442,7 @@ void oo_hw_filter_transfer(struct oo_hw_filter* oofilter_old,
 
   ci_assert_equal(oofilter_old->trs, oofilter_new->trs);
 
-  for( hwport = 0; hwport < CPLANE_MAX_REGISTER_INTERFACES; ++hwport )
+  for( hwport = 0; hwport < CI_CFG_MAX_HWPORTS; ++hwport )
     if( (hwport_mask & (1u << hwport)) &&
         oofilter_old->filter_id[hwport] >= 0 ) {
       ci_assert(oofilter_new->filter_id[hwport] < 0);
@@ -452,7 +458,7 @@ unsigned oo_hw_filter_hwports(struct oo_hw_filter* oofilter)
   int hwport;
 
   if( oofilter->trs != NULL || oofilter->thc != NULL )
-    for( hwport = 0; hwport < CPLANE_MAX_REGISTER_INTERFACES; ++hwport )
+    for( hwport = 0; hwport < CI_CFG_MAX_HWPORTS; ++hwport )
       if( oofilter->filter_id[hwport] >= 0 )
         hwport_mask |= 1 << hwport;
   return hwport_mask;

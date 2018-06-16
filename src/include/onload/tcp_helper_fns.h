@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -58,16 +58,16 @@ extern int tcp_helper_alloc_ul(ci_resource_onload_alloc_t* alloc,
                                int ifindices_len,
                                tcp_helper_resource_t** rs_out);
 
+extern int tcp_helper_get_ns_components(struct oo_cplane_handle** cplane,
+                                        struct oo_filter_ns**  filter_ns);
+
+struct user_namespace;
+extern struct user_namespace* tcp_helper_get_user_ns(tcp_helper_resource_t*);
+
 extern int tcp_helper_rm_alloc(ci_resource_onload_alloc_t* alloc,
                                const ci_netif_config_opts* opts,
                                int ifindices_len, tcp_helper_cluster_t* thc,
                                tcp_helper_resource_t** rs_out);
-
-extern int
-tcp_helper_rm_alloc_proxy(ci_resource_onload_alloc_t* alloc,
-                          const ci_netif_config_opts* opts,
-                          int ifindices_len,
-                          tcp_helper_resource_t** rs_out);
 
 extern void tcp_helper_dtor(tcp_helper_resource_t* trs);
 
@@ -103,11 +103,13 @@ extern int efab_ioctl_get_ep(ci_private_t*, oo_sp,
                              tcp_helper_endpoint_t** ep_out);
 
 
-extern int efab_os_sock_callback(wait_queue_t *wait, unsigned mode, int sync,
-                                 void *key);
+extern int efab_os_sock_callback(wait_queue_entry_t *wait, unsigned mode,
+                                 int sync, void *key);
 
 extern void efab_os_wakeup_work(struct work_struct *data);
 
+extern int efab_tcp_helper_vi_stats_query(tcp_helper_resource_t*,
+                                                 unsigned int, void*, size_t, int);
 /* get a resource installed install_resource_into_priv, or return a
  negative error code (does not remove the resource from the priv) */
 ci_inline int
@@ -157,7 +159,7 @@ extern int efab_thr_get_inaccessible_stack_info(unsigned id,
 extern int efab_thr_can_access_stack(tcp_helper_resource_t* thr,
                                      int check_user);
 extern int efab_thr_user_can_access_stack(uid_t uid, uid_t euid,
-                                          ci_netif* ni);
+                                          tcp_helper_resource_t* thr);
 
 /*! Lookup a stack and grab a reference if found.  If [name] is not NULL,
  * search by name, else by [id]. 
@@ -176,16 +178,21 @@ extern int efab_thr_user_can_access_stack(uid_t uid, uid_t euid,
  * 
  * Caller is responsible for dropping the reference taken on success.
  */
-extern int efab_thr_table_lookup(const char* name, unsigned id, int flags,
+extern int efab_thr_table_lookup(const char* name, struct net* netns,
+                                 unsigned id, int flags,
                                  tcp_helper_resource_t** stack_out);
 
 
 /*! Dump a stack's netif state to a buffer or (if NULL) to syslog */
 extern int tcp_helper_dump_stack(unsigned id, unsigned orphan_only,
-                                 void* user_buf, int user_buf_len);
+                                 void* user_buf, int user_buf_len,
+                                 int op);
 
 /*! Try to kill an orphan/zombie stack */
 extern int tcp_helper_kill_stack_by_id(unsigned id);
+
+extern int
+oo_version_check(const char* version, const char* uk_intf_ver, int debug_lib);
 
 ci_inline void
 efab_thr_ref(tcp_helper_resource_t *thr)
@@ -237,13 +244,13 @@ extern int efab_tcp_helper_bind_os_sock_kernel(tcp_helper_resource_t* trs,
                                                struct sockaddr *addr,
                                                int addrlen,
                                                ci_uint16 *out_port);
+extern int /*bool*/
+tcp_helper_active_wilds_need_filters(tcp_helper_resource_t*);
 
 extern int efab_tcp_helper_listen_os_sock(ci_private_t *priv, void *p_backlog);
 
 extern int efab_tcp_helper_shutdown_os_sock (tcp_helper_endpoint_t* ep,
                                              ci_int32 how);
-
-extern int efab_tcp_helper_connect_os_sock (ci_private_t *priv, void *arg);
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(3,7,0)
 struct file *sock_alloc_file(struct socket *sock, int flags, void *unused);
@@ -264,6 +271,9 @@ extern int efab_file_move_to_alien_stack(ci_private_t *priv,
                                          ci_netif *alien_ni,
                                          int drop_filter,
                                          oo_sp* new_sock_id);
+
+extern void
+tcp_helper_cluster_ref(tcp_helper_cluster_t* thc);
 
 extern void
 tcp_helper_cluster_release(tcp_helper_cluster_t* thc,
@@ -364,7 +374,8 @@ efab_tcp_helper_netif_unlock(tcp_helper_resource_t*, int in_dl_context);
 /**********************************************************************
 ***************** Iterators to find netifs ***************************
 **********************************************************************/
-extern int iterate_netifs_unlocked(ci_netif **p_ni);
+extern int iterate_netifs_unlocked(ci_netif **p_ni, int only_orphans,
+                                   int skip_orphans);
 
 ci_inline void
 iterate_netifs_unlocked_dropref(ci_netif * netif)
@@ -419,7 +430,6 @@ int efab_tcp_helper_setsockopt(tcp_helper_resource_t* trs, oo_sp sock_id,
 
 
 
-
 extern int efab_tcp_helper_handover(ci_private_t* priv, void *p_fd);
 extern int oo_file_moved_rsop(ci_private_t* priv, void *p_fd);
 
@@ -455,24 +465,33 @@ efab_tcp_helper_ready_list_events(tcp_helper_resource_t* trs,
 
 
 extern int efab_attach_os_socket(tcp_helper_endpoint_t*, struct file*);
-extern int efab_create_os_socket(tcp_helper_endpoint_t* ep, ci_int32 domain,
+extern int efab_create_os_socket(tcp_helper_resource_t* trs,
+                                 tcp_helper_endpoint_t* ep, ci_int32 domain,
                                  ci_int32 type, int flags);
+
+extern void
+oo_os_sock_status_bit_clear_handled(tcp_helper_endpoint_t *ep,
+                                    struct file* os_sock,
+                                    ci_uint32 bits_handled);
 
 extern void
 tcp_helper_defer_dl2work(tcp_helper_resource_t* trs, ci_uint32 flag);
 
 
 extern int
-oo_create_fd(tcp_helper_resource_t* thr, oo_sp ep_id, int flags, int fd_type);
+oo_create_fd(tcp_helper_resource_t* thr, oo_sp ep_id, int flags, int fd_type,
+             ci_os_file* _file_ptr);
 static inline int
 oo_create_ep_fd(tcp_helper_endpoint_t* ep, int flags, int fd_type)
 {
-  return oo_create_fd(ep->thr, ep->id, flags, fd_type);
+  return oo_create_fd(ep->thr, ep->id, flags, fd_type,
+                      (fd_type == -1 || (fd_type == CI_PRIV_TYPE_TCP_EP)) ?
+                      &ep->file_ptr : NULL);
 }
 static inline int
 oo_create_stack_fd(tcp_helper_resource_t *thr)
 {
-  return oo_create_fd(thr, OO_SP_NULL, O_CLOEXEC, CI_PRIV_TYPE_NETIF);
+  return oo_create_fd(thr, OO_SP_NULL, O_CLOEXEC, CI_PRIV_TYPE_NETIF, NULL);
 }
 
 extern int onloadfs_get_dev_t(ci_private_t* priv, void* arg);
@@ -483,8 +502,10 @@ extern int onload_alloc_file(tcp_helper_resource_t *thr, oo_sp ep_id,
 extern int oo_clone_fd(struct file* filp, int do_cloexec);
 
 ci_inline void
-efab_get_os_settings(ci_netif_config_opts *opts)
+efab_get_os_settings(tcp_helper_resource_t* trs)
 {
+  ci_netif_config_opts *opts = &NI_OPTS_TRS(trs);
+
   /* We do not overwrite values from userland, so exit if opts are already
    * inited. */
   if (opts->inited)
@@ -496,12 +517,20 @@ efab_get_os_settings(ci_netif_config_opts *opts)
   ** the system and other factors that usually affect linux kernel
   ** logic. The RCVBUF can safely go beyong thyis value. */
   opts->tcp_sndbuf_min = CI_CFG_TCP_SNDBUF_MIN;
+  opts->tcp_rcvbuf_min = CI_CFG_TCP_RCVBUF_MIN;
+
+  /* Linux 4.15 moved these values into network namespace structures */
+#if defined(EFRM_DO_NAMESPACES) && defined(EFRM_HAVE_NS_SYSCTL_TCP_MEM)
+  opts->tcp_sndbuf_def = trs->nsproxy->net_ns->ipv4.sysctl_tcp_wmem[1];
+  opts->tcp_sndbuf_max = trs->nsproxy->net_ns->ipv4.sysctl_tcp_wmem[2];
+  opts->tcp_rcvbuf_def = trs->nsproxy->net_ns->ipv4.sysctl_tcp_rmem[1];
+  opts->tcp_rcvbuf_max = trs->nsproxy->net_ns->ipv4.sysctl_tcp_rmem[2];
+#else
   opts->tcp_sndbuf_def = sysctl_tcp_wmem[1];
   opts->tcp_sndbuf_max = sysctl_tcp_wmem[2];
-
-  opts->tcp_rcvbuf_min = CI_CFG_TCP_RCVBUF_MIN;
   opts->tcp_rcvbuf_def = sysctl_tcp_rmem[1];
   opts->tcp_rcvbuf_max = sysctl_tcp_rmem[2];
+#endif
 #ifdef LINUX_HAS_SYSCTL_MEM_MAX
   opts->udp_sndbuf_max = sysctl_wmem_max;
   opts->udp_rcvbuf_max = sysctl_rmem_max;
@@ -579,6 +608,55 @@ extern void oo_timesync_update(struct oo_timesync*);
 
 extern int oo_timesync_ctor(struct oo_timesync *oo_ts);
 extern void oo_timesync_dtor(struct oo_timesync *oo_ts);
+
+
+extern int
+tcp_helper_install_tproxy(int install,
+                          tcp_helper_resource_t* thr,
+                          tcp_helper_cluster_t* thc,
+                          const ci_netif_config_opts* ni_opts,
+                          ci_uint16* ifindexes_out, int out_count);
+
+
+/*----------------------------------------------------------------------------
+ * Shared local ports
+ *---------------------------------------------------------------------------*/
+
+extern int
+efab_alloc_ephemeral_port(ci_uint32 laddr_be32,
+                          struct efab_ephemeral_port_keeper** keeper_out);
+extern void
+efab_free_ephemeral_port(struct efab_ephemeral_port_keeper* keeper);
+
+extern struct efab_ephemeral_port_head*
+tcp_helper_alloc_ephem_table(ci_uint32 min_entries, ci_uint32* entries_out);
+
+extern int
+tcp_helper_get_ephemeral_port_list(struct efab_ephemeral_port_head* table,
+                                   uint32_t laddr_be32,
+                                   ci_uint32 table_entries,
+                                   struct efab_ephemeral_port_head** list_out);
+
+/*! Tries to allocate up to size active wilds to the active wild pool.
+ *
+ * \return 0 size entries were added to pool
+ *        -1 otherwise
+ */
+extern int tcp_helper_alloc_to_active_wild_pool(tcp_helper_resource_t* rs,
+                                                ci_uint32 laddr_be32,
+                                                ci_dllist* ephemeral_ports);
+
+extern int tcp_helper_increase_active_wild_pool(tcp_helper_resource_t* rs,
+                                                ci_uint32 laddr_be);
+
+extern int
+tcp_helper_alloc_ephemeral_ports(struct efab_ephemeral_port_head* list_head,
+                                 ci_uint32 laddr_be32, int count);
+
+extern void
+tcp_helper_free_ephemeral_ports(struct efab_ephemeral_port_head* table,
+                                ci_uint32 entries);
+
 
 #endif /* __CI_DRIVER_EFAB_TCP_HELPER_FNS_H__ */
 /*! \cidoxg_end */

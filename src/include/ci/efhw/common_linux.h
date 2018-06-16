@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -67,12 +67,6 @@
 
 /* Linux kernel also does not provide PRIx32... Sigh. */
 #define PRIx32 "x"
-
-#ifdef __ia64__
-# define PRIx64 "lx"
-#else
-# define PRIx64 "llx"
-#endif
-
+#define PRIx64 "llx"
 
 #endif /* __CI_EFHW_COMMON_LINUX_H__ */

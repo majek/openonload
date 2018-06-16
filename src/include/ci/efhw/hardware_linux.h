@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -78,11 +78,6 @@
 #ifndef mmiowb
 	#if defined(__i386__) || defined(__x86_64__)
 		#define mmiowb()
-	#elif defined(__ia64__)
-		#ifndef ia64_mfa
-			#define ia64_mfa() asm volatile ("mf.a" ::: "memory")
-		#endif
-	#define mmiowb ia64_mfa
 	#elif defined(__PPC32__)
 		#define mmiowb
 	#elif defined(__PPC64__)

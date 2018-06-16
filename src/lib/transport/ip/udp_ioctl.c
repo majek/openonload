@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -48,8 +48,10 @@ void ci_synchronise_clock(ci_netif *ni, struct oo_timesync* oo_ts_local)
       ci_rmb();
       oo_ts_local->smoothed_ticks = oo_ts->smoothed_ticks;
       oo_ts_local->smoothed_ns = oo_ts->smoothed_ns;
-      oo_ts_local->clock.tv_sec = oo_ts->clock.tv_sec;
-      oo_ts_local->clock.tv_nsec = oo_ts->clock.tv_nsec;
+      oo_ts_local->wall_clock.tv_sec = oo_ts->wall_clock.tv_sec;
+      oo_ts_local->wall_clock.tv_nsec = oo_ts->wall_clock.tv_nsec;
+      oo_ts_local->mono_clock.tv_sec = oo_ts->mono_clock.tv_sec;
+      oo_ts_local->mono_clock.tv_nsec = oo_ts->mono_clock.tv_nsec;
       oo_ts_local->clock_made = oo_ts->clock_made;
       ci_rmb();
     } while (gc & 1 || gc != oo_ts->generation_count);
@@ -67,8 +69,8 @@ void ci_udp_compute_stamp(ci_netif *ni, ci_uint64 stamp, struct timespec *ts)
   oo_ts_local = &(__oo_per_thread_get()->timesync);
   ci_synchronise_clock(ni, oo_ts_local);
 
-  ts->tv_sec = oo_ts_local->clock.tv_sec;
-  ts->tv_nsec = oo_ts_local->clock.tv_nsec;
+  ts->tv_sec = oo_ts_local->wall_clock.tv_sec;
+  ts->tv_nsec = oo_ts_local->wall_clock.tv_nsec;
 
   ns_rate = (double)oo_ts_local->smoothed_ns / 
     (double)oo_ts_local->smoothed_ticks;
@@ -226,7 +228,7 @@ static int ci_udp_ioctl_locked(ci_netif* ni, ci_udp_state* us,
        * lock, which we do have.  So we're safe so long as we only read
        * [extract] once.
        */
-      oo_pkt_p extract = us->recv_q.extract;
+      oo_pkt_p extract = OO_ACCESS_ONCE(us->recv_q.extract);
       if( OO_PP_NOT_NULL(extract) ) {
         ci_ip_pkt_fmt* pkt = PKT_CHK(ni, extract);
         if( (pkt->rx_flags & CI_PKT_RX_FLAG_RECV_Q_CONSUMED) &&

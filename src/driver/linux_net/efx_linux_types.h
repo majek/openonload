@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -48,6 +48,13 @@ typedef __u16 u16;
 typedef __u32 u32;
 typedef __s32 s32;
 typedef __u64 u64;
+#endif
+
+/* Empty define of __user, for use in struct efx_sfctool */
+#define __user
+
+#ifndef noinline_for_stack
+#define noinline_for_stack noinline
 #endif
 
 #endif /* !EFX_LINUX_TYPES_H */

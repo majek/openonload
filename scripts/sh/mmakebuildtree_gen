@@ -46,7 +46,7 @@ generate_gnumake () {
 	EOF
 }
 
-generate_linux26 () {
+generate_linux () {
   local path=$1
   [ -f $TOP/$CURRENT/mmake.mk ] || return
   cat <<-EOF >$path/Makefile
@@ -210,8 +210,8 @@ do_copies $dp $tc
 [ -f Makefile ] || [ -f GNUmakefile ] || generate_gnumake $dp $TOP
 
 case "$PLATFORM" in
-    linux2.6 | falcon_linux2.6 | falcon_10g_linux2.6 | falcon_b0_linux2.6)
-        generate_linux26 $bp;;
+    linux)
+        generate_linux $bp;;
     *win7 | *wlh | *wnet | *wxp)
         generate_wdk $bp;;
 esac

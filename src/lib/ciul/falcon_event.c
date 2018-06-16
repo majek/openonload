@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -76,6 +76,7 @@ ef_vi_inline void falcon_rx_desc_consumed(ef_vi* vi, const ef_vi_event* ev,
 					  int q_label, int desc_i)
 {
   ef_event* ev_out = (*evs)++;
+  ci_qword_t interesting_errors;
   --(*evs_len);
   ev_out->rx.q_id = q_label;
   ev_out->rx.rq_id = vi->vi_rxq.ids[desc_i];
@@ -88,12 +89,14 @@ ef_vi_inline void falcon_rx_desc_consumed(ef_vi* vi, const ef_vi_event* ev,
   if( QWORD_TEST_BIT(RX_JUMBO_CONT, *ev) )
     ev_out->rx.flags |= EF_EVENT_FLAG_CONT;
 
+  interesting_errors.u64[0] = ev->u64[0] & vi->rx_discard_mask;
+
   /* Don't discard if packet ok or discard mask indicates
    * error type should not generate discard event.
    * Multicast mismatch always generates discard.
    */
   if(likely( QWORD_TEST_BIT(RX_EV_PKT_OK, *ev) )
-    || ( ! (ev->u64[0] & vi->rx_discard_mask) )) {
+    || ( ! interesting_errors.u64[0] )) {
   dont_discard:
     ev_out->rx.len = QWORD_GET_U(RX_EV_BYTE_CNT, *ev);
     ev_out->rx.type = EF_EVENT_TYPE_RX;
@@ -111,26 +114,26 @@ ef_vi_inline void falcon_rx_desc_consumed(ef_vi* vi, const ef_vi_event* ev,
     ev_out->rx_discard.len = QWORD_GET_U(RX_EV_BYTE_CNT, *ev);
     ev_out->rx_discard.type = EF_EVENT_TYPE_RX_DISCARD;
     /* Order matters here: more fundamental errors first. */
-    if( QWORD_TEST_BIT(RX_EV_BUF_OWNER_ID_ERR, *ev) )
+    if( QWORD_TEST_BIT(RX_EV_BUF_OWNER_ID_ERR, interesting_errors) )
       ev_out->rx_discard.subtype =
         EF_EVENT_RX_DISCARD_RIGHTS;
-    else if( QWORD_TEST_BIT(RX_EV_FRM_TRUNC, *ev) )
+    else if( QWORD_TEST_BIT(RX_EV_FRM_TRUNC, interesting_errors) )
       ev_out->rx_discard.subtype =
         EF_EVENT_RX_DISCARD_TRUNC;
-    else if( QWORD_TEST_BIT(RX_EV_ETH_CRC_ERR, *ev) )
+    else if( QWORD_TEST_BIT(RX_EV_ETH_CRC_ERR, interesting_errors) )
       ev_out->rx_discard.subtype =
         EF_EVENT_RX_DISCARD_CRC_BAD;
     else if( QWORD_TEST_BIT(RX_EV_MCAST_PKT, *ev) &&
              ! QWORD_TEST_BIT(RX_EV_MCAST_HASH_MATCH,*ev) )
       ev_out->rx_discard.subtype =
         EF_EVENT_RX_DISCARD_MCAST_MISMATCH;
-    else if( QWORD_TEST_BIT(RX_EV_IP_HDR_CHKSUM_ERR, *ev) )
+    else if( QWORD_TEST_BIT(RX_EV_IP_HDR_CHKSUM_ERR, interesting_errors ) )
       ev_out->rx_discard.subtype =
         EF_EVENT_RX_DISCARD_CSUM_BAD;
-    else if( QWORD_TEST_BIT(RX_EV_TCP_UDP_CHKSUM_ERR, *ev) )
+    else if( QWORD_TEST_BIT(RX_EV_TCP_UDP_CHKSUM_ERR, interesting_errors) )
       ev_out->rx_discard.subtype =
         EF_EVENT_RX_DISCARD_CSUM_BAD;
-    else if( QWORD_TEST_BIT(RX_EV_TOBE_DISC, *ev) )
+    else if( QWORD_TEST_BIT(RX_EV_TOBE_DISC, interesting_errors) )
       ev_out->rx_discard.subtype =
         EF_EVENT_RX_DISCARD_OTHER;
     else if( QWORD_TEST_BIT(RX_EV_IP_FRAG_ERR, *ev) )
@@ -251,13 +254,9 @@ int falcon_ef_eventq_poll(ef_vi* evq, ef_event* evs, int evs_len)
   EF_VI_BUG_ON(evs == NULL);
   EF_VI_BUG_ON(evs_len < EF_VI_EVENT_POLL_MIN_EVS);
 
-#ifdef __powerpc__
-  if(unlikely( EF_VI_IS_EVENT(EF_VI_EVENT_PTR(evq, -17)) ))
+  if(unlikely( EF_VI_IS_EVENT(EF_VI_EVENT_PTR(evq,
+                                   evq->ep_state->evq.evq_clear_stride - 1)) ))
     goto overflow;
-#else
-  if(unlikely( EF_VI_IS_EVENT(EF_VI_EVENT_PTR(evq, -1)) ))
-    goto overflow;
-#endif
 
  not_empty:
   /* Read the event out of the ring, then fiddle with copied version.
@@ -270,11 +269,7 @@ int falcon_ef_eventq_poll(ef_vi* evq, ef_event* evs, int evs_len)
     goto empty;
 
   do {
-#ifdef __powerpc__
-    CI_SET_QWORD(*EF_VI_EVENT_PTR(evq, -16));
-#else
-    CI_SET_QWORD(*pev);
-#endif
+    CI_SET_QWORD(*EF_VI_EVENT_PTR(evq, evq->ep_state->evq.evq_clear_stride));
     evq->ep_state->evq.evq_ptr += sizeof(ef_vi_event);
 
     /* Ugly: Exploit the fact that event code lies in top bits
@@ -330,14 +325,14 @@ int falcon_ef_eventq_poll(ef_vi* evq, ef_event* evs, int evs_len)
 }
 
 
-int ef_eventq_has_event(ef_vi* vi)
+int ef_eventq_has_event(const ef_vi* vi)
 {
   EF_VI_ASSERT(vi->evq_base);
   return EF_VI_IS_EVENT(EF_VI_EVENT_PTR(vi, 0));
 }
 
 
-int ef_eventq_has_many_events(ef_vi* vi, int look_ahead)
+int ef_eventq_has_many_events(const ef_vi* vi, int look_ahead)
 {
   EF_VI_BUG_ON(look_ahead < 0);
   return EF_VI_IS_EVENT(EF_VI_EVENT_PTR(vi, look_ahead));

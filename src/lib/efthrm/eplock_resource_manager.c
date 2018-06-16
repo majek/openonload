@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -163,7 +163,7 @@ static int efab_eplock_is_unlocked_or_request_wake(ci_eplock_t* epl)
 int
 efab_eplock_lock_wait(ci_netif* ni, int maybe_wedged)
 {
-  wait_queue_t wait;
+  wait_queue_entry_t wait;
   int rc;
 
 #if CI_CFG_EFAB_EPLOCK_RECORD_CONTENTIONS
@@ -200,7 +200,7 @@ efab_eplock_lock_wait(ci_netif* ni, int maybe_wedged)
 int
 efab_eplock_lock_timeout(ci_netif* ni, signed long timeout_jiffies)
 {
-  wait_queue_t wait;
+  wait_queue_entry_t wait;
   int rc = -EAGAIN;
 
   if( ef_eplock_trylock(&ni->state->lock) )

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -258,7 +258,7 @@ typedef union ci_oword_u {
 	_field1, _value1, _field2, _value2, _field3, _value3,		\
 	_field4, _value4, _field5, _value5, _field6, _value6,		\
     	_field7, _value7, _field8, _value8, _field9, _value9,		\
-	_field10, _value10)						\
+	_field10, _value10, _field11, _value11)						\
   (CI_BITFIELD_INSERT_FIELD_NATIVE(_min, _max, _field1, _value1) |	\
    CI_BITFIELD_INSERT_FIELD_NATIVE(_min, _max, _field2, _value2) |	\
    CI_BITFIELD_INSERT_FIELD_NATIVE(_min, _max, _field3, _value3) |	\
@@ -268,49 +268,50 @@ typedef union ci_oword_u {
    CI_BITFIELD_INSERT_FIELD_NATIVE(_min, _max, _field7, _value7) |	\
    CI_BITFIELD_INSERT_FIELD_NATIVE(_min, _max, _field8, _value8) |	\
    CI_BITFIELD_INSERT_FIELD_NATIVE(_min, _max, _field9, _value9) |	\
-   CI_BITFIELD_INSERT_FIELD_NATIVE(_min, _max, _field10, _value10))
+   CI_BITFIELD_INSERT_FIELD_NATIVE(_min, _max, _field10, _value10) |	\
+   CI_BITFIELD_INSERT_FIELD_NATIVE(_min, _max, _field11, _value11))
 
 /* 64bit field cnostruction */
 #define CI_BITFIELD_INSERT_FIELDS64(_min, _max,				\
 	_field1, _value1, _field2, _value2, _field3, _value3,		\
 	_field4, _value4, _field5, _value5, _field6, _value6,		\
     	_field7, _value7, _field8, _value8, _field9, _value9,		\
-	_field10, _value10)						\
+	_field10, _value10, _field11, _value11)						\
   CI_BSWAP_LE64(CI_BITFIELD_INSERT_FIELDS_NATIVE(_min, _max,		\
 	_field1, _value1, _field2, _value2, _field3, _value3,		\
 	_field4, _value4, _field5, _value5, _field6, _value6,		\
     	_field7, _value7, _field8, _value8, _field9, _value9,		\
-	_field10, _value10))
+	_field10, _value10, _field11, _value11))
 
 #define CI_POPULATE_OWORD64(_oword,					\
 	_field1, _value1, _field2, _value2, _field3, _value3,		\
 	_field4, _value4, _field5, _value5, _field6, _value6,		\
     	_field7, _value7, _field8, _value8, _field9, _value9,		\
-	_field10, _value10)						\
+	_field10, _value10, _field11, _value11)						\
   do {									\
     (_oword).u64[0] = CI_BITFIELD_INSERT_FIELDS64(0, 63,		\
    	_field1, _value1, _field2, _value2, _field3, _value3,		\
 	_field4, _value4, _field5, _value5, _field6, _value6,		\
 	_field7, _value7, _field8, _value8, _field9, _value9,		\
-	_field10, _value10);						\
+	_field10, _value10, _field11, _value11);						\
     (_oword).u64[1] = CI_BITFIELD_INSERT_FIELDS64(64, 127,		\
    	_field1, _value1, _field2, _value2, _field3, _value3,		\
 	_field4, _value4, _field5, _value5, _field6, _value6,		\
 	_field7, _value7, _field8, _value8, _field9, _value9,		\
-	_field10, _value10);						\
+	_field10, _value10, _field11, _value11);						\
   } while (0)
 
 #define CI_POPULATE_QWORD64(_qword,					\
 	_field1, _value1, _field2, _value2, _field3, _value3,		\
 	_field4, _value4, _field5, _value5, _field6, _value6,		\
     	_field7, _value7, _field8, _value8, _field9, _value9,		\
-	_field10, _value10)						\
+	_field10, _value10, _field11, _value11)						\
   do {									\
     (_qword).u64[0] = CI_BITFIELD_INSERT_FIELDS64(0, 63,		\
    	_field1, _value1, _field2, _value2, _field3, _value3,		\
 	_field4, _value4, _field5, _value5, _field6, _value6,		\
 	_field7, _value7, _field8, _value8, _field9, _value9,		\
-	_field10, _value10);						\
+	_field10, _value10, _field11, _value11);						\
   } while (0)
 
 /* 32bit field construction */
@@ -318,70 +319,70 @@ typedef union ci_oword_u {
 	_field1, _value1, _field2, _value2, _field3, _value3,		\
 	_field4, _value4, _field5, _value5, _field6, _value6,		\
     	_field7, _value7, _field8, _value8, _field9, _value9,		\
-	_field10, _value10)						\
+	_field10, _value10, _field11, _value11)						\
   CI_BSWAP_LE32(CI_BITFIELD_INSERT_FIELDS_NATIVE(_min, _max,		\
 	_field1, _value1, _field2, _value2, _field3, _value3,		\
 	_field4, _value4, _field5, _value5, _field6, _value6,		\
     	_field7, _value7, _field8, _value8, _field9, _value9,		\
-	_field10, _value10))
+	_field10, _value10, _field11, _value11))
 
 #define CI_POPULATE_OWORD32(_oword,					\
 	_field1, _value1, _field2, _value2, _field3, _value3,		\
 	_field4, _value4, _field5, _value5, _field6, _value6,		\
     	_field7, _value7, _field8, _value8, _field9, _value9,		\
-	_field10, _value10)						\
+	_field10, _value10, _field11, _value11)						\
   do {									\
     (_oword).u32[0] = CI_BITFIELD_INSERT_FIELDS32(0, 31,		\
    	_field1, _value1, _field2, _value2, _field3, _value3,		\
 	_field4, _value4, _field5, _value5, _field6, _value6,		\
 	_field7, _value7, _field8, _value8, _field9, _value9,		\
-	_field10, _value10);						\
+	_field10, _value10, _field11, _value11);						\
     (_oword).u32[1] = CI_BITFIELD_INSERT_FIELDS32(32, 63,		\
    	_field1, _value1, _field2, _value2, _field3, _value3,		\
 	_field4, _value4, _field5, _value5, _field6, _value6,		\
 	_field7, _value7, _field8, _value8, _field9, _value9,		\
-	_field10, _value10);						\
+	_field10, _value10, _field11, _value11);						\
     (_oword).u32[2] = CI_BITFIELD_INSERT_FIELDS32(64, 95,		\
    	_field1, _value1, _field2, _value2, _field3, _value3,		\
 	_field4, _value4, _field5, _value5, _field6, _value6,		\
 	_field7, _value7, _field8, _value8, _field9, _value9,		\
-	_field10, _value10);						\
+	_field10, _value10, _field11, _value11);						\
     (_oword).u32[3] = CI_BITFIELD_INSERT_FIELDS32(96, 127,		\
    	_field1, _value1, _field2, _value2, _field3, _value3,		\
 	_field4, _value4, _field5, _value5, _field6, _value6,		\
 	_field7, _value7, _field8, _value8, _field9, _value9,		\
-	_field10, _value10);						\
+	_field10, _value10, _field11, _value11);						\
   } while (0)
 
 #define CI_POPULATE_QWORD32(_qword,					\
    	_field1, _value1, _field2, _value2, _field3, _value3,		\
 	_field4, _value4, _field5, _value5, _field6, _value6,		\
     	_field7, _value7, _field8, _value8, _field9, _value9,		\
-	_field10, _value10)						\
+	_field10, _value10, _field11, _value11)						\
   do {									\
     (_qword).u32[0] = CI_BITFIELD_INSERT_FIELDS64(0, 31,		\
    	_field1, _value1, _field2, _value2, _field3, _value3,		\
 	_field4, _value4, _field5, _value5, _field6, _value6,		\
 	_field7, _value7, _field8, _value8, _field9, _value9,		\
-	_field10, _value10);						\
+	_field10, _value10, _field11, _value11);						\
     (_qword).u32[1] = CI_BITFIELD_INSERT_FIELDS64(32, 63,		\
    	_field1, _value1, _field2, _value2, _field3, _value3,		\
 	_field4, _value4, _field5, _value5, _field6, _value6,		\
 	_field7, _value7, _field8, _value8, _field9, _value9,		\
-	_field10, _value10);						\
+	_field10, _value10, _field11, _value11);						\
   } while (0)
 
 #define CI_POPULATE_DWORD(_dword,					\
    	_field1, _value1, _field2, _value2, _field3, _value3,		\
 	_field4, _value4, _field5, _value5, _field6, _value6,		\
     	_field7, _value7, _field8, _value8, _field9, _value9,		\
-	_field10, _value10)						\
+        _field10, _value10, _field11, _value11)				\
   do {									\
     (_dword).u32[0] = CI_BITFIELD_INSERT_FIELDS32(0, 31,		\
    	_field1, _value1, _field2, _value2, _field3, _value3,		\
 	_field4, _value4, _field5, _value5, _field6, _value6,		\
 	_field7, _value7, _field8, _value8, _field9, _value9,		\
-	_field10, _value10);						\
+	_field10, _value10, _field11, _value11);			\
   } while (0)
 
 #if CI_WORD_SIZE == 8
@@ -393,7 +394,18 @@ typedef union ci_oword_u {
 #endif
 
 /* Populate oword fields*/
-#define CI_POPULATE_OWORD_10 CI_POPULATE_OWORD
+#define CI_POPULATE_OWORD_11 CI_POPULATE_OWORD
+
+#define CI_POPULATE_OWORD_10(_oword,					\
+   	_field1, _value1, _field2, _value2, _field3, _value3,		\
+	_field4, _value4, _field5, _value5, _field6, _value6,		\
+        _field7, _value7, _field8, _value8, _field9, _value9,		\
+        _field10, _value10)                                             \
+    CI_POPULATE_OWORD_11(_oword, CI_DUMMY_FIELD, 0,			\
+   	_field1, _value1, _field2, _value2, _field3, _value3,		\
+	_field4, _value4, _field5, _value5, _field6, _value6,		\
+        _field7, _value7, _field8, _value8, _field9, _value9,		\
+        _field10, value10)
 
 #define CI_POPULATE_OWORD_9(_oword,					\
    	_field1, _value1, _field2, _value2, _field3, _value3,		\
@@ -456,7 +468,18 @@ typedef union ci_oword_u {
     CI_POPULATE_OWORD_2(_oword, CI_DUMMY_FIELD, 0, _field1, _value1)
 
 /* Populate qword fields*/
-#define CI_POPULATE_QWORD_10 CI_POPULATE_QWORD
+#define CI_POPULATE_QWORD_11 CI_POPULATE_QWORD
+
+#define CI_POPULATE_QWORD_10(_qword,					\
+   	_field1, _value1, _field2, _value2, _field3, _value3,		\
+	_field4, _value4, _field5, _value5, _field6, _value6,		\
+        _field7, _value7, _field8, _value8, _field9, _value9,		\
+        _field10, _value10)                                             \
+    CI_POPULATE_QWORD_11(_qword, CI_DUMMY_FIELD, 0,			\
+   	_field1, _value1, _field2, _value2, _field3, _value3,		\
+	_field4, _value4, _field5, _value5, _field6, _value6,		\
+        _field7, _value7, _field8, _value8, _field9, _value9,		\
+        _field10, _value10)
 
 #define CI_POPULATE_QWORD_9(_qword,					\
    	_field1, _value1, _field2, _value2, _field3, _value3,		\
@@ -519,7 +542,18 @@ typedef union ci_oword_u {
     CI_POPULATE_QWORD_2(_qword, CI_DUMMY_FIELD, 0, _field1, _value1)
 
 /* Populate dword fields */
-#define CI_POPULATE_DWORD_10 CI_POPULATE_DWORD
+#define CI_POPULATE_DWORD_11 CI_POPULATE_DWORD
+
+#define CI_POPULATE_DWORD_10(_dword,					\
+   	_field1, _value1, _field2, _value2, _field3, _value3,		\
+	_field4, _value4, _field5, _value5, _field6, _value6,		\
+        _field7, _value7, _field8, _value8, _field9, _value9,		\
+        _field10, _value10)                                             \
+    CI_POPULATE_DWORD_11(_dword, CI_DUMMY_FIELD, 0,			\
+   	_field1, _value1, _field2, _value2, _field3, _value3,		\
+	_field4, _value4, _field5, _value5, _field6, _value6,		\
+        _field7, _value7, _field8, _value8, _field9, _value9,		\
+	_field10, _value10)
 
 #define CI_POPULATE_DWORD_9(_dword,					\
    	_field1, _value1, _field2, _value2, _field3, _value3,		\

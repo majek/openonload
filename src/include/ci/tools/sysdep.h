@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -84,7 +84,6 @@
 /*! Linux sendfile() support enable/disable. */
 # define CI_HAVE_SENDFILE            /* provide sendfile i/f */
 
-
 typedef ci_int32 ci_uerr_t; /* range of OS user-mode return codes */
 typedef ci_int32 ci_kerr_t; /* range of OS kernel-mode return codes */
 
@@ -99,8 +98,6 @@ typedef ci_int32 ci_kerr_t; /* range of OS kernel-mode return codes */
 # include <ci/tools/platform/gcc_x86.h>
 #elif defined(__PPC__)
 #  include <ci/tools/platform/gcc_ppc.h>
-#elif defined(__ia64__)
-#  include <ci/tools/platform/gcc_ia64.h>
 #else
 # error Unknown processor.
 #endif

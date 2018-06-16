@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -65,6 +65,9 @@
 #include <ci/efrm/pd.h>
 #include <ci/efrm/pio.h>
 #include <ci/affinity/k_drv_intf.h>
+#include <ci/tools/utils.h>
+#include <etherfabric/vi.h>
+#include <etherfabric/internal/internal.h>
 #include "efrm_internal.h"
 #include "efrm_vi_set.h"
 #include "efrm_pd.h"
@@ -172,6 +175,15 @@ static int efrm_vi_set_alloc_instance_try(struct efrm_vi *virs,
 	efrm_resource_ref(efrm_vi_set_to_resource(vi_set));
 	return 0;
 }
+
+
+int efrm_vi_set_get_vi_instance(struct efrm_vi *virs)
+{
+	if( virs->vi_set == NULL )
+		return -1;
+	return virs->allocation.instance - virs->vi_set->allocation.instance;
+}
+EXPORT_SYMBOL(efrm_vi_set_get_vi_instance);
 
 
 /* Try to allocate an instance out of the VIset.  If no free instances
@@ -404,6 +416,10 @@ static unsigned q_flags_to_vi_flags(unsigned q_flags, enum efhw_q_type q_type)
 			vi_flags |= EFHW_VI_TX_TIMESTAMPS;
 		if (q_flags & EFRM_VI_TX_LOOPBACK)
 			vi_flags |= EFHW_VI_TX_LOOPBACK;
+		if (q_flags & EFRM_VI_TX_CTPIO)
+			vi_flags |= EFHW_VI_TX_CTPIO;
+		if (q_flags & EFRM_VI_TX_CTPIO_NO_POISON)
+			vi_flags |= EFHW_VI_TX_CTPIO_NO_POISON;
 		break;
 	case EFHW_RXQ:
 		if (!(q_flags & EFRM_VI_CONTIGUOUS))
@@ -463,6 +479,10 @@ static unsigned vi_flags_to_q_flags(unsigned vi_flags, enum efhw_q_type q_type)
 			q_flags |= EFRM_VI_TX_TIMESTAMPS;
 		if (vi_flags & EFHW_VI_TX_LOOPBACK)
 			q_flags |= EFRM_VI_TX_LOOPBACK;
+		if (vi_flags & EFHW_VI_TX_CTPIO)
+			q_flags |= EFRM_VI_TX_CTPIO;
+		if (vi_flags & EFHW_VI_TX_CTPIO_NO_POISON)
+			q_flags |= EFRM_VI_TX_CTPIO_NO_POISON;
 		break;
 	case EFHW_RXQ:
 		if (!(vi_flags & EFHW_VI_JUMBO_EN))
@@ -669,7 +689,7 @@ efrm_vi_io_map(struct efrm_vi* virs, struct efhw_nic *nic, int instance)
 		virs->io_page = nic->bar_ioaddr + offset;
 		break;
 	case EFHW_ARCH_EF10:
-		offset = instance * ER_DZ_EVQ_RPTR_REG_STEP;
+		offset = instance * nic->vi_stride;
 		virs->io_page = ioremap_nocache(nic->ctr_ap_dma_addr +
 						offset, PAGE_SIZE);
 		if (virs->io_page == NULL)
@@ -815,8 +835,13 @@ __efrm_vi_resource_free(struct efrm_vi *virs)
 					    virs->tx_alt_cp, virs->tx_alt_ids);
 	}
 	if (virs->pio != NULL) {
-		/* Unlink also manages reference accounting. */
-		rc = efrm_pio_unlink_vi(virs->pio, virs);
+		/* Unlink also manages reference accounting.  We don't need to
+		 * worry about whether this actually freed the buffer: other
+		 * callers need to clean up the resource-table if so, to
+		 * prevent double-frees, but the fact that the VI is going away
+		 * is sufficient to guarantee this anyway, so we can pass NULL
+		 * for the last parameter. */
+		rc = efrm_pio_unlink_vi(virs->pio, virs, NULL);
 		if (rc < 0)
 			/* If txq has been flushed already, this can
 			 * fail benignly */
@@ -1001,13 +1026,14 @@ efrm_vi_resource_alloc(struct efrm_client *client,
 		       struct efrm_vi **virs_out,
 		       uint32_t *out_io_mmap_bytes,
 		       uint32_t *out_mem_mmap_bytes,
+                       uint32_t *out_ctpio_mmap_bytes,
 		       uint32_t *out_txq_capacity,
 		       uint32_t *out_rxq_capacity,
-		       int print_resource_warnings,
-		       enum efrm_vi_alloc_failure *out_failure_reason)
+		       int print_resource_warnings)
 {
 	struct efrm_vi_attr attr;
 	struct efrm_vi *virs;
+        unsigned ctpio_mmap_bytes = 0;
 	int rc;
 
 	EFRM_ASSERT(pd != NULL);
@@ -1023,11 +1049,8 @@ efrm_vi_resource_alloc(struct efrm_client *client,
 		efrm_vi_attr_set_wakeup_channel(&attr, wakeup_channel);
 
 	if ((rc = efrm_vi_alloc(client, &attr, print_resource_warnings,
-				name, &virs)) < 0) {
-		if (out_failure_reason != NULL )
-			*out_failure_reason= EFRM_VI_ALLOC_VI_FAILED;
+				name, &virs)) < 0)
 		goto fail_vi_alloc;
-	}
 
 	/* We have to jump through some hoops here:
 	 * - EF10 needs the event queue allocated before rx and tx queues
@@ -1038,48 +1061,38 @@ efrm_vi_resource_alloc(struct efrm_client *client,
 	 */
 
 	rc = efrm_vi_q_alloc_sanitize_size(virs, EFHW_TXQ, txq_capacity);
-	if (rc < 0) {
-		if (out_failure_reason != NULL )
-			*out_failure_reason= EFRM_VI_ALLOC_TXQ_FAILED;
+	if (rc < 0)
 		goto fail_q_alloc;
-	}
 	txq_capacity = rc;
 	
 	rc = efrm_vi_q_alloc_sanitize_size(virs, EFHW_RXQ, rxq_capacity);
-	if (rc < 0) {
-		if (out_failure_reason != NULL )
-			*out_failure_reason= EFRM_VI_ALLOC_RXQ_FAILED;
+	if (rc < 0)
 		goto fail_q_alloc;
-	}
 	rxq_capacity = rc;
 
 	if (evq_virs == NULL && evq_capacity < 0)
 		evq_capacity = rxq_capacity + txq_capacity;
 
 	if ((rc = efrm_vi_q_alloc(virs, EFHW_EVQ, evq_capacity,
-				  0, vi_flags, NULL)) < 0) {
-		if (out_failure_reason != NULL )
-			*out_failure_reason= EFRM_VI_ALLOC_EVQ_FAILED;
+				  0, vi_flags, NULL)) < 0)
 		goto fail_q_alloc;
-	}
 
 	if ((rc = efrm_vi_q_alloc(virs, EFHW_TXQ, txq_capacity,
-				  tx_q_tag, vi_flags, evq_virs)) < 0) {
-		if (out_failure_reason != NULL )
-			*out_failure_reason= EFRM_VI_ALLOC_TXQ_FAILED;
+				  tx_q_tag, vi_flags, evq_virs)) < 0)
 		goto fail_q_alloc;
-	}
 	if ((rc = efrm_vi_q_alloc(virs, EFHW_RXQ, rxq_capacity,
-				  rx_q_tag, vi_flags, evq_virs)) < 0) {
-		if (out_failure_reason != NULL )
-			*out_failure_reason= EFRM_VI_ALLOC_RXQ_FAILED;
+				  rx_q_tag, vi_flags, evq_virs)) < 0)
 		goto fail_q_alloc;
-	}
+
+        if( vi_flags & EFHW_VI_TX_CTPIO )
+                ctpio_mmap_bytes = EF_VI_CTPIO_APERTURE_SIZE;
 
 	if (out_io_mmap_bytes != NULL)
 		*out_io_mmap_bytes = PAGE_SIZE;
 	if (out_mem_mmap_bytes != NULL)
 		*out_mem_mmap_bytes = virs->mem_mmap_bytes;
+	if (out_ctpio_mmap_bytes != NULL)
+                *out_ctpio_mmap_bytes = ctpio_mmap_bytes;
 	if (out_txq_capacity != NULL)
 		*out_txq_capacity = virs->q[EFHW_TXQ].capacity;
 	if (out_rxq_capacity != NULL)
@@ -1432,6 +1445,15 @@ int  efrm_vi_q_get_size(struct efrm_vi *virs, enum efhw_q_type q_type,
 
 	qso->q_len_entries = n_q_entries;
 	qso->q_len_bytes = efrm_vi_q_bytes(virs, q_type, n_q_entries);
+
+	/* This value should always be positive, but if we don't check for this
+	 * explicitly, some compilers will assume that undefined logarithms
+	 * can be taken in get_order() and will generate code that won't link.
+	 * See bug63982. */
+	EFRM_ASSERT(qso->q_len_bytes > 0);
+	if (qso->q_len_bytes <= 0)
+		return -EINVAL;
+
 	qso->q_len_page_order = get_order(qso->q_len_bytes);
 	return 0;
 }
@@ -1630,6 +1652,9 @@ int efrm_vi_tx_alt_alloc(struct efrm_vi *virs, int num_alt, int num_32b_words)
 	struct efhw_nic *nic = virs->rs.rs_client->nic;
 	int rc;
 
+        if ((num_alt <= 0) || (num_32b_words <= 0))
+                return -EINVAL;
+
 	if (virs->tx_alt_num > 0)
 		return -EALREADY;
 
@@ -1641,3 +1666,19 @@ int efrm_vi_tx_alt_alloc(struct efrm_vi *virs, int num_alt, int num_32b_words)
 	return rc;
 }
 EXPORT_SYMBOL(efrm_vi_tx_alt_alloc);
+
+int efrm_vi_tx_alt_free(struct efrm_vi *virs)
+{
+	struct efhw_nic *nic = virs->rs.rs_client->nic;
+	int rc;
+
+	if (virs->tx_alt_num == 0)
+		return 0;
+
+	rc = nic->efhw_func->tx_alt_free(nic, virs->tx_alt_num,
+					 virs->tx_alt_cp, virs->tx_alt_ids);
+	if (rc == 0)
+                virs->tx_alt_num = 0;
+	return rc;
+}
+EXPORT_SYMBOL(efrm_vi_tx_alt_free);

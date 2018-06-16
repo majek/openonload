@@ -1,8 +1,8 @@
 # OpenOnload "safe" profile.
 #
-# With this profile, Onload shows a small difference with Linux Socket API
-# as possible.  Changing the Onload variables below might give you better
-# performance or latency, but might also break something important.
+# With this profile, Onload shows as small a difference with Linux Socket
+# API as possible.  Changing the Onload variables below might give you
+# better performance or latency, but might also break something important.
 #
 # This profile is not intended for production use.  Please create your own
 # profile based on it, by changing/removing variables if it does not

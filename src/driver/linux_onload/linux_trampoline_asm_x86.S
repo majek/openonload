@@ -31,8 +31,9 @@ efab_linux_trampoline_close:
 
 #elif defined(__x86_64__)
 
-/* we have return address on the stack before pt_regs, so
- * pt_regs is expected on 8(%rsp) */
+/* We have at least the return address on the stack before pt_regs, so pt_regs
+ * is no earlier than 8(%rsp).  There might be other stuff in the way, too,
+ * but it's up to the handler in C to sort that out. */
 #define RSP_TP_PT_REGS_OFFSET_BASE 8
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4,1,0)
@@ -49,8 +50,8 @@ efab_linux_trampoline_close:
 	.type	efab_linux_trampoline_close,@function
 	.align 16
 efab_linux_trampoline_close:
-	leaq	RSP_TP_PT_REGS_OFFSET(%rsp),%rsi	/* 2nd arg to our handler = struct pt_regs */
-	mov	(%rsp),%rdx     /* 3rd arg is return address */
+	/* The only argument to the C handler is the fd, which is already in
+	 * the correct register. */
 	jmp	efab_linux_trampoline_handler_close64
 .Lfe1:
 	.size	efab_linux_trampoline_close,.Lfe1-efab_linux_trampoline_close
@@ -85,8 +86,6 @@ efab_linux_trampoline_close:
 
 /*  end elif __PPC__ */
 
-#elif defined(__ia64__)
-	/* trampoline unsupported on ia64 */
 #else
 
 #error "Don't know how to build trampolines for this platform"

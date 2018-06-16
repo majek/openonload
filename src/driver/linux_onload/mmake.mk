@@ -10,8 +10,9 @@
 ONLOAD_SRCS	:= driver.c linux_cplane_netif.c timesync.c \
 		tcp_sendpage.c driverlink_ip.c linux_stats.c pinbuf.c \
 		linux_trampoline.c shmbuf.c compat.c \
-		ossock_calls.c linux_efabcfg.c linux_sock_ops.c mmap.c \
-		epoll_device.c terminate.c sigaction_calls.c onloadfs.c
+		ossock_calls.c linux_sock_ops.c mmap.c \
+		epoll_device.c terminate.c sigaction_calls.c onloadfs.c \
+		dshm.c cplane.c cplane_prot.c
 
 
 EFTHRM_SRCS	:= cplane_netif.c eplock_resource_manager.c \
@@ -20,11 +21,12 @@ EFTHRM_SRCS	:= cplane_netif.c eplock_resource_manager.c \
 		tcp_helper_endpoint_move.c \
 		tcp_filters.c oof_filters.c oof_onload.c \
 		driverlink_filter.c ip_prot_rx.c ip_protocols.c \
-		efabcfg.c onload_nic.c id_pool.c dump_to_user.c iobufset.c \
-		tcp_helper_cluster.c
+		onload_nic.c id_pool.c dump_to_user.c iobufset.c \
+		tcp_helper_cluster.c oof_interface.c
 
 EFTHRM_HDRS	:= oo_hw_filter.h oof_impl.h tcp_filters_internal.h \
-		tcp_helper_resource.h
+		tcp_helper_resource.h tcp_filters_deps.h oof_tproxy_ipproto.h \
+		oof_onload_types.h
 
 ifeq ($(LINUX),1)
 EFTHRM_SRCS	+= tcp_helper_linux.c
@@ -54,8 +56,6 @@ i386_TARGET_SRCS    := $(x86_TARGET_SRCS)
 
 x86_64_TARGET_SRCS := $(x86_TARGET_SRCS)
 
-ia64_TARGET_SRCS := $(x86_TARGET_SRCS)
-
 powerpc_TARGET_SRCS    := ppc64_linux_trampoline_asm.o \
 			ppc64_linux_trampoline.o ppc64_linux_trampoline_internal.o
 
@@ -63,9 +63,6 @@ powerpc_TARGET_SRCS    := ppc64_linux_trampoline_asm.o \
 ######################################################
 # linux kbuild support
 #
-
-KBUILD_EXTRA_SYMBOLS=$(BUILDPATH)/driver/linux_cplane/Module.symvers
-export KBUILD_EXTRA_SYMBOLS
 
 all: $(BUILDPATH)/driver/linux_onload/Module.symvers \
 	$(KBUILD_EXTRA_SYMBOLS)
@@ -82,11 +79,7 @@ endif
 
 
 
-ifeq ($(USE_EXTRA_SYM),ok)
 PREVIOUS_KSYM=$(BUILDPATH)/driver/linux_char/Module.symvers
-else
-PREVIOUS_KSYM=$(BUILDPATH)/driver/linux_cplane/Module.symvers
-endif
 
 $(BUILDPATH)/driver/linux_onload/Module.symvers: $(PREVIOUS_KSYM)
 	cp $< $@
@@ -109,8 +102,8 @@ endif
 ifeq ($(strip $(CI_PREBUILT_IPDRV)),)
 onload-objs  := $(IP_TARGET_SRCS:%.c=%.o) $($(ARCH)_TARGET_SRCS:%.c=%.o)
 onload-objs  += $(BUILD)/lib/transport/ip/lib.a	\
+		$(BUILD)/lib/cplane/lib.a \
 		$(BUILD)/lib/citools/lib.a	\
-		$(BUILD)/lib/efabcfg/lib.a \
 		$(BUILD)/lib/ciul/lib.a
 
 ifdef OFE_TREE

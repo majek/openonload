@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -88,11 +88,6 @@
 
 
 
-#ifdef __KERNEL__
-# include <cplane/exported.h>
-#endif
-
-
 /*****************************************************************************
  *                                                                           *
  *          Debugging                                                        *
@@ -117,34 +112,6 @@
 
 
 
-ci_inline int cicp_all_slaves_in_stack(const cicp_ul_mibs_t *user,
-                                       ci_netif *ni, ci_int16 bond_rowid)
-{
-  /* Check all slaves are in this stack.
-   *
-   * NB. Caller must check the forwarding table lock.
-   */
-  cicp_bond_row_t* bond_row;
-  ci_hwport_id_t hwport;
-
-  ci_assert(bond_rowid >= 0 && bond_rowid < user->bondinfo_utable->rows_max);
-  bond_row = &user->bondinfo_utable->bond[bond_rowid];
-
-  while( bond_row->next != CICP_BOND_ROW_NEXT_BAD ) {
-    ci_assert(bond_row->next < user->bondinfo_utable->rows_max);
-    bond_row = &user->bondinfo_utable->bond[bond_row->next];
-    if( bond_row->type != CICP_BOND_ROW_TYPE_SLAVE )
-      return 0;
-    hwport = bond_row->slave.hwport;
-    if( (unsigned) hwport >= CPLANE_MAX_REGISTER_INTERFACES ||
-        __ci_hwport_to_intf_i(ni, hwport) < 0 )
-      return 0;
-  }
-
-  return 1;
-}
-
-
 ci_inline int
 ci_ip_cache_is_onloadable(ci_netif* ni, ci_ip_cached_hdrs* ipcache)
 {
@@ -155,18 +122,17 @@ ci_ip_cache_is_onloadable(ci_netif* ni, ci_ip_cached_hdrs* ipcache)
    */
   ci_hwport_id_t hwport = ipcache->hwport;
   ci_assert(hwport == CI_HWPORT_ID_BAD ||
-            (unsigned) hwport < CPLANE_MAX_REGISTER_INTERFACES);
-  return (unsigned) hwport < CPLANE_MAX_REGISTER_INTERFACES &&
+            (unsigned) hwport < CI_CFG_MAX_HWPORTS);
+  return (unsigned) hwport < CI_CFG_MAX_HWPORTS &&
     (ipcache->intf_i = __ci_hwport_to_intf_i(ni, hwport)) >= 0;
 }
 
 
-#if CPLANE_TEAMING
+#if CI_CFG_TEAMING
 static int
 cicp_user_bond_hash_get_hwport(ci_netif* ni, ci_ip_cached_hdrs* ipcache,
-                               const cicp_llap_row_t* llap_row,
-                               ci_uint16 src_port_be16,
-                               cicp_encap_t encap)
+                               cicp_hwport_mask_t hwports,
+                               ci_uint16 src_port_be16, uint32_t daddr_be32)
 {
   /* For an active-active bond that uses hashing, choose the appropriate
    * interface to send out of.
@@ -178,67 +144,138 @@ cicp_user_bond_hash_get_hwport(ci_netif* ni, ci_ip_cached_hdrs* ipcache,
       CICP_HASH_STATE_FLAGS_IS_IP;
   else
     hs.flags = CICP_HASH_STATE_FLAGS_IS_IP;
-  CI_MAC_ADDR_SET(&hs.dst_mac, ci_ip_cache_ether_dhost(ipcache));
-  CI_MAC_ADDR_SET(&hs.src_mac, ci_ip_cache_ether_shost(ipcache));
+  memcpy(&hs.dst_mac, ci_ip_cache_ether_dhost(ipcache), ETH_ALEN);
+  memcpy(&hs.src_mac, ci_ip_cache_ether_shost(ipcache), ETH_ALEN);
   hs.src_addr_be32 = ipcache->ip_saddr_be32;
-  hs.dst_addr_be32 = ipcache->ip.ip_daddr_be32;
+  hs.dst_addr_be32 = daddr_be32;
   hs.src_port_be16 = src_port_be16;
   hs.dst_port_be16 = ipcache->dport_be16;
-  ipcache->hwport = ci_hwport_bond_get(CICP_HANDLE(ni), &encap,
-                                       llap_row->bond_rowid, &hs);
+  ipcache->hwport = oo_cp_hwport_bond_get(ni->cplane, ipcache->ifindex,
+                                          &ipcache->encap, hwports, &hs);
   return ! ci_ip_cache_is_onloadable(ni, ipcache);
 }
 #endif
 
+#ifdef __KERNEL__
+#include <net/flow.h>
+#include <net/route.h>
+#include <net/arp.h>
 
-ci_inline int
-cicp_mcast_use_gw_mac(const cicp_fwd_row_t* row,
-                      const struct oo_sock_cplane* sock_cp)
+static void
+cicp_kernel_resolve(ci_netif* ni, struct cp_fwd_key* key,
+                    struct cp_fwd_data* data)
 {
-  /* If:
-   * - route table says (via explicit route) that this mcast addr should be
-   *   delivered via a gateway
-   *
-   *   If:
-   *   - have set IP_MULTICAST_IF to the same dev (as route table)
-   *   Or:
-   *   - have NOT set IP_MULTICAST_IF
-   *   - and socket laddr is not bound
-   *   - and socket is not connected
-   *   Then:
-   *   => use GATEWAY mac.
-   *
-   * Else:
-   * => use MCAST mac.
-   */
-  if( row != NULL && row->first_hop != 0 && row->destnet_ipset != 0 ) {
-    if( sock_cp->ip_multicast_if == CI_IFID_BAD ) {
-      return (sock_cp->sock_cp_flags &
-              (OO_SCP_LADDR_BOUND | OO_SCP_CONNECTED)) == 0;
-    }
-    else {
-      return sock_cp->ip_multicast_if == row->dest_ifindex;
-    }
+  int rc;
+  struct rtable *rt = NULL;
+  cicp_hwport_mask_t rx_hwports = 0;
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(2,6,38)
+  /* rhel6 case */
+  struct flowi fl;
+
+  memset(&fl, 0, sizeof(fl));
+  fl.fl4_dst = key->dst;
+  fl.fl4_src = key->src;
+  fl.fl4_tos = key->tos;
+  fl.oif = key->ifindex;
+
+  rc = ip_route_output_key(ni->cplane->cp_netns, &rt, &fl);
+  if( rc < 0 ) {
+    data->type = CICP_ROUTE_ALIEN;
+    return;
   }
-  return 0;
+  data->src = fl.fl4_src;
+#define DST_DEV(rt) rt->u.dst.dev
+#else /* linux-2.6.39 and newer */
+  struct flowi4 fl4;
+
+  memset(&fl4, 0, sizeof(fl4));
+  fl4.daddr = key->dst;
+  fl4.saddr = key->src;
+  fl4.flowi4_tos = key->tos;
+  fl4.flowi4_oif = key->ifindex;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,10,0)
+  fl4.flowi4_uid = make_kuid(current_user_ns(), ni->state->uuid);
+#endif
+
+  rt = ip_route_output_key(ni->cplane->cp_netns, &fl4);
+  if( IS_ERR(rt) ) {
+    data->type = CICP_ROUTE_ALIEN;
+    return;
+  }
+  data->src = fl4.saddr;
+#define DST_DEV(rt) rt->dst.dev
+#endif /* 2.6.39 */
+
+  data->ifindex = DST_DEV(rt)->ifindex;
+  data->next_hop = rt->rt_gateway;
+  if( data->next_hop == 0 )
+    data->next_hop = key->dst;
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3,6,0)
+  data->mtu = 0;
+  /* We'll use interface MTU and ignore the route MTU even if it has one
+   * for the older kernels.  This code is mostly used for SYN-ACK replies,
+   * so MTU value is not too important. */
+#else
+  data->mtu = rt->rt_pmtu;
+#endif
+
+  data->arp_valid = 0;
+  if( data->ifindex != 1 ) {
+    /* In theory the rt->dst structure has a reference to the neigh,
+     * but in practice it is not easy to dig the neigh out. */
+    struct neighbour *neigh = neigh_lookup(&arp_tbl, &rt->rt_gateway,
+                                           DST_DEV(rt));
+    if( neigh != NULL && (neigh->nud_state & NUD_VALID) ) {
+      data->arp_valid = 1;
+      memcpy(data->dst_mac, neigh->ha, ETH_ALEN);
+    }
+    if( neigh != NULL )
+      neigh_release(neigh);
+  }
+
+  ip_rt_put(rt);
+
+  if( data->ifindex == 1 ) {
+    data->type = CICP_ROUTE_LOCAL;
+    return;
+  }
+
+  /* We've got the route.  Let's look into llap table to find out the
+   * network interface details. */
+  rc = oo_cp_find_llap(ni->cplane, data->ifindex,
+                       data->mtu == 0 ? &data->mtu : NULL,
+                       &data->hwports, &rx_hwports, &data->src_mac, &data->encap);
+
+  if( rc < 0 || rx_hwports == 0 )
+    data->type = CICP_ROUTE_ALIEN;
+  else
+    data->type = CICP_ROUTE_NORMAL;
 }
+#endif
 
-
-ci_inline void
-ci_ip_cache_init_mcast_mac(ci_netif* ni, ci_ip_cached_hdrs* ipcache,
-                           unsigned daddr_be32)
+static int cicp_user_resolve(ci_netif* ni, cicp_verinfo_t* verinfo,
+                             struct cp_fwd_key* key, struct cp_fwd_data* data)
 {
-  ci_uint8* dhost = ci_ip_cache_ether_dhost(ipcache);
-  unsigned daddr = CI_BSWAP_BE32(daddr_be32);
-  dhost[0] = 1;
-  dhost[1] = 0;
-  dhost[2] = 0x5e;
-  dhost[3] = (daddr >> 16) & 0x7f;
-  dhost[4] = (daddr >>  8) & 0xff;
-  dhost[5] =  daddr        & 0xff;
-  cicp_mac_set_mostly_valid(CICP_USER_MIBS(CICP_HANDLE(ni)).mac_utable,
-                            &ipcache->mac_integrity);
-  ipcache->nexthop = 0;
+  int rc=  __oo_cp_route_resolve(ni->cplane, verinfo, key,
+                                 1/*ask_server*/, data);
+#ifdef __KERNEL__
+  ci_assert_impl(ni->flags & CI_NETIF_FLAG_IN_DL_CONTEXT,
+                 ! (key->flag & CP_FWD_KEY_REQ_WAIT));
+  if( !(key->flag & CP_FWD_KEY_REQ_WAIT) && rc < 0 ) {
+    /* We've scheduled an addition of this route to the route cache, but we
+     * can't sleep for the time when it really happens.  Let's use more
+     * direct way to resolve a route. */
+    cicp_kernel_resolve(ni, key, data);
+    return 0;
+  }
+#else
+  /* There is no reason to call this in UL without WAIT; so we don't. */
+  ci_assert(key->flag & CP_FWD_KEY_REQ_WAIT);
+#endif
+  if( rc < 0 )
+    data->type = CICP_ROUTE_ALIEN;
+  return rc;
 }
 
 
@@ -247,250 +284,135 @@ cicp_user_retrieve(ci_netif*                    ni,
                    ci_ip_cached_hdrs*           ipcache,
                    const struct oo_sock_cplane* sock_cp)
 {
-  const cicp_ul_mibs_t* user = &CICP_USER_MIBS(CICP_HANDLE(ni));
-  cicp_fwdinfo_t* fwdt = user->fwdinfo_utable;
-  cicp_llapinfo_t* llapt = user->llapinfo_utable;
-  const cicp_fwd_row_t* row;
-  const cicp_llap_row_t* lrow = NULL;
-  cicp_mac_verinfo_t mac_info;
-  int osrc;
+  struct cp_fwd_key key;
+  struct cp_fwd_data data;
+  int rc;
+  uint32_t daddr_be32 = ipcache->ip.ip_daddr_be32;
 
-  ci_assert(user);
-  ci_assert(llapt);
-  (void) llapt;  /* Not used in kernel NDEBUG. */
-  CI_DEBUG(ipcache->status = -1);
+  /* This function must be called when "the route is unusable".  I.e. when
+   * the route is invalid or if there is no ARP.  In the second case, we
+   * can expedite ARP resolution by explicit request just now. */
+  if( oo_cp_verinfo_is_valid(ni->cplane, &ipcache->mac_integrity) ) {
+    ci_assert_equal(ipcache->status, retrrc_nomac);
+    oo_cp_arp_resolve(ni->cplane, &ipcache->mac_integrity);
 
-  if(CI_UNLIKELY( CI_IP_IS_MULTICAST(ipcache->ip.ip_daddr_be32) &&
-                  (sock_cp->sock_cp_flags & OO_SCP_NO_MULTICAST) ))
-    goto alienroute_no_verlock;
-
- again:
-  CICP_READ_LOCK(CICP_HANDLE(ni), llapt->version)
-
-  /* We need to do a route table lookup even when hwport is selected by
-   * IP_MULTICAST_IF, due to the baroque rules for selecting the MAC addr.
-   *
-   * ?? TODO: Are there scenarious with SO_BINDTODEVICE where a route table
-   * lookup can be avoided?  Probably there are.
-   */
-  row = _cicp_fwd_find_ip(fwdt, ipcache->ip.ip_daddr_be32,
-                          sock_cp->so_bindtodevice);
-  if( row != NULL ) {
-    lrow = &user->llapinfo_utable->llap[row->llap_rowid];
-    ci_assert_equal(row->dest_ifindex, lrow->ifindex);
+    /* Re-check the version of the fwd entry after ARP resolution.
+     * Return if nothing changed; otherwise handle the case when ARP has
+     * already been resolved. */
+    if( oo_cp_verinfo_is_valid(ni->cplane, &ipcache->mac_integrity) )
+      return;
   }
 
-  if( sock_cp->so_bindtodevice != CI_IFID_BAD ) {
-    ipcache->ifindex = sock_cp->so_bindtodevice;
-    goto handle_bound_dev;
-  }
-  else if( CI_IP_IS_MULTICAST(ipcache->ip.ip_daddr_be32) &&
-           sock_cp->ip_multicast_if != CI_IFID_BAD ) {
-    /* TODO: Optimisation: Remember non-mac info associated with the
-     * ifindex selected by IP_MULTICAST_IF or SO_BINDTODEVICE when
-     * destination changes.  Requires that we remember the fwd table
-     * version.
-     */
 
-    ipcache->ifindex = sock_cp->ip_multicast_if;
-    /* In case of multicast traffic with multicast_if set
-     * route info ignored */
-    row = NULL;
-  handle_bound_dev:
-    lrow = cicp_llap_find_ifid(user->llapinfo_utable, ipcache->ifindex);
-    if( lrow == NULL )
-      goto alienroute;
-    ipcache->mtu = lrow->mtu;
-    ipcache->hwport = lrow->hwport;
-    ipcache->encap = lrow->encap;
+  key.dst = daddr_be32;
+  key.tos = sock_cp->ip_tos;
+  key.flag = 0;
 
-    if( ! ci_ip_cache_is_onloadable(ni, ipcache)
-#if CPLANE_TEAMING
-        || ( (ipcache->encap.type & CICP_LLAP_TYPE_BOND) && 
-             ! cicp_all_slaves_in_stack(user, ni, lrow->bond_rowid) )
-#endif
-        )
-      goto alienroute;
-    /* Select source IP:
-     * 1. Bound local IP,
-     * 2. IP_MULTICAST_IF addr, where both mcast local addr and iface provided
-     * 3. IP from routing table lookup (SO_BINDTODEVICE interface
-     *    could have multiple IPs assigned to it). This case includes multicast
-     *    where IP_MULTICAST_IF has not been provided (neither local ip or if)
-     * 4. arbitrary IP on this interface - this includes multicast, where
-     *    multicast local addr is not provided while interface is
-     *
-     * NB. We're handling SO_BINDTODEVICE as well as IP_MULTICAST_IF here.
-     */
-    if( sock_cp->ip_laddr_be32 != 0 )
-      ipcache->ip_saddr_be32 = sock_cp->ip_laddr_be32;
-    else if( sock_cp->ip_multicast_if != CI_IFID_BAD &&
-             sock_cp->ip_multicast_if_laddr_be32 != 0 )
-      ipcache->ip_saddr_be32 = sock_cp->ip_multicast_if_laddr_be32;
-    /* Present route preferred source address is used,
-     * unless we deal with multicast traffic, for which there is interface but
-     * not local ip address specified. However, in this case the row
-     * variable has been set to NULL - see above - therefore no
-     * special check here */
-    else if( row != NULL )
-      ipcache->ip_saddr_be32 = row->pref_source;
-    else if( lrow->ip_addr != INADDR_ANY )
-      ipcache->ip_saddr_be32 = lrow->ip_addr;
-    else
-      goto alienroute;  /* really this is "no source addr" */
+  if( ipcache->ip.ip_protocol == IPPROTO_UDP )
+    key.flag |= CP_FWD_KEY_UDP;
+
+  key.ifindex = sock_cp->so_bindtodevice;
+  if( CI_IP_IS_MULTICAST(daddr_be32) ) {
+    if( sock_cp->sock_cp_flags & OO_SCP_NO_MULTICAST ) {
+      ipcache->status = retrrc_alienroute;
+      ipcache->hwport = CI_HWPORT_ID_BAD;
+      ipcache->intf_i = -1;
+      return;
+    }
+
+    /* In linux, SO_BINDTODEVICE has the priority over IP_MULTICAST_IF */
+    if( key.ifindex == 0 )
+      key.ifindex = sock_cp->ip_multicast_if;
+    key.src = sock_cp->ip_multicast_if_laddr_be32;
+    if( key.src == 0 && sock_cp->ip_laddr_be32 != 0 )
+      key.src = sock_cp->ip_laddr_be32;
   }
   else {
-    if(CI_UNLIKELY( row == NULL ))
-      goto noroute;
-    if(CI_UNLIKELY( row->type == CICP_ROUTE_ALIEN ))
-      goto alienroute;
-    ipcache->mtu = row->mtu == 0 ? lrow->mtu : row->mtu;
-    ci_assert(ipcache->mtu);
-     /* Is the destination address the same as the local one? */
-    if( ipcache->ip.ip_daddr_be32 == row->pref_source ||
-        lrow->encap.type == CICP_LLAP_TYPE_LOOP) {
+    key.src = sock_cp->ip_laddr_be32;
+    if( sock_cp->sock_cp_flags & OO_SCP_TPROXY )
+      key.flag |= CP_FWD_KEY_TRANSPARENT;
+  }
+
+  if( key.src == 0 && sock_cp->sock_cp_flags & OO_SCP_UDP_WILD )
+    key.flag |= CP_FWD_KEY_SOURCELESS;
+
+#ifdef __KERNEL__
+  if( ! (ni->flags & CI_NETIF_FLAG_IN_DL_CONTEXT) )
+#endif
+    key.flag |= CP_FWD_KEY_REQ_WAIT;
+
+  rc = cicp_user_resolve(ni, &ipcache->mac_integrity, &key, &data);
+  if( rc == 0 && key.src == 0 &&
+      ! (sock_cp->sock_cp_flags & OO_SCP_UDP_WILD) ) {
+    key.src = data.src;
+    rc = cicp_user_resolve(ni, &ipcache->mac_integrity, &key, &data);
+  }
+
+  switch( data.type ) {
+    case CICP_ROUTE_LOCAL:
       ipcache->status = retrrc_localroute;
-      ipcache->encap.type = CICP_LLAP_TYPE_SFC;
+      ipcache->encap.type = CICP_LLAP_TYPE_NONE;
       ipcache->ether_offset = 4;
       ipcache->intf_i = OO_INTF_I_LOOPBACK;
-      cicp_mac_set_mostly_valid(CICP_USER_MIBS(CICP_HANDLE(ni)).mac_utable,
-                                &ipcache->mac_integrity);
-      goto check_verlock_and_out;
+      return;
+    case CICP_ROUTE_NORMAL:
+    {
+      cicp_hwport_mask_t hwports = 0;
+      /* Can we accelerate interface in this stack ? */
+      if( (data.encap.type & CICP_LLAP_TYPE_BOND) == 0 &&
+          (data.hwports & ~(ci_netif_get_hwport_mask(ni))) == 0 )
+        break;
+      /* Check bond */
+      rc = oo_cp_find_llap(ni->cplane, data.ifindex, NULL/*mtu*/,
+                           NULL /*tx_hwports*/, &hwports /*rx_hwports*/,
+                           NULL/*mac*/, NULL /*encap*/);
+      if( rc == 0 && (hwports & ~(ci_netif_get_hwport_mask(ni))) == 0 )
+        break;
+      /* FALL through to alien path */
     }
-    ipcache->hwport = lrow->hwport;
-    if( ! ci_ip_cache_is_onloadable(ni, ipcache)
-#if CPLANE_TEAMING
-        || ( (lrow->encap.type & CICP_LLAP_TYPE_BOND) && 
-             ! cicp_all_slaves_in_stack(user, ni, lrow->bond_rowid) )
-#endif
-        )
-      goto alienroute;
-    ipcache->ifindex = row->dest_ifindex;
-    if( sock_cp->ip_laddr_be32 != 0 )
-      ipcache->ip_saddr_be32 = sock_cp->ip_laddr_be32;
-    else
-      ipcache->ip_saddr_be32 = row->pref_source;
-    ipcache->encap = lrow->encap;
+    case CICP_ROUTE_ALIEN:
+      ipcache->status = retrrc_alienroute;
+      ipcache->intf_i = -1;
+      return;
   }
 
-  /* Layout the Ethernet header, and set the source mac. */
+  ipcache->encap = data.encap;
+#if CI_CFG_TEAMING
+  if( ipcache->encap.type & CICP_LLAP_TYPE_USES_HASH ) {
+     if( cicp_user_bond_hash_get_hwport(ni, ipcache, data.hwports,
+                                    sock_cp->lport_be16, daddr_be32) != 0 ) {
+      ipcache->status = retrrc_alienroute;
+      ipcache->intf_i = -1;
+      return;
+    }
+  }
+  else
+#endif
+    ipcache->hwport = cp_hwport_mask_first(data.hwports);
+
+  ipcache->mtu = data.mtu;
+  ipcache->ip_saddr_be32 = key.src == INADDR_ANY ? data.src : key.src;
+  ipcache->ifindex = data.ifindex;
+  ipcache->nexthop = data.next_hop;
+  if( ! ci_ip_cache_is_onloadable(ni, ipcache)) {
+    ipcache->status = retrrc_alienroute;
+    ipcache->intf_i = -1;
+    return;
+  }
+
+  /* Layout the Ethernet header, and set the source mac.
+   * Route resolution already issues ARP request, so there is no need to
+   * call oo_cp_arp_resolve() explicitly in case of retrrc_nomac. */
+  ipcache->status = data.arp_valid ? retrrc_success : retrrc_nomac;
   cicp_ipcache_vlan_set(ipcache);
-  memcpy(ci_ip_cache_ether_shost(ipcache), lrow->mac, ETH_ALEN);
+  memcpy(ci_ip_cache_ether_shost(ipcache), &data.src_mac, ETH_ALEN);
+  if( data.arp_valid )
+    memcpy(ci_ip_cache_ether_dhost(ipcache), &data.dst_mac, ETH_ALEN);
 
-  /* Find the next hop, initialise the destination mac and select TTL. */
-  if( CI_IP_IS_MULTICAST(ipcache->ip.ip_daddr_be32) ) {
+  if( CI_IP_IS_MULTICAST(daddr_be32) )
     ipcache->ip.ip_ttl = sock_cp->ip_mcast_ttl;
-    if( ! cicp_mcast_use_gw_mac(row, sock_cp) ) {
-      ci_ip_cache_init_mcast_mac(ni, ipcache, ipcache->ip.ip_daddr_be32);
-#if CPLANE_TEAMING
-      if( ipcache->encap.type & CICP_LLAP_TYPE_USES_HASH )
-        if( cicp_user_bond_hash_get_hwport(ni, ipcache, lrow, 
-                                           sock_cp->lport_be16,
-                                           ipcache->encap) != 0 )
-          goto alienroute;
-#endif
-      ipcache->status = retrrc_success;
-      goto check_verlock_and_out;
-    }
-    ipcache->nexthop = row->first_hop;
-  }
-  else {
+  else
     ipcache->ip.ip_ttl = sock_cp->ip_ttl;
-    if( row != NULL && row->first_hop != 0 && 
-        (sock_cp->so_bindtodevice == CI_IFID_BAD || 
-         ipcache->ifindex == row->dest_ifindex) ) {
-      ipcache->nexthop = row->first_hop;
-    }
-    else {
-      ipcache->nexthop = ipcache->ip.ip_daddr_be32;
-    }
-  }
-
-  /* Find the MAC address of the first hop destination.
-   *
-   * TODO: This requires two rmb()s, and can I think be significantly
-   * improved upon.  One approach could be to add a new verlock that is
-   * bumped both when updating the fwd+bond tables, and also when updating
-   * any mac entry.  Thus a single pair of verlock checks would suffice for
-   * this entire function.
-   */
-  osrc = cicp_mac_get(user->mac_utable, ipcache->ifindex, ipcache->nexthop,
-                      ci_ip_cache_ether_dhost(ipcache), &mac_info);
-
-  if( osrc == 0 ) {
-#if CPLANE_TEAMING
-    if( ipcache->encap.type & CICP_LLAP_TYPE_USES_HASH )
-      if( cicp_user_bond_hash_get_hwport(ni, ipcache, lrow, sock_cp->lport_be16,
-                                         ipcache->encap) != 0 )
-        goto alienroute;
-#endif
-    ipcache->mac_integrity = mac_info;
-    ipcache->status = retrrc_success;
-    if( user->mac_utable->ipmac[mac_info.row_index].need_update ) {
-      ipcache->flags |= CI_IP_CACHE_NEED_UPDATE_SOON;
-      if( user->mac_utable->ipmac[mac_info.row_index].need_update ==
-          CICP_MAC_ROW_NEED_UPDATE_STALE )
-        ipcache->flags |= CI_IP_CACHE_NEED_UPDATE_STALE;
-    }
-    goto check_verlock_and_out;
-  }
-  else if( osrc == -EDESTADDRREQ ) {
-    /* TODO out_hwport is wrong if bonding encap */
-    ipcache->mac_integrity.row_version = CI_VERLOCK_BAD;
-    ipcache->status = retrrc_nomac;
-    goto check_verlock_and_out;
-  }
-  else if( osrc == -EAGAIN ) {
-    goto again;
-  }
-  else {
-    /* TODO out_hwport is wrong if bonding encap */
-    /* At time of writing, osrc is taken from a ci_uint16, which is
-     * assigned to with either 0 or a -ve constant int.  Ugly.
-     */
-    ipcache->status = (ci_int16) osrc;
-    if( ipcache->status == -EHOSTUNREACH ) {
-      /* Treat this the same as nomac.  Arguably it would be better to
-       * handle this exception when writing the table rather than when
-       * reading it, but modifying the write code scares the willies out of
-       * me.
-       */
-      ipcache->mac_integrity.row_version = CI_VERLOCK_BAD;
-      ipcache->status = retrrc_nomac;
-      goto check_verlock_and_out;
-    }
-    goto not_onloadable;
-  }
-
- check_verlock_and_out:
-  ;
-  CICP_READ_UNLOCK(CICP_HANDLE(ni), llapt->version)
- out:
-  ci_assert(ipcache->status != -1);
-  return;
-
- not_onloadable:
-  ipcache->hwport = CI_HWPORT_ID_BAD;
-  ipcache->intf_i = -1;
-  cicp_mac_set_mostly_valid(CICP_USER_MIBS(CICP_HANDLE(ni)).mac_utable,
-                            &ipcache->mac_integrity);
-  goto check_verlock_and_out;
-
- alienroute:
-  ipcache->status = retrrc_alienroute;
-  goto not_onloadable;
-
- noroute:
-  ipcache->status = retrrc_noroute;
-  goto not_onloadable;
-
- alienroute_no_verlock:
-  ipcache->hwport = CI_HWPORT_ID_BAD;
-  ipcache->intf_i = -1;
-  cicp_mac_set_mostly_valid(CICP_USER_MIBS(CICP_HANDLE(ni)).mac_utable,
-                            &ipcache->mac_integrity);
-  ipcache->status = retrrc_alienroute;
-  goto out;
 }
 
 
@@ -521,4 +443,21 @@ cicp_ip_cache_update_from(ci_netif* ni, ci_ip_cached_hdrs* ipcache,
          sizeof(ipcache->ether_header));
 }
 
+
+int
+cicp_ipif_check_ok(struct oo_cplane_handle* cp,
+                   cicp_ipif_row_t* ipif, void* data)
+{
+  return 1;
+}
+
+int
+cicp_llap_ipif_check_onloaded(struct oo_cplane_handle* cp,
+                              cicp_llap_row_t* llap, cicp_ipif_row_t* ipif,
+                              void* data)
+{
+  ci_netif* ni = data;
+  return llap->rx_hwports != 0 &&
+         (llap->rx_hwports & ~ci_netif_get_hwport_mask(ni)) == 0;
+}
 

@@ -1,39 +1,43 @@
-NO_ZF := 1
 ifeq ($(GNU),1)
 SUBDIRS		:= ciul \
-                   nic \
                    ip \
                    citools \
                    driver \
                    ef_vi \
                    onload \
-                   cplane \
-		   rtt
+                   runbench_scripts \
+		   rtt \
+                   syscalls \
+                   tap \
+		   trade_sim
 
-OTHER_SUBDIRS	:= tweaks \
-                   syscalls
+OTHER_SUBDIRS	:=
 
 ifeq ($(ONLOAD_ONLY),1)
 SUBDIRS		:= ef_vi \
                    onload \
-                   rtt
+                   rtt \
+                   trade_sim
 endif
 
 ifneq ($(NO_ZF),1)
 ifeq (${PLATFORM},gnu_x86_64)
 ifeq ($(shell $(TOP)/$(CURRENT)/zf_apps/zf_supported.sh),1)
-SUBDIRS         += zf_apps
+SUBDIRS         += zf_apps zf_internal
 endif
 ifndef PREBUILD_ZF
 ifneq ($(ONLOAD_ONLY),1)
+SUBDIRS         += packetdrill
+ifdef ZF_DEVEL
 SUBDIRS         += zf_unit
 endif
 endif
 endif
 endif
 endif
+endif
 
-DRIVER_SUBDIRS	:= driver
+DRIVER_SUBDIRS	:=
 
 ifeq ($(FREEBSD),1)
 SUBDIRS         := ip
@@ -48,7 +52,7 @@ OTHER_SUBDIRS	:=
 endif
 
 ifeq ($(SOLARIS),1)
-SUBDIRS       	:= solaris nic ip
+SUBDIRS       	:= ip
 DRIVER_SUBDIRS	:=
 OTHER_SUBDIRS	:=
 endif

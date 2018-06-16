@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -33,6 +33,7 @@ falcon_ef_vi_receive_set_discards(ef_vi* vi, unsigned discard_err_flags)
   uint64_t mask = 1LL << RX_EV_FRM_TRUNC_LBN
                   | 1LL << RX_EV_BUF_OWNER_ID_ERR_LBN;
 
+  /* Inner checksum discard flags are ignored */
   if( discard_err_flags & EF_VI_DISCARD_RX_TOBE_DISC )
     mask |= 1LL << RX_EV_TOBE_DISC_LBN;
   if( discard_err_flags & EF_VI_DISCARD_RX_L4_CSUM_ERR )
@@ -59,6 +60,10 @@ ef10_ef_vi_receive_set_discards(ef_vi* vi, unsigned discard_err_flags)
     mask |= 1LL << ESF_DZ_RX_TCPUDP_CKSUM_ERR_LBN;
   if( discard_err_flags & EF_VI_DISCARD_RX_L3_CSUM_ERR )
     mask |= 1LL << ESF_DZ_RX_IPCKSUM_ERR_LBN;
+  if( discard_err_flags & EF_VI_DISCARD_RX_INNER_L4_CSUM_ERR )
+    mask |= 1LL << ESF_DZ_RX_INNER_TCPUDP_CKSUM_ERR_LBN;
+  if( discard_err_flags & EF_VI_DISCARD_RX_INNER_L3_CSUM_ERR )
+    mask |= 1LL << ESF_DZ_RX_INNER_IPCKSUM_ERR_LBN;
   if( discard_err_flags & EF_VI_DISCARD_RX_ETH_FCS_ERR )
     mask |= 1LL << ESF_DZ_RX_ECRC_ERR_LBN;
 

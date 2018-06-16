@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -76,8 +76,7 @@
  * The private ioctl is numbered %SIOCEFX and is implemented on
  * both sockets and a char device (/dev/sfc_control).  Sockets are
  * more reliable as they do not depend on a device node being
- * created on disk.  However, on VMware ESX only char ioctls will
- * work.
+ * created on disk.
  */
 
 /* Efx private ioctl number */
@@ -254,7 +253,10 @@ struct efx_reset_flags {
 		__u32				flow_type;
 		__u64				data;
 		struct efx_ethtool_rx_flow_spec	fs;
-		__u32				rule_cnt;
+		union {
+			__u32			rule_cnt;
+			__u32			rss_context;
+		};
 		__u32				rule_locs[0];
 	};
 	#define EFX_HAVE_EFX_ETHTOOL_RXNFC yes
@@ -298,7 +300,7 @@ struct efx_timespec {
 
 #define EFX_TS_INIT_FLAGS_PTP_V2_ENHANCED 0x80000000
 
-#if !defined(__KERNEL__) || defined(__VMKLNX__)
+#if !defined(__KERNEL__)
 
 enum {
 	SOF_TIMESTAMPING_TX_HARDWARE = (1<<0),
@@ -343,7 +345,7 @@ struct hwtstamp_config {
 	int rx_filter;
 };
 
-#endif /* !__KERNEL__ || __VMKLNX__ */
+#endif /* !__KERNEL__ */
 
 #if !defined(EFX_HAVE_NET_TSTAMP)
 
@@ -545,7 +547,16 @@ struct efx_device_ids {
 	#define ETHTOOL_GET_DUMP_DATA	0x00000040
 #endif
 
-/* Next available cmd number is 0xef29 */
+/* sfctool2 shadow ethtool interface ****************************************/
+#define EFX_SFCTOOL 0xef29
+struct efx_sfctool {
+	/* This can be any ethtool command struct from include/linux/ethtool.h.
+	 * The first element will always be __u32 cmd.
+	 */
+	void __user *data;
+};
+
+/* Next available cmd number is 0xef2a */
 
 /* Efx private ioctl command structures *************************************/
 
@@ -578,6 +589,7 @@ union efx_ioctl_data {
 	struct efx_device_ids device_ids;
 	struct efx_licensed_app_state app_state;
 	struct ethtool_dump dump;
+	struct efx_sfctool sfctool;
 };
 
 /**

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -48,11 +48,11 @@
 
 #include "linux_resource_internal.h"
 
-/* We depend on rx_channel_count being available for 
- * EFX_DRIVERLINK_API_VERSION=22, also we need vi_shift
- * values, so requesting minor version 3.
+/* We depend on rx_channel_count being available for
+ * EFX_DRIVERLINK_API_VERSION=22, also we need vi_stride
+ * and vi_shift values, so requesting minor version 5.
  */
-#define EFX_DRIVERLINK_API_VERSION_MINOR 3
+#define EFX_DRIVERLINK_API_VERSION_MINOR 0
 
 #include <driver/linux_net/driverlink_api.h>
 
@@ -60,7 +60,7 @@
  * different MINOR version.  Put this here to make sure we
  * remember. 
  */
-#if EFX_DRIVERLINK_API_VERSION != 22
+#if EFX_DRIVERLINK_API_VERSION != 23
 #error "EFX_DRIVERLINK_API_VERSION_MINOR needs updating"
 #endif
 
@@ -105,7 +105,12 @@ static struct efx_dl_driver efrm_dl_driver = {
 	.priority = EFX_DL_EV_HIGH,
 #endif
 #if EFX_DRIVERLINK_API_VERSION >= 8
-	.flags = EFX_DL_DRIVER_CHECKS_FALCON_RX_USR_BUF_SIZE,
+	.flags = EFX_DL_DRIVER_CHECKS_FALCON_RX_USR_BUF_SIZE
+#if EFX_DRIVERLINK_API_VERSION > 22 || (EFX_DRIVERLINK_API_VERSION == 22 && \
+                                        EFX_DRIVERLINK_API_VERSION_MINOR > 4)
+		 | EFX_DL_DRIVER_CHECKS_MEDFORD2_VI_STRIDE
+#endif
+		 ,
 #endif
 	.probe = efrm_dl_probe,
 	.remove = efrm_dl_remove,
@@ -144,8 +149,22 @@ init_vi_resource_dimensions(struct vi_resource_dimensions *rd,
 #else
 		rd->vi_shift = 0;
 #endif
-		EFRM_TRACE("Using VI range %d+(%d-%d)<<%d", rd->vi_base,
-			   rd->vi_min, rd->vi_lim, rd->vi_shift);
+#if EFX_DRIVERLINK_API_VERSION > 22 || (EFX_DRIVERLINK_API_VERSION == 22 && \
+					EFX_DRIVERLINK_API_VERSION_MINOR > 4)
+		rd->mem_bar = ef10_res->mem_bar;
+		rd->vi_stride = ef10_res->vi_stride;
+#else
+		rd->mem_bar = VI_RES_MEM_BAR_UNDEFINED;
+		rd->vi_stride = ER_DZ_EVQ_RPTR_REG_STEP;
+#endif
+		/* assume all the register STEPS are identical */
+		EFRM_BUILD_ASSERT(ER_DZ_EVQ_RPTR_REG_STEP == ER_DZ_EVQ_TMR_REG_STEP);
+		EFRM_BUILD_ASSERT(ER_DZ_EVQ_RPTR_REG_STEP == ER_DZ_RX_DESC_UPD_REG_STEP);
+		EFRM_BUILD_ASSERT(ER_DZ_EVQ_RPTR_REG_STEP == ER_DZ_TX_DESC_UPD_REG_STEP);
+
+		EFRM_TRACE("Using VI range %d+(%d-%d)<<%d bar %d ws 0x%x", rd->vi_base,
+			   rd->vi_min, rd->vi_lim, rd->vi_shift,
+			   rd->mem_bar, rd->vi_stride);
 #endif
 #if EFX_DRIVERLINK_API_VERSION >= 18
 		rd->vport_id = ef10_res->vport_id;
@@ -282,8 +301,9 @@ efrm_dl_probe(struct efx_dl_device *efrm_dev,
 
 	init_vi_resource_dimensions(&res_dim, falcon_res, sriov_res, ef10_res);
 
-	rc = efrm_nic_add(efrm_dev, probe_flags, net_dev->dev_addr, &lnic,
-			  biu_lock, &res_dim, net_dev->ifindex,
+	rc = efrm_nic_add(efrm_dev, probe_flags,
+			  (/*no const*/ struct net_device *)net_dev,
+			  &lnic, biu_lock, &res_dim,
                           timer_quantum_ns, hash_prefix, rx_usr_buf_size);
 	if (rc != 0)
 		return rc;
@@ -322,6 +342,8 @@ static void efrm_dl_remove(struct efx_dl_device *efrm_dev)
 		 * have already cleared [lnic->dl_device], no new calls can
 		 * start. */
 		efhw_nic_flush_dl(nic);
+
+		efrm_nic_unplug(nic, efrm_dev);
 
 		/* Absent hardware is treated as a protracted reset. */
 		efrm_nic_reset_suspend(nic);
@@ -388,6 +410,21 @@ static void efrm_dl_reset_resume(struct efx_dl_device *efrm_dev, int ok)
 				   __FUNCTION__, nic->vi_shift, 
 				   ef10_res->vi_shift);
 			nic->vi_shift = ef10_res->vi_shift;
+		}
+#endif
+#if EFX_DRIVERLINK_API_VERSION > 22 || (EFX_DRIVERLINK_API_VERSION == 22 && \
+					EFX_DRIVERLINK_API_VERSION_MINOR > 4)
+		if( nic->ctr_ap_bar != ef10_res->mem_bar ) {
+			EFRM_TRACE("%s: mem_bar changed from %d to %d\n",
+				   __FUNCTION__, nic->ctr_ap_bar,
+				   ef10_res->mem_bar);
+			nic->ctr_ap_bar = ef10_res->mem_bar;
+		}
+		if( nic->vi_stride != ef10_res->vi_stride ) {
+			EFRM_TRACE("%s: vi_stride changed from %d to %d\n",
+				   __FUNCTION__, nic->vi_stride,
+				   ef10_res->vi_stride);
+			nic->vi_stride = ef10_res->vi_stride;
 		}
 #endif
 	}

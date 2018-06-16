@@ -340,8 +340,8 @@ def SwapSrcDest( bits ):
 	rval['dest']		= bits['source']
 	return rval
 
-def MakeSysFsRuleFromLine( line, options ):
-	''' Turn a line (from iptables -L) into another line, in SysFs format (going via a map). '''
+def MakeSysFsRulesFromLine( line, options ):
+	''' Turn a line (from iptables -L) into SysFs format rules for each interface '''
 	comment,good = StripComments(line)
 	if comment:
 		# It's ok to not have a valid rule if it's potentially a comment rule.
@@ -353,10 +353,9 @@ def MakeSysFsRuleFromLine( line, options ):
 		# Otherwise, we do need to propogate exceptions
 		bits = GenerateBits(good)
 	rulemap = ComprehensibleIpRule( bits, options.strict, options.treat_as_outgoing )
-	#print "@rulemap", rulemap
 	interfaces = GetInterfaces( options )
 	rules = RuleFromInterface( interfaces, rulemap )
-	return ( comment, "\n".join( rules ) )
+	return ( comment, rules )
 
 def PrintFrom(x, options):
 	''' Prints the rules, one at a time '''
@@ -365,7 +364,8 @@ def PrintFrom(x, options):
 	for line in x:
 		print ( line )
 		try:
-			comment, sysfs = MakeSysFsRuleFromLine(line, options)
+			comment, rules = MakeSysFsRulesFromLine(line, options)
+			sysfs = "\n".join( rules )
 			print ( "=> %s" % sysfs )
 			if comment:
 				print ( "=> /* %s */" %comment )
@@ -403,8 +403,8 @@ def OutputFilterRulesFrom(x, options):
 	failure_count = 0
 	for line in x:
 		try:
-			comment, rule = MakeSysFsRuleFromLine(line, options)
-			all_rules.append( rule )
+			comment, rules = MakeSysFsRulesFromLine(line, options)
+			all_rules.extend( rules )
 			if comment:
 				# A comment is ALWAYS something we can skip
 				sys.stderr.write( "Comment skipped: %s\n"%comment )

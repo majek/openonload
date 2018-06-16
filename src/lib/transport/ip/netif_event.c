@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -131,12 +131,12 @@ static void handle_rx_pkt(ci_netif* netif, struct ci_netif_poll_state* ps,
    */
   int not_fast, ip_paylen, ip_tot_len;
   ci_ip4_hdr *ip;
+  ci_uint16 ether_type = *((ci_uint16*)oo_l3_hdr(pkt) - 1);
 
   ci_assert_nequal(pkt->pkt_eth_payload_off, 0xff);
 
   ip = oo_ip_hdr(pkt);
-  LOG_NR(log(LPF "RX id=%d ether_type=0x%04x ip_proto=0x%x", OO_PKT_FMT(pkt),
-             (unsigned) CI_BSWAP_BE16(oo_ether_type_get(pkt)),
+  LOG_NR(log(LPF "RX id=%d ip_proto=0x%x", OO_PKT_FMT(pkt),
              (unsigned) ip->ip_protocol));
   LOG_AR(ci_analyse_pkt(PKT_START(pkt), pkt->pay_len));
 
@@ -144,9 +144,8 @@ static void handle_rx_pkt(ci_netif* netif, struct ci_netif_poll_state* ps,
   if( CI_UNLIKELY(rand() < NI_OPTS(netif).rx_drop_rate) )  goto drop;
 #endif
 
-  /* Is this an IP packet?  Yes -- hardware only delivers us IPv4 at time
-  ** of writing. */
-  if(CI_LIKELY( 1 || oo_ether_type_get(pkt) == CI_ETHERTYPE_IP )) {
+  /* Is this an IP packet? */
+  if(CI_LIKELY( ether_type == CI_ETHERTYPE_IP )) {
     CI_IPV4_STATS_INC_IN_RECVS( netif );
 
     /* Do the byte-swap just once! */
@@ -161,7 +160,7 @@ static void handle_rx_pkt(ci_netif* netif, struct ci_netif_poll_state* ps,
     /* Hardware will not deliver us fragments.  Check for IP options and
     ** valid IP length. */
     not_fast = ((ip->ip_ihl_version-CI_IP4_IHL_VERSION(sizeof(*ip))) |
-                (ip_tot_len > pkt->pay_len - oo_ether_hdr_size(pkt)));
+                (ip_tot_len > pkt->pay_len - oo_pre_l3_len(pkt)));
     /* NB. If you want to check for fragments, add this:
     **
     **  (ip->ip_frag_off_be16 & ~CI_IP4_FRAG_DONT)
@@ -175,14 +174,17 @@ static void handle_rx_pkt(ci_netif* netif, struct ci_netif_poll_state* ps,
 
     if( CI_LIKELY(not_fast == 0) ) {
       char* payload = (char*) ip + sizeof(ci_ip4_hdr);
+#if CI_CFG_TIMESTAMPING
       ci_netif_state_nic_t* nsn = &netif->state->nic[pkt->intf_i];
       struct timespec stamp;
+#endif
 
       ip_paylen = (int) ip_tot_len - sizeof(ci_ip4_hdr);
       /* This will go negative if the ip_tot_len was too small even
       ** for the IP header.  The ULP is expected to notice...
       */
 
+#if CI_CFG_TIMESTAMPING
       if( nsn->oo_vi_flags & OO_VI_FLAGS_RX_HW_TS_EN ) {
         unsigned sync_flags;
         int rc = ef_vi_receive_get_timestamp_with_sync_flags
@@ -212,19 +214,24 @@ static void handle_rx_pkt(ci_netif* netif, struct ci_netif_poll_state* ps,
         /* no need to set tv_nsec to 0 here as socket layer ignores
          * timestamps when tv_sec is 0
          */
+#endif
 
       /* Demux to appropriate protocol. */
       if( ip->ip_protocol == IPPROTO_TCP ) {
+#if CI_CFG_TIMESTAMPING
         pkt->pf.tcp_rx.rx_hw_stamp.tv_sec = stamp.tv_sec;
         pkt->pf.tcp_rx.rx_hw_stamp.tv_nsec = stamp.tv_nsec;
+#endif
         ci_tcp_handle_rx(netif, ps, pkt, (ci_tcp_hdr*) payload, ip_paylen);
         CI_IPV4_STATS_INC_IN_DELIVERS( netif );
         return;
       }
 #if CI_CFG_UDP
       else if(CI_LIKELY( ip->ip_protocol == IPPROTO_UDP )) {
+#if CI_CFG_TIMESTAMPING
         pkt->pf.udp.rx_hw_stamp.tv_sec = stamp.tv_sec;
         pkt->pf.udp.rx_hw_stamp.tv_nsec = stamp.tv_nsec;
+#endif
         ci_udp_handle_rx(netif, pkt, (ci_udp_hdr*) payload, ip_paylen);
         CI_IPV4_STATS_INC_IN_DELIVERS( netif );
         return;
@@ -244,15 +251,22 @@ static void handle_rx_pkt(ci_netif* netif, struct ci_netif_poll_state* ps,
               (unsigned) ip->ip_frag_off_be16,
               ip_tot_len, pkt->pay_len, PKT_DBG_ARGS(pkt)));
     LOG_DU(ci_hex_dump(ci_log_fn, PKT_START(pkt), 64, 0));
-    ci_netif_pkt_release_rx_1ref(netif, pkt);
+    CI_IPV4_STATS_INC_IN_DISCARDS( netif );
+    if( ci_netif_pkt_pass_to_kernel(netif, pkt) )
+      CITP_STATS_NETIF_INC(netif, no_match_pass_to_kernel_ip_other);
+    else
+      ci_netif_pkt_release_rx_1ref(netif, pkt);
     return;
   }
 
-  LOG_U(log(LPF "UNEXPECTED ether_type=%04x"PKT_DBG_FMT,
-            (unsigned) CI_BSWAP_BE16(oo_ether_type_get(pkt)),
-            PKT_DBG_ARGS(pkt));
-        ci_hex_dump(ci_log_fn, PKT_START(pkt), 64, 0));
-  ci_netif_pkt_release_rx_1ref(netif, pkt);
+  if( ci_netif_pkt_pass_to_kernel(netif, pkt) ) {
+    CITP_STATS_NETIF_INC(netif, no_match_pass_to_kernel_non_ip);
+  }
+  else {
+    LOG_U(log(LPF "UNEXPECTED ether_type "PKT_DBG_FMT, PKT_DBG_ARGS(pkt));
+          ci_hex_dump(ci_log_fn, PKT_START(pkt), 64, 0));
+    ci_netif_pkt_release_rx_1ref(netif, pkt);
+  }
   return;
 
 #if CI_CFG_RANDOM_DROP && !defined(__ci_driver__)
@@ -401,36 +415,49 @@ static int handle_rx_csum_bad(ci_netif* ni, struct ci_netif_poll_state* ps,
   ci_ip4_hdr *ip;
   int ip_paylen;
   int ip_len;
-
-  ci_parse_rx_vlan(pkt);
+  int min_ip_paylen;
 
   /* Packet reached onload -- so must be IP and must at least reach the TCP
    * or UDP header.
    */
-  ci_assert_equal(oo_ether_type_get(pkt), CI_ETHERTYPE_IP);
-
+  ci_parse_rx_vlan(pkt);
   pkt->pay_len = frame_len;
   oo_offbuf_init(&pkt->buf, PKT_START(pkt), pkt->pay_len);
-  if( pkt->pay_len <=
-      sizeof(ci_tcp_hdr) + sizeof(ci_ip4_hdr) + oo_ether_hdr_size(pkt) ) {
+
+  /* Check that we have at least a full IP-header's-worth of data before we
+   * start touching it. */
+  if( pkt->pay_len < oo_pre_l3_len(pkt) + sizeof(ci_ip4_hdr) ) {
     CI_IPV4_STATS_INC_IN_HDR_ERRS(ni);
     LOG_U(log(FN_FMT "BAD frame_len=%d",
               FN_PRI_ARGS(ni), pkt->pay_len));
     goto drop;
   }
-  
+
   ip = oo_ip_hdr(pkt);
   ip_len = CI_BSWAP_BE16(ip->ip_tot_len_be16);
   ip_paylen = ip_len - sizeof(ci_ip4_hdr);
-  if( pkt->pay_len < oo_ether_hdr_size(pkt) + ip_len ||
-      ip_paylen < sizeof(ci_tcp_hdr) ) {
+  /* Strictly speaking, we should validate the IP checksum before relying on
+   * the protocol field, but nothing will go wrong in the event that it's
+   * invalid. */
+  min_ip_paylen = ip->ip_protocol == IPPROTO_UDP ? sizeof(ci_udp_hdr) :
+                                                   sizeof(ci_tcp_hdr);
+
+  /* Check that we have a full-length transport-layer header. */
+  if( pkt->pay_len < oo_pre_l3_len(pkt) + sizeof(ci_ip4_hdr) + min_ip_paylen ) {
     CI_IPV4_STATS_INC_IN_HDR_ERRS(ni);
-    LOG_U(log(FN_FMT "BAD ip_len=%d frame_len=%d",
-              FN_PRI_ARGS(ni), ip_len, pkt->pay_len));
+    LOG_U(log(FN_FMT "BAD min_ip_paylen=%d frame_len=%d",
+              FN_PRI_ARGS(ni), min_ip_paylen, pkt->pay_len));
     goto drop;
   }
 
-  if( ! ci_ip_csum_correct(ip, pkt->pay_len - oo_ether_hdr_size(pkt)) ) {
+  if( pkt->pay_len < oo_pre_l3_len(pkt) + ip_len || ip_paylen < min_ip_paylen ){
+    CI_IPV4_STATS_INC_IN_HDR_ERRS(ni);
+    LOG_U(log(FN_FMT "BAD ip_len=%d min_ip_paylen=%d frame_len=%d",
+              FN_PRI_ARGS(ni), ip_len, min_ip_paylen, pkt->pay_len));
+    goto drop;
+  }
+
+  if( ! ci_ip_csum_correct(ip, pkt->pay_len - oo_pre_l3_len(pkt)) ) {
     CI_IPV4_STATS_INC_IN_HDR_ERRS(ni);
     LOG_U(log(FN_FMT "IP BAD CHECKSUM", FN_PRI_ARGS(ni)));
     goto drop;
@@ -495,14 +522,13 @@ static void handle_rx_no_desc_trunc(ci_netif* ni,
 }
 
 
-static void handle_rx_discard(ci_netif* ni, struct ci_netif_poll_state* ps,
-                              int intf_i, struct oo_rx_state* s, ef_event ev)
+static void __handle_rx_discard(ci_netif* ni, struct ci_netif_poll_state* ps,
+                                int intf_i, struct oo_rx_state* s, ef_event ev,
+                                int frame_len, int discard_type, oo_pkt_p pp)
 {
-  int discard_type = EF_EVENT_RX_DISCARD_TYPE(ev), is_frag;
+  int is_frag;
   ci_ip_pkt_fmt* pkt;
-  oo_pkt_p pp;
   int handled = 0;
-  int frame_len;
 
   LOG_U(log(LPF "[%d] intf %d RX_DISCARD %d "EF_EVENT_FMT,
             NI_ID(ni), intf_i,
@@ -519,25 +545,26 @@ static void handle_rx_discard(ci_netif* ni, struct ci_netif_poll_state* ps,
    * checksum (especially so for packets long enough to fragment); and
    * (iii) validating the hardware's decision in the multiple
    * fragments case would require significantly more code
+   *
+   * By avoiding the more complex fragmented path, which differs between
+   * normal and high throughput VIs, we also allow a common discard path.
    */
   if( (is_frag = (s->frag_pkt != NULL)) ) {
     ci_netif_pkt_release_rx_1ref(ni, s->frag_pkt);
     s->frag_pkt = NULL;
   }
 
-  OO_PP_INIT(ni, pp, EF_EVENT_RX_DISCARD_RQ_ID(ev));
   pkt = PKT_CHK(ni, pp);
 
-  frame_len = EF_EVENT_RX_DISCARD_BYTES(ev) - 
-    ni->nic_hw[intf_i].vi.rx_prefix_len;
-
-  if( EF_EVENT_RX_DISCARD_TYPE(ev) == EF_EVENT_RX_DISCARD_CSUM_BAD && 
-      !is_frag )
+  if( discard_type == EF_EVENT_RX_DISCARD_CSUM_BAD && !is_frag )
     handled = handle_rx_csum_bad(ni, ps, pkt, frame_len);
   
   switch( discard_type ) {
   case EF_EVENT_RX_DISCARD_CSUM_BAD:
     CITP_STATS_NETIF_INC(ni, rx_discard_csum_bad);
+    break;
+  case EF_EVENT_RX_DISCARD_INNER_CSUM_BAD:
+    CITP_STATS_NETIF_INC(ni, rx_discard_inner_csum_bad);
     break;
   case EF_EVENT_RX_DISCARD_MCAST_MISMATCH:
     CITP_STATS_NETIF_INC(ni, rx_discard_mcast_mismatch);
@@ -570,6 +597,37 @@ static void handle_rx_discard(ci_netif* ni, struct ci_netif_poll_state* ps,
 
     ci_netif_pkt_release_rx_1ref(ni, pkt);
   }
+}
+
+
+static void handle_rx_discard(ci_netif* ni, struct ci_netif_poll_state* ps,
+                              int intf_i, struct oo_rx_state* s, ef_event ev)
+{
+  int discard_type = EF_EVENT_RX_DISCARD_TYPE(ev);
+  int frame_len = EF_EVENT_RX_DISCARD_BYTES(ev) -
+                  ni->nic_hw[intf_i].vi.rx_prefix_len;
+  oo_pkt_p pp;
+  OO_PP_INIT(ni, pp, EF_EVENT_RX_DISCARD_RQ_ID(ev));
+
+  __handle_rx_discard(ni, ps, intf_i, s, ev, frame_len, discard_type, pp);
+}
+
+
+static void handle_rx_multi_discard(ci_netif* ni,
+                                    struct ci_netif_poll_state* ps, int intf_i,
+                                    struct oo_rx_state* s, ef_event ev,
+                                    ef_request_id id, ef_vi* vi)
+{
+  int discard_type = EF_EVENT_RX_MULTI_DISCARD_TYPE(ev);
+  uint16_t frame_len;
+  oo_pkt_p pp;
+  ci_ip_pkt_fmt* pkt;
+
+  OO_PP_INIT(ni, pp, id);
+  pkt = PKT_CHK(ni, pp);
+  ef_vi_receive_get_bytes(vi, pkt->dma_start, &frame_len);
+
+  __handle_rx_discard(ni, ps, intf_i, s, ev, frame_len, discard_type, pp);
 }
 
 
@@ -615,7 +673,8 @@ static void process_post_poll_list(ci_netif* ni)
         ++sb->sleep_seq.rw.tx;
       ci_mb();
 
-      lists_need_wake |= 1 << sb->ready_list_id;
+      lists_need_wake |= sb->ready_lists_in_use;
+
       if( ! (sb->sb_flags & sb->wake_request) ) {
         sb->sb_flags = 0;
       }
@@ -649,15 +708,16 @@ static void process_post_poll_list(ci_netif* ni)
 
   CHECK_NI(ni);
 
+  /* Shouldn't have had a wake for a list we don't think exists */
+  ci_assert_equal(lists_need_wake & ~((1 << CI_CFG_N_READY_LISTS)-1), 0);
+
 #ifndef __KERNEL__
   /* See if any of the ready lists need a wake.  We only bother checking if
-   * we're not going to do a wake anyway, and we don't check list 0, as that's
-   * just a dummy list, for things that aren't on a real one.
+   * we're not going to do a wake anyway.
    */
-  if( need_wake == 0 ) {
-    for( i = 1; i < CI_CFG_N_READY_LISTS; i++ ) {
-      if( (lists_need_wake & (1 << i)) &&
-          (ni->state->ready_list_flags[i] & CI_NI_READY_LIST_FLAG_WAKE) ) {
+  if( need_wake == 0 && lists_need_wake != 0 ) {
+    CI_READY_LIST_EACH(lists_need_wake, lists_need_wake, i) {
+      if( ni->state->ready_list_flags[i] & CI_NI_READY_LIST_FLAG_WAKE ) {
         need_wake = 1;
         break;
       }
@@ -668,18 +728,14 @@ static void process_post_poll_list(ci_netif* ni)
   if( need_wake )
     ef_eplock_holder_set_flag(&ni->state->lock, CI_EPLOCK_NETIF_NEED_WAKE);
 
-  /* Shouldn't have had a wake for a list we don't think exists */
-  ci_assert_equal(lists_need_wake & ~((1 << (CI_CFG_N_READY_LISTS + 1))-1), 0);
-
 #ifdef __KERNEL__
   /* Check whether any ready lists associated with a set need to be woken.
-   * We don't check ready list 0 as that is the dummy list, used for all socks
-   * that aren't associated with a specific set, so never needs a wakeup.
    */
-  for( i = 1; i < CI_CFG_N_READY_LISTS; i++ )
+  CI_READY_LIST_EACH(lists_need_wake, lists_need_wake, i) {
     if( (lists_need_wake & (1 << i)) &&
         (ni->state->ready_list_flags[i] & CI_NI_READY_LIST_FLAG_WAKE) )
       efab_tcp_helper_ready_list_wakeup(netif2tcp_helper_resource(ni), i);
+  }
 #endif
 }
 
@@ -719,12 +775,14 @@ static void ci_netif_tx_pkt_complete_udp(ci_netif* netif,
     }
   }
 
+#if CI_CFG_TIMESTAMPING
   /* linux/Documentation/networking/timestamping.txt:
    * If the outgoing packet has to be fragmented, then only the first
    * fragment is time stamped and returned to the sending socket. */
   if( pkt->flags & CI_PKT_FLAG_TX_TIMESTAMPED &&
       ci_udp_timestamp_q_enqueue(netif, us, pkt) == 0 )
     return;
+#endif
 
   /* Free this packet and all the fragments if possible. */
   while( 1 ) {
@@ -766,6 +824,7 @@ ci_inline void __ci_netif_tx_pkt_complete(ci_netif* ni,
     pkt->pio_addr = -1;
   }
 #endif
+#if CI_CFG_TIMESTAMPING
   if( pkt->flags & CI_PKT_FLAG_TX_TIMESTAMPED ) {
     if( ev != NULL && EF_EVENT_TYPE(*ev) == EF_EVENT_TYPE_TX_WITH_TIMESTAMP ) {
       int opt_tsf = ((NI_OPTS(ni).timestamping_reporting) &
@@ -781,8 +840,15 @@ ci_inline void __ci_netif_tx_pkt_complete(ci_netif* ni,
                     ((pkt_tsf & opt_tsf) ?
                      CI_IP_PKT_HW_STAMP_FLAG_IN_SYNC : 0);
     }
+    else if( ev == NULL ) {
+      /* This is NIC reset. The TIMESTAMPED flag needs to stay
+       * to ensure client is notified of missing timestamp -
+       * important to keep TCP timestamps in sync with
+       * TCP stream */
+      pkt->tx_hw_stamp.tv_sec = 0;
+      pkt->tx_hw_stamp.tv_nsec = 0;
+    }
     else {
-      /* Fixme: suppress this message if ev=NULL as a result of reset? */
       if( CI_NETIF_TX_VI(ni, pkt->intf_i, ev->tx_timestamp.q_id)->vi_flags &
           EF_VI_TX_TIMESTAMPS ) {
         ci_log("ERROR: TX timestamp requested, but non-timestamped "
@@ -792,7 +858,19 @@ ci_inline void __ci_netif_tx_pkt_complete(ci_netif* ni,
     }
 
   }
+#endif
 
+#if CI_CFG_CTPIO
+  if( pkt->flags & CI_PKT_FLAG_TX_CTPIO ) {
+    /* We tried to send the packet by CTPIO.  Check whether this was
+     * successful. */
+    if( ! EF_EVENT_TX_CTPIO(*ev) ) {
+      ci_netif_ctpio_desist(ni, pkt->intf_i);
+      CITP_STATS_NETIF_INC(ni, ctpio_dma_fallbacks);
+    }
+    pkt->flags &= ~CI_PKT_FLAG_TX_CTPIO;
+  }
+#endif
 
   pkt->flags &=~ CI_PKT_FLAG_TX_PENDING;
 #if CI_CFG_UDP
@@ -823,6 +901,7 @@ static int ci_netif_poll_evq(ci_netif* ni, struct ci_netif_poll_state* ps,
   ef_event *ev = ni->events;
   int i, n_evs;
   oo_pkt_p pp;
+  int completed_tx = 0;
 
   s.frag_pkt = NULL;
   s.frag_bytes = 0;  /*??*/
@@ -882,6 +961,7 @@ static int ci_netif_poll_evq(ci_netif* ni, struct ci_netif_poll_state* ps,
           ++ni->state->nic[intf_i].tx_dmaq_done_seq;
           __ci_netif_tx_pkt_complete(ni, ps, pkt, &ev[i]);
         }
+        completed_tx = 1;
       }
 
       else if( EF_EVENT_TYPE(ev[i]) == EF_EVENT_TYPE_RX_MULTI ) {
@@ -924,6 +1004,7 @@ static int ci_netif_poll_evq(ci_netif* ni, struct ci_netif_poll_state* ps,
         pkt = PKT_CHK(ni, pp);
         ++ni->state->nic[intf_i].tx_dmaq_done_seq;
         __ci_netif_tx_pkt_complete(ni, ps, pkt, &ev[i]);
+        completed_tx = 1;
       }
 
       else if( EF_EVENT_TYPE(ev[i]) == EF_EVENT_TYPE_RX_NO_DESC_TRUNC ) {
@@ -932,6 +1013,18 @@ static int ci_netif_poll_evq(ci_netif* ni, struct ci_netif_poll_state* ps,
 
       else if( EF_EVENT_TYPE(ev[i]) == EF_EVENT_TYPE_RX_DISCARD ) {
         handle_rx_discard(ni, ps, intf_i, &s, ev[i]);
+      }
+
+      else if( EF_EVENT_TYPE(ev[i]) == EF_EVENT_TYPE_RX_MULTI_DISCARD ) {
+        ef_request_id *ids = ni->rx_events;
+        int n_ids, j;
+        ef_vi* vi = CI_NETIF_RX_VI(ni, intf_i, ev[i].rx.q_id);
+        n_ids = ef_vi_receive_unbundle(vi, &ev[i], ids);
+        ci_assert_ge(n_ids, 0);
+        ci_assert_le(n_ids, sizeof(ni->rx_events) / sizeof(ids[0]));
+
+        for( j = 0; j < n_ids; ++j )
+          handle_rx_multi_discard(ni, ps, intf_i, &s, ev[i], ids[j], vi);
       }
 
       else if( EF_EVENT_TYPE(ev[i]) == EF_EVENT_TYPE_TX_ERROR ) {
@@ -974,6 +1067,10 @@ static int ci_netif_poll_evq(ci_netif* ni, struct ci_netif_poll_state* ps,
 
     total_evs += n_evs;
   } while( total_evs < NI_OPTS(ni).evs_per_poll );
+
+  /* If we've drained the TXQ, we can start trying CTPIO again. */
+  if( completed_tx && ef_vi_transmit_fill_level(&ni->nic_hw[intf_i].vi) == 0 )
+    ci_netif_ctpio_resume(ni, intf_i);
 
   if( s.frag_pkt != NULL ) {
     s.frag_pkt->pay_len = s.frag_bytes;
@@ -1046,18 +1143,6 @@ static int ci_netif_poll_intf(ci_netif* ni, int intf_i, int max_evs)
     ci_netif_tx_progress(ni, intf_i);
   if( ci_netif_dmaq_not_empty(ni, intf_i) )
     ci_netif_dmaq_shove1(ni, intf_i);
-
-#ifdef __KERNEL__
-  /* If the stack is under destruction, and we've received all TX complete
-   * events - wake it up. */
-  if( netif2tcp_helper_resource(ni)->k_ref_count & TCP_HELPER_K_RC_DEAD ) {
-    if( ni->state->nic[intf_i].tx_dmaq_insert_seq ==
-        ni->state->nic[intf_i].tx_dmaq_done_seq )
-      complete(&netif2tcp_helper_resource(ni)->complete);
-    else
-      tcp_helper_request_wakeup_nic(netif2tcp_helper_resource(ni), intf_i);
-  }
-#endif
 
   return total_evs;
 }
@@ -1189,6 +1274,23 @@ int ci_netif_poll_n(ci_netif* netif, int max_evs)
   }
   ci_assert_equal(netif->state->n_looppkts, 0);
   --netif->state->in_poll;
+
+  /* If we've got packets that need to be forwarded to the kernel, and they are
+   * sufficiently numerous or sufficiently old, do the forwarding when we drop
+   * the lock. */
+  if( ! OO_PP_IS_NULL(netif->state->kernel_packets_head) ) {
+    ci_uint64 frc;
+    ci_frc64(&frc);
+
+    ci_assert_gt(netif->state->kernel_packets_pending, 0);
+
+    if( netif->state->kernel_packets_pending >=
+        NI_OPTS(netif).kernel_packets_batch_size ||
+        frc - netif->state->kernel_packets_last_forwarded >=
+        netif->state->kernel_packets_cycles )
+      ef_eplock_holder_set_flag(&netif->state->lock,
+                                CI_EPLOCK_NETIF_KERNEL_PACKETS);
+  }
 
   /* Timer code can't use in-poll wakeup, since endpoints are out of
    * post-poll list.  So, poll timers after --in_poll. */

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -72,12 +72,24 @@ oo_close(ci_fd_t fp)
   return 0;
 }
 
+ci_inline int
+oo_resource_op(ci_fd_t fp, ci_uint32 cmd, void* io)
+{
+  int r;
+  int saved_errno = errno;
+  if( (r = ci_sys_ioctl(fp, cmd, io)) < 0 ) {
+    r = -errno;
+    errno = saved_errno;
+  }
+  return r;
+}
+
+
 /*! \i_efab_unix */
 ci_inline int
 oo_resource_alloc(ci_fd_t fp, ci_resource_onload_alloc_t* io)
 {
-  if( ci_sys_ioctl(fp, OO_IOC_RESOURCE_ONLOAD_ALLOC, io) < 0 )  return -errno;
-  return 0;
+  return oo_resource_op(fp, OO_IOC_RESOURCE_ONLOAD_ALLOC, io);
 }
 
 
@@ -86,20 +98,31 @@ oo_resource_alloc(ci_fd_t fp, ci_resource_onload_alloc_t* io)
 #define OO_MMAP_FLAG_READONLY 1
 #define OO_MMAP_FLAG_FIXED    2
 ci_inline int
-oo_resource_mmap(ci_fd_t fp, unsigned map_id, unsigned bytes, int flags,
-                 void** p_out)
+oo_resource_mmap(ci_fd_t fp, ci_uint8 map_type, unsigned long map_id,
+                 unsigned bytes, int flags, void** p_out)
 {
   int mmap_prot = PROT_READ;
   int mmap_flags = MAP_SHARED;
+  int saved_errno = errno;
+
+  off_t offset = map_id << OO_MMAP_ID_SHIFT;
+  offset |= ((off_t) map_type) << OO_MMAP_TYPE_SHIFT;
+#ifndef OO_MMAP_TYPE_DSHM
+  ci_assert_equal(map_type, OO_MMAP_TYPE_NETIF);
+#endif
 
   if( ! (flags & OO_MMAP_FLAG_READONLY) )
     mmap_prot |= PROT_WRITE;
   if( flags & OO_MMAP_FLAG_FIXED )
     mmap_flags |= MAP_FIXED;
-  *p_out = mmap((flags & OO_MMAP_FLAG_FIXED) ? *p_out : (void*) 0,
-                bytes, mmap_prot,
-                mmap_flags, fp, map_id << CI_NETIF_MMAP_ID_SHIFT);
-  return *p_out != MAP_FAILED ? 0 : -errno;
+  *p_out = mmap((flags & OO_MMAP_FLAG_FIXED) ? *p_out : (void*) 0, bytes,
+                mmap_prot, mmap_flags, fp, offset);
+  if( *p_out == MAP_FAILED ) {
+    int rc = -errno;
+    errno = saved_errno;
+    return rc;
+  }
+  return 0;
 }
 
 
@@ -111,72 +134,44 @@ oo_resource_munmap(ci_fd_t fp, void* ptr, int bytes)
   return 0;
 }
 
-ci_inline int
-oo_resource_op(ci_fd_t fp, ci_uint32 cmd, void* io)
-{
-  int r;
-  if( (r = ci_sys_ioctl(fp, cmd, io)) < 0 )  return -errno;
-  return r;
-}
-
-
 /*! \i_efab_unix */
 ci_inline int
 oo_ipid_range_alloc(ci_fd_t fp, ci_int32* what)
 {
-  if( ci_sys_ioctl(fp, OO_IOC_IPID_RANGE_ALLOC, what) < 0) return -errno;
-  return 0;
+  return oo_resource_op(fp, OO_IOC_IPID_RANGE_ALLOC, what);
 }
 
 /*! \i_efab_unix */
 ci_inline int
 oo_ipid_range_free(ci_fd_t fp, ci_int32 *what)
 {
-  if (ci_sys_ioctl(fp, OO_IOC_IPID_RANGE_FREE, what) < 0) return -errno;
-  return 0;
+  return oo_resource_op(fp, OO_IOC_IPID_RANGE_FREE, what);
 }
 
 /*! \i_efab_unix */
 ci_inline int
 oo_ep_info(ci_fd_t fp, ci_ep_info_t* io)
 {
-  if( ci_sys_ioctl(fp, OO_IOC_EP_INFO, io) < 0 )  return -errno;
-  return 0;
+  return oo_resource_op(fp, OO_IOC_EP_INFO, io);
+}
+
+ci_inline int
+oo_vi_stats_query(ci_fd_t fp, int intf_i, void* data, int data_len,
+                  int do_reset)
+{
+  ci_vi_stats_query_t io;
+  io.intf_i = intf_i;
+  CI_USER_PTR_SET(io.stats_data, data);
+  io.data_len = data_len;
+  io.do_reset = do_reset;
+
+  return oo_resource_op(fp, OO_IOC_VI_STATS_QUERY, &io);
 }
 
 ci_inline int
 oo_debug_op(ci_fd_t fp, ci_debug_onload_op_t *io)
 {
-  if (ci_sys_ioctl(fp, OO_IOC_DEBUG_OP, io) < 0) return -errno;
-  return 0;
-}
-
-ci_inline int
-oo_config_set (ci_fd_t fp, ci_cfg_ioctl_desc_t *desc)
-{
-  if (ci_sys_ioctl(fp, OO_IOC_CFG_SET, desc) < 0) return -errno;
-  return 0;
-}
-
-ci_inline int
-oo_config_unset (ci_fd_t fp, ci_cfg_ioctl_desc_t *desc)
-{
-  if (ci_sys_ioctl(fp, OO_IOC_CFG_UNSET, desc) < 0) return -errno;
-  return 0;
-}
-
-ci_inline int
-oo_config_get (ci_fd_t fp, ci_cfg_ioctl_desc_t *desc)
-{
-  if (ci_sys_ioctl(fp, OO_IOC_CFG_GET, desc) < 0) return -errno;
-  return 0;
-}
-
-ci_inline int
-oo_config_query (ci_fd_t fp, ci_cfg_ioctl_desc_t *desc)
-{
-  if (ci_sys_ioctl(fp, OO_IOC_CFG_QUERY, desc) < 0) return -errno;
-  return 0;
+  return oo_resource_op(fp, OO_IOC_DEBUG_OP, io);
 }
 
 #endif  /* _CI_DRIVER_UNIX_INTF_H_ */

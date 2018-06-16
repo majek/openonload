@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -95,6 +95,25 @@ static inline int oo_sock_sendmsg(struct socket *sock, struct msghdr *msg)
 #endif
 
 
+#ifdef EFRM_SOCK_RECVMSG_NEEDS_BYTES
+static inline int oo_sock_recvmsg(struct socket *sock, struct msghdr *msg,
+                                  int flags)
+{
+  size_t bytes = 0;
+
+#ifdef EFRM_HAVE_MSG_ITER
+  bytes = msg->msg_iter.count;
+#else
+  int i;
+  for( i = 0; i < msg->msg_iovlen; ++i )
+    bytes += msg->msg_iov[i].iov_len;
+#endif
+  return sock_recvmsg(sock, msg, bytes, flags);
+
+}
+#define sock_recvmsg oo_sock_recvmsg
+#endif
+
 /*--------------------------------------------------------------------
  *
  * System calls
@@ -187,6 +206,9 @@ task_nsproxy_done(struct task_struct *tsk)
   rcu_read_unlock();
 }
 #else
+#ifdef EFRM_HAVE_SCHED_TASK_H
+#include <linux/sched/task.h>
+#endif
 static inline struct nsproxy *
 task_nsproxy_start(struct task_struct *tsk)
 {

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -440,6 +440,8 @@ efrm_resource_read_proc(struct seq_file *seq, void *s)
 		seq_printf(seq, "*** %s ***\n", rm->rm_name);
 
 		spin_lock_bh(&rm->rm_lock);
+                if( rm->rm_resources_total != -1 )
+                        seq_printf(seq, "  total = %u\n", rm->rm_resources_total);
 		seq_printf(seq, "current = %u\n", rm->rm_resources);
 		seq_printf(seq, "    max = %u\n\n",
 				 rm->rm_resources_hiwat);

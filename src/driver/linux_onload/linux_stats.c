@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -49,12 +49,12 @@
 #include <ci/internal/ip.h>
 #include <ci/internal/ip_log.h>
 
-#include <cplane/exported.h>
 #include <ci/internal/ip.h>
-#include <onload/efabcfg.h>
 #include <onload/version.h>
 #include <onload/driverlink_filter.h>
 #include <onload/nic.h>
+#include <onload/oof_onload.h>
+#include <onload/oof_interface.h>
 
 #include <net/tcp.h>
 #include <net/udp.h>
@@ -141,7 +141,7 @@ efab_stacks_seq_start(struct seq_file *seq, loff_t *ppos)
   int i, rc;
 
   for( i = 0; i <= *ppos; i++) {
-    rc = iterate_netifs_unlocked(&ni);
+    rc = iterate_netifs_unlocked(&ni, 0, 0);
     if( rc != 0 )
       return NULL;
   }
@@ -154,7 +154,7 @@ efab_stacks_seq_next(struct seq_file *seq, void *v, loff_t *ppos)
   ci_netif *ni = v;
   int rc;
   (*ppos)++;
-  rc = iterate_netifs_unlocked(&ni);
+  rc = iterate_netifs_unlocked(&ni, 0, 0);
   if( rc != 0 )
     return NULL;
   return ni;
@@ -172,13 +172,20 @@ efab_stacks_seq_show(struct seq_file *seq, void *v)
 {
   ci_netif *ni = v;
   ci_netif_stats* s = &ni->state->stats;
+  tcp_helper_resource_t* thr = netif2tcp_helper_resource(ni);
+  int upid;
+  uid_t kuid = ci_make_kuid(tcp_helper_get_user_ns(thr), ni->state->uuid);
+  uid_t uuid = ci_current_from_kuid_munged(kuid);
+  rcu_read_lock();
+  upid = pid_vnr(ci_netif_pid_lookup(ni, ni->state->pid));
+  rcu_read_unlock();
   seq_printf(seq,
              "%d: %d %d %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u\n",
-             NI_ID(ni), (int) ni->state->pid, (int) ni->state->uid,
+             NI_ID(ni), upid, uuid,
              s->periodic_polls, s->periodic_evs,
              s->timeout_interrupts, s->interrupts, s->interrupt_polls,
              s->interrupt_wakes, s->interrupt_evs,
-             s->interrupt_primes, s->select_primes,
+             s->interrupt_primes, s->muxer_primes,
              s->sock_wakes_rx + s->sock_wakes_tx +
              s->sock_wakes_rx_os + s->sock_wakes_tx_os,
              s->pkt_wakes, s->unlock_slow,
@@ -207,6 +214,109 @@ static struct file_operations efab_stacks_seq_fops = {
   .llseek   = seq_lseek,
   .release  = seq_release_private,
 };
+
+
+/* /proc/driver/onload/stacks_ul - user-level mapped stacks (excluding
+ * orphans/zombies)
+ */
+
+static void *
+efab_stacks_seq_start_ul(struct seq_file *seq, loff_t *ppos)
+{
+  ci_netif *ni = NULL;
+  int i, rc;
+
+  for( i = 0; i <= *ppos; i++) {
+    rc = iterate_netifs_unlocked(&ni, 0, 1);
+    if( rc != 0 )
+      return NULL;
+  }
+  return ni;
+}
+
+static void *
+efab_stacks_seq_next_ul(struct seq_file *seq, void *v, loff_t *ppos)
+{
+  ci_netif *ni = v;
+  int rc;
+  (*ppos)++;
+  rc = iterate_netifs_unlocked(&ni, 0, 1);
+  if( rc != 0 )
+    return NULL;
+  return ni;
+}
+
+static struct seq_operations efab_stacks_ul_seq_ops = {
+  .start    = efab_stacks_seq_start_ul,
+  .next     = efab_stacks_seq_next_ul,
+  .stop     = efab_stacks_seq_stop,
+  .show     = efab_stacks_seq_show,
+};
+
+static int
+efab_stacks_ul_seq_open(struct inode *inode, struct file *file)
+{
+  return seq_open(file, &efab_stacks_ul_seq_ops);
+
+}
+static struct file_operations efab_stacks_ul_seq_fops = {
+  .owner    = THIS_MODULE,
+  .open     = efab_stacks_ul_seq_open,
+  .read     = seq_read,
+  .llseek   = seq_lseek,
+  .release  = seq_release_private,
+};
+
+
+/* /proc/driver/onload/stacks_k - kernel-only stacks (aka orphans/zombies) */
+
+static void *
+efab_stacks_seq_start_k(struct seq_file *seq, loff_t *ppos)
+{
+  ci_netif *ni = NULL;
+  int i, rc;
+
+  for( i = 0; i <= *ppos; i++) {
+    rc = iterate_netifs_unlocked(&ni, 1, 0);
+    if( rc != 0 )
+      return NULL;
+  }
+  return ni;
+}
+
+static void *
+efab_stacks_seq_next_k(struct seq_file *seq, void *v, loff_t *ppos)
+{
+  ci_netif *ni = v;
+  int rc;
+  (*ppos)++;
+  rc = iterate_netifs_unlocked(&ni, 1, 0);
+  if( rc != 0 )
+    return NULL;
+  return ni;
+}
+
+static struct seq_operations efab_stacks_k_seq_ops = {
+  .start    = efab_stacks_seq_start_k,
+  .next     = efab_stacks_seq_next_k,
+  .stop     = efab_stacks_seq_stop,
+  .show     = efab_stacks_seq_show,
+};
+
+static int
+efab_stacks_k_seq_open(struct inode *inode, struct file *file)
+{
+  return seq_open(file, &efab_stacks_k_seq_ops);
+
+}
+static struct file_operations efab_stacks_k_seq_fops = {
+  .owner    = THIS_MODULE,
+  .open     = efab_stacks_k_seq_open,
+  .read     = seq_read,
+  .llseek   = seq_lseek,
+  .release  = seq_release_private,
+};
+
 
 #endif
 
@@ -319,28 +429,53 @@ ci_proc_files_uninstall(struct proc_dir_entry *root,
     remove_proc_entry(entries[entry_no].name, root);
 }
 
-
-#define CICPOS_PROCFS_FILE_BLACK_WHITE_LIST "intf-black-white-list"
-static int cicpos_bwl_read(struct seq_file *seq, void *unused)
+static int oo_filter_hwports_read(struct seq_file *seq, void *unused)
 {
-  return oo_nic_black_white_list_proc_get(seq);
+  return oof_onload_hwports_list(&efab_tcp_driver, seq);
 }
-
-
-static int cicpos_bwl_open(struct inode *inode, struct file *file)
+static int oo_filter_hwports_open(struct inode *inode, struct file *file)
 {
-    return single_open(file, cicpos_bwl_read, PDE_DATA(inode));
+    return single_open(file, oo_filter_hwports_read, PDE_DATA(inode));
 }
-
-
-static const struct file_operations cicpos_bwl_fops = {
+static const struct file_operations oo_filter_hwports_fops = {
     .owner   = THIS_MODULE,
-    .open    = cicpos_bwl_open,
+    .open    = oo_filter_hwports_open,
     .read    = seq_read,
     .llseek  = seq_lseek,
     .release = single_release,
 };
 
+static int oo_filter_ipaddrs_read(struct seq_file *seq, void *unused)
+{
+  return oof_onload_ipaddrs_list(&efab_tcp_driver, seq);
+}
+static int oo_filter_ipaddrs_open(struct inode *inode, struct file *file)
+{
+    return single_open(file, oo_filter_ipaddrs_read, PDE_DATA(inode));
+}
+static const struct file_operations oo_filter_ipaddrs_fops = {
+    .owner   = THIS_MODULE,
+    .open    = oo_filter_ipaddrs_open,
+    .read    = seq_read,
+    .llseek  = seq_lseek,
+    .release = single_release,
+};
+
+static const struct file_operations oo_cp_stats_fops = {
+    .owner   = THIS_MODULE,
+    .open    = cp_proc_stats_open,
+    .read    = seq_read,
+    .llseek  = seq_lseek,
+    .release = seq_release,
+};
+
+static const struct file_operations oo_cp_server_pids_fops = {
+    .owner   = THIS_MODULE,
+    .open    = cp_server_pids_open,
+    .read    = seq_read,
+    .llseek  = seq_lseek,
+    .release = seq_release,
+};
 
 
 int
@@ -358,6 +493,8 @@ ci_install_proc_entries(void)
 
 #if CI_CFG_STATS_NETIF
   proc_create("stacks", 0, oo_proc_root, &efab_stacks_seq_fops);
+  proc_create("stacks_ul", 0, oo_proc_root, &efab_stacks_ul_seq_fops);
+  proc_create("stacks_k", 0, oo_proc_root, &efab_stacks_k_seq_fops);
 #endif
 
 #if CI_MEMLEAK_DEBUG_ALLOC_TABLE
@@ -367,8 +504,14 @@ ci_install_proc_entries(void)
     ci_log("%s: failed to create 'mem'", __FUNCTION__);
 #endif
 
-  proc_create_data(CICPOS_PROCFS_FILE_BLACK_WHITE_LIST, 0, oo_proc_root,
-                   &cicpos_bwl_fops,  NULL);
+  proc_create_data("filter_hwports", 0, oo_proc_root,
+                   &oo_filter_hwports_fops,  NULL);
+  proc_create_data("filter_ipaddrs", 0, oo_proc_root,
+                   &oo_filter_ipaddrs_fops,  NULL);
+  proc_create_data("cp_stats", 0, oo_proc_root,
+                   &oo_cp_stats_fops,  NULL);
+  proc_create_data("cp_server_pids", 0, oo_proc_root,
+                   &oo_cp_server_pids_fops,  NULL);
 
   return 0;
 }
@@ -389,12 +532,17 @@ void ci_uninstall_proc_entries(void)
   ci_proc_files_uninstall(oo_proc_root, ci_proc_efab_table,
                           CI_PROC_EFAB_TABLE_SIZE);
 #if CI_CFG_STATS_NETIF
-    remove_proc_entry("stacks", oo_proc_root);
+  remove_proc_entry("stacks_ul", oo_proc_root);
+  remove_proc_entry("stacks_k", oo_proc_root);
+  remove_proc_entry("stacks", oo_proc_root);
 #endif
 #if CI_MEMLEAK_DEBUG_ALLOC_TABLE
   remove_proc_entry("mem", oo_proc_root);
 #endif
-  remove_proc_entry(CICPOS_PROCFS_FILE_BLACK_WHITE_LIST, oo_proc_root);
+  remove_proc_entry("filter_hwports", oo_proc_root);
+  remove_proc_entry("filter_ipaddrs", oo_proc_root);
+  remove_proc_entry("cp_stats", oo_proc_root);
+  remove_proc_entry("cp_server_pids", oo_proc_root);
   remove_proc_entry("driver/onload", NULL);
   oo_proc_root = NULL;
 }

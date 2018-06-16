@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -70,6 +70,8 @@ typedef enum {
   CI_TRUE
 } ci_boolean_t;
 
+
+typedef char                            ci_string256[256];
 
 /**********************************************************************
  * Some nice types you'd always assumed were standards.

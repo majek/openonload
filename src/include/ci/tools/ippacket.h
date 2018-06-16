@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -197,7 +197,11 @@ typedef struct ci_iscsi_bhs_s {
 /* From RFC 3720 setion 10.2 */
 typedef struct ci_iscsi_pkt_s {
   ci_iscsi_bhs_t bhs;
+#if defined(NDEBUG)
   ci_uint32 ahs[];
+#else	/* unknown length, CTF debug info problem */
+  ci_uint32 ahs[1];
+#endif
   /* Followed by:
   ci_uint32 header_digest; (optional - negotiated)
   ci_uint32 data[];

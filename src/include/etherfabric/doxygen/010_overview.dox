@@ -58,9 +58,10 @@ Solarflare network adapters, including:
 - Load spreading by hashing (also known as receive-side scaling) and flow 
   steering
 - Data path sniffing
-- PIO mode for ultra-low latency
+- PIO mode for low latency
+- CTPIO mode for ultra-low latency
 - Scatter gather transmit and receive
-- PCI pass-through and SR-IOV for virtualised environments.
+- PCI pass-through and SR-IOV for virtualized environments.
 
 But because the %ef_vi API operates at this low level, any application 
 using it must implement the higher layer protocols itself, and also deal 

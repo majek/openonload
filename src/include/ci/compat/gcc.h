@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -62,24 +62,12 @@ typedef __u64                 ci_uintptr_t;
 # endif
 
 
-/* it's not obvious to me why the below is wrong for x64_64, but
- * gcc seems to complain on this platform
- */
-# if defined(__ia64__)
-#  define CI_PRId64            "ld"
-#  define CI_PRIi64            "li"
-#  define CI_PRIo64            "lo"
-#  define CI_PRIu64            "lu"
-#  define CI_PRIx64            "lx"
-#  define CI_PRIX64            "lX"
-# else
-#  define CI_PRId64            "lld"
-#  define CI_PRIi64            "lli"
-#  define CI_PRIo64            "llo"
-#  define CI_PRIu64            "llu"
-#  define CI_PRIx64            "llx"
-#  define CI_PRIX64            "llX"
-# endif
+# define CI_PRId64            "lld"
+# define CI_PRIi64            "lli"
+# define CI_PRIo64            "llo"
+# define CI_PRIu64            "llu"
+# define CI_PRIx64            "llx"
+# define CI_PRIX64            "llX"
 
 # define CI_PRId32            "d"
 # define CI_PRIi32            "i"
@@ -148,7 +136,7 @@ typedef ci_uint64                       ci_fixed_descriptor_t;
 #endif
 
 
-#define OO_ACCESS_ONCE(p) (*(volatile typeof(p) *)&(p))
+#define OO_ACCESS_ONCE(p) (*(volatile __typeof__(p) *)&(p))
 
 
 /**********************************************************************
@@ -157,9 +145,12 @@ typedef ci_uint64                       ci_fixed_descriptor_t;
 #if __GNUC__ >= 3 && defined(NDEBUG)
 # define CI_HF __attribute__((visibility("hidden")))
 # define CI_HV __attribute__((visibility("hidden")))
+# define CI_DV __attribute__((visibility("default")))
+# define CI_USE_GCC_VISIBILITY
 #else
 # define CI_HF
 # define CI_HV
+# define CI_DV
 #endif
 
 #if __GNUC__ >= 4 || (__GNUC__ == 3 && __GNUC_MINOR__ >= 1)
@@ -178,7 +169,7 @@ typedef ci_uint64                       ci_fixed_descriptor_t;
 /* Compiler barrier: prevent compiler from reordering.  (Does nothing to
  * prevent the processor or platform from reordering).
  */
-#define ci_compiler_barrier()    __asm__ __volatile__ ("")
+#define ci_compiler_barrier()    __asm__ __volatile__ ("": : :"memory")
 
 
 #endif  /* __CI_COMPAT_GCC_H__ */

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -52,16 +52,13 @@ void citp_waitable_init(ci_netif* ni, citp_waitable* w, int id)
 #endif
   w->sb_flags = 0;
   w->sb_aflags = CI_SB_AFLAG_ORPHAN | CI_SB_AFLAG_NOT_READY;
+  w->epoll = OO_PP_NULL;
+  w->ready_lists_in_use = 0;
 
   sp = oo_sockp_to_statep(ni, W_SP(w));
   OO_P_ADD(sp, CI_MEMBER_OFFSET(citp_waitable, post_poll_link));
   ci_ni_dllist_link_init(ni, &w->post_poll_link, sp, "ppll");
   ci_ni_dllist_self_link(ni, &w->post_poll_link);
-
-  sp = oo_sockp_to_statep(ni, W_SP(w));
-  OO_P_ADD(sp, CI_MEMBER_OFFSET(citp_waitable, ready_link));
-  ci_ni_dllist_link_init(ni, &w->ready_link, sp, "rll");
-  ci_ni_dllist_self_link(ni, &w->ready_link);
 
   w->lock.wl_val = 0;
   CI_DEBUG(w->wt_next = OO_SP_NULL);
@@ -156,7 +153,6 @@ static void ci_drop_orphan(ci_netif * ni)
 # define ci_drop_orphan(ni)  do{}while(0)
 #endif
 
-
 #if CI_CFG_FD_CACHING
 void citp_waitable_obj_free_to_cache(ci_netif* ni, citp_waitable* w)
 {
@@ -188,8 +184,7 @@ void citp_waitable_obj_free_to_cache(ci_netif* ni, citp_waitable* w)
   ci_atomic32_and(&w->sb_aflags, CI_SB_AFLAG_NOT_READY |
                                  CI_SB_AFLAG_CACHE_PRESERVE);
   w->lock.wl_val = 0;
-  w->ready_list_id = 0;
-  CI_USER_PTR_SET(w->eitem, NULL);
+  citp_waitable_remove_from_epoll(ni, w, 0);
 }
 #endif
 
@@ -206,8 +201,6 @@ static void __citp_waitable_obj_free(ci_netif* ni, citp_waitable* w)
   w->sb_aflags = CI_SB_AFLAG_ORPHAN | CI_SB_AFLAG_NOT_READY;
   w->state = CI_TCP_STATE_FREE;
   w->lock.wl_val = 0;
-  w->ready_list_id = 0;
-  CI_USER_PTR_SET(w->eitem, NULL);
 }
 
 
@@ -233,6 +226,8 @@ void citp_waitable_obj_free(ci_netif* ni, citp_waitable* w)
 #endif
 
   __citp_waitable_obj_free(ni, w);
+  citp_waitable_remove_from_epoll(ni, w, 1);
+
   w->wt_next = ni->state->free_eps_head;
   ni->state->free_eps_head = W_SP(w);
   /* Must be last, as may result in stack going away. */
@@ -245,6 +240,8 @@ void citp_waitable_obj_free_nnl(ci_netif* ni, citp_waitable* w)
   /* Stack lock is probably not held (but not guaranteed). */
 
   __citp_waitable_obj_free(ni, w);
+  w->ready_lists_in_use = 0;
+
   do
     w->next_id = ni->state->deferred_free_eps_head;
   while( ci_cas32_fail(&ni->state->deferred_free_eps_head,
@@ -255,6 +252,7 @@ void citp_waitable_obj_free_nnl(ci_netif* ni, citp_waitable* w)
 
 
 #ifdef __KERNEL__
+
 
 void citp_waitable_cleanup(ci_netif* ni, citp_waitable_obj* wo, int do_free)
 {
@@ -274,6 +272,8 @@ void citp_waitable_cleanup(ci_netif* ni, citp_waitable_obj* wo, int do_free)
   else if( wo->waitable.state == CI_TCP_STATE_PIPE )
     ci_pipe_all_fds_gone(ni, &wo->pipe, do_free);
 #endif
+  else if( wo->waitable.state == CI_TCP_STATE_ACTIVE_WILD )
+    ci_active_wild_all_fds_gone(ni, &wo->aw, do_free);
   else if( do_free ) {
     /* The only non-TCP and non-UDP state in FREE.  But FREE endpoint is
      * already free, we can't free it again.  Possibly, it is a
@@ -300,7 +300,8 @@ void citp_waitable_all_fds_gone(ci_netif* ni, oo_sp w_id)
    * efab_tcp_helper_close_endpoint().
    * CI_SB_AFLAG_ORPHAN is set earlier in this case.. */
   CI_DEBUG(if( (wo->waitable.sb_aflags & CI_SB_AFLAG_ORPHAN) &&
-               wo->waitable.state != CI_TCP_LISTEN )
+               wo->waitable.state != CI_TCP_LISTEN &&
+               wo->waitable.state != CI_TCP_STATE_ACTIVE_WILD )
 	     ci_log("%s: %d:%d already orphan", __FUNCTION__,
                     NI_ID(ni), OO_SP_FMT(w_id)));
 
@@ -319,8 +320,7 @@ void citp_waitable_all_fds_gone(ci_netif* ni, oo_sp w_id)
    * have been left there because the stack believes a wakeup is needed.
    */
   ci_ni_dllist_remove_safe(ni, &wo->waitable.post_poll_link);
-  ci_ni_dllist_remove_safe(ni, &wo->waitable.ready_link);
-  wo->waitable.ready_list_id = 0;
+  citp_waitable_remove_from_epoll(ni, &wo->waitable, 1);
 
   citp_waitable_cleanup(ni, wo, 1);
 }
@@ -337,6 +337,7 @@ const char* citp_waitable_type_str(citp_waitable* w)
   else if( w->state == CI_TCP_STATE_PIPE )  return "PIPE";
 #endif
   else if( w->state == CI_TCP_STATE_AUXBUF )  return "AUXBUFS";
+  else if( w->state == CI_TCP_STATE_ACTIVE_WILD )  return "ACTIVE_WILD";
   else return "<unknown-citp_waitable-type>";
 }
 
@@ -345,9 +346,11 @@ static void citp_waitable_dump2(ci_netif* ni, citp_waitable* w, const char* pf,
                                 oo_dump_log_fn_t logger, void* log_arg)
 {
   unsigned tmp;
+  ci_sock_cmn* s = NULL;
 
-  if( CI_TCP_STATE_IS_SOCKET(w->state) ) {
-    ci_sock_cmn* s = CI_CONTAINER(ci_sock_cmn, b, w);
+  if( CI_TCP_STATE_IS_SOCKET(w->state) ||
+      w->state == CI_TCP_STATE_ACTIVE_WILD) {
+    s = CI_CONTAINER(ci_sock_cmn, b, w);
     logger(log_arg, "%s%s "NT_FMT"lcl="OOF_IP4PORT" rmt="OOF_IP4PORT" %s",
            pf, citp_waitable_type_str(w), NI_ID(ni), W_FMT(w),
            OOFA_IP4PORT(sock_laddr_be32(s), sock_lport_be16(s)),
@@ -358,7 +361,8 @@ static void citp_waitable_dump2(ci_netif* ni, citp_waitable* w, const char* pf,
     logger(log_arg, "%s%s "NT_FMT, pf,
            citp_waitable_type_str(w), NI_ID(ni), W_FMT(w));
 
-  if( w->state == CI_TCP_STATE_FREE || w->state == CI_TCP_STATE_AUXBUF )
+  if( w->state == CI_TCP_STATE_FREE || w->state == CI_TCP_STATE_AUXBUF ||
+      w->state == CI_TCP_STATE_ACTIVE_WILD )
     return;
 
   tmp = w->lock.wl_val;
@@ -377,7 +381,7 @@ static void citp_waitable_dump2(ci_netif* ni, citp_waitable* w, const char* pf,
   if( w->spin_cycles == -1 )
     logger(log_arg, "%s  ul_poll: -1 spin cycles -1 usecs", pf);
   else
-    logger(log_arg, "%s  ul_poll: %llu spin cycles %u usec", pf,
+    logger(log_arg, "%s  ul_poll: %"CI_PRIu64" spin cycles %u usec", pf,
          w->spin_cycles, oo_cycles64_to_usec(ni, w->spin_cycles));
 }
 
@@ -395,6 +399,9 @@ void citp_waitable_dump_to_logger(ci_netif* ni, citp_waitable* w,
 
   citp_waitable_dump2(ni, w, pf, logger, log_arg);
   if( CI_TCP_STATE_IS_SOCKET(w->state) ) {
+    if( w->state == CI_TCP_STATE_ACTIVE_WILD )
+      return;
+
     ci_sock_cmn_dump(ni, &wo->sock, pf, logger, log_arg);
     if( w->state == CI_TCP_LISTEN )
       ci_tcp_socket_listen_dump(ni, &wo->tcp_listen, pf, logger, log_arg);
@@ -412,7 +419,8 @@ void citp_waitable_dump_to_logger(ci_netif* ni, citp_waitable* w,
 }
 
 
-void citp_waitable_print(citp_waitable* w)
+void citp_waitable_print_to_logger(citp_waitable* w, oo_dump_log_fn_t logger,
+                                   void *log_arg)
 {
   /* Output socket using netstat style output:
    *   TCP 2 0 0.0.0.0:12865 0.0.0.0:0 LISTEN
@@ -433,11 +441,11 @@ void citp_waitable_print(citp_waitable* w)
       tq = wo->udp.tx_count + oo_atomic_read(&wo->udp.tx_async_q_level);
       rq = ci_udp_recv_q_pkts(&wo->udp.recv_q);
     }
-    log("%s %d %d "OOF_IP4PORT" "OOF_IP4PORT" %s",
-        citp_waitable_type_str(w), rq, tq,
-        OOFA_IP4PORT(sock_laddr_be32(s), sock_lport_be16(s)),
-        OOFA_IP4PORT(sock_raddr_be32(s), sock_rport_be16(s)),
-        ci_tcp_state_str(w->state));
+    logger(log_arg, "%s %d %d "OOF_IP4PORT" "OOF_IP4PORT" %s",
+           citp_waitable_type_str(w), rq, tq,
+           OOFA_IP4PORT(sock_laddr_be32(s), sock_lport_be16(s)),
+           OOFA_IP4PORT(sock_raddr_be32(s), sock_rport_be16(s)),
+           ci_tcp_state_str(w->state));
   }
 }
 
@@ -454,6 +462,34 @@ void citp_waitable_wakeup(ci_netif* ni, citp_waitable* w)
 
 #endif
 
+static void
+citp_waitable_wake_epoll3_not_in_poll(ci_netif* ni, citp_waitable* sb)
+{
+  /* Normally we put an object on a ready list in ci_netif_put_on_post_poll,
+   * but in this case we don't go via there, so have to explicitly queue on
+   * the ready list here.
+   */
+  if( sb->ready_lists_in_use != 0 ) {
+    ci_sb_epoll_state* epoll = ci_ni_aux_p2epoll(ni, sb->epoll);
+    ci_uint32 tmp, i;
+
+    CI_READY_LIST_EACH(sb->ready_lists_in_use, tmp, i) {
+      ci_ni_dllist_remove(ni, &epoll->e[i].ready_link);
+      ci_ni_dllist_put(ni, &ni->state->ready_lists[i],
+                       &epoll->e[i].ready_link);
+
+      /* Wake the ready list too, if that's requested it. */
+      if( ni->state->ready_list_flags[i] & CI_NI_READY_LIST_FLAG_WAKE )
+#ifdef __KERNEL__
+        efab_tcp_helper_ready_list_wakeup(netif2tcp_helper_resource(ni), i);
+#else
+        ef_eplock_holder_set_flag(&ni->state->lock, CI_EPLOCK_NETIF_NEED_WAKE);
+#endif
+    }
+  }
+}
+
+
 void citp_waitable_wake_not_in_poll(ci_netif* ni, citp_waitable* sb,
                                     unsigned what)
 {
@@ -468,24 +504,12 @@ void citp_waitable_wake_not_in_poll(ci_netif* ni, citp_waitable* sb,
   ci_mb();
 
 #ifdef __KERNEL__
-  /* Normally we put an object on a ready list in ci_netif_put_on_post_poll,
-   * but in this case we don't go via there, so have to explicitly queue on
-   * the ready list here.
-   */
-  ci_ni_dllist_remove(ni, &sb->ready_link);
-  ci_ni_dllist_put(ni, &ni->state->ready_lists[sb->ready_list_id],
-                   &sb->ready_link);
-
   if( what & sb->wake_request ) {
     sb->sb_flags |= what;
     citp_waitable_wakeup(ni, sb);
   }
+  citp_waitable_wake_epoll3_not_in_poll(ni, sb);
 
-  /* Wake the ready list too, if that's requested it. */
-  if( ni->state->ready_list_flags[sb->ready_list_id] &
-      CI_NI_READY_LIST_FLAG_WAKE )
-    efab_tcp_helper_ready_list_wakeup(netif2tcp_helper_resource(ni),
-                                      sb->ready_list_id);
 #else
   if( what & sb->wake_request ) {
     sb->sb_flags |= what;
@@ -493,17 +517,7 @@ void citp_waitable_wake_not_in_poll(ci_netif* ni, citp_waitable* sb,
     ef_eplock_holder_set_flag(&ni->state->lock, CI_EPLOCK_NETIF_NEED_WAKE);
   }
   else {
-    /* Normally we put an object on a ready list in ci_netif_put_on_post_poll,
-     * but in this case we don't go via there, so have to explicitly queue on
-     * the ready list here.
-     */
-    ci_ni_dllist_remove(ni, &sb->ready_link);
-    ci_ni_dllist_put(ni, &ni->state->ready_lists[sb->ready_list_id],
-                     &sb->ready_link);
-
-    if( ni->state->ready_list_flags[sb->ready_list_id] &
-        CI_NI_READY_LIST_FLAG_WAKE )
-      ef_eplock_holder_set_flag(&ni->state->lock, CI_EPLOCK_NETIF_NEED_WAKE);
+    citp_waitable_wake_epoll3_not_in_poll(ni, sb);
   }
 #endif
 }

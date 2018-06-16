@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -28,6 +28,7 @@
   
 #include "ip_internal.h"
 #include "udp_internal.h"
+#include "l3xudp_encap.h"
 #include <onload/sleep.h>
 
 #ifdef ONLOAD_OFE
@@ -45,6 +46,7 @@
 
 
 
+#if CI_CFG_TIMESTAMPING
 int ci_udp_timestamp_q_enqueue(ci_netif* ni, ci_udp_state* us, 
                                ci_ip_pkt_fmt* pkt)
 {
@@ -83,12 +85,13 @@ int ci_udp_timestamp_q_enqueue(ci_netif* ni, ci_udp_state* us,
 
   return 0;
 }
+#endif
 
 
 int ci_udp_recv_q_reap(ci_netif* ni, ci_udp_recv_q* q)
 {
   int freed = 0;
-  while( ! OO_PP_EQ(q->head, q->extract) ) {
+  while( ! OO_PP_EQ(q->head, OO_ACCESS_ONCE(q->extract)) ) {
     ci_ip_pkt_fmt* pkt = PKT_CHK(ni, q->head);
     int n_buffers = pkt->n_buffers;
     q->head = pkt->udp_rx_next;
@@ -164,8 +167,7 @@ int ci_udp_rx_deliver(ci_sock_cmn* s, void* opaque_arg)
   if( s->ofe_code_start != OFE_ADDR_NULL &&
       ofe_process_packet(ni->ofe_channel, s->ofe_code_start, ci_ip_time_now(ni),
                          oo_ether_hdr(pkt), pkt->pay_len, pkt->vlan,
-                         CI_BSWAP_BE16(oo_ether_type_get(pkt)),
-                         oo_ip_hdr(pkt))
+                         ETHERTYPE_IP, oo_ip_hdr(pkt))
       != OFE_ACCEPT ) {
     return 0; /* deliver to other sockets if their rules allow */
   }
@@ -185,7 +187,11 @@ int ci_udp_rx_deliver(ci_sock_cmn* s, void* opaque_arg)
      * timestamped.  This can only occur in the loopback case, where the
      * state->queued flag is ignored.
      */
-    if( ! state->queued && !(pkt->flags & CI_PKT_FLAG_TX_TIMESTAMPED) ) {
+    if( ! state->queued
+#if CI_CFG_TIMESTAMPING
+        && !(pkt->flags & CI_PKT_FLAG_TX_TIMESTAMPED)
+#endif
+        ) {
       state->queued = 1;
       ci_netif_pkt_hold(ni, pkt);
     }
@@ -202,7 +208,9 @@ int ci_udp_rx_deliver(ci_sock_cmn* s, void* opaque_arg)
       ++ni->state->n_rx_pkts;
       q_pkt->pf.udp.pay_len = pkt->pf.udp.pay_len;
       q_pkt->pf.udp.rx_stamp = pkt->pf.udp.rx_stamp;
+#if CI_CFG_TIMESTAMPING
       q_pkt->pf.udp.rx_hw_stamp.tv_sec = pkt->pf.udp.rx_hw_stamp.tv_sec;
+#endif
       oo_offbuf_init(&q_pkt->buf, PKT_START(q_pkt), 0);
       q_pkt->flags = (CI_PKT_FLAG_RX_INDIRECT | CI_PKT_FLAG_UDP |
                       CI_PKT_FLAG_RX);
@@ -266,7 +274,6 @@ void ci_udp_handle_rx(ci_netif* ni, ci_ip_pkt_fmt* pkt, ci_udp_hdr* udp,
 
   ASSERT_VALID_PKT(ni, pkt);
   ci_assert(oo_ip_hdr(pkt)->ip_protocol == IPPROTO_UDP);
-  ci_assert(oo_offbuf_ptr(&pkt->buf) == PKT_START(pkt));
   ci_assert_gt(pkt->pay_len, ip_paylen);
 
   pkt->pf.udp.rx_stamp = IPTIMER_STATE(ni)->frc;
@@ -287,6 +294,7 @@ void ci_udp_handle_rx(ci_netif* ni, ci_ip_pkt_fmt* pkt, ci_udp_hdr* udp,
   state.pkt = pkt;
   state.queued = 0;
   state.delivered = 0;
+
 
   dealt_with = 
     ci_netif_filter_for_each_match(ni,
@@ -311,11 +319,23 @@ void ci_udp_handle_rx(ci_netif* ni, ci_ip_pkt_fmt* pkt, ci_udp_hdr* udp,
   }
 
   if( state.delivered == 0 ) {
-    LOG_U( log(LPFOUT "handle_rx: NO MATCH %s:%u->%s:%u",
-               ip_addr_str(oo_ip_hdr(pkt)->ip_saddr_be32),
-               (unsigned) CI_BSWAP_BE16(udp->udp_source_be16),
-               ip_addr_str(oo_ip_hdr(pkt)->ip_daddr_be32),
-               (unsigned) CI_BSWAP_BE16(udp->udp_dest_be16)));
+
+    if( ci_netif_pkt_pass_to_kernel(ni, pkt) ) {
+      CITP_STATS_NETIF_INC(ni, no_match_pass_to_kernel_udp);
+      return;
+    }
+
+    if( oo_tcpdump_check_no_match(ni, pkt, pkt->intf_i) )
+      oo_tcpdump_dump_pkt(ni, pkt);
+
+#ifndef NDEBUG
+    if( !NI_OPTS(ni).scalable_filter_enable )
+      LOG_U( log(LPFOUT "handle_rx: NO MATCH %s:%u->%s:%u",
+                 ip_addr_str(oo_ip_hdr(pkt)->ip_saddr_be32),
+                 (unsigned) CI_BSWAP_BE16(udp->udp_source_be16),
+                 ip_addr_str(oo_ip_hdr(pkt)->ip_daddr_be32),
+                 (unsigned) CI_BSWAP_BE16(udp->udp_dest_be16)));
+#endif
     CITP_STATS_NETIF_INC(ni, udp_rx_no_match_drops);
     if( ! CI_IP_IS_MULTICAST(oo_ip_hdr(pkt)->ip_daddr_be32) ) {
       CI_UDP_STATS_INC_NO_PORTS(ni);

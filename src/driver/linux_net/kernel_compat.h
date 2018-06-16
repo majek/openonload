@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -16,7 +16,7 @@
 /****************************************************************************
  * Driver for Solarflare network controllers and boards
  * Copyright 2005-2006 Fen Systems Ltd.
- * Copyright 2006-2015 Solarflare Communications Inc.
+ * Copyright 2006-2017 Solarflare Communications Inc.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 as published
@@ -95,12 +95,13 @@
  * layer above. The following definitions are all deprecated
  */
 
+
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,16)
 	#error "This kernel version is now unsupported"
 #endif
 
 /* netif_device_{detach,attach}() were missed in multiqueue transition */
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,30) && defined(EFX_USE_TX_MQ)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,30)
 	#define EFX_NEED_NETIF_DEVICE_DETACH_ATTACH_MQ yes
 #endif
 
@@ -197,6 +198,22 @@
 	#define NETIF_F_GSO_UDP_TUNNEL_CSUM 0
 #endif
 
+#ifndef NETIF_F_RXFCS
+	#define NETIF_F_RXFCS 0
+#endif
+#ifndef NETIF_F_RXALL
+	#define NETIF_F_RXALL 0
+#endif
+
+/* RHEL 6.2 introduced XPS support but didn't add it under CONFIG_XPS.
+ * Instead the code was simply included directly, so it's enabled in all
+ * configurations. We check for the presence of CONFIG_XPS in other code.
+ */
+#if (LINUX_VERSION_CODE == KERNEL_VERSION(2,6,32)) && \
+    defined(RHEL_MAJOR) && (RHEL_MAJOR == 6) &&  \
+    defined(RHEL_MINOR) && (RHEL_MINOR >= 2)
+# define CONFIG_XPS
+#endif
 
 /* Cope with small changes in PCI constants between minor kernel revisions */
 #if PCI_X_STATUS != 4
@@ -277,19 +294,6 @@
 	#define IRQF_SHARED	   SA_SHIRQ
 #endif
 
-#ifdef EFX_NEED_MMIOWB
-	#if defined(__i386__) || defined(__x86_64__)
-		#define mmiowb()
-	#elif defined(__ia64__)
-		#ifndef ia64_mfa
-			#define ia64_mfa() asm volatile ("mf.a" ::: "memory")
-		#endif
-		#define mmiowb ia64_mfa
-	#else
-		#error "Need definition for mmiowb()"
-	#endif
-#endif
-
 #ifndef CHECKSUM_PARTIAL
 	#define CHECKSUM_PARTIAL CHECKSUM_HW
 #endif
@@ -358,10 +362,6 @@
 
 #ifndef __bitwise
 	#define __bitwise
-#endif
-
-#ifdef EFX_NEED_ATOMIC_CMPXCHG
-	#define atomic_cmpxchg(v, old, new) ((int)cmpxchg(&((v)->counter), old, new))
 #endif
 
 #ifndef cpumask_of
@@ -456,16 +456,6 @@
 
 /**************************************************************************/
 
-#ifdef EFX_NEED_IRQ_HANDLER_T
-	typedef irqreturn_t (*irq_handler_t)(int, void *, struct pt_regs *);
-#endif
-
-/* linux_mdio.h needs this */
-#ifdef EFX_NEED_BOOL
-	typedef _Bool bool;
-	enum { false, true };
-#endif
-
 #ifdef EFX_NEED_BYTEORDER_TYPES
 	typedef __u16 __be16;
 	typedef __u32 __be32;
@@ -479,17 +469,6 @@
 	#include <linux/mdio.h>
 #else
 	#include "linux_mdio.h"
-#endif
-
-#ifdef EFX_NEED_MII_CONSTANTS
-	#define BMCR_SPEED1000		0x0040
-	#define ADVERTISE_PAUSE_ASYM	0x0800
-	#define ADVERTISE_PAUSE_CAP	0x0400
-#endif
-
-#ifdef EFX_NEED_ETHTOOL_CONSTANTS
-	#define ADVERTISED_Pause	(1 << 13)
-	#define ADVERTISED_Asym_Pause	(1 << 14)
 #endif
 
 #ifndef ETH_RESET_SHARED_SHIFT
@@ -554,6 +533,9 @@
 #endif
 #ifndef FLOW_EXT
 	#define	FLOW_EXT	0x80000000
+#endif
+#ifndef FLOW_RSS
+	#define	FLOW_RSS	0x20000000
 #endif
 #ifndef RXH_L2DA
 	#define	RXH_L2DA	(1 << 1)
@@ -632,7 +614,10 @@
 		__u32				flow_type;
 		__u64				data;
 		struct efx_ethtool_rx_flow_spec	fs;
-		__u32				rule_cnt;
+		union {
+			__u32			rule_cnt;
+			__u32			rss_context;
+		};
 		__u32				rule_locs[0];
 	};
 	#define EFX_HAVE_EFX_ETHTOOL_RXNFC yes
@@ -900,43 +885,6 @@
 	#define __raw_readq efx_raw_readq
 #endif
 
-#ifdef EFX_NEED_SCHEDULE_TIMEOUT_INTERRUPTIBLE
-	static inline signed long
-	schedule_timeout_interruptible(signed long timeout)
-	{
-		set_current_state(TASK_INTERRUPTIBLE);
-		return schedule_timeout(timeout);
-	}
-#endif
-
-#ifdef EFX_NEED_SCHEDULE_TIMEOUT_UNINTERRUPTIBLE
-	static inline signed long
-	schedule_timeout_uninterruptible(signed long timeout)
-	{
-		set_current_state(TASK_UNINTERRUPTIBLE);
-		return schedule_timeout(timeout);
-	}
-#endif
-
-#ifdef EFX_NEED_KZALLOC
-	static inline void *kzalloc(size_t size, int flags)
-	{
-		void *buf = kmalloc(size, flags);
-		if (buf)
-			memset(buf, 0, size);
-		return buf;
-	}
-#endif
-
-#ifdef EFX_NEED_KCALLOC
-	static inline void *kcalloc(size_t n, size_t size, int flags)
-	{
-		if (size != 0 && n > ULONG_MAX / size)
-			return NULL;
-		return kzalloc(n * size, flags);
-	}
-#endif
-
 #ifdef EFX_NEED_VZALLOC
 	static inline void *vzalloc(unsigned long size)
 	{
@@ -945,66 +893,6 @@
 			memset(buf, 0, size);
 		return buf;
 	}
-#endif
-
-#ifdef EFX_NEED_SETUP_TIMER
-	static inline void setup_timer(struct timer_list *timer,
-				       void (*function)(unsigned long),
-				       unsigned long data)
-	{
-		timer->function = function;
-		timer->data = data;
-		init_timer(timer);
-	}
-#endif
-
-#ifdef EFX_NEED_MUTEX
-	#define EFX_DEFINE_MUTEX(x) DECLARE_MUTEX(x)
-	#undef DEFINE_MUTEX
-	#define DEFINE_MUTEX EFX_DEFINE_MUTEX
-
-	#define efx_mutex semaphore
-	#undef mutex
-	#define mutex efx_mutex
-
-	#define efx_mutex_init(x) init_MUTEX(x)
-	#undef mutex_init
-	#define mutex_init efx_mutex_init
-
-	#define efx_mutex_destroy(x) do { } while (0)
-	#undef mutex_destroy
-	#define mutex_destroy efx_mutex_destroy
-
-	#define efx_mutex_lock(x) down(x)
-	#undef mutex_lock
-	#define mutex_lock efx_mutex_lock
-
-	#define efx_mutex_lock_interruptible(x) down_interruptible(x)
-	#undef mutex_lock_interruptible
-	#define mutex_lock_interruptible efx_mutex_lock_interruptible
-
-	#define efx_mutex_unlock(x) up(x)
-	#undef mutex_unlock
-	#define mutex_unlock efx_mutex_unlock
-
-	#define efx_mutex_trylock(x) (!down_trylock(x))
-	#undef mutex_trylock
-	#define mutex_trylock efx_mutex_trylock
-
-	static inline int efx_mutex_is_locked(struct efx_mutex *m)
-	{
-		/* NB. This is quite inefficient, but it's the best we
-		 * can do with the semaphore API. */
-		if (down_trylock(m))
-			return 1;
-		/* Undo the effect of down_trylock. */
-		up(m);
-		return 0;
-	}
-	#undef mutex_is_locked
-	#define mutex_is_locked efx_mutex_is_locked
-#else
-	#include <linux/mutex.h>
 #endif
 
 #ifndef NETIF_F_GSO
@@ -1084,34 +972,11 @@
 		})
 #endif
 
-#ifdef EFX_NEED_TX_MQ_API
-	#define netdev_get_tx_queue(dev, index) (dev)
-	#define netif_tx_stop_queue netif_stop_queue
-	#define netif_tx_stop_all_queues netif_stop_queue
-	#define netif_tx_start_queue netif_start_queue
-	#define netif_tx_wake_queue netif_wake_queue
-	#define netif_tx_wake_all_queues netif_wake_queue
-	#define netif_tx_queue_stopped netif_queue_stopped
-	#define skb_get_queue_mapping(skb) 0
-	#define netdev_queue net_device
-
-	#define __netif_tx_lock(_dev, _cpu)		\
-		netif_tx_lock((_dev))
-	#define __netif_tx_lock_bh(_dev)		\
-		netif_tx_lock_bh(_dev)
-	#define __netif_tx_unlock(_dev)			\
-		netif_tx_unlock((_dev))
-	#define __netif_tx_unlock_bh(_dev)		\
-		netif_tx_unlock_bh(_dev)
-#endif
-
 #ifdef EFX_NEED_NETIF_SET_REAL_NUM_TX_QUEUES
 	static inline void
 	netif_set_real_num_tx_queues(struct net_device *dev, unsigned int txq)
 	{
-#ifdef EFX_USE_TX_MQ
 		dev->real_num_tx_queues = txq;
-#endif
 	}
 #endif
 
@@ -1123,12 +988,6 @@
 		dev->num_rx_queues = rxq;
 #endif
 	}
-#endif
-
-#ifdef EFX_HAVE_NONCONST_ETHTOOL_OPS
-	#undef SET_ETHTOOL_OPS
-	#define SET_ETHTOOL_OPS(netdev, ops)				\
-		((netdev)->ethtool_ops = (struct ethtool_ops *)(ops))
 #endif
 
 #ifdef EFX_NEED_RTNL_TRYLOCK
@@ -1184,12 +1043,6 @@
 	#define ip_fast_csum(iph, ihl) ip_fast_csum((unsigned char *)iph, ihl)
 #endif
 
-#ifdef EFX_HAVE_OLD_CSUM
-	typedef u16 __sum16;
-	typedef u32 __wsum;
-	#define csum_unfold(x) ((__force __wsum) x)
-#endif
-
 #ifdef EFX_NEED_HEX_DUMP
 	enum {
 		DUMP_PREFIX_NONE,
@@ -1202,31 +1055,6 @@
 	#define DECLARE_MAC_BUF(var) char var[18] __attribute__((unused))
 #endif
 
-#ifdef EFX_NEED_GFP_T
-	typedef unsigned int gfp_t;
-#endif
-
-#ifdef EFX_NEED_SAFE_LISTS
-	#define list_for_each_entry_safe_reverse(pos, n, head, member)	     \
-		for (pos = list_entry((head)->prev, typeof(*pos), member),   \
-		     n = list_entry(pos->member.prev, typeof(*pos), member); \
-		     &pos->member != (head);				     \
-		     pos = n,						     \
-		     n = list_entry(n->member.prev, typeof(*n), member))
-#endif
-
-#ifdef EFX_NEED_DEV_NOTICE
-	#define dev_notice dev_warn
-#endif
-
-#ifdef EFX_NEED_DEV_CREATE_FIX
-	#define efx_device_create(cls, parent, devt, drvdata, fmt, _args...) \
-			device_create(cls, parent, devt, fmt ## _args)
-#else
-	#define efx_device_create(cls, parent, devt, drvdata, fmt, _args...) \
-			device_create(cls, parent, devt, drvdata, fmt ## _args)
-#endif
-
 #ifdef EFX_NEED_RESOURCE_SIZE_T
 	typedef unsigned long resource_size_t;
 #endif
@@ -1236,68 +1064,6 @@
 	{
 		return res->end - res->start + 1;
 	}
-#endif
-
-#ifdef EFX_USE_I2C_LEGACY
-	#ifndef I2C_BOARD_INFO
-		struct i2c_board_info {
-			char type[I2C_NAME_SIZE];
-			unsigned short flags;
-			unsigned short addr;
-			void *platform_data;
-			int irq;
-		};
-		#define I2C_BOARD_INFO(dev_type, dev_addr) \
-			.type = (dev_type), .addr = (dev_addr)
-	#endif
-	struct i2c_client *
-	i2c_new_device(struct i2c_adapter *adap, const struct i2c_board_info *info);
-	struct i2c_client *
-	i2c_new_probed_device(struct i2c_adapter *adap,
-			      const struct i2c_board_info *info,
-			      const unsigned short *addr_list);
-	void i2c_unregister_device(struct i2c_client *);
-	struct i2c_device_id;
-#endif
-
-#ifdef EFX_NEED_I2C_NEW_DUMMY
-	extern struct i2c_driver efx_i2c_dummy_driver;
-	struct i2c_client *
-	efx_i2c_new_dummy(struct i2c_adapter *adap, u16 address);
-	#undef i2c_new_dummy
-	#define i2c_new_dummy efx_i2c_new_dummy
-#endif
-
-#ifdef EFX_HAVE_OLD_I2C_NEW_DUMMY
-	static inline struct i2c_client *
-	efx_i2c_new_dummy(struct i2c_adapter *adap, u16 address)
-	{
-		return i2c_new_dummy(adap, address, "dummy");
-	}
-	#undef i2c_new_dummy
-	#define i2c_new_dummy efx_i2c_new_dummy
-#endif
-
-#ifdef EFX_NEED_I2C_LOCK_ADAPTER
-	#ifdef EFX_USE_I2C_BUS_SEMAPHORE
-		static inline void i2c_lock_adapter(struct i2c_adapter *adap)
-		{
-			down(&adap->bus_lock);
-		}
-		static inline void i2c_unlock_adapter(struct i2c_adapter *adap)
-		{
-			up(&adap->bus_lock);
-		}
-	#else
-		static inline void i2c_lock_adapter(struct i2c_adapter *adap)
-		{
-			mutex_lock(&adap->bus_lock);
-		}
-		static inline void i2c_unlock_adapter(struct i2c_adapter *adap)
-		{
-			mutex_unlock(&adap->bus_lock);
-		}
-	#endif
 #endif
 
 #ifdef EFX_HAVE_OLD_DMA_MAPPING_ERROR
@@ -1331,29 +1097,6 @@
 	#define for_each_pci_dev(d)				\
 		while ((d = pci_get_device(PCI_ANY_ID,		\
 			PCI_ANY_ID, d)) != NULL)
-#endif
-
-#ifndef DEFINE_PCI_DEVICE_TABLE
-	#define DEFINE_PCI_DEVICE_TABLE(_table) \
-		const struct pci_device_id _table[] __devinitdata
-#endif
-
-#ifdef EFX_NEED_LM87_DRIVER
-#ifdef EFX_HAVE_OLD_I2C_DRIVER_PROBE
-int efx_lm87_probe(struct i2c_client *client);
-#else
-int efx_lm87_probe(struct i2c_client *client, const struct i2c_device_id *);
-#endif
-extern struct i2c_driver efx_lm87_driver;
-#endif
-
-#ifdef EFX_NEED_LM90_DRIVER
-#ifdef EFX_HAVE_OLD_I2C_DRIVER_PROBE
-int efx_lm90_probe(struct i2c_client *client);
-#else
-int efx_lm90_probe(struct i2c_client *client, const struct i2c_device_id *);
-#endif
-extern struct i2c_driver efx_lm90_driver;
 #endif
 
 /*
@@ -1477,6 +1220,17 @@ extern struct i2c_driver efx_lm90_driver;
 		printk(KERN_WARNING fmt, ##arg)
 #endif
 
+#ifndef netif_cond_dbg
+/* if @cond then downgrade to debug, else print at @level */
+#define netif_cond_dbg(priv, type, netdev, cond, level, fmt, args...)     \
+	do {                                                              \
+		if (cond)                                                 \
+			netif_dbg(priv, type, netdev, fmt, ##args);       \
+		else                                                      \
+			netif_ ## level(priv, type, netdev, fmt, ##args); \
+	} while (0)
+#endif
+
 /* __maybe_unused may be defined wrongly */
 #undef __maybe_unused
 #define __maybe_unused __attribute__((unused))
@@ -1494,39 +1248,6 @@ extern struct i2c_driver efx_lm90_driver;
 		a[0] = b[0];
 		a[1] = b[1];
 		a[2] = b[2];
-	}
-#endif
-
-#ifdef EFX_NEED_IS_ZERO_ETHER_ADDR
-	static inline int is_zero_ether_addr(const u8 *addr)
-	{
-		return !(addr[0] | addr[1] | addr[2] | addr[3] | addr[4] | addr[5]);
-	}
-#endif
-
-#ifdef EFX_NEED_IS_BROADCAST_ETHER_ADDR
-	static inline int is_broadcast_ether_addr(const u8 *addr)
-	{
-		return (addr[0] & addr[1] & addr[2] & addr[3] & addr[4] & addr[5]) == 0xff;
-	}
-#endif
-
-#ifdef EFX_NEED_IS_MULTICAST_ETHER_ADDR
-	static inline int is_multicast_ether_addr(const u8 *addr)
-	{
-		return addr[0] & 0x01;
-	}
-#endif
-
-#ifdef EFX_NEED_COMPARE_ETHER_ADDR
-	static inline unsigned int
-	compare_ether_addr(const u8 *addr1, const u8 *addr2)
-	{
-		const u16 *a = (const u16 *) addr1;
-		const u16 *b = (const u16 *) addr2;
-
-		BUILD_BUG_ON(ETH_ALEN != 6);
-		return ((a[0] ^ b[0]) | (a[1] ^ b[1]) | (a[2] ^ b[2])) != 0;
 	}
 #endif
 
@@ -1660,16 +1381,6 @@ extern struct i2c_driver efx_lm90_driver;
 	#endif
 #endif
 
-#ifdef EFX_NEED___CPU_TO_LE32_CONSTANT_FIX
-	#ifdef __BIG_ENDIAN
-		#undef __cpu_to_le32
-		#define __cpu_to_le32(x)		\
-		(__builtin_constant_p((__u32)(x)) ?	\
-		 ___constant_swab32((x)) :		\
-		 __fswab32((x)))
-	#endif
-#endif
-
 #ifdef EFX_NEED_BYTE_QUEUE_LIMITS
 static inline void netdev_tx_sent_queue(struct netdev_queue *dev_queue,
 					unsigned int bytes)
@@ -1703,11 +1414,6 @@ static inline void skb_checksum_none_assert(const struct sk_buff *skb)
 	BUG_ON(skb->ip_summed != CHECKSUM_NONE);
 #endif
 }
-#endif
-
-#ifdef EFX_NEED_SKB_HEADER_CLONED
-	/* This is a bit pessimistic but it's the best we can do */
-	#define skb_header_cloned skb_cloned
 #endif
 
 #ifndef __read_mostly
@@ -1821,11 +1527,6 @@ struct efx_napi_dummy {};
 #define napi_struct efx_napi_dummy
 #endif
 
-#ifdef EFX_NEED_NAPI_HASH
-static inline void napi_hash_add(struct napi_struct *napi) {}
-static inline void napi_hash_del(struct napi_struct *napi) {}
-#endif
-
 #ifdef EFX_HAVE_RXHASH_SUPPORT
 #ifdef EFX_NEED_SKB_SET_HASH
 enum pkt_hash_types {
@@ -1937,6 +1638,20 @@ static inline struct tcphdr *inner_tcp_hdr(const struct sk_buff *skb)
 #endif /* !NETIF_F_GSO_GRE */
 #endif /* EFX_HAVE_SKB_ENCAPSULATION */
 
+#ifndef EFX_HAVE_ETHTOOL_LINKSETTINGS
+/* We use an array of size 1 so that legacy code using index [0] will
+ * work with both this and a real link_mode_mask.
+ */
+#define __ETHTOOL_DECLARE_LINK_MODE_MASK(name)  unsigned long name[1]
+#endif
+
+#ifndef EFX_HAVE_ETHTOOL_LINKSETTINGS
+/* We use an array of size 1 so that legacy code using index [0] will
+ * work with both this and a real link_mode_mask.
+ */
+#define __ETHTOOL_DECLARE_LINK_MODE_MASK(name)  unsigned long name[1]
+#endif
+
 /**************************************************************************
  *
  * Missing functions provided by kernel_compat.c
@@ -1944,22 +1659,6 @@ static inline struct tcphdr *inner_tcp_hdr(const struct sk_buff *skb)
  **************************************************************************
  *
  */
-#ifdef EFX_NEED_UNREGISTER_NETDEVICE_NOTIFIER_FIX
-	/* unregister_netdevice_notifier() does not wait for the notifier
-	 * to be unused before 2.6.17 */
-	static inline int efx_unregister_netdevice_notifier(struct notifier_block *nb)
-	{
-		int res;
-
-		res = unregister_netdevice_notifier(nb);
-		rtnl_lock();
-		rtnl_unlock();
-		return res;
-	}
-	#define unregister_netdevice_notifier		 \
-		efx_unregister_netdevice_notifier
-#endif
-
 #if defined(EFX_NEED_PRINT_MAC)
 	char *print_mac(char *buf, const u8 *addr);
 #endif
@@ -1977,16 +1676,6 @@ static inline struct tcphdr *inner_tcp_hdr(const struct sk_buff *skb)
 
 #ifdef EFX_NEED_PCI_WAKE_FROM_D3
 	int pci_wake_from_d3(struct pci_dev *dev, bool enable);
-#endif
-
-#ifdef EFX_NEED_MDELAY
-	#include <linux/delay.h>
-	#undef mdelay
-	#define mdelay(_n)				\
-		do {					\
-			unsigned long __ms = _n;	\
-			while (__ms--) udelay(1000);	\
-		} while (0);
 #endif
 
 #if defined(EFX_NEED_UNMASK_MSIX_VECTORS) || \
@@ -2185,10 +1874,6 @@ unsigned int cpumask_local_spread(unsigned int i, int node);
 		pci_restore_state(_dev, (_dev)->saved_config_space)
 #endif
 
-#ifdef EFX_NEED_PCI_MATCH_ID
-	#define pci_match_id pci_match_device
-#endif
-
 #ifdef EFX_NEED_WORK_API_WRAPPERS
 	#define delayed_work work_struct
 	#undef INIT_DELAYED_WORK
@@ -2214,45 +1899,27 @@ unsigned int cpumask_local_spread(unsigned int i, int node);
 		} while (0)
 #endif
 
-#if defined(EFX_HAVE_OLD_NAPI)
+#ifdef EFX_NEED_WQ_SYSFS
+	#define WQ_SYSFS	0
+#endif
+#ifndef WQ_MEM_RECLAIM
+	#define WQ_MEM_RECLAIM	0
+#endif
 
-	#ifndef EFX_USE_GRO
-		#define napi_gro_flush(napi)
-	#endif
+#ifdef EFX_HAVE_ALLOC_WORKQUEUE
+#ifndef EFX_HAVE_NEW_ALLOC_WORKQUEUE
+	#define efx_alloc_workqueue(_fmt, _flags, _max, _name)	\
+		alloc_workqueue(_name, _flags, _max)
+#else
+	#define efx_alloc_workqueue(_fmt, _flags, _max, _name)	\
+		alloc_workqueue(_fmt, _flags, _max, _name)
+#endif
+#else
+	#define efx_alloc_workqueue(_fmt, _flags, _max, _name)	\
+		create_singlethread_workqueue(_name)
+#endif
 
-	static inline void netif_napi_add(struct net_device *dev,
-					  struct napi_struct *napi,
-					  int (*poll) (struct net_device *,
-						       int *),
-					  int weight)
-	{
-		INIT_LIST_HEAD(&dev->poll_list);
-		dev->weight = weight;
-		dev->poll = poll;
-		set_bit(__LINK_STATE_RX_SCHED, &dev->state);
-	}
-	static inline void netif_napi_del(struct napi_struct *napi) {}
-
-	#define efx_napi_get_device(napi)				\
-		(container_of(napi, struct efx_channel, napi_str)->napi_dev)
-
-	#define napi_enable(napi) netif_poll_enable(efx_napi_get_device(napi))
-	#define napi_disable(napi) netif_poll_disable(efx_napi_get_device(napi))
-	#define napi_complete(napi)					\
-		do {							\
-			napi_gro_flush(napi);				\
-			netif_rx_complete(efx_napi_get_device(napi));	\
-		} while (0)
-
-	static inline void efx_napi_schedule(struct net_device *dev)
-	{
-		if (!test_and_set_bit(__LINK_STATE_RX_SCHED, &dev->state))
-			__netif_rx_schedule(dev);
-	}
-	#define napi_schedule(napi)					\
-		efx_napi_schedule(efx_napi_get_device(napi))
-
-#elif defined(EFX_NEED_NETIF_NAPI_DEL)
+#if defined(EFX_NEED_NETIF_NAPI_DEL)
 	static inline void netif_napi_del(struct napi_struct *napi)
 	{
 	#ifdef CONFIG_NETPOLL
@@ -2316,56 +1983,6 @@ unsigned int cpumask_local_spread(unsigned int i, int node);
 	  for (__i = 0, sg = (sglist); __i < (nr); __i++, sg = sg_next(sg))
 #endif
 
-#if defined(EFX_NEED_WARN) || defined(EFX_NEED_WARN_ON)
-	void efx_warn_slowpath(const char *file, const int line,
-			       const char *function, const char *fmt, ...)
-		__attribute__((format(printf, 4, 5)));
-#endif
-#ifdef EFX_NEED_WARN
-	#define WARN(condition, format...) ({				\
-		int __ret_warn_on = !!(condition);			\
-		if (unlikely(__ret_warn_on))				\
-			efx_warn_slowpath(__FILE__, __LINE__, __func__,	\
-					  format);			\
-		unlikely(__ret_warn_on);				\
-	})
-#endif
-#ifdef EFX_NEED_WARN_ONCE
-	#define WARN_ONCE(condition, format...) ({      \
-		static int __warned;                    \
-		int __ret_warn_once = !!(condition);    \
-							\
-		if (unlikely(__ret_warn_once))          \
-			if (WARN(!__warned, format))    \
-				__warned = 1;           \
-		unlikely(__ret_warn_once);              \
-	})
-#endif
-#ifdef EFX_NEED_WARN_ON
-	void efx_warn_on_slowpath(const char *file, const int line,
-				  const char *function);
-	#undef WARN_ON
-	#define WARN_ON(condition) ({					\
-		int __ret_warn_on = !!(condition);			\
-		if (unlikely(__ret_warn_on))				\
-			efx_warn_on_slowpath(__FILE__, __LINE__,	\
-					     __func__);			\
-		unlikely(__ret_warn_on);				\
-	})
-#endif
-#ifdef EFX_NEED_WARN_ON_ONCE
-	#undef WARN_ON_ONCE
-	#define WARN_ON_ONCE(condition)					\
-	({								\
-		static bool __warned = false;				\
-		int __ret_warn_once = !!(condition);			\
-		if (unlikely(__ret_warn_once))				\
-			if (WARN_ON(!__warned)) 			\
-				__warned = true;			\
-		unlikely(__ret_warn_once);				\
-	})
-#endif
-
 #ifdef EFX_NEED_VMALLOC_NODE
 	static inline void *vmalloc_node(unsigned long size, int node)
 	{
@@ -2416,15 +2033,6 @@ static inline unsigned long __attribute_const__ rounddown_pow_of_two(unsigned lo
 
 #ifndef order_base_2
 #define order_base_2(x) fls((x) - 1)
-#endif
-
-#ifdef EFX_NEED_ON_EACH_CPU_WRAPPER
-static inline int efx_on_each_cpu(void (*func) (void *info), void *info, int wait)
-{
-	return on_each_cpu(func, info, 0, wait);
-}
-#undef on_each_cpu
-#define on_each_cpu efx_on_each_cpu
 #endif
 
 #ifndef EFX_HAVE_LIST_SPLICE_TAIL_INIT
@@ -2575,6 +2183,7 @@ static inline int efx_on_each_cpu(void (*func) (void *info), void *info, int wai
 	};
 #endif
 
+#ifndef EFX_HAVE_TIMESPEC64
 #ifdef EFX_NEED_TIMESPEC_ADD_NS
 	static inline void timespec_add_ns(struct timespec *a, u64 ns)
 	{
@@ -2608,7 +2217,7 @@ static inline int efx_on_each_cpu(void (*func) (void *info), void *info, int wai
 	#define set_normalized_timespec efx_set_normalized_timespec
 #endif
 
-#if defined(EFX_NEED_TIMESPEC_SUB) || defined(EFX_NEED_SET_NORMALIZED_TIMESPEC)
+#ifdef EFX_NEED_SET_NORMALIZED_TIMESPEC
 	/* timespec_sub() may need to be redefined because of
 	 * set_normalized_timespec() not being exported.  Define it
 	 * under our own name.
@@ -2624,19 +2233,7 @@ static inline int efx_on_each_cpu(void (*func) (void *info), void *info, int wai
 	#define timespec_sub efx_timespec_sub
 #endif
 
-#ifdef EFX_NEED_TIMESPEC_COMPARE
-	static inline int
-	timespec_compare(struct timespec *lhs, struct timespec *rhs)
-	{
-		if (lhs->tv_sec < rhs->tv_sec)
-			return -1;
-		if (lhs->tv_sec > rhs->tv_sec)
-			return 1;
-		return lhs->tv_nsec - rhs->tv_nsec;
-	}
-#endif
 
-#ifndef EFX_HAVE_TIMESPEC64
 	#define timespec64		timespec
 	#define timespec64_compare	timespec_compare
 	#define timespec64_add_ns	timespec_add_ns
@@ -2647,7 +2244,7 @@ static inline int efx_on_each_cpu(void (*func) (void *info), void *info, int wai
 	#define timespec64_to_ktime	timespec_to_ktime
 	#define timespec_to_timespec64(t) (t)
 	#define timespec64_to_timespec(t) (t)
-#endif
+#endif // EFX_HAVE_TIMESPEC64
 
 #ifdef EFX_HAVE_OLD_SKB_LINEARIZE
 	static inline int efx_skb_linearize(struct sk_buff *skb)
@@ -2685,17 +2282,6 @@ static inline int efx_on_each_cpu(void (*func) (void *info), void *info, int wai
 
 #ifndef EFX_HAVE_REMAP_PFN_RANGE
 #define remap_pfn_range remap_page_range
-#endif
-
-#ifdef EFX_NEED_GETNSTIMEOFDAY
-	static inline void efx_getnstimeofday(struct timespec *tv)
-	{
-		struct timeval x;
-		do_gettimeofday(&x);
-		tv->tv_sec = x.tv_sec;
-		tv->tv_nsec = x.tv_usec * NSEC_PER_USEC;
-	}
-#define getnstimeofday efx_getnstimeofday
 #endif
 
 #ifdef EFX_HAVE_PARAM_BOOL_INT
@@ -3043,13 +2629,6 @@ int pci_enable_msix_range(struct pci_dev *dev, struct msix_entry *entries,
 #define EFX_NEED_GET_PHYS_PORT_ID
 #endif
 
-/* get_rxfh_indir_size is used both directly via ethtool_ops and also via
- * the old rxfh_indir implementation.
- */
-#if defined(EFX_HAVE_ETHTOOL_GET_RXFH_INDIR_SIZE) || !defined(EFX_HAVE_ETHTOOL_RXFH_INDIR) || (defined(EFX_HAVE_ETHTOOL_GET_RXFH_INDIR) && defined(EFX_HAVE_OLD_ETHTOOL_RXFH_INDIR))
-#define EFX_NEED_ETHTOOL_GET_RXFH_INDIR_SIZE
-#endif
-
 #ifdef EFX_NEED_SKB_GSO_TCPV6
 #define SKB_GSO_TCPV6 0
 #endif
@@ -3114,6 +2693,192 @@ static inline int skb_inner_transport_offset(const struct sk_buff *skb)
 	return skb_inner_transport_header(skb) - skb->data;
 }
 #endif
+#endif
+
+#ifndef QSTR_INIT
+#define QSTR_INIT(n,l) { .len = l, .name = n }
+#endif
+
+#ifdef EFX_HAVE_NETDEV_REGISTER_RH
+/* The _rh versions of these appear in RHEL7.3.
+ * Wrap them to make the calling code simpler.
+ */
+static inline int efx_register_netdevice_notifier(struct notifier_block *b)
+{
+	return register_netdevice_notifier_rh(b);
+}
+
+static inline int efx_unregister_netdevice_notifier(struct notifier_block *b)
+{
+	return unregister_netdevice_notifier_rh(b);
+}
+
+#define register_netdevice_notifier efx_register_netdevice_notifier
+#define unregister_netdevice_notifier efx_unregister_netdevice_notifier
+#endif
+
+#ifdef EFX_HAVE_NAPI_HASH_ADD
+/* napi_hash_add appeared in 3.11 and is no longer exported as of 4.10.
+ *
+ * Although newer versions of netif_napi_add call napi_hash_add we can still
+ * call napi_hash_add here regardless, since there is a state bit to avoid
+ * double adds.
+ */
+static inline void efx_netif_napi_add(struct net_device *dev,
+				      struct napi_struct *napi,
+				      int (*poll)(struct napi_struct *, int),
+				      int weight)
+{
+	netif_napi_add(dev, napi, poll, weight);
+	napi_hash_add(napi);
+}
+#ifdef netif_napi_add
+/* RHEL7.3 defines netif_napi_add as _netif_napi_add for KABI compat. */
+#define _netif_napi_add efx_netif_napi_add
+#else
+#define netif_napi_add efx_netif_napi_add
+#endif
+
+/* napi_hash_del still exists as of 4.10, even though napi_hash_add has gone.
+ * This is because it returns whether an RCU grace period is needed, allowing
+ * drivers to coalesce them. We don't do this.
+ *
+ * Although newer versions of netif_napi_del() call napi_hash_del() already
+ * this is safe - it uses a state bit to determine if it needs deleting.
+ */
+static inline void efx_netif_napi_del(struct napi_struct *napi)
+{
+	might_sleep();
+#ifndef EFX_HAVE_NAPI_HASH_DEL_RETURN
+	napi_hash_del(napi);
+	if (1) /* Always call synchronize_net */
+#else
+	if (napi_hash_del(napi))
+#endif
+		synchronize_net();
+	netif_napi_del(napi);
+}
+#define netif_napi_del efx_netif_napi_del
+#endif
+
+#ifndef tcp_flag_byte
+#define tcp_flag_byte(th) (((u_int8_t *)th)[13])
+#endif
+
+#ifndef TCPHDR_FIN
+#define TCPHDR_FIN 0x01
+#define TCPHDR_SYN 0x02
+#define TCPHDR_RST 0x04
+#define TCPHDR_PSH 0x08
+#define TCPHDR_ACK 0x10
+#define TCPHDR_URG 0x20
+#define TCPHDR_ECE 0x40
+#define TCPHDR_CWR 0x80
+#endif
+
+#if defined(EFX_HAVE_NDO_BUSY_POLL) || defined(EFX_HAVE_NDO_EXT_BUSY_POLL)
+/* Combined define for driver-based busy poll. Later kernels (4.11+) implement
+ * busy polling in the core.
+ */
+#define EFX_WANT_DRIVER_BUSY_POLL
+#endif
+
+#if defined(EFX_NEED_BOOL_NAPI_COMPLETE_DONE)
+static inline bool efx_napi_complete_done(struct napi_struct *napi,
+					  int spent __always_unused)
+{
+	napi_complete(napi);
+	return true;
+}
+#define napi_complete_done efx_napi_complete_done
+#endif
+
+#if defined(EFX_NEED_HWMON_DEVICE_REGISTER_WITH_INFO)
+struct hwmon_chip_info;
+struct attribute_group;
+
+enum hwmon_sensor_types {
+	hwmon_chip,
+	hwmon_temp,
+	hwmon_in,
+	hwmon_curr,
+	hwmon_power,
+	hwmon_energy,
+	hwmon_humidity,
+	hwmon_fan,
+	hwmon_pwm,
+};
+
+#ifdef EFX_HAVE_HWMON_CLASS_DEVICE
+#define EFX_HWMON_DEVICE_REGISTER_TYPE class_device
+#else
+#define EFX_HWMON_DEVICE_REGISTER_TYPE device
+#endif
+
+struct EFX_HWMON_DEVICE_REGISTER_TYPE *hwmon_device_register_with_info(
+	struct device *dev,
+	const char *name __always_unused,
+	void *drvdata __always_unused,
+	const struct hwmon_chip_info *info __always_unused,
+	const struct attribute_group **extra_groups __always_unused);
+#else
+#if defined(EFX_NEED_HWMON_T_ALARM)
+#define HWMON_T_ALARM	BIT(hwmon_temp_alarm)
+#endif
+#endif
+
+#if defined(EFX_HAVE_XDP_OLD)
+/* ndo_xdp and netdev_xdp were renamed in 4.15 */
+#define ndo_bpf	ndo_xdp
+#define netdev_bpf netdev_xdp
+#define EFX_HAVE_XDP
+#endif
+
+#if defined(EFX_HAVE_XDP) && !defined(EFX_HAVE_XDP_TRACE)
+#define trace_xdp_exception(dev, prog, act)
+#endif
+
+#if !defined(EFX_HAVE_XDP_HEAD)
+#define XDP_PACKET_HEADROOM 0
+#endif
+
+#ifdef EFX_NEED_VOID_SKB_PUT
+static inline void *efx_skb_put(struct sk_buff *skb, unsigned int len)
+{
+	return skb_put(skb, len);
+}
+#define skb_put efx_skb_put
+#endif
+
+#ifndef DEFINE_RATELIMIT_STATE
+/* No rate limitation */
+#define DEFINE_RATELIMIT_STATE(var, i, b)	int var = 1
+#define __ratelimit(varp)			(*varp)
+#endif
+
+#if defined(EFX_NEED_PAGE_FRAG_FREE)
+#if defined(EFX_HAVE_FREE_PAGE_FRAG)
+/* Renamed in v4.10 */
+#define page_frag_free __free_page_frag
+#else
+static inline void page_frag_free(void *p)
+{
+	put_page(virt_to_head_page(p));
+}
+#endif
+#endif
+
+#ifndef BIT_ULL
+#define BIT_ULL(nr)		(1ULL << (nr))
+#endif
+
+#ifdef EFX_NEED_PCI_DEV_TO_EEH_DEV
+#define pci_dev_to_eeh_dev(pci_dev) \
+	of_node_to_eeh_dev(pci_device_to_OF_node((pci_dev)))
+#endif
+
+#ifndef USER_TICK_USEC
+#define USER_TICK_USEC TICK_USEC
 #endif
 
 #endif /* EFX_KERNEL_COMPAT_H */

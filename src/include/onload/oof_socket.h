@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -43,6 +43,11 @@ struct oof_socket {
 #define OOF_SOCKET_NO_STACK               0x00000010
 /* full socket will not share filter of a semi-wild one */
 #define OOF_SOCKET_NO_SHARING             0x00000020
+/* No unicast filters sw or hw should be installed.
+ * Note: this means these sockets should be ignored in all
+ * filter related searches.  Exception being an installation of
+ * NO_STACK DUMMY socket in search of presence of an existing cluster */
+#define OOF_SOCKET_NO_UCAST               0x00000040
   unsigned  sf_flags;
 
   /* All other fields are only valid when [sf_local_port] is not NULL */

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -200,6 +200,7 @@ static void citp_dump_opts(citp_opts_t *o)
 #endif
   DUMP_OPT_INT("EF_FDTABLE_SIZE",	fdtable_size);
   DUMP_OPT_INT("EF_SPIN_USEC",		ul_spin_usec);
+  DUMP_OPT_INT("EF_SLEEP_SPIN_USEC",	sleep_spin_usec);
   DUMP_OPT_INT("EF_STACK_PER_THREAD",	stack_per_thread);
   DUMP_OPT_INT("EF_DONT_ACCELERATE",	dont_accelerate);
   DUMP_OPT_INT("EF_FDTABLE_STRICT",	fdtable_strict);
@@ -213,8 +214,10 @@ static void citp_dump_opts(citp_opts_t *o)
   DUMP_OPT_INT("EF_PIPE", ul_pipe);
 #endif
   DUMP_OPT_HEX("EF_SIGNALS_NOPOSTPONE", signals_no_postpone);
+  DUMP_OPT_HEX("EF_SYNC_CPLANE_AT_CREATE", sync_cplane);
   DUMP_OPT_INT("EF_CLUSTER_SIZE",  cluster_size);
   DUMP_OPT_INT("EF_CLUSTER_RESTART",  cluster_restart_opt);
+  DUMP_OPT_INT("EF_CLUSTER_HOT_RESTART", cluster_hot_restart_opt);
   ci_log("EF_CLUSTER_NAME=%s", o->cluster_name);
   if( o->tcp_reuseports == 0 ) {
     DUMP_OPT_INT("EF_TCP_FORCE_REUSEPORT", tcp_reuseports);
@@ -268,7 +271,6 @@ static void citp_get_process_name(void)
            citp.process_name[-1] != '/')
       --citp.process_name;
   }
-
 }
 
 
@@ -336,6 +338,27 @@ static void get_env_opt_port_list(ci_uint64* opt, const char* name)
   }
 }
 
+static void citp_update_and_crosscheck(ci_netif_config_opts* netif_opts,
+                                       citp_opts_t* citp_opts)
+{
+  /*
+   * ci_netif_config_opts_getenv() is called before
+   * citp_transport_init(), so we need to update
+   * update ci_cfg_opts.netif_opts.accept_inherit_nonblock,
+   * making netifs to inherit flags if the O/S is
+   * being forced to do so
+   */
+  if (citp_opts->accept_force_inherit_nonblock)
+    netif_opts->accept_inherit_nonblock = 1;
+
+  if( citp_opts->ul_epoll == 0 && netif_opts->int_driven == 0 ) {
+    ci_log("EF_INT_DRIVEN=0 and EF_UL_EPOLL=0 are not compatible.  "
+           "EF_INT_DRIVEN can be set to 0 implicitly, because of non-zero "
+           "EF_POLL_USEC.  If you need both spinning and EF_UL_EPOLL=0, "
+           "please set EF_INT_DRIVEN=1 explicitly.");
+  }
+  return;
+}
 
 static void citp_opts_getenv(citp_opts_t* opts)
 {
@@ -365,10 +388,14 @@ static void citp_opts_getenv(citp_opts_t* opts)
     ci_log_options &=~ CI_LOG_PID;
     citp_setup_logging_change(citp_log_fn_drv);
   } else {
-    if( getenv("EF_LOG_TIMESTAMPS") )
+    GET_ENV_OPT_INT("EF_LOG_TIMESTAMPS", log_timestamps);
+    if( opts->log_timestamps )
       ci_log_options |= CI_LOG_TIME;
     citp_setup_logging_change(citp_log_fn_ul);
   }
+  if( getenv("EF_LOG_THREAD") )
+    ci_log_options |= CI_LOG_TID;
+
 
   if( getenv("EF_POLL_NONBLOCK_FAST_LOOPS") &&
       ! getenv("EF_POLL_NONBLOCK_FAST_USEC") )
@@ -380,7 +407,12 @@ static void citp_opts_getenv(citp_opts_t* opts)
         " EF_POLL_FAST_USEC instead");
 
   if( (s = getenv("EF_POLL_USEC")) && atoi(s) ) {
+    /* Any changes to the behaviour triggered by this meta
+     * option must also be made to the extensions API option
+     * ONLOAD_SPIN_MIMIC_EF_POLL
+     */
     GET_ENV_OPT_INT("EF_POLL_USEC", ul_spin_usec);
+    GET_ENV_OPT_INT("EF_SLEEP_SPIN_USEC", sleep_spin_usec);
     opts->ul_select_spin = 1;
     opts->ul_poll_spin = 1;
 #if CI_CFG_USERSPACE_EPOLL
@@ -435,19 +467,15 @@ static void citp_opts_getenv(citp_opts_t* opts)
   GET_ENV_OPT_INT("EF_SO_BUSY_POLL_SPIN", so_busy_poll_spin);
 #if CI_CFG_USERSPACE_EPOLL
   GET_ENV_OPT_INT("EF_UL_EPOLL",        ul_epoll);
-  if( opts->ul_epoll == 0 && ci_cfg_opts.netif_opts.int_driven == 0 ) {
-    ci_log("EF_INT_DRIVEN=0 and EF_UL_EPOLL=0 are not compatible.  "
-           "EF_INT_DRIVEN can be set to 0 implicitly, because of non-zero "
-           "EF_POLL_USEC.  If you need both spinning and EF_UL_EPOLL=0, "
-           "please set EF_INT_DRIVEN=1 explicitly.");
-  }
   GET_ENV_OPT_INT("EF_EPOLL_SPIN",      ul_epoll_spin);
   GET_ENV_OPT_INT("EF_EPOLL_CTL_FAST",  ul_epoll_ctl_fast);
   GET_ENV_OPT_INT("EF_EPOLL_CTL_HANDOFF",ul_epoll_ctl_handoff);
   GET_ENV_OPT_INT("EF_EPOLL_MT_SAFE",   ul_epoll_mt_safe);
+  GET_ENV_OPT_INT("EF_WODA_SINGLE_INTERFACE", woda_single_if);
 #endif
   GET_ENV_OPT_INT("EF_FDTABLE_SIZE",	fdtable_size);
   GET_ENV_OPT_INT("EF_SPIN_USEC",	ul_spin_usec);
+  GET_ENV_OPT_INT("EF_SLEEP_SPIN_USEC",	sleep_spin_usec);
   GET_ENV_OPT_INT("EF_STACK_PER_THREAD",stack_per_thread);
   GET_ENV_OPT_INT("EF_DONT_ACCELERATE",	dont_accelerate);
   GET_ENV_OPT_INT("EF_FDTABLE_STRICT",	fdtable_strict);
@@ -459,6 +487,7 @@ static void citp_opts_getenv(citp_opts_t* opts)
 #if CI_CFG_USERSPACE_PIPE
   GET_ENV_OPT_INT("EF_PIPE",        ul_pipe);
 #endif
+  GET_ENV_OPT_INT("EF_SYNC_CPLANE_AT_CREATE",	sync_cplane);
 
   if( (s = getenv("EF_FORK_NETIF")) && sscanf(s, "%x", &v) == 1 ) {
     opts->fork_netif = CI_MIN(v, CI_UNIX_FORK_NETIF_BOTH);
@@ -486,15 +515,18 @@ static void citp_opts_getenv(citp_opts_t* opts)
     opts->cluster_name[0] = '\0';
   }
   GET_ENV_OPT_INT("EF_CLUSTER_SIZE",	cluster_size);
-  if( opts->cluster_size < 2 )
-    log("ERROR: cluster_size < 2 are not supported");
+  if( opts->cluster_size < 1 )
+    log("ERROR: cluster_size needs to be a positive number");
   GET_ENV_OPT_INT("EF_CLUSTER_RESTART",	cluster_restart_opt);
+  GET_ENV_OPT_INT("EF_CLUSTER_HOT_RESTART", cluster_hot_restart_opt);
   get_env_opt_port_list(&opts->tcp_reuseports, "EF_TCP_FORCE_REUSEPORT");
   get_env_opt_port_list(&opts->udp_reuseports, "EF_UDP_FORCE_REUSEPORT");
 
 #if CI_CFG_FD_CACHING
   get_env_opt_port_list(&opts->sock_cache_ports, "EF_SOCKET_CACHE_PORTS");
 #endif
+
+  GET_ENV_OPT_INT("EF_ONLOAD_FD_BASE",	fd_base);
 }
 
 
@@ -516,6 +548,7 @@ static void citp_opts_validate_env(void)
     "EF_NO_PRELOAD_RESTORE",
     "EF_LD_PRELOAD",
     "EF_CLUSTER_NAME",
+    "EF_LOG_THREAD",
 #ifdef ONLOAD_OFE
     "EF_OFE_CONFIG_FILE",
 #endif
@@ -561,10 +594,7 @@ static void citp_opts_validate_env(void)
 static int
 citp_cfg_init(void)
 {
-  int cfgerr = 0;
- /* FIXME: if return code is non-zero, must not allow
-           no-intercept to be overriden by environment variable */
-  ci_cfg_query(NULL, &cfgerr);
+  ci_cfg_query();
   return 0;
 }
 
@@ -602,6 +632,8 @@ citp_transport_init(void)
   citp.select_fast_cycles = 
     citp_usec_to_cycles64(CITP_OPTS.ul_select_fast_usec);
   ci_tp_init(__oo_per_thread_init_thread);
+
+  citp_update_and_crosscheck(&ci_cfg_opts.netif_opts, &CITP_OPTS);
   return 0;
 }
 
@@ -674,6 +706,7 @@ void _init(void)
 void _fini(void)
 {
   Log_S(log("citp: finishing up"));
+  uncache_active_netifs();
 }
 
 

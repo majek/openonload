@@ -41,7 +41,9 @@ LIB_SRCS	+=		\
 		vi_stats.c	\
 		vi_prime.c	\
 		vi_discard.c	\
-		capabilities.c
+		checksum.c	\
+		capabilities.c	\
+		ctpio.c
 endif
 
 

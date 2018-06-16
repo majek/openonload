@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -96,7 +96,9 @@ typedef struct efx_dlfilt_cb_s {
 #if CI_CFG_NET_DHCP_FILTER
   efx_dlfilter_dhcp_hook_t dhcp_filter;
 #endif
-} efx_dlfilter_cb_t ;
+  void* ctx;
+  efx_dlfilter_is_onloaded_t is_onloaded;
+} efx_dlfilter_cb_t;
 
 
 #endif /* __CI_DRIVER_EFAB_DRIVERLINK__FILTER__PRIVATE_H__ */

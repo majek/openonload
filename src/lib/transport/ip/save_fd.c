@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -27,8 +27,12 @@
 /*! \cidoxg_lib_transport_ip */
  
 #include <onload/ul.h>
+#include <onload/ul/tcp_helper.h>
 #include <ci/internal/ip_log.h>
+#include <ci/internal/efabcfg.h>
 #include <onload/epoll.h>
+#include <onload/version.h>
+#include "uk_intf_ver.h"
 
 
 /*! Names of the devices to open.
@@ -55,12 +59,65 @@ static int fd_is_saved[OO_MAX_DEV];
 static unsigned long oo_st_rdev[OO_MAX_DEV];
 
 
+int oo_version_check_ul(ci_fd_t fd)
+{
+  int rc;
+  oo_version_check_t vc;
+  strncpy(vc.in_version, ONLOAD_VERSION, sizeof(vc.in_version));
+  strncpy(vc.in_uk_intf_ver, OO_UK_INTF_VER, sizeof(vc.in_uk_intf_ver));
+  vc.debug =
+#ifdef NDEBUG
+    0;
+#else
+    1;
+#endif
+  rc = ci_sys_ioctl(fd, OO_IOC_CHECK_VERSION, &vc);
+  if( rc == -1 )
+    return -errno;
+  return rc;
+}
+
+
 /* Please do not add any logging here (else citp_log_fn() could recurse) */
 ci_inline int oo_open(ci_fd_t* out, enum oo_device_type dev_type, int flags) {
   ci_fd_t fp  = ci_sys_open(oo_device_name[dev_type], O_RDWR | flags);
+  int rc;
   if( fp < 0 )  return -errno;
+  if( dev_type == OO_STACK_DEV ) {
+    rc = oo_version_check_ul(fp);
+    if( rc < 0 ) {
+      ci_sys_close(fp);
+      return rc;
+    }
+  }
   *out = fp;
   return 0;
+}
+
+
+int ef_onload_handle_move_and_do_cloexec(ef_driver_handle* pfd, int do_cloexec)
+{
+  int fd;
+
+  if( do_cloexec )
+    fd = oo_fcntl_dupfd_cloexec(*pfd, CITP_OPTS.fd_base);
+  else
+    fd = ci_sys_fcntl(*pfd, F_DUPFD, CITP_OPTS.fd_base);
+
+  /* If we've successfully done the dup then we've also set CLOEXEC if
+   * needed on the new fd, so we're done.
+   */
+  if( fd >= 0 ) {
+    ci_tcp_helper_close_no_trampoline(*pfd);
+    *pfd = fd;
+    return 0;
+  }
+  else {
+    LOG_NV(ci_log("%s: Failed to move fd from %d, rc %d",
+                  __func__, *pfd, fd));
+  }
+
+  return fd;
 }
 
 int ef_onload_driver_open(ef_driver_handle* pfd,
@@ -92,6 +149,21 @@ int ef_onload_driver_open(ef_driver_handle* pfd,
 
   if( rc != 0 )
     return rc;
+
+  /* Our internal driver handles are not visible to the application.  It may
+   * make assumptions about the fd space available to it, and try to dup2/3
+   * onto one of our driver fds.  To try and minimise this we allow the user
+   * to specify a minimum value for us to use, to try and keep out of their
+   * way.
+   *
+   * We have to be able to cope with them coming along and trying to dup onto
+   * one of these fds anyway, as they may not have set the option up.  As such
+   * we treat failure to shift the fd as acceptable, and just retain the old
+   * one.
+   */
+  if( *pfd < CITP_OPTS.fd_base )
+    if( ef_onload_handle_move_and_do_cloexec(pfd, do_cloexec) == 0 )
+      return 0;
       
   if( do_cloexec ) {
 #if defined(O_CLOEXEC)

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -49,6 +49,7 @@ typedef struct {
   ci_uint16 sport_be16; /*< dest port of TCP/UDP IP PDU in ICMP reply data */
   ci_uint16 dport_be16; /*< src port of TCP/UDP IP PDU in ICMP reply data */
   ci_uint8  protocol;   /*< protocol of IP PDU in ICMP reply data */
+  ci_ifid_t ifindex;    /*< interface index we've got the ICMP message from */
 } efab_ipp_addr;
 
 #endif

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -42,6 +42,8 @@ extern int ci_tcp_helper_stack_attach(ci_fd_t from_fd,
 /*! Allocate fd for socket ep_id and create OS socket for UDP socks */
 extern int ci_tcp_helper_sock_attach(ci_fd_t stack_fd, oo_sp ep_id,
                                      int domain, int type);
+extern int
+ci_tcp_helper_sock_attach_to_existing_file(ci_fd_t stack_fd, oo_sp ep_id);
 /*! Allocate fd for accepted tcp socket ep_id */
 extern int ci_tcp_helper_tcp_accept_sock_attach(ci_fd_t stack_fd, oo_sp ep_id,
                                                int type);
@@ -70,9 +72,6 @@ extern int ci_tcp_helper_listen_os_sock(ci_fd_t fd, int backlog) CI_HF;
 
 extern int ci_tcp_helper_endpoint_shutdown(ci_fd_t fd, int how,
                                            ci_uint32 old_state) CI_HF;
-
-extern int ci_tcp_helper_connect_os_sock(ci_fd_t, const struct sockaddr*,
-                                         size_t addrlen) CI_HF;
 
 extern int ci_tcp_helper_os_sock_create_and_set(ci_netif *ni, ci_fd_t fd,
                                                 ci_sock_cmn *s, int level,
@@ -115,6 +114,7 @@ ci_tcp_helper_ep_reuseport_bind(ci_fd_t           fd,
                                 const char*       cluster_name,
                                 ci_int32          cluster_size,
                                 ci_uint32         cluster_restart_opt,
+                                ci_uint32         cluster_hot_restart_opt,
                                 ci_uint32         addr_be32,
                                 ci_uint16         port_be16) CI_HF;
 
@@ -215,6 +215,17 @@ int ci_tcp_helper_open_shared_event(ci_netif *ni, ci_fd_t fd,
 
 extern int ci_tcp_helper_set_tcp_close_os_sock(ci_netif *ni,
                                                oo_sp sock_id) CI_HF;
+
+/*--------------------------------------------------------------------
+ *!
+ * Try and expand the active wild pool
+ *--------------------------------------------------------------------*/
+extern int ci_tcp_helper_alloc_active_wild(ci_netif *ni, ci_uint32 laddr_be32);
+
+extern int
+ci_tcp_inject_packets(ci_netif *ni, int ifindex, struct iovec* kernel_packets,
+                      int num);
+
 
 #endif /* __CI_UL_TCP_HELPER_H__ */
 

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -82,6 +82,11 @@ const char* type_str(int type)
     "<unknown>",              /* 9 */
     "SOCK_PACKET"             /* 10 */
   };
+#ifndef SOCK_TYPE_MASK
+#define SOCK_TYPE_MASK 0xf
+#endif
+
+  type &= SOCK_TYPE_MASK;
 
   if (type < 0 || type >= (sizeof (type_strs) / sizeof (type_strs[0])))
     return "<out of range>";
@@ -160,7 +165,8 @@ const char* ci_tcp_state_num_str(int state_i)
     "FREE",
     "UDP",
     "PIPE",
-    "ALIEN",
+    "AUXBUF",
+    "ACTIVE_WILD",
   };
 
   if( state_i < 0 || state_i >= (sizeof(state_strs) / sizeof(state_strs[0])) )
@@ -186,6 +192,24 @@ const char* ci_tcp_congstate_str(unsigned s)
 }
 
 
+#ifndef NDEBUG
+void ci_tcp_state_verify_no_timers(ci_netif *ni, ci_tcp_state *ts)
+{
+# define chk(x) ci_assert(!ci_ip_timer_pending(ni, &ts->x))
+  chk(rto_tid);
+  chk(delack_tid);
+  chk(zwin_tid);
+  chk(kalive_tid);
+  chk(cork_tid);
+  chk(pmtus.tid);
+#if CI_CFG_TCP_SOCK_STATS
+  chk(stats_tid);
+#endif
+#undef chk
+}
+#endif
+
+
 static void __ci_tcp_state_free(ci_netif *ni, ci_tcp_state *ts)
 {
   VERB(ci_log("%s("NTS_FMT")", __FUNCTION__, NTS_PRI_ARGS(ni,ts)));
@@ -206,8 +230,9 @@ static void __ci_tcp_state_free(ci_netif *ni, ci_tcp_state *ts)
 
   /* Remove from any lists we're in. */
   ci_ni_dllist_remove_safe(ni, &ts->s.b.post_poll_link);
-  ci_ni_dllist_remove_safe(ni, &ts->s.b.ready_link);
   ci_ni_dllist_remove_safe(ni, &ts->s.reap_link);
+
+  citp_waitable_remove_from_epoll(ni, &ts->s.b, 1);
 
   /* By the time we get here the send queues must be empty (otherwise it
   ** means we have a leak!).  Receive queues may have data due to
@@ -220,7 +245,9 @@ static void __ci_tcp_state_free(ci_netif *ni, ci_tcp_state *ts)
   ci_ip_queue_drop(ni, &ts->recv1);
   ci_ip_queue_drop(ni, &ts->recv2);
 
+#if CI_CFG_TIMESTAMPING
   ci_udp_recv_q_drop(ni, &ts->timestamp_q);
+#endif
 
 #if CI_CFG_FD_CACHING
   /* Clear any cache link - it's possible that this socket is on the
@@ -235,17 +262,7 @@ static void __ci_tcp_state_free(ci_netif *ni, ci_tcp_state *ts)
   ci_ni_dllist_remove_safe(ni, &ts->epcache_link);
 #endif
 
-# define chk(x) ci_assert(!ci_ip_timer_pending(ni, &ts->x))
-  chk(rto_tid);
-  chk(delack_tid);
-  chk(zwin_tid);
-  chk(kalive_tid);
-  chk(cork_tid);
-  chk(pmtus.tid);
-#if CI_CFG_TCP_SOCK_STATS
-  chk(stats_tid);
-#endif
-#undef chk
+  ci_tcp_state_verify_no_timers(ni, ts);
 }
 
 
@@ -664,21 +681,46 @@ void ci_tcp_state_free_to_cache(ci_netif* netif, ci_tcp_state* ts)
 
   ci_assert(ci_tcp_is_cached(ts));
 
-  if( ts->s.b.sb_aflags & CI_SB_AFLAG_IN_PASSIVE_CACHE ) {
+  if( ts->s.s_flags & CI_SOCK_FLAG_SCALPASSIVE ) {
+    cache = &netif->state->passive_scalable_cache;
+  }
+  else if( ts->s.b.sb_aflags & CI_SB_AFLAG_IN_PASSIVE_CACHE ) {
     /* We can only cache passively accepted sockets if they have filters,
      * so they must have been bound.
      */
     ci_assert_nequal(tcp_laddr_be32(ts), 0);
     ci_assert_nequal(tcp_lport_be16(ts), 0);
     rc = ci_netif_listener_lookup(netif, tcp_laddr_be32(ts), tcp_lport_be16(ts));
-    /* The listening socket must clear it's epcache_pending queue on shutdown,
-     * so we should always find it.
-     */
-    ci_assert_ge(rc, 0);
-    tls = ID_TO_TCP_LISTEN(netif, CI_NETIF_FILTER_ID_TO_SOCK_ID(netif, rc));
+    if( rc >= 0 ) {
+      tls = ID_TO_TCP_LISTEN(netif, CI_NETIF_FILTER_ID_TO_SOCK_ID(netif, rc));
 
-    ci_assert_equal(tls->s.b.state, CI_TCP_LISTEN);
-    cache = &tls->epcache;
+      ci_assert_equal(tls->s.b.state, CI_TCP_LISTEN);
+      ci_assert_nflags(tls->s.s_flags, CI_SOCK_FLAG_SCALPASSIVE);
+      cache = &tls->epcache;
+    }
+    else {
+      /* The listening socket clears its cache (including the epcache_pending
+       * queue) on shutdown, so the fact that we have a cached socket means
+       * that the listening socket must still exist.  However,
+       * ci_netif_listener_lookup() uses the software filter table to do its
+       * lookup, so this can still fail if the software filter has been
+       * removed, which happens if the IP address has been removed from the
+       * interface.  In this case we have a bit of a problem, because we can't
+       * move the socket through the caching state machine without getting at
+       * the listener.  On the other hand, if the IP address has been removed,
+       * then the cached socket is useless anyway.  We pop it from
+       * epcache_pending but leave it in limbo for the rest of the lifetime of
+       * the listening socket, meaning that it consumes one of the available
+       * caching slots.  The TCP state will eventually be freed when the
+       * listening socket is closed, because then we iterate over the fd_states
+       * list, of which this socket will still be a member, and close the
+       * associated file descriptors.  Bug79267 discusses a possible way to
+       * overcome this limitation.
+       */
+      LOG_EP(ci_log("Couldn't find listener for cached socket "NSS_FMT" fd %d",
+                    NSS_PRI_ARGS(netif,&ts->s), ts->cached_on_fd));
+      cache = NULL;
+    }
   }
   else {
     cache = &netif->state->active_cache;
@@ -689,7 +731,7 @@ void ci_tcp_state_free_to_cache(ci_netif* netif, ci_tcp_state* ts)
    * rather than allocating a new TCP state
    */
 #if CI_CFG_DETAILED_CHECKS
-  {
+  if( cache != NULL ) {
     /* Check that this TS is really on the pending list */
     ci_ni_dllist_link *link =
       ci_ni_dllist_start(netif, &cache->pending);
@@ -718,7 +760,9 @@ void ci_tcp_state_free_to_cache(ci_netif* netif, ci_tcp_state* ts)
    */
   __ci_tcp_state_free(netif, ts);
   citp_waitable_obj_free_to_cache(netif, &ts->s.b);
-  ci_ni_dllist_push(netif, &cache->cache, &ts->epcache_link);
+
+  if( cache != NULL )
+    ci_ni_dllist_push(netif, &cache->cache, &ts->epcache_link);
 }
 #endif
 
@@ -767,7 +811,10 @@ void ci_tcp_drop(ci_netif* netif, ci_tcp_state* ts, int so_error)
   ci_tcp_set_slow_state(netif, ts, CI_TCP_CLOSED);
 
 #if CI_CFG_FD_CACHING
-  if( !ci_tcp_is_cached(ts) ) {
+  if( ts->s.s_flags & CI_SOCK_FLAGS_SCALABLE ) {
+    rc = ci_tcp_ep_clear_filters(netif, S_SP(ts), 0);
+  }
+  else if( !ci_tcp_is_cached(ts) ) {
     if( !ci_ni_dllist_is_self_linked(netif, &ts->epcache_link) ) {
       ci_ni_dllist_remove_safe(netif, &ts->epcache_link);
       rc = ci_tcp_ep_clear_filters(netif, S_SP(ts), 1);
@@ -899,6 +946,19 @@ void ci_tcp_get_fack(ci_netif* ni, ci_tcp_state* ts,
   int retrans_data = 0;
   unsigned fack;
 
+#ifndef NDEBUG
+  /* We have very occasionally seen the assert following this being hit.
+   * However, we haven't tracked down the reason.  This hope is that by
+   * adding a bit of logging here we'll have a bit more to go on if we hit
+   * it again.
+   */
+  if( ci_ip_queue_is_empty(rtq) ) {
+    ci_log("%s: "NTS_FMT, __FUNCTION__, NTS_PRI_ARGS(ni, ts));
+    ci_tcp_state_dump_id(ni, ts->s.b.bufid);
+    ci_tcp_state_dump_qs(ni, ts->s.b.bufid, 1);
+  }
+#endif
+
   ci_assert(! ci_ip_queue_is_empty(rtq));
 
   block = PKT_CHK(ni, rtq->head);
@@ -942,13 +1002,15 @@ void ci_tcp_recovered(ci_netif* ni, ci_tcp_state* ts)
             ts->congstate != CI_TCP_CONG_NOTIFIED);
 
   if( ts->congstate == CI_TCP_CONG_FAST_RECOV ) {
-    if( !(ts->tcpflags & CI_TCPT_FLAG_SACK) )
+    if( !(ts->tcpflags & CI_TCPT_FLAG_SACK) ) {
       /* RFC2581 says set cwnd to ssthresh on exit from fast recovery.
       ** NewReno (RFC2582) says min(ssthresh, FlightSize+MSS) or ssthresh.
       ** So I guess we could use either.
       ** chosen as the more aggresive and to allow ANVL tcp-advanced/4.17 to pass
       */
       ts->cwnd = CI_MAX(ts->ssthresh, NI_OPTS(ni).loss_min_cwnd);
+      ts->cwnd = CI_MAX(ts->cwnd, NI_OPTS(ni).min_cwnd);
+    }
   }
   else if( ts->congstate == CI_TCP_CONG_RTO_RECOV ) {
     if( ts->dup_acks >= ts->dup_thresh ) {
@@ -1115,10 +1177,9 @@ ci_tcp_rcvbuf_unabuse_socklocked(ci_netif* ni, ci_tcp_state* ts)
 }
 
 void
-ci_tcp_rcvbuf_unabuse(ci_netif* ni, ci_tcp_state* ts, int sock_locked)
+ci_tcp_rcvbuf_unabuse(ci_netif* ni, ci_tcp_state* ts, int sock_already_locked)
 {
   int rob_dropped = 0;
-  int sock_unlock = 0;
 #ifndef NDEBUG
   int pkts = ts->recv1.num + ts->recv2.num + ts->rob.num;
 #endif
@@ -1142,35 +1203,28 @@ ci_tcp_rcvbuf_unabuse(ci_netif* ni, ci_tcp_state* ts, int sock_locked)
       goto out;
   }
 
-  /* Try to get socket lock */
-  if( ! sock_locked ) {
-    sock_locked = sock_unlock = ci_sock_trylock(ni, &ts->s.b);
-  }
-  if( sock_locked )
-    ci_assert(ci_sock_is_locked(ni, &ts->s.b));
-
-  /* If we've got socket lock, coalesce receive queue.
-   * If receive queue is guilty, try harder to get the lock. */
-  if( sock_locked ) {
+  /* Try to get socket lock so that we can coalesce the receive queue.
+   * We mustn't block on the socket lock because it violates lock ordering.
+   * And we mustn't drop the stack lock and then block on the socket lock
+   * because this function may be called from ci_netif_poll().  It is
+   * definitely a bad idea to drop the stack lock in the middle of the
+   * poll.
+   *
+   * If we can't get the socket lock, then no luck - we'll unabuse the RXQ
+   * later.
+   *
+   * If we already have the socket lock, then the caller is probably doing
+   * something with the RXQ, and we should not touch it under the caller's
+   * feet; see the call chain ci_tcp_recvmsg_get_nopeek() ->
+   * ci_tcp_recvmsg_send_wnd_update() -> ci_tcp_send_ack() -> here.
+   */
+  if( ! sock_already_locked && ci_sock_trylock(ni, &ts->s.b)) {
     CITP_STATS_NETIF_INC(ni, tcp_rcvbuf_abused_recv_coalesced);
     ci_tcp_rcvbuf_unabuse_socklocked(ni, ts);
-    if( sock_unlock )
-      ci_sock_unlock(ni, &ts->s.b);
+    ci_sock_unlock(ni, &ts->s.b);
+    if( ! ci_tcp_rcvbuf_abused(ni, ts) )
+      goto out;
   }
-  else if( ts->recv1.num + ts->recv2.num >
-           (ts->s.so.rcvbuf + ts->rcv_window_max) / ts->amss  ) {
-    int rc = ci_sock_lock(ni, &ts->s.b);
-    if( rc == 0 ) {
-      CITP_STATS_NETIF_INC(ni, tcp_rcvbuf_abused_recv_guilty);
-      ci_tcp_rcvbuf_unabuse_socklocked(ni, ts);
-      ci_sock_unlock(ni, &ts->s.b);
-#ifndef NDEBUG
-      sock_locked = sock_unlock = 1;
-#endif
-    }
-  }
-  if( ! ci_tcp_rcvbuf_abused(ni, ts) )
-    goto out;
 
   /* Nothing helps.  Probably, we are under attack with a lot of small
    * non-continuous segments.  Drop reorder buffer. */
@@ -1190,9 +1244,9 @@ out:
     }
     LOG_TV(print = 1);
     if( print )
-      ci_log(LNT_FMT" %s(%d): locked=%d from %d to %d limited by %d %s",
+      ci_log(LNT_FMT" %s: already_locked=%d from %d to %d limited by %d %s",
              LNT_PRI_ARGS(ni, ts), __func__,
-             sock_locked && !sock_unlock, sock_locked, pkts,
+             sock_already_locked, pkts,
              ts->recv1.num + ts->recv2.num + ts->rob.num,
              (ts->s.so.rcvbuf + ts->rcv_window_max) / ts->amss,
              ci_tcp_rcvbuf_abused(ni, ts) ? " ABUSED" : "");
@@ -1284,9 +1338,11 @@ void ci_tcp_set_sndbuf(ci_netif* ni, ci_tcp_state* ts)
   if( NI_OPTS(ni).tcp_sndbuf_mode ) {
     /* some packets for retransmit queue: */
     ts->so_sndbuf_pkts = ts->so_sndbuf_pkts * 3 / 2;
+#if CI_CFG_TIMESTAMPING
     /* and some packets for tx timestamps: */
     if( ts->s.timestamping_flags & ONLOAD_SOF_TIMESTAMPING_STREAM )
       ts->so_sndbuf_pkts = ts->so_sndbuf_pkts * 3 / 2;
+#endif
   }
 
   /* If we've tx space available and ( there were no space when we started
@@ -1403,23 +1459,17 @@ static int ci_tcp_sync_so_sockopts(ci_netif* ni, ci_tcp_state* ts,
       err = rc;
     }
   }
-  if( ts->s.so_priority != 0 ) {
-    /* This can also be set by setting IP_TOS - it's not clear whether we
-     * should really be setting both.
-     */
-    optlen = sizeof(optval);
-    rc = ci_get_sol_socket(ni, &ts->s, SO_PRIORITY, &optval, &optlen);
-    ci_assert_equal(rc, 0);
-    ci_tcp_sync_opt_unsigned(sock, &err, SOL_SOCKET, SO_PRIORITY, &optval);
-  }
+  /* In Linux SO_PRIORITY is derived from IP_TOS, so we do not sync the
+   * SO_PRIORITY value */
   if( ts->s.cp.so_bindtodevice != CI_IFID_BAD ) {
     /* ifindex is what we store when this is set, and what we use for
      * filtering decisions.  It's possible that the device this ifindex
      * refers to has changed since the sockopt was set.
      */
     char* ifname;
-    struct net_device *dev = dev_get_by_index(&init_net,
-                                              ts->s.cp.so_bindtodevice);
+    struct net_device *dev = dev_get_by_index(
+                               netif2tcp_helper_resource(ni)->nsproxy->net_ns,
+                               ts->s.cp.so_bindtodevice);
     if( dev ) {
       ifname = dev->name;
       rc = kernel_setsockopt(sock, SOL_SOCKET, SO_BINDTODEVICE, ifname,
@@ -1461,32 +1511,21 @@ static int ci_tcp_sync_ip_sockopts(ci_netif* ni, ci_tcp_state* ts,
                                     struct socket* sock)
 {
   unsigned optval;
-  int optlen;
   int err = 0;
-  int rc;
 
-  if( ts->s.pkt.ip.ip_tos != 0 ) {
-    optlen = sizeof(optval);
-    rc = ci_get_sol_socket(ni, &ts->s, IP_TOS, &optval, &optlen);
-    ci_assert_equal(rc, 0);
-    (void)rc;
+  if( ts->s.cp.ip_tos != 0 ) {
+    optval = ts->s.cp.ip_tos;
     ci_tcp_sync_opt_unsigned(sock, &err, SOL_IP, IP_TOS, &optval);
   }
   if( ts->s.s_flags & CI_SOCK_FLAG_SET_IP_TTL ) {
-    optlen = sizeof(optval);
-    rc = ci_get_sol_socket(ni, &ts->s, IP_TTL, &optval, &optlen);
-    ci_assert_equal(rc, 0);
-    (void)rc;
+    optval = ts->s.cp.ip_ttl;
     ci_tcp_sync_opt_unsigned(sock, &err, SOL_IP, IP_TTL, &optval);
   }
   if( ts->s.cmsg_flags & CI_IP_CMSG_PKTINFO ) {
     ci_tcp_sync_opt_flag(sock, &err, SOL_IP, IP_PKTINFO);
   }
   if( ts->s.s_flags & (CI_SOCK_FLAG_ALWAYS_DF | CI_SOCK_FLAG_PMTU_DO) ) {
-    optlen = sizeof(optval);
-    rc = ci_get_sol_socket(ni, &ts->s, SO_PRIORITY, &optval, &optlen);
-    ci_assert_equal(rc, 0);
-    (void)rc;
+    optval = ci_ip_mtu_discover_from_sflags(ts->s.s_flags);
     ci_tcp_sync_opt_unsigned(sock, &err, SOL_IP, IP_MTU_DISCOVER, &optval);
   }
   if( ts->s.cmsg_flags & CI_IP_CMSG_TOS ) {
@@ -1629,9 +1668,11 @@ void ci_tcp_set_sndbuf_from_sndbuf_pkts(ci_netif* ni, ci_tcp_state* ts)
 
   /* some packets for retransmit queue: */
   ts->s.so.sndbuf = (ts->s.so.sndbuf / 3) * 2;
+#if CI_CFG_TIMESTAMPING
   /* and possible some packets for tx timestamps: */
   if( ts->s.timestamping_flags & ONLOAD_SOF_TIMESTAMPING_STREAM )
     ts->s.so.sndbuf = (ts->s.so.sndbuf / 3) * 2;
+#endif
 }
 
 
@@ -1694,6 +1735,37 @@ ci_int32 ci_tcp_max_rcvbuf(ci_netif* ni, ci_uint16 amss)
   return ( NI_OPTS(ni).max_rx_packets >>
            NI_OPTS(ni).tcp_sockbuf_max_fraction ) * amss;
 }
+
+
+#if CI_CFG_FD_CACHING
+int /*bool*/ ci_tcp_active_wild_sharer_is_cacheable(ci_tcp_state* ts)
+{
+  ci_assert_flags(ts->tcpflags, CI_TCPT_FLAG_ACTIVE_WILD);
+
+  /* Normally, active-open sockets sharing a local port are not eligible to be
+   * cached, as they have a port-keeper reference to the OS socket associated
+   * with the underlying active-wild object.  However, if the active-open
+   * socket is also scalable, then it has no port-keeper reference, and so it
+   * can be cached, and caching is likely to be beneficial in precisely the
+   * scenarios for which scalable-active sockets are intended. */
+  return (ts->s.s_flags & CI_SOCK_FLAG_SCALACTIVE) != 0;
+}
+
+
+int /*bool*/ ci_tcp_is_cacheable_active_wild_sharer(ci_sock_cmn* s)
+{
+  ci_tcp_state* ts;
+
+  if( ! (s->b.state & CI_TCP_STATE_TCP) || s->b.state == CI_TCP_LISTEN )
+    return 0;
+
+  ts = SOCK_TO_TCP(s);
+  if( ! (ts->tcpflags & CI_TCPT_FLAG_ACTIVE_WILD) )
+    return 0;
+
+  return ci_tcp_active_wild_sharer_is_cacheable(ts);
+}
+#endif
 
 
 /*! \cidoxg_end */

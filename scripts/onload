@@ -1,7 +1,7 @@
 #!/bin/sh
 ######################################################################
 # Copyright 2005  Level 5 Networks.
-# Copyright 2005-2011 Solarflare Communications Inc.
+# Copyright 2005-2018 Solarflare Communications Inc.
 # Description: Invokes a command so that it runs over the Open Onload
 #            : userlevel IP transport.
 #      Author: David Riddoch
@@ -49,7 +49,7 @@ sfc_usage() {
   err "  $me [options] <command> <command-args>"
   err
   err "options:"
-  err "  --profile=<profile>    -- comma sep list of config profile(s)"
+  err "  -p,--profile=<profile> -- comma sep list of config profile(s)"
   err "  --force-profiles       -- profile settings override environment"
   err "  --no-app-handler       -- do not use app-specific settings"
   err "  --app=<app-name>       -- identify application to run under onload"
@@ -294,12 +294,20 @@ onload_set() {
     VAR=$(echo "$1" | cut -f1 -d=)
     VAL=$(echo "$1" | cut -f2 -d=)
   else
-    VAR=$1
-    VAL=$2
+    VAR="$1"
+    VAL="$2"
   fi
   if $profileforce || eval test -z "\"\$$VAR\""; then
     vlog "onload_set: $VAR=$VAL"
-    eval "$VAR=$VAL"; export "$VAR"
+    # printf %q is a bashism, but is supported by bash even in POSIX mode.  For
+    # other shells, we fall back to relying on the variable not containing an
+    # embdedded single quote, for which there is no use-case anyway.
+    if printf %q test 2> /dev/null > /dev/null; then
+      eval "$VAR=$(printf %q "$VAL")"
+    else
+      eval "$VAR='$VAL'"
+    fi
+    export "$VAR"
   else
     eval vlog "\"onload_set: \$VAL=\$VAR IGNORED (\$$VAR)\""
   fi
@@ -325,6 +333,8 @@ onload_import() {
     exit 3
   fi
   vlog "onload_import: $profile ($pf)"
+  # Source profile, with $@ representing the application and its options
+  shift
   . "$pf"
   vlog "onload_import-done: $profile"
 }
@@ -337,7 +347,7 @@ sfc_source_config() {
 
   # Pull in canned configuration profiles.
   for profile in $profiles; do
-    onload_import "$profile"
+    onload_import "$profile" "$@"
   done
 }
 
@@ -346,7 +356,7 @@ sfc_do_other() {	# The default: preload and go.
   isloaded onload || nodrivers
 
   # Preload and go!
-  sfc_source_config
+  sfc_source_config "$@"
   sfc_preload "$1"
   vlog "invoking: $*"
   $doit exec "$@"

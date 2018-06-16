@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -1984,23 +1984,27 @@ void ci_pipe_all_fds_gone(ci_netif* ni, struct oo_pipe* p, int do_free)
 #ifndef __KERNEL__
 int ci_pipe_set_size(ci_netif* ni, struct oo_pipe* pipe, size_t size)
 {
-  /* one extra buffer is needed exclusively for reading. */
-  int bufs = OO_PIPE_SIZE_TO_BUFS(size) + 1;
+  int bufs = OO_PIPE_SIZE_TO_BUFS(size);
 
   /* The case in which a pipe is not allowed to exceed a single buffer is not
    * compatible with the mechanism for detecting whether a pipe is writable. */
   CI_BUILD_ASSERT(OO_PIPE_MIN_BUFS > 1);
 
   if( bufs < OO_PIPE_MIN_BUFS || bufs > OO_PIPE_MAX_BUFS)
-    return -1;
+    return -EINVAL;
 
   ci_netif_lock(ni);
 
-  pipe->bufs_max = bufs;
-
   /* We get rid of empty buffers in case the shrinkage is requested.
    * When pages are in use this might not take (full) effect. */
-  oo_pipe_reap_empty_buffers(ni, pipe, 0, NULL);
+  if( bufs < pipe->bufs_num )
+    oo_pipe_reap_empty_buffers(ni, pipe, 0, NULL);
+
+  if( pipe->bufs_num > bufs ) {
+    ci_netif_unlock(ni);
+    return -EBUSY;
+  }
+  pipe->bufs_max = bufs;
 
   ci_netif_unlock(ni);
 

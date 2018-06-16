@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -38,7 +38,9 @@ void ci_udp_state_free(ci_netif* ni, ci_udp_state* us)
   ci_assert(us->s.b.state == CI_TCP_STATE_UDP);
   ci_assert(ci_ni_dllist_is_self_linked(ni, &us->s.b.post_poll_link));
 
+#if CI_CFG_TIMESTAMPING
   ci_udp_recv_q_drop(ni, &us->timestamp_q);
+#endif
 
   citp_waitable_obj_free(ni, &us->s.b);
 }

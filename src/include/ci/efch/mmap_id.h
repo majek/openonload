@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -19,5 +19,6 @@
 #define EFCH_VI_MMAP_IO  0
 #define EFCH_VI_MMAP_MEM 1
 #define EFCH_VI_MMAP_PIO 2
+#define EFCH_VI_MMAP_CTPIO 3
 
 #endif

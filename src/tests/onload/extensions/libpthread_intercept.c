@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -45,6 +45,7 @@
  *   0 : none.  If thread name not found, do not accelerate.
  *   1 : protocol.  If thread name not found, use TCP/UDP stack.
  *   2 : basic. If thread name not found, use default stack.  (Default)
+ *   3 : cpu.  If thread name not found, use one per CPU.
  * Please note, config file parsing is not very robust.
  *
  * Examples:
@@ -75,11 +76,10 @@
 
 /*
  * Compilation:
- *   gcc -c -fPIC pthread.c -o pthread.o
- *   gcc -shared -Wl,-soname,libpthread_intercept.so.1 -ldl \
- *       -o libpthread_intercept pthread.o
+ *   gcc -Wall -fPIC -shared -o libpthread_intercept.so.1 libpthread_intercept.c
  * Usage:
- *   LD_PRELOAD="libpthread_intercept libonload.so" your_application
+ *   LD_PRELOAD="libpthread_intercept.so.1 libonload.so" your_application
+ *   (With appropriate LD_LIBRARY_PATH set)
 */
 
 
@@ -122,7 +122,10 @@ extern int socket(int socket_family, int socket_type, int protocol);
     fprintf(stderr, ## args );        \
     fprintf(stderr, "\n" ); }
 #if DEBUG
-#define LOG(args ...) LOG_E( ## args )
+#define LOG(args ...) {               \
+    fprintf(stderr, LIBNAME_PREFIX);  \
+    fprintf(stderr, ## args );        \
+    fprintf(stderr, "\n" ); }
 #else
 #define LOG(args ...)
 #endif
@@ -140,7 +143,8 @@ struct mapping {
 enum {
   CFG_DEFAULT_NONE,
   CFG_DEFAULT_PROTO,
-  CFG_DEFAULT_BASIC
+  CFG_DEFAULT_BASIC,
+  CFG_DEFAULT_CPU
 };
 
 /* Forward declares of functionality */
@@ -162,11 +166,11 @@ static int add_numeric(int num, const char *ext_name);
 
 /* And these are the rest */
 static int get_extname_for_thread(pthread_t tid, char *name);
-static int get_extname_for_num(int num, char *name);
 static int remember_threadname(pthread_t tid, char const *name);
 static int dump_table(void);
 static void sanitise_name(char const *src, char *name, int length);
 static void alter_name_for_socket(int socket_type, char *name);
+static void alter_name_for_cpu(char *name);
 
 /* Library-local-storage */
 static pthread_mutex_t cfg_mutex;
@@ -332,11 +336,11 @@ int socket(int socket_family, int socket_type, int protocol)
 static int dump_table(void)
 {
   int count = 0;
-  if( !cfg_loaded ) return;
 #if DEBUG
   struct mapping *ptr = cfg_mapping;
+  if( !cfg_loaded ) return count;
   while( ptr ) {
-    LOG("%s %d -> %s", ptr->thread_name, ptr->tid, ptr->ext_name);
+    LOG("%s %d -> %s", ptr->thread_name, (int)ptr->tid, ptr->ext_name);
     count++;
     ptr = ptr->next;
   }
@@ -354,7 +358,7 @@ static void name_changed(pthread_t tid, char const *src)
   /* We need our config loaded */
   ensure_config_loaded();
 
-  LOG("name_changed(tid=%d name=%s)", tid, src);
+  LOG("name_changed(tid=%d name=%s)", (int)tid, src);
 
   /* Make sure name is truncated, zero terminated etc. */
   sanitise_name(src, name, MAX_THREADNAME_LEN);
@@ -369,12 +373,12 @@ static void name_changed(pthread_t tid, char const *src)
 static int apply_extname(int socket_type)
 {
   char name[MAX_EXTNAME_LEN];
-  int ok, saved;
+  int ok;
 
   /* Need to have loaded the config from disk */
   ensure_config_loaded();
 
-  LOG("apply_extname(%d) tid=%d", socket_type, pthread_self());
+  LOG("apply_extname(%d) tid=%d", socket_type, (int)pthread_self());
 
   /* Find the name for this thread */
   ok = get_extname_for_thread(pthread_self(), name);
@@ -385,6 +389,8 @@ static int apply_extname(int socket_type)
     ok = onload_stackname_save();
     /* Adjust the name to account for socket type */
     alter_name_for_socket(socket_type, name);
+    /* Adjust the name to account for CPU */
+    alter_name_for_cpu(name);
     /* Check for 'do not accelerate' name, then set appropriate name */
     if( !strncasecmp("_", name, 2) )
       ok = onload_set_stackname(ONLOAD_THIS_THREAD, ONLOAD_SCOPE_GLOBAL,
@@ -395,7 +401,7 @@ static int apply_extname(int socket_type)
     LOG("onload_set_stackname(\"%s\"): %d (%d)", name, ok, errno);
   }
 
-  return ok && (saved == 0);
+  return ok;
 }
 
 
@@ -415,7 +421,7 @@ static int created_new_thread(pthread_t tid)
     if( ptr->num == thread_num ) {
       /* If we've found it, update the table to now have an id */
       ptr->tid = tid;
-      LOG("Associated tid %d with %s", tid, ptr->ext_name);
+      LOG("Associated tid %d with %s", (int)tid, ptr->ext_name);
     }
     ptr = ptr->next;
   }
@@ -434,7 +440,7 @@ static void sanitise_name(char const *src, char *dest, int length)
 }
 
 
-/* Reaplce '%' in name with socket type identifier */
+/* Replace '%' in name with socket type identifier */
 static void alter_name_for_socket(int socket_type, char *name)
 {
   char protocol;
@@ -471,6 +477,13 @@ static void alter_name_for_socket(int socket_type, char *name)
   }
 }
 
+/* If desired, use a per-cpu name */
+static void alter_name_for_cpu(char *name)
+{
+  if( strncasecmp("&CPU&", name, 6) )
+      return;
+  snprintf(name, MAX_EXTNAME_LEN, "%d-core", sched_getcpu() );
+}
 
 /*******************/
 /** Configuration **/
@@ -495,7 +508,6 @@ static int ensure_config_loaded(void)
  */
 static char const *get_config_filename(void)
 {
-  static const char *default_file = ".onload_intercept";
   char const *env_name = getenv("LPI_INTERCEPT_CONFIG_FILE");
   if ( !env_name ) {
     LOG_E( "LPI_INTERCEPT_CONFIG_FILE not set, unable to load config." );
@@ -587,7 +599,7 @@ static int remember_threadname(pthread_t tid, char const *name)
     if( !strncmp(name, ptr->thread_name, MAX_THREADNAME_LEN) ) {
       /* And remember this new thread id to match it */
       ptr->tid = tid;
-      LOG("Associated tid %d with known name %s", tid, name);
+      LOG("Associated tid %d with known name %s", (int)tid, name);
     }
     ptr = ptr->next;
   }
@@ -626,6 +638,11 @@ static int get_extname_for_thread(pthread_t tid, char *name)
   /* Are we using default of 'protocol'?  Set it. */
   else if( cfg_default == CFG_DEFAULT_PROTO ) {
     strncpy(name, "%", MAX_EXTNAME_LEN);
+    return 0;
+  }
+  /* Default of 'cpu'?  Record that. */
+  else if ( cfg_default == CFG_DEFAULT_CPU ) {
+    strncpy(name, "&CPU&", MAX_EXTNAME_LEN);
     return 0;
   }
 

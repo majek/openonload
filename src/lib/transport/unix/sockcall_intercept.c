@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -251,8 +251,8 @@ OO_INTERCEPT(int, socket,
   }
 
   citp_enter_lib(&lib_context);
-  Log_CALL(ci_log("%s(%s, %s, %d)", __FUNCTION__, domain_str(domain),
-		  type_str(type), protocol));
+  Log_CALL(ci_log("%s(%s, "CI_SOCK_TYPE_FMT", %d)", __FUNCTION__,
+                  domain_str(domain), CI_SOCK_TYPE_ARGS(type), protocol));
 
   rc = citp_protocol_manager_create_socket(domain, type, protocol);
   
@@ -466,15 +466,13 @@ OO_INTERCEPT(int, connect,
      );
 
   if( (fdi = citp_fdtable_lookup(fd)) ) {
-    {
-      /* NOTE
-       * 1. All protocol handlers MUST do their own call to
-       * citp_fdinfo_release_ref()
-       * 2. After the call to the protocol connect handler the fd
-       * and all associated resources may have been deleted
-       */
-      rc = citp_fdinfo_get_ops(fdi)->connect(fdi, sa, sa_len, &lib_context);
-    }
+    /* NOTE
+     * 1. All protocol handlers MUST do their own call to
+     * citp_fdinfo_release_ref()
+     * 2. After the call to the protocol connect handler the fd
+     * and all associated resources may have been deleted
+     */
+    rc = citp_fdinfo_get_ops(fdi)->connect(fdi, sa, sa_len, &lib_context);
   }
   else {
     Log_PT(log("PT: sys_connect(%d, , %d)", fd, sa_len));
@@ -507,8 +505,7 @@ OO_INTERCEPT(int, shutdown,
   Log_CALL(ci_log("%s(%d,%d)", __FUNCTION__, fd, how));
 
   if( (fdi = citp_fdtable_lookup(fd)) ) {
-    /* Validate 'how' parameter at first. 
-     * Solaris validates it after validation of the socket state. */
+    /* Validate 'how' parameter at first. */
     if (!citp_shutdown_how_is_valid(how)) {
       errno = EINVAL;
       citp_fdinfo_release_ref(fdi, 0);
@@ -552,9 +549,7 @@ OO_INTERCEPT(int, getsockname,
     rc = -1;
   } else {
     if( (fdi = citp_fdtable_lookup(fd)) ) {
-      {
-        rc = citp_fdinfo_get_ops(fdi)->getsockname(fdi, sa, p_sa_len);
-      }
+      rc = citp_fdinfo_get_ops(fdi)->getsockname(fdi, sa, p_sa_len);
       citp_fdinfo_release_ref(fdi, 0);
       citp_exit_lib(&lib_context, rc == 0);
     } else {
@@ -584,9 +579,7 @@ OO_INTERCEPT(int, getpeername,
   Log_CALL(ci_log("%s(%d,%p,%p)", __FUNCTION__, fd, sa, p_sa_len));
 
   if( (fdi = citp_fdtable_lookup(fd)) ) {
-    {
-      rc = citp_fdinfo_get_ops(fdi)->getpeername(fdi, sa, p_sa_len);
-    }
+    rc = citp_fdinfo_get_ops(fdi)->getpeername(fdi, sa, p_sa_len);
     citp_fdinfo_release_ref(fdi, 0);
     citp_exit_lib(&lib_context, rc == 0);
   } else {
@@ -823,16 +816,13 @@ OO_INTERCEPT(ssize_t, recvmsg,
 int ci_sys_recvmmsg(int fd, struct mmsghdr* mmsg, unsigned vlen,
                     int flags, const struct timespec* timeout)
 {
-  static int (*sys_recvmmsg)(int, struct mmsghdr*, unsigned, int,
-                             const struct timespec*);
-
-  if( sys_recvmmsg == NULL )
-    if( (sys_recvmmsg = dlsym(RTLD_NEXT, "recvmmsg")) == NULL ) {
-      errno = ENOSYS;
-      return -1;
-    }
-
-  return sys_recvmmsg(fd, mmsg, vlen, flags, timeout);
+#  ifdef __NR_recvmmsg 
+  return syscall(__NR_recvmmsg, fd, mmsg, vlen, flags, timeout);
+#  else
+  int rc;
+  CI_SET_ERROR(rc, ENOSYS);
+  return rc;
+#  endif
 }
 # endif
 
@@ -1010,15 +1000,13 @@ OO_INTERCEPT(ssize_t, sendmsg,
 int ci_sys_sendmmsg(int fd, struct mmsghdr* mmsg, unsigned vlen,
                     int flags)
 {
-  static int (*sys_sendmmsg)(int, struct mmsghdr*, unsigned, int);
-
-  if( sys_sendmmsg == NULL )
-    if( (sys_sendmmsg = dlsym(RTLD_NEXT, "sendmmsg")) == NULL ) {
-      errno = ENOSYS;
-      return -1;
-    }
-
-  return sys_sendmmsg(fd, mmsg, vlen, flags);
+#  ifdef __NR_sendmmsg
+  return syscall(__NR_sendmmsg, fd, mmsg, vlen, flags);
+#  else
+  int rc;
+  CI_SET_ERROR(rc, ENOSYS);
+  return rc;
+#  endif
 }
 # endif
 
@@ -1466,6 +1454,9 @@ OO_INTERCEPT(int, epoll_wait,
     Log_CALL_RESULT(rc);
     return rc;
   }
+  else {
+    citp_exit_lib(&lib_context, TRUE);
+  }
 
 error:
   Log_PT(log("PT: sys_epoll_wait(%d, %p, %d, %d)", epfd, events,
@@ -1511,6 +1502,9 @@ OO_INTERCEPT(int, epoll_pwait,
       goto error;
     Log_CALL_RESULT(rc);
     return rc;
+  }
+  else {
+    citp_exit_lib(&lib_context, TRUE);
   }
 
 error:
@@ -1692,17 +1686,15 @@ OO_INTERCEPT(ssize_t, writev,
   Log_CALL(ci_log("%s(%d, %p, %d)", __FUNCTION__, fd, vector, count));
 
   if( (fdi = citp_fdtable_lookup_fast(&lib_context, fd)) ) {
-    {
-      /* See note about convertions above in this file */
-      CI_DEBUG(m.msg_name = CI_NOT_NULL);
-      m.msg_namelen = 0;
-      m.msg_iov = (struct iovec*) vector;
-      m.msg_iovlen = count;
-      CI_DEBUG(m.msg_control = CI_NOT_NULL);
-      m.msg_controllen = 0;
-      /* msg_flags is output only */
-      rc = citp_fdinfo_get_ops(fdi)->send(fdi, &m, 0);
-    }
+    /* See note about convertions above in this file */
+    CI_DEBUG(m.msg_name = CI_NOT_NULL);
+    m.msg_namelen = 0;
+    m.msg_iov = (struct iovec*) vector;
+    m.msg_iovlen = count;
+    CI_DEBUG(m.msg_control = CI_NOT_NULL);
+    m.msg_controllen = 0;
+    /* msg_flags is output only */
+    rc = citp_fdinfo_get_ops(fdi)->send(fdi, &m, 0);
     citp_fdinfo_release_ref_fast(fdi);
     citp_exit_lib(&lib_context, rc >= 0);
   }
@@ -1720,6 +1712,7 @@ OO_INTERCEPT(ssize_t, writev,
 OO_INTERCEPT(ci_splice_return_type, splice, (int in_fd, loff_t* in_off,
                                              int out_fd, loff_t* out_off,
                                              size_t len, unsigned int flags))
+#if CI_CFG_USERSPACE_PIPE
 {
   citp_lib_context_t lib_context;
   citp_fdinfo *out_fdi, *in_fdi;
@@ -1730,7 +1723,6 @@ OO_INTERCEPT(ci_splice_return_type, splice, (int in_fd, loff_t* in_off,
     citp_do_init(CITP_INIT_SYSCALLS);
     return ci_sys_splice(in_fd, in_off, out_fd, out_off, len, flags);
   }
-
   citp_enter_lib(&lib_context);
   Log_CALL(ci_log("%s(%d, %p, %d, %p, %u, 0x%x)", __FUNCTION__,
                   in_fd, in_off, out_fd, out_off, (unsigned)len, flags ));
@@ -1788,6 +1780,13 @@ OO_INTERCEPT(ci_splice_return_type, splice, (int in_fd, loff_t* in_off,
   Log_CALL_RESULT(rc);
   return rc;
 }
+#else
+{
+  if( CI_UNLIKELY(citp.init_level < CITP_INIT_ALL) )
+    citp_do_init(CITP_INIT_SYSCALLS);
+  return ci_sys_splice(in_fd, in_off, out_fd, out_off, len, flags);
+}
+#endif
 #endif
 
 
@@ -2329,7 +2328,7 @@ OO_INTERCEPT(int, setuid, (uid_t uid))
 
 
 /* On linux, this interception is necessary:
- * - for kernel<=2.6.21, since onloadfs files do not have proper i_mode;
+ * - since onloadfs files cannot have S_IFSOCK set in i_mode;
  * - for epoll, since it is a char device. */
 OO_INTERCEPT(int, __fxstat,
              (int ver, int fd, struct stat *stat_buf))
@@ -2415,8 +2414,6 @@ OO_INTERCEPT(int, __fxstat64,
   return rc;
 }
 #endif
-
-
 
 
 OO_INTERCEPT(int, chroot,
@@ -2593,7 +2590,7 @@ OO_INTERCEPT(int, bproc_move,
       /* This is slow (taking and releasing the FD table lock lots) but it
       ** works.
       */
-      fdinfo = citp_fdtable_lookup_noprobe(fd);
+      fdinfo = citp_fdtable_lookup_noprobe(fd, 0);
       if (fdinfo) {
         close(fd);
         citp_fdinfo_release_ref(fdinfo, 0);

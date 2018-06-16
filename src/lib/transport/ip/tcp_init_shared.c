@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -173,7 +173,7 @@ static void ci_tcp_state_tcb_reinit(ci_netif* netif, ci_tcp_state* ts,
 
   ts->outgoing_hdrs_len = sizeof(ci_ip4_hdr) + sizeof(ci_tcp_hdr);
   if( ts->tcpflags & CI_TCPT_FLAG_TSO )  ts->outgoing_hdrs_len += 12;
-  ts->incoming_tcp_hdr_len = sizeof(ci_tcp_hdr);
+  ts->incoming_tcp_hdr_len = (ci_uint8)sizeof(ci_tcp_hdr);
   ts->c.tcp_defer_accept = OO_TCP_DEFER_ACCEPT_OFF;
 
   ci_tcp_state_connected_opts_init(netif, ts);
@@ -293,7 +293,9 @@ void ci_tcp_state_init(ci_netif* netif, ci_tcp_state* ts, int from_cache)
   /* Initialise the lower level. */
   ci_sock_cmn_init(netif, &ts->s, !from_cache);
   ci_pmtu_state_init(netif, &ts->s, &ts->pmtus, CI_IP_TIMER_PMTU_DISCOVER);
+#if CI_CFG_TIMESTAMPING
   ci_udp_recv_q_init(&ts->timestamp_q);
+#endif
 
   /* Initialise this level. */
   ci_tcp_state_tcb_init_fixed(netif, ts, from_cache);
@@ -316,7 +318,9 @@ void ci_tcp_state_reinit(ci_netif* netif, ci_tcp_state* ts)
   /* Reinitialise the lower level. */
   ci_sock_cmn_reinit(netif, &ts->s);
   ci_pmtu_state_reinit(netif, &ts->s, &ts->pmtus);
+#if CI_CFG_TIMESTAMPING
   ci_udp_recv_q_init(&ts->timestamp_q);
+#endif
   /* Reinitialise this level. */
   ci_tcp_state_tcb_reinit(netif, ts, 0);
 }
@@ -327,6 +331,8 @@ ci_tcp_state* ci_tcp_get_state_buf_from_cache(ci_netif *netif)
 {
   ci_tcp_state *ts = NULL;
 #if CI_CFG_FD_CACHING
+  ci_uint32 nonblocking;
+
   if( ci_ni_dllist_not_empty(netif, &netif->state->active_cache.cache) ) {
     /* Take the first entry from the cache.  However, do not take it
      * if the ep's pid does not match current pid which may happen if
@@ -336,6 +342,24 @@ ci_tcp_state* ci_tcp_get_state_buf_from_cache(ci_netif *netif)
     ts = CI_CONTAINER(ci_tcp_state, epcache_link, link);
     ci_assert(ts);
 
+    if( S_TO_EPS(netif, ts)->fd != CI_FD_BAD ) {
+      ci_assert_nflags(ts->s.b.sb_aflags, CI_SB_AFLAG_IN_CACHE_NO_FD);
+      /* We have an FD cached if the cached endpoint has been reused by
+       * other process let's restore state */
+      if( ts->cached_on_pid != getpid() ) {
+        /* This context has its own FD
+         * no race with kernel file close() expected.
+         * sys_close() in other process will merely decrease sys file refcount
+         * and in this process no other thread could use the fd.
+         * note: concurrent accept and dup2 are not supported */
+        CITP_STATS_NETIF(++netif->state->stats.active_attach_fd_reuse);
+        ts->cached_on_fd = S_TO_EPS(netif,ts)->fd;
+        ts->cached_on_pid = getpid();
+      }
+      else {
+        ci_assert_equal(ts->cached_on_fd, S_TO_EPS(netif, ts)->fd);
+      }
+    }
     /* The use-case we are targeting is that there is only one active
      * process using the stack with active cache.  Reuse an endpoint from
      * other process if it is marked with NO_FD flags (NO_FD is set when fd
@@ -345,9 +369,22 @@ ci_tcp_state* ci_tcp_get_state_buf_from_cache(ci_netif *netif)
      * guarged by the stack lock, i.e. we guarantee a sort of correctness
      * for this unsupported use-case.
      */
-    if( ts->cached_on_pid != getpid() &&
-        (~ts->s.b.sb_aflags & CI_SB_AFLAG_IN_CACHE_NO_FD) ) {
-      return NULL;
+    else if( ci_tcp_is_cached(ts) && ts->cached_on_pid != getpid() &&
+             (~ts->s.b.sb_aflags & CI_SB_AFLAG_IN_CACHE_NO_FD) ) {
+      ci_fd_t stack_fd = ci_netif_get_driver_handle(netif);
+      /* Other process put the endpoint to cache, we need to create an FD
+       * for this process to use */
+      int rc = ci_tcp_helper_sock_attach_to_existing_file(stack_fd, S_SP(ts));
+      if( rc < 0 ) {
+        CITP_STATS_NETIF(++netif->state->stats.active_attach_fd_fail);
+        return NULL;
+      }
+      CITP_STATS_NETIF(++netif->state->stats.active_attach_fd);
+      /* Set state to indicate FD cache, note comments in previous clause */
+      S_TO_EPS(netif, ts)->fd = rc;
+      ci_atomic32_and(&ts->s.b.sb_aflags, ~CI_SB_AFLAG_IN_CACHE_NO_FD);
+      ts->cached_on_fd = rc;
+      ts->cached_on_pid = getpid();
     }
     /* Sian says that cached_on_pid is not used by the following code, so
      * we can leave it as-is even if we steal a NO_FD endpoint from another
@@ -364,7 +401,15 @@ ci_tcp_state* ci_tcp_get_state_buf_from_cache(ci_netif *netif)
     LOG_EP(ci_log("Taking cached socket "NSS_FMT" fd %d off cached list",
                   NSS_PRI_ARGS(netif, &ts->s), ts->cached_on_fd));
 
+    nonblocking = ts->s.b.sb_aflags &
+                  (CI_SB_AFLAG_O_NONBLOCK | CI_SB_AFLAG_O_NONBLOCK_UNSYNCED);
     ci_tcp_state_init(netif, ts, 1);
+    /* ci_tcp_state_init() resets the nonblock flags. We restore them to
+     * mirror the OS status of the fd.  The flags will be fixed in
+     * citp_tcp_cached_fixup_flags() if needed. */
+    if( nonblocking )
+      ci_atomic32_or(&ts->s.b.sb_aflags, nonblocking);
+
     /* Shouldn't have touched these bits of state */
     ci_assert(!(ts->s.b.sb_aflags & CI_SB_AFLAG_ORPHAN));
     ci_assert(ci_tcp_is_cached(ts));
@@ -413,7 +458,6 @@ void ci_ni_aux_more_bufs(ci_netif* ni)
     OO_P_ADD(sp, CI_AUX_MEM_SIZE);
     ci_ni_dllist_link_init(ni, &aux->link, sp, "faux");
     aux->no = i;
-    ni->state->n_aux_bufs++;
     /* We could call ci_ni_aux_free() here, but we already have correct sp
      * to use. */
     aux->link.next = ni->state->free_aux_mem;

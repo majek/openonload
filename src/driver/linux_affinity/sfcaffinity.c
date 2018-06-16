@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -27,7 +27,22 @@
 #include <linux/ctype.h>
 #include <ci/efhw/efhw_types.h>
 #include <ci/driver/efab/hardware.h>
+
+/* We depend on EFX_DL_DRIVER_CHECKS_MEDFORD2_VI_STRIDE to allow
+ * loading on Medford2 so requesting minor version 5
+ */
+#define EFX_DRIVERLINK_API_VERSION_MINOR 0
+
 #include <driver/linux_net/driverlink_api.h>
+
+/* When driverlink API version is updated we'll need to select a
+ * different MINOR version.  Put this here to make sure we
+ * remember.
+ */
+#if EFX_DRIVERLINK_API_VERSION != 23
+#error "EFX_DRIVERLINK_API_VERSION_MINOR needs updating"
+#endif
+
 #include "kernel_compat.h"
 
 
@@ -781,7 +796,12 @@ static struct efx_dl_driver dl_driver = {
   /* This flag is required to for the driver to register with the net
    * driver however this driver will never receive packets so it will
    * not be doing any actual checking. */
-  .flags = EFX_DL_DRIVER_CHECKS_FALCON_RX_USR_BUF_SIZE,
+  .flags = EFX_DL_DRIVER_CHECKS_FALCON_RX_USR_BUF_SIZE
+#if EFX_DRIVERLINK_API_VERSION > 22 || (EFX_DRIVERLINK_API_VERSION == 22 && \
+                                        EFX_DRIVERLINK_API_VERSION_MINOR > 4)
+  | EFX_DL_DRIVER_CHECKS_MEDFORD2_VI_STRIDE
+#endif
+  ,
 #endif
   .probe  = dl_probe,
   .remove = dl_remove,

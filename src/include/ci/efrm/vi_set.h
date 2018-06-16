@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -49,6 +49,7 @@
 #include <ci/efrm/resource.h>
 #include <ci/efhw/common.h>
 #include <ci/efrm/debug.h>
+#include <ci/efrm/efrm_filter.h> /* for EFRM_RSS_* */
 
 
 struct efrm_vi_set;
@@ -56,14 +57,9 @@ struct efrm_vi;
 struct efrm_pd;
 
 
-/* note mode default and src are mutually exclusive */
-#define EFRM_RSS_MODE_DEFAULT 0x1 /* standard non-tproxy mode */
-#define EFRM_RSS_MODE_SRC     0x2 /* semi transparent proxy passive side */
-#define EFRM_RSS_MODE_DST     0x4 /* transparent proxy active side */
-
 extern int
 efrm_vi_set_alloc(struct efrm_pd *, int n_vis, unsigned vi_props,
-		  int rss_mode,
+		  int efrm_rss_mode,
 		  struct efrm_vi_set **vi_set_out);
 
 extern void

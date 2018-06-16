@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -52,18 +52,54 @@
 #include "logging.h"
 
 
+#define DEFAULT_GETPW_R_BUF_SIZE 1024
+static char* get_username(void)
+{
+  struct passwd passwd;
+  char* user = NULL;
+  int buf_size;
+  char* buf;
+  struct passwd* result;
+  uid_t uid;
+  int rc;
+
+  buf_size = sysconf(_SC_GETPW_R_SIZE_MAX);
+  if( buf_size == -1 )
+    buf_size = DEFAULT_GETPW_R_BUF_SIZE;
+
+  buf = malloc(buf_size);
+  if( buf == NULL ) {
+    LOG(ef_log("%s: ERROR: malloc(%d) failed: %d",
+               __FUNCTION__, buf_size, errno));
+    return NULL;
+  }
+
+  uid = getuid();
+  rc = getpwuid_r(uid, &passwd, buf, buf_size, &result);
+  if( rc != 0) {
+    LOG(ef_log("%s: ERROR: getpwuid_r(buf_size=%d) failed: %d",
+               __FUNCTION__, buf_size, rc));
+    errno = rc;
+  }
+  else if( result == NULL ) {
+    errno = ENOENT;
+  }
+  else {
+    user = strdup(result->pw_name);
+  }
+
+  free(buf);
+  return user;
+}
+
+
 /* Connect to solar_clusterd.  Returns socket to daemon on success or
  * negative error code on failure.
  */
 static int clusterd_connect(int* sock_out)
 {
   struct sockaddr_un sockaddr;
-  struct passwd passwd;
-  const char* user;
-  const int buf_size = 96;
-  char buf[buf_size];
-  struct passwd* result;
-  uid_t uid;
+  char* user;
   char* sock_path;
   int rc;
 
@@ -77,19 +113,13 @@ static int clusterd_connect(int* sock_out)
     strncpy(sockaddr.sun_path, sock_path, sizeof(sockaddr.sun_path) - 1);
   }
   else {
-    uid = getuid();
-    rc = getpwuid_r(uid, &passwd, buf, buf_size, &result);
-    if( rc == 0 ) {
-      if( result != NULL )
-        user = passwd.pw_name;
-      else
-        return -ENOENT;
-    }
-    else {
-      return -rc;
-    }
+    user = get_username();
+    if( user == NULL )
+      return -errno;
+
     rc = asprintf(&sock_path, "%s%s/%s", DEFAULT_CLUSTERD_DIR, user,
                   DEFAULT_CLUSTERD_SOCK_NAME);
+    free(user);
     if( rc < 0 )
       return -errno;
     strncpy(sockaddr.sun_path, sock_path, sizeof(sockaddr.sun_path) - 1);

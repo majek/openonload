@@ -511,7 +511,7 @@ check_platform_exists "$PLATFORM"
 [ -z "$dest" ] && dest="$PLATFORM"
 
 case "$PLATFORM" in
-   *linux2.6)    VPATH_ENABLED=0;;
+   *linux)       VPATH_ENABLED=0;;
    *x86_win32_*) VPATH_ENABLED=0;;
    *x64_win64_*) VPATH_ENABLED=0;;
    *_wxp)        VPATH_ENABLED=0;;

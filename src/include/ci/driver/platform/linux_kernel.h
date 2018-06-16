@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -269,7 +269,7 @@ typedef struct {
 } ci_waitable_t;
 
 typedef struct {
-  wait_queue_t	w;
+  wait_queue_entry_t w;
 } ci_waiter_t;
 
 typedef long  ci_waitable_timeout_t;  /* jiffies */
@@ -386,7 +386,7 @@ ci_inline int ci_waiter_wait(ci_waiter_t* waiter, ci_waitable_t* w,
  *--------------------------------------------------------------------*/
 
 typedef wait_queue_head_t	ci_waitq_t;
-typedef wait_queue_t		ci_waitq_waiter_t;
+typedef wait_queue_entry_t	ci_waitq_waiter_t;
 typedef long			ci_waitq_timeout_t;  /* jiffies */
 
 #define ci_waitq_ctor(wq)	init_waitqueue_head(wq)

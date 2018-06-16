@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -27,6 +27,20 @@
 #include "nonsock.h"
 
 
+/* See comment in ef_onload_driver_open() about why we shift this fd */
+static inline void ci_sys_epoll_move_fd(int oldfd, int* newfd)
+{
+  int fd = oo_fcntl_dupfd_cloexec(oldfd, CITP_OPTS.fd_base);
+  if( fd >= 0 ) {
+    ci_sys_close(oldfd);
+    *newfd = fd;
+  }
+  /* we ignore failure to shift the fd, in the hope that it won't cause a
+   * problem in the place we got it originally.
+   */
+}
+
+
 static inline int ci_sys_epoll_create_compat(int size, int flags, int cloexec)
 {
   int rc;
@@ -41,6 +55,9 @@ static inline int ci_sys_epoll_create_compat(int size, int flags, int cloexec)
   if( flags && CI_LIKELY( ci_sys_epoll_create1 != epoll_create1 ) ) {
     rc = ci_sys_epoll_create1(flags);
 
+    if( rc >= 0 && rc < CITP_OPTS.fd_base )
+      ci_sys_epoll_move_fd(rc, &rc);
+
     /* ENOSYS means that kernel is older than libc; fall through
      * to the old epoll_create(). */
     if( rc >=0 || errno != ENOSYS )
@@ -54,6 +71,10 @@ static inline int ci_sys_epoll_create_compat(int size, int flags, int cloexec)
   fd = ci_sys_epoll_create(size);
   if( fd < 0 )
     return fd;
+
+  if( fd < CITP_OPTS.fd_base )
+    ci_sys_epoll_move_fd(fd, &fd);
+
   if( ! cloexec )
     return fd;
   rc = ci_sys_fcntl(fd, F_SETFD, FD_CLOEXEC);
@@ -69,7 +90,7 @@ static inline int ci_sys_epoll_create_compat(int size, int flags, int cloexec)
 ci_inline citp_fdinfo*
 citp_epoll_fdi_from_member(citp_fdinfo* fd_fdi, int fdt_locked)
 {
-  citp_fdinfo* epoll_fdi = citp_fdtable_lookup_noprobe(fd_fdi->epoll_fd);
+  citp_fdinfo* epoll_fdi = citp_fdtable_lookup_noprobe(fd_fdi->epoll_fd, fdt_locked);
   if( epoll_fdi == NULL ) {
     Log_POLL(ci_log("%s: epoll_fd=%d not found (fd=%d)", __FUNCTION__,
                     fd_fdi->epoll_fd, fd_fdi->fd));
@@ -110,8 +131,16 @@ struct citp_epoll_member {
   ci_uint64             fdi_seq;    /*!< fdi->seq */
   int                   fd;         /*!< Onload fd */
   ci_sleep_seq_t        reported_sleep_seq;
+  /*!< indicates after which eitem on ready list socket we should look
+   * on other and os sockets */
+  int                   poll_end;
 };
 
+
+enum {
+  EPOLL_PHASE_DONE_ACCELERATED = 1,
+  EPOLL_PHASE_DONE_OTHER = 2,
+};
 
 #define EPOLL_STACK_EITEM 1
 #define EPOLL_NON_STACK_EITEM 2
@@ -163,9 +192,17 @@ struct citp_epoll_fd {
   /* Avoid spinning in next epoll_pwait call */
   int avoid_spin_once;
 
+  /* We've entered the citp_epoll_dtor() function */
+  int closing;
+
   ci_netif* home_stack;
   int ready_list;
 
+  /*!< phase of the poll to ensure fairness between groups of sockets
+   * value of highest bit matters */
+  int phase;
+
+#if CI_CFG_TIMESTAMPING
   /* When using WODA with large numbers of sockets performance can be harmed
    * by repeated large alloc/free calls, so we cache memory allocated for this
    * purpose.
@@ -173,6 +210,7 @@ struct citp_epoll_fd {
   struct citp_ordering_info* ordering_info;
   struct epoll_event* wait_events;
   int n_woda_events;
+#endif
 };
 
 
@@ -195,12 +233,13 @@ struct citp_ordered_wait {
   struct citp_ordering_info* ordering_info;
   int poll_again;
   int next_timeout;
+  ci_netif* ordering_stack;
 };
 
 /* Epoll state in user-land poll.  Copied from oo_ul_poll_state */
 struct oo_ul_epoll_state {
   /* Parameters of this epoll fd */
-  struct citp_epoll_fd*__restrict__ ep;
+  struct citp_epoll_fd* ep;
 
   /* Where to store events. */
   struct epoll_event*__restrict__ events;
@@ -227,6 +266,8 @@ struct oo_ul_epoll_state {
   /* Have we incremented statistics for this spin round? */
   int stat_incremented;
 #endif
+
+  int phase;
 };
 
 
@@ -244,6 +285,7 @@ extern void citp_epoll_on_handover(citp_fdinfo*, citp_fdinfo*,
 extern void citp_epoll_on_close(citp_fdinfo*, citp_fdinfo*,
                                 int fdt_locked) CI_HF;
 
+#if CI_CFG_TIMESTAMPING
 struct onload_ordered_epoll_event;
 extern int citp_epoll_ordered_wait(citp_fdinfo* fdi,
                                    struct epoll_event*__restrict__ events,
@@ -251,6 +293,7 @@ extern int citp_epoll_ordered_wait(citp_fdinfo* fdi,
                                    int maxevents, int timeout,
                                    const sigset_t *sigmask,
                                    citp_lib_context_t *lib_context);
+#endif
 extern void citp_epoll_remove_if_not_ready(struct oo_ul_epoll_state* eps,
                                            struct citp_epoll_member* eitem,
                                            ci_netif* ni, citp_waitable* w);
@@ -304,6 +347,8 @@ citp_ul_epoll_set_ul_events(struct oo_ul_epoll_state*__restrict__ eps,
       citp_ul_epoll_find_events(eps, eitem, events,
                                 sleep_seq, sleep_seq_p, seq_mismatch) : 0;
 }
+
+ci_uint64 citp_sock_sleep_seq(citp_fdinfo* fdi);
 
 
 

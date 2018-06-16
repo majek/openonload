@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -63,10 +63,22 @@
 /* This macro will do <x> no more than (approximately) once per second.  In
  * other words, <x> is rate-limited.
  */
-#define EFRM_LIMITED(x) do {	               \
-	static uint64_t last_jiffy;	       \
-	if (jiffies - last_jiffy > HZ) { x; }  \
-	last_jiffy = jiffies;		       \
+#define EFRM_LIMITED(x) do {				     \
+	static uint64_t last_jiffy;			     \
+	static int suppressed;				     \
+	if (jiffies - last_jiffy > HZ) {		     \
+		if (suppressed) {					\
+			EFRM_PRINTK(KERN_WARNING,			\
+				    "Rate limiting suppressed %d msgs",	\
+				    suppressed);			\
+		}							\
+		x;						     \
+		suppressed = 0;					     \
+		last_jiffy = jiffies;				     \
+	}							     \
+	else {							     \
+		++suppressed;					     \
+	}							     \
 } while(0)
 
 

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -30,7 +30,6 @@
 #include <ci/internal/ip.h>
 #include <onload/debug.h>
 #include <onload/tcp_helper_fns.h>
-#include <cplane/exported.h>
 
 #ifndef NDEBUG
 # define __ENTRY OO_DEBUG_IPP(ci_log("-> %s", __FUNCTION__))
@@ -356,10 +355,14 @@ ci_ipp_pmtu_rx(ci_netif *netif, ci_pmtu_state_t *pmtus,
   /* ... (proof that i'm not great at predictions) by april 2005 it was picked
    *  up by the media as part of a world-spanning problem :-) */
   if( CI_UNLIKELY(len < plateau[0]) ) {
-    int i = 4;
+    int i = CI_PMTU_PLATEAU_ENTRY_MAX;
     ci_uint16 npl;
-    ci_assert(i < CI_PMTU_PLATEAU_ENTRY_MAX);
+    ci_assert_ge(ipcache->mtu, plateau[0]);
+    while( plateau[i] > ipcache->mtu )
+      i--;
     npl = plateau[i];
+    if( ipcache->mtu == npl && i != 0 )
+      npl = plateau[i-1];
     /* see bug 3667 where ANVL requires us to reduce the PMTU a bit
        from default; this matches the Linux behaviour, and also
        prevents the DoS attack */
@@ -430,21 +433,92 @@ ci_ipp_pmtu_rx_tcp(tcp_helper_resource_t* thr,
   ci_tcp_tx_change_mss(&thr->netif, ts);
 }
 
+struct ipp_pmtu_udp_work {
+  struct work_struct w;
+
+  struct cp_fwd_key key;
+  struct oo_cplane_handle *cplane;
+};
+
+static void ci_ipp_pmtu_rx_udp_work(struct work_struct *data)
+{
+  struct ipp_pmtu_udp_work* w = container_of(data,
+                                             struct ipp_pmtu_udp_work,
+                                             w);
+
+  oo_op_route_resolve(w->cplane, &w->key);
+  kfree(w);
+}
+
 /* ci_ipp_pmtu_rx_udp -
  * handler for the receipt of "datagram too big" icmp messages
+ *
+ * When we finish here, this ICMP is passed back to Linux IP stack; Linux
+ * stores the PMTU limitation in its route cache.  All we need to do is to
+ * ask Linux about the new routing data; Linux will tell us the new PMTU
+ * data and how long it is valid.
  */
 static void 
 ci_ipp_pmtu_rx_udp(tcp_helper_resource_t* thr, 
                    ci_udp_state* us, efab_ipp_addr* addr)
 {
-  cicpos_pmtu_add(&CI_GLOBAL_CPLANE, addr->saddr_be32);
-  /* todo: install pmtu=
-   * CI_BSWAP_BE16((ci_icmp_too_big_t*)addr->icmp)->next_hop_mtu_be16 */
-  if (addr->saddr_be32 == sock_raddr_be32(&us->s)) {
-    ci_ip_cache_invalidate(&us->s.pkt);
+  struct ipp_pmtu_udp_work* w;
+  struct cp_fwd_data data;
+  cicp_verinfo_t verinfo;
+  int mtu = CI_BSWAP_BE16(((ci_icmp_too_big_t*)(addr->icmp))->
+                          next_hop_mtu_be16);
+
+  OO_DEBUG_IPP(ci_log("%s: ICMP route from "CI_IP_PRINTF_FORMAT
+                      " to "CI_IP_PRINTF_FORMAT" ifindex %d mtu=%d",
+                      __func__,
+                      CI_IP_PRINTF_ARGS(&addr->daddr_be32),
+                      CI_IP_PRINTF_ARGS(&addr->saddr_be32),
+                      addr->ifindex, mtu));
+
+  if( us->s.cp.ip_laddr_be32 != 0 &&
+      us->s.cp.ip_laddr_be32 != addr->daddr_be32 )
+    return;
+  if( us->s.cp.so_bindtodevice != 0 &&
+      us->s.cp.so_bindtodevice != addr->ifindex )
+    return;
+
+  w = kmalloc(sizeof(struct ipp_pmtu_udp_work), GFP_ATOMIC);
+  if( w == NULL )
+    return;
+
+  /* This is a sort of UDP-specific copy of cicp_user_retrieve().
+   * Fixme: Do we need to support multicast here?  IP_TRANSPARENT? */
+  memset(w, 0, sizeof(*w));
+  INIT_WORK(&w->w, ci_ipp_pmtu_rx_udp_work);
+  w->key.dst = addr->saddr_be32;
+  w->key.src = us->s.cp.ip_laddr_be32;
+  w->key.ifindex = us->s.cp.so_bindtodevice;
+  w->key.flag = CP_FWD_KEY_UDP | CP_FWD_KEY_SOURCELESS | CP_FWD_KEY_REQ_REFRESH;
+  if( us->s.cp.sock_cp_flags & OO_SCP_TPROXY )
+    w->key.flag |= CP_FWD_KEY_TRANSPARENT;
+  w->cplane = thr->netif.cplane;
+
+  if( __oo_cp_route_resolve(w->cplane, &verinfo, &w->key, 0, &data)
+      != 0 ||
+      data.mtu <= mtu ) {
+    /* Our forward cache does not know about such a route.  Have we ever
+     * sent a datagram via it, or is it an attack?
+     * If we know about this route, and our MTU is small enough, then there
+     * is nothing to do.  It may be a part of ICMP stream provoced by UDP
+     * stream, or it may be a part of attack - in any case, we've already
+     * handled something like this.
+     */
+    kfree(w);
+    return;
   }
-  else if (addr->saddr_be32 == us->ephemeral_pkt.ip.ip_daddr_be32)
-    ci_ip_cache_invalidate(&us->ephemeral_pkt);
+
+  /* Nothing prevents us from calling oo_op_route_resolve() right now,
+   * but we have a good chance to get a Linux route information before
+   * this ICMP will be handled by Linux.  A workqueue does not give us
+   * any guarantee as well, but we have a better chance to loose this race.
+   * Otherwise we'll get another ICMP and will refresh PMTU correctly from
+   * the second attempt. */
+  queue_work(thr->wq, &w->w);
 }
 
 /* efab_ipp_icmp_for_thr -

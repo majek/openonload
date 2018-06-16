@@ -65,6 +65,7 @@ EFRM_HAVE_NETFILTER_HOOK_STATE		memtype	struct_nf_hook_state	hook	include/linux/
 EFRM_HAVE_NETFILTER_OPS_HAVE_OWNER	memtype	struct_nf_hook_ops	owner	include/linux/netfilter.h struct module
 
 EFRM_HAVE_KSTRTOUL	symbol	kstrtoul	include/linux/kernel.h
+EFRM_HAVE_KSTRTOL	symbol	kstrtol 	include/linux/kernel.h
 EFRM_HAVE_IN4_PTON	symbol	in4_pton	include/linux/inet.h
 EFRM_HAVE_IN6_PTON	symbol	in6_pton	include/linux/inet.h
 EFRM_HAVE_STRCASECMP	symbol	strcasecmp	include/linux/string.h
@@ -101,20 +102,77 @@ EFRM_HAVE_TEAMING		file	include/uapi/linux/if_team.h
 EFRM_HAVE_CLOEXEC_TEST	symbol	fd_is_open	include/linux/fdtable.h
 
 EFRM_SOCK_SENDMSG_NEEDS_LEN	symtype	sock_sendmsg	include/linux/net.h int(struct socket *, struct msghdr *, size_t)
+EFRM_SOCK_RECVMSG_NEEDS_BYTES	symtype sock_recvmsg	include/linux/net.h int(struct socket *, struct msghdr *, size_t, int)
 
-EFRM_HAVE___VFS_READ_EXPORTED	export	__vfs_read	include/linux/fs.h
-
-EFRM_HAVE_FOP_READV	memtype	struct_file_operations	readv	include/linux/fs.h ssize_t (*) (struct file *, const struct iovec *, unsigned long, loff_t *)
-EFRM_HAVE_FOP_AIO_READ	memtype	struct_file_operations	aio_read	include/linux/fs.h ssize_t (*) (struct kiocb *, const struct iovec *, unsigned long, loff_t)
 EFRM_HAVE_FOP_READ_ITER	memtype	struct_file_operations	read_iter	include/linux/fs.h ssize_t (*) (struct kiocb *, struct iov_iter *)
 
 EFRM_SOCK_CREATE_KERN_HAS_NET	symtype	sock_create_kern	include/linux/net.h int(struct net *, int, int, int, struct socket **)
 
 EFRM_HAVE_SK_SLEEP_FUNC	symtype	sk_sleep	include/net/sock.h wait_queue_head_t *(struct sock *)
 
+# Before 4.8, set_restore_sigmask() is defined by some architectures only, and
+# there's a corresponding HAVE_SET_RESTORE_SIGMASK symbol.  On 4.8, the
+# implementation is generic and HAVE_SET_RESTORE_SIGMASK has gone.  This compat
+# will not find the pre-4.8 arch-specific and fallback implementations of
+# set_restore_sigmask() as they were in different places, so it's necessary
+# when using this to check for HAVE_SET_RESTORE_SIGMASK as well as for
+# EFRM_HAVE_SET_RESTORE_SIGMASK.
+EFRM_HAVE_SET_RESTORE_SIGMASK	symbol	set_restore_sigmask	include/linux/sched.h
+EFRM_HAVE_SET_RESTORE_SIGMASK1	symbol	set_restore_sigmask	include/linux/sched/signal.h
+
+EFRM_ALLOC_FILE_TAKES_STRUCT_PATH	symtype	alloc_file	include/linux/file.h struct file *(struct path *, fmode_t, const struct file_operations *)
+EFRM_ALLOC_FILE_TAKES_CONST_STRUCT_PATH	symtype	alloc_file	include/linux/file.h struct file *(const struct path *, fmode_t, const struct file_operations *)
+EFRM_HAVE_D_DNAME			member	struct_dentry_operations d_dname	include/linux/dcache.h
+EFRM_HAVE_CONST_D_OP			memtype	struct_dentry_operations d_op	include/linux/dcache.h	const struct dentry_operations *
+EFRM_FSTYPE_HAS_MOUNT			member	struct_file_system_type	mount	include/linux/fs.h
+EFRM_NEED_VFSMOUNT_PARAM_IN_GET_SB	memtype	struct_file_system_type	get_sb	include/linux/fs.h	int (*)(struct file_system_type *, int, const char *, void *, struct vfsmount *)
+EFRM_HAVE_KERN_UMOUNT			symbol	kern_unmount		include/linux/fs.h
+EFRM_HAVE_ALLOC_FILE			symbol	alloc_file	include/linux/file.h
+
+# Note this is the only place where the first test is needed to perform the subsequent kcompat tests
+EFRM_HAVE_KMEM_CACHE_S			custom
+EFRM_HAVE_KMEM_CACHE_DTOR		symtype	kmem_cache_create	include/linux/slab.h struct kmem_cache *(const char *, size_t, size_t, unsigned long, void (*ctor)(void*, struct kmem_cache *, unsigned long), void (*dtor)(void*, struct kmem_cache *, unsigned long))
+EFRM_HAVE_KMEM_CACHE_FLAGS		symtype	kmem_cache_create	include/linux/slab.h struct kmem_cache *(const char *, size_t, size_t, unsigned long, void (*ctor)(void*, struct kmem_cache *, unsigned long))
+EFRM_HAVE_KMEM_CACHE_CACHEP		symtype	kmem_cache_create	include/linux/slab.h struct kmem_cache *(const char *, size_t, size_t, unsigned long, void (*ctor)(struct kmem_cache *, void*))
+EFRM_NET_HAS_PROC_INUM			member	struct_net proc_inum	include/net/net_namespace.h
+EFRM_NET_HAS_USER_NS			member	struct_net user_ns	include/net/net_namespace.h
+
+EFRM_HAVE_PRANDOM_U32			symbol  prandom_u32             include/linux/random.h
+
+EFRM_HAVE_NEW_FAULT			memtype struct_vm_operations_struct	fault	include/linux/mm.h	int (*)(struct vm_fault *vmf)
+
+EFRM_HAVE_SCHED_TASK_H			file	include/linux/sched/task.h
+EFRM_HAVE_CRED_H			file	include/linux/cred.h
+
+EFRM_OLD_NEIGH_UPDATE	symtype	neigh_update	include/net/neighbour.h int(struct neighbour *neigh, const u8 *lladdr, u8 new, u32 flags)
+
+EFRM_HAVE_WAIT_QUEUE_ENTRY	memtype	struct_wait_queue_entry	flags	include/linux/wait.h	unsigned int
+EFRM_HAVE_NF_NET_HOOK	symbol	nf_register_net_hook	include/linux/netfilter.h
+
+EFRM_GUP_RCINT_TASK_SEPARATEFLAGS symtype get_user_pages include/linux/mm.h int(struct task_struct *, struct mm_struct *, unsigned long, int, int, int, struct page **, struct vm_area_struct **)
+EFRM_GUP_RCLONG_TASK_SEPARATEFLAGS symtype get_user_pages include/linux/mm.h long(struct task_struct *, struct mm_struct *, unsigned long, unsigned long, int, int, struct page **, struct vm_area_struct **)
+EFRM_GUP_RCLONG_NOTASK_COMBINEDFLAGS symtype get_user_pages include/linux/mm.h long(unsigned long, unsigned long, unsigned int, struct page **, struct vm_area_struct **)
+
+EFRM_HAVE_USERMODEHELPER_SETUP		symbol	call_usermodehelper_setup	include/linux/kmod.h
+EFRM_HAVE_USERMODEHELPER_SETUP_INFO	symtype	call_usermodehelper_setup	include/linux/kmod.h	struct subprocess_info*(char *path, char **argv, char **envp, gfp_t gfp_mask, int (*init)(struct subprocess_info *info, struct cred *new), void (*cleanup)(struct subprocess_info *), void *data)
+
+EFRM_RTMSG_IFINFO_EXPORTED		export	rtmsg_ifinfo	include/linux/rtnetlink.h	net/core/rtnetlink.c
+EFRM_RTMSG_IFINFO_NEEDS_GFP_FLAGS	symtype	rtmsg_ifinfo	include/linux/rtnetlink.h	void(int type, struct net_device *dev, unsigned int change, gfp_t flags)
+
+EFRM_DEV_GET_BY_NAME_TAKES_NS	symtype	dev_get_by_name	include/linux/netdevice.h	struct net_device*(struct net*, const char* name)
+
+EFRM_HAVE_NS_SYSCTL_TCP_MEM		nsymbol sysctl_tcp_wmem include/net/tcp.h
+
+EFRM_HAVE_CONST_KERNEL_PARAM            symtype param_get_int include/linux/moduleparam.h int(char *, const struct kernel_param *)
+EFRM_HAVE_KERNEL_PARAM_OPS		symbol kernel_param_ops	include/linux/moduleparam.h
+
+EFRM_HAVE_TIMER_SETUP                   symbol timer_setup include/linux/timer.h
+
+
 # TODO move onload-related stuff from net kernel_compat
 " | egrep -v -e '^#' -e '^$' | sed 's/[ \t][ \t]*/:/g'
 }
+
 
 ######################################################################
 # Generic methods for standard symbol types
@@ -301,7 +359,7 @@ function defer_test_symtype()
 #include <${file:8}>
 
 #include \"_autocompat.h\"
-#if defined(EFX_HAVE_KMEM_CACHE_S)
+#if defined(EFRM_HAVE_KMEM_CACHE_S)
   #define kmem_cache kmem_cache_s
 #endif
 
@@ -458,7 +516,7 @@ function read_define()
 ######################################################################
 # Implementation for more tricky types
 
-function do_EFX_HAVE_KMEM_CACHE_S
+function do_EFRM_HAVE_KMEM_CACHE_S
 {
     # This uses test_compile such that the subsquent defer_test_compile
     # based tests can consume from _autocompat.h

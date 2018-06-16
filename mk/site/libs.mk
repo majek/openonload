@@ -55,24 +55,3 @@ SPEKTOR_LIB		:= $(MMakeGenerateLibTarget)
 SPEKTOR_LIB_DEPEND	:= $(MMakeGenerateLibDepend)
 LINK_SPEKTOR_LIB	:= $(MMakeGenerateLibLink)
 
-lib_ver   := 0
-lib_name  := efabcfg
-lib_where := lib/efabcfg
-EFABCFG_LIB		:= $(MMakeGenerateLibTarget)
-EFABCFG_LIB_DEPEND	:= $(MMakeGenerateLibDepend)
-LINK_EFABCFG_LIB	:= $(MMakeGenerateLibLink)
-
-lib_ver   := 0
-lib_name  := ftl
-lib_where := lib/efabcfg/ftl
-FTL_LIB			:= $(MMakeGenerateLibTarget)
-FTL_LIB_DEPEND		:= $(MMakeGenerateLibDepend)
-LINK_FTL_LIB		:= $(MMakeGenerateLibLink)
-
-# Non-distributable version of the above library (calling readline)
-lib_ver   := 0
-lib_name  := ftl5
-lib_where := lib/efabcfg/ftl
-L5_FTL_LIB		:= $(MMakeGenerateLibTarget)
-L5_FTL_LIB_DEPEND	:= $(MMakeGenerateLibDepend)
-LINK_L5_FTL_LIB		:= $(MMakeGenerateLibLink)

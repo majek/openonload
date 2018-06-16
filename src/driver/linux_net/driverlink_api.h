@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -16,7 +16,7 @@
 /****************************************************************************
  * Driver for Solarflare network controllers and boards
  * Copyright 2005-2006 Fen Systems Ltd.
- * Copyright 2005-2015 Solarflare Communications Inc.
+ * Copyright 2005-2017 Solarflare Communications Inc.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 as published
@@ -27,14 +27,6 @@
 #define EFX_DRIVERLINK_API_H
 
 #include <linux/list.h>
-#if defined(EFX_USE_KCOMPAT) && !defined(EFX_USE_FASTCALL)
-	#include <linux/version.h>
-	#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,20)
-		#define EFX_USE_FASTCALL yes
-		#include <linux/linkage.h>
-	#endif
-#endif
-
 #include "filter.h"
 
 /* Forward declarations */
@@ -50,8 +42,8 @@ struct efx_dl_device_info;
  * is not used for binary compatibility checking, as that is done by
  * kbuild and the module loader using symbol versions.
  */
-#define EFX_DRIVERLINK_API_VERSION 22
-#define EFX_DRIVERLINK_API_VERSION_MINOR_MAX 4
+#define EFX_DRIVERLINK_API_VERSION 23
+#define EFX_DRIVERLINK_API_VERSION_MINOR_MAX 0
 
 #ifndef EFX_DRIVERLINK_API_VERSION_MINOR
 #define EFX_DRIVERLINK_API_VERSION_MINOR 0
@@ -78,11 +70,16 @@ enum efx_dl_ev_prio {
  *      minor_ver entry us present in their struct. Defined from API 22.1.
  * @EFX_DL_DRIVER_SUPPORTS_MINOR_VER: Set by the server driver to
  *      indicate the minor version supplied by the client is supported.
+ * @EFX_DL_DRIVER_CHECKS_MEDFORD2_VI_STRIDE: Set by client drivers that
+ *	promise to use the VI stride and memory BAR supplied by the net
+ *	driver on Medford2.  If this flag is not set, the client driver
+ *	will not be probed for Medford2 (or newer) NICs.  Defined from API 22.5.
  */
 enum efx_dl_driver_flags {
 	EFX_DL_DRIVER_CHECKS_FALCON_RX_USR_BUF_SIZE = 0x1,
 	EFX_DL_DRIVER_REQUIRES_MINOR_VER = 0x2,
 	EFX_DL_DRIVER_SUPPORTS_MINOR_VER = 0x4,
+	EFX_DL_DRIVER_CHECKS_MEDFORD2_VI_STRIDE = 0x8,
 };
 
 /**
@@ -330,9 +327,9 @@ struct efx_dl_aoe_resources {
 };
 
 /**
- * enum efx_dl_falcon_resource_flags - Falcon/Siena resource information flags.
+ * enum efx_dl_ef10_resource_flags - EF10 resource information flags.
  *
- * Flags that describe hardware variations for the current Falcon or
+ * Flags that describe hardware variations for the current EF10 or
  * Siena device.
  *
  * @EFX_DL_EF10_USE_MSI: Port is initialised to use MSI/MSI-X interrupts.
@@ -358,6 +355,8 @@ enum efx_dl_ef10_resource_flags {
  * @rss_channel_count: Number of receive channels used for RSS.
  * @rx_channel_count: Number of receive channels available for use.
  * @vi_shift: Shift value for absolute VI number computation.
+ * @vi_stride: size in bytes of a single VI.
+ * @mem_bar: PCIe memory BAR index.
  */
 struct efx_dl_ef10_resources {
 	struct efx_dl_device_info hdr;
@@ -373,6 +372,10 @@ struct efx_dl_ef10_resources {
 #endif
 #if EFX_DRIVERLINK_API_VERSION > 22 || (EFX_DRIVERLINK_API_VERSION == 22 && EFX_DRIVERLINK_API_VERSION_MINOR > 2)
 	unsigned int vi_shift;
+#endif
+#if EFX_DRIVERLINK_API_VERSION > 22 || (EFX_DRIVERLINK_API_VERSION == 22 && EFX_DRIVERLINK_API_VERSION_MINOR > 4)
+	unsigned int vi_stride;
+	unsigned int mem_bar;
 #endif
 };
 
@@ -443,11 +446,7 @@ static inline int efx_dl_register_driver(struct efx_dl_driver *driver)
  * efx_dl_netdev_is_ours() - Check whether device is handled by sfc
  * @net_dev: Net device to be checked
  */
-#if defined(EFX_USE_KCOMPAT) && defined(EFX_USE_FASTCALL)
-bool fastcall efx_dl_netdev_is_ours(const struct net_device *net_dev);
-#else
 bool efx_dl_netdev_is_ours(const struct net_device *net_dev);
-#endif
 
 /**
  * efx_dl_dev_from_netdev() - Find Driverlink device structure for net device
@@ -463,13 +462,82 @@ efx_dl_dev_from_netdev(const struct net_device *net_dev,
 /* Schedule a reset without grabbing any locks */
 void efx_dl_schedule_reset(struct efx_dl_device *efx_dev);
 
+/**
+ * efx_dl_rss_flags_default() - return appropriate default RSS flags for NIC
+ * @efx_dev: NIC on which to act
+ */
+u32 efx_dl_rss_flags_default(struct efx_dl_device *efx_dev);
+
+/**
+ * efx_dl_rss_context_new() - allocate and configure a new RSS context
+ * @efx_dev: NIC on which to act
+ * @indir: initial indirection table, or %NULL to use default
+ * @key: initial hashing key, or %NULL to use default
+ * @flags: initial hashing flags (as defined by MCDI)
+ * @num_queues: number of queues spanned by this context, in the range 1-64
+ * @rss_context: location to store user_id of newly allocated RSS context
+ */
+int efx_dl_rss_context_new(struct efx_dl_device *efx_dev, const u32 *indir,
+			   const u8 *key, u32 flags, u8 num_queues,
+			   u32 *rss_context);
+/**
+ * efx_dl_rss_context_set() - update the configuration of existing RSS context
+ * @efx_dev: NIC on which to act
+ * @indir: new indirection table, or %NULL for no change
+ * @key: new hashing key, or %NULL for no change
+ * @flags: new hashing flags (as defined by MCDI)
+ * @rss_context: user_id of RSS context on which to act.  Should be a value
+ *	previously written by efx_dl_rss_context_new().
+ */
+int efx_dl_rss_context_set(struct efx_dl_device *efx_dev, const u32 *indir,
+			   const u8 *key, u32 flags, u32 rss_context);
+/**
+ * efx_dl_rss_context_free() - remove an existing RSS context
+ * @efx_dev: NIC on which to act
+ * @rss_context: user_id of RSS context to be removed.  Should be a value
+ *	previously written by efx_dl_rss_context_new().
+ */
+int efx_dl_rss_context_free(struct efx_dl_device *efx_dev, u32 rss_context);
+
+/* From API version 23, @spec->rss_context is a user_id allocated by the driver,
+ * as per comments in filter.h.  In older Driverlink versions, it was an MCFW-
+ * facing ID, but that behaviour caused problems around resets (bug 74758).
+ */
 int efx_dl_filter_insert(struct efx_dl_device *efx_dev,
 			 const struct efx_filter_spec *spec,
 			 bool replace_equal);
 int efx_dl_filter_remove(struct efx_dl_device *efx_dev, int filter_id);
+
+/**
+ * efx_dl_filter_redirect() - update the queue for an existing RX filter
+ * @efx_dev: NIC in which to update the filter
+ * @filter_id: ID of filter, as returned by @efx_dl_filter_insert
+ * @rxq_i: Index of RX queue
+ *
+ * If filter previously had %EFX_FILTER_FLAG_RX_RSS and an associated RSS
+ * context, the flag will be cleared and the RSS context deassociated.  (This
+ * behaviour is new in API version 23 and is only supported by EF10; farch will
+ * return -EINVAL in this case.)
+ */
 int efx_dl_filter_redirect(struct efx_dl_device *efx_dev,
 			   int filter_id, int rxq_i, int stack_id);
 
+/**
+ * efx_dl_filter_redirect_rss() - update the queue and RSS context for an existing RX filter
+ * @efx_dev: NIC in which to update the filter
+ * @filter_id: ID of filter, as returned by @efx_dl_filter_insert
+ * @rxq_i: Index of RX queue
+ * @rss_context: user_id of RSS context.  Either a value supplied by
+ *	efx_dl_rss_context_new(), or 0 to use default RSS context.
+ *
+ * If filter previously did not have %EFX_FILTER_FLAG_RX_RSS, it will be set
+ * (EF10) or -EINVAL will be returned (farch).
+ */
+int efx_dl_filter_redirect_rss(struct efx_dl_device *efx_dev,
+			       int filter_id, int rxq_i, u32 rss_context,
+			       int stack_id);
+
+/* See comment on efx_dl_filter_insert() about @spec->rss_context semantics */
 int efx_dl_vport_filter_insert(struct efx_dl_device *efx_dev,
 			       unsigned int vport_id,
 			       const struct efx_filter_spec *spec,

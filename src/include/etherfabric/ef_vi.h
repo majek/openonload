@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -15,7 +15,7 @@
 
 /****************************************************************************
  * Copyright 2002-2005: Level 5 Networks Inc.
- * Copyright 2005-2015: Solarflare Communications Inc,
+ * Copyright 2005-2017: Solarflare Communications Inc,
  *                      7505 Irvine Center Drive, Suite 100
  *                      Irvine, CA 92618, USA
  *
@@ -43,8 +43,8 @@
 ** \author    Solarflare Communications, Inc.
 ** \brief     Virtual Interface definitions for EtherFabric Virtual
 **            Interface HAL.
-** \date      2015/02/16
-** \copyright Copyright &copy; 2015 Solarflare Communications, Inc. All
+** \date      2017/02/21
+** \copyright Copyright &copy; 2017 Solarflare Communications, Inc. All
 **            rights reserved. Solarflare, OpenOnload and EnterpriseOnload
 **            are trademarks of Solarflare Communications, Inc.
 *//*
@@ -58,13 +58,15 @@
  * Primitive types ****************************************************
  **********************************************************************/
 
-/* We standardise on the types from stdint.h and synthesise these types
+/* We standardize on the types from stdint.h and synthesize these types
  * for compilers/platforms that don't provide them */
 
 #if defined(__GNUC__)
 # if defined(__linux__) && defined(__KERNEL__)
 #  include <linux/types.h>
 #  include <linux/time.h>
+#  include <asm/errno.h>
+#  include <linux/uio.h>
 # else
 #  include <stdint.h>
 #  ifndef __STDC_FORMAT_MACROS
@@ -73,9 +75,12 @@
 #  include <inttypes.h>
 #  include <time.h>
 #   include <sys/types.h>
+#   include <sys/uio.h>
+#  include <errno.h>
 # endif
 # define EF_VI_ALIGN(x) __attribute__ ((aligned (x)))
 # define ef_vi_inline static inline
+# define ef_vi_pure __attribute__ ((pure))
 
 #elif defined(_MSC_VER)
 
@@ -92,6 +97,7 @@ typedef unsigned long long  uint64_t;
 typedef long long           int64_t;
 
 # define ef_vi_inline static __inline
+# define ef_vi_pure
 
 # define EF_VI_ALIGN(x)
 #else
@@ -167,7 +173,8 @@ typedef union {
   /** An event of type EF_EVENT_TYPE_RX */
   struct {
     unsigned       type       :16;
-    unsigned       q_id       :16;
+    unsigned       q_id       :8;
+    unsigned       __reserved :8;
     unsigned       rq_id      :32;
     unsigned       len        :16;
     unsigned       flags      :16;
@@ -175,7 +182,8 @@ typedef union {
   /** An event of type EF_EVENT_TYPE_RX_DISCARD */
   struct {  /* This *must* have same initial layout as [rx]. */
     unsigned       type       :16;
-    unsigned       q_id       :16;
+    unsigned       q_id       :8;
+    unsigned       __reserved :8;
     unsigned       rq_id      :32;
     unsigned       len        :16;
     unsigned       flags      :16;
@@ -184,20 +192,23 @@ typedef union {
   /** An event of type EF_EVENT_TYPE_TX */
   struct {
     unsigned       type       :16;
-    unsigned       q_id       :16;
+    unsigned       q_id       :8;
+    unsigned       flags      :8;
     unsigned       desc_id    :16;
   } tx;
   /** An event of type EF_EVENT_TYPE_TX_ERROR */
   struct {  /* This *must* have same layout as [tx]. */
     unsigned       type       :16;
-    unsigned       q_id       :16;
+    unsigned       q_id       :8;
+    unsigned       flags      :8;
     unsigned       desc_id    :16;
     unsigned       subtype    :16;
   } tx_error;
   /** An event of type EF_EVENT_TYPE_TX_WITH_TIMESTAMP */
-  struct {
+  struct {  /* This *must* have same layout as [tx] up to [flags]. */
     unsigned       type       :16;
-    unsigned       q_id       :16;
+    unsigned       q_id       :8;
+    unsigned       flags      :8;
     unsigned       rq_id      :32;
     unsigned       ts_sec     :32;
     unsigned       ts_nsec    :32;
@@ -205,18 +216,20 @@ typedef union {
   /** An event of type EF_EVENT_TYPE_TX_ALT */
   struct {
     unsigned       type       :16;
-    unsigned       q_id       :16;
+    unsigned       q_id       :8;
+    unsigned       __reserved :8;
     unsigned       alt_id     :16;
   } tx_alt;
   /** An event of type EF_EVENT_TYPE_RX_NO_DESC_TRUNC */
   struct {
     unsigned       type       :16;
-    unsigned       q_id       :16;
+    unsigned       q_id       :8;
   } rx_no_desc_trunc;
   /** An event of type EF_EVENT_TYPE_RX_PACKED_STREAM */
   struct {
     unsigned       type       :16;
-    unsigned       q_id       :16;
+    unsigned       q_id       :8;
+    unsigned       __reserved :8;
     unsigned       flags      :16;
     unsigned       n_pkts     :16;
     unsigned       ps_flags   :8;
@@ -226,13 +239,23 @@ typedef union {
     unsigned       type       :16;
     unsigned       data;
   } sw;
-  /** An event of type EF_EVENT_TYPE_MULTI */
+  /** An event of type EF_EVENT_TYPE_RX_MULTI */
   struct {
     unsigned       type       :16;
-    unsigned       q_id       :16;
-    unsigned       desc_id    :16;
+    unsigned       q_id       :8;
+    unsigned       __reserved :8;
+    unsigned       n_descs    :16;
     unsigned       flags      :16;
   } rx_multi;
+  /** An event of type EF_EVENT_TYPE_RX_MULTI_DISCARD */
+  struct {  /* Common layout with rx_multi. */
+    unsigned       type       :16;
+    unsigned       q_id       :8;
+    unsigned       __reserved :8;
+    unsigned       n_descs    :16;
+    unsigned       flags      :16;
+    unsigned       subtype    :16;
+  } rx_multi_discard;
 } ef_event;
 
 
@@ -264,6 +287,8 @@ enum {
   EF_EVENT_TYPE_RX_MULTI,
   /** Packet has been transmitted via a "TX alternative". */
   EF_EVENT_TYPE_TX_ALT,
+  /** A batch of packets was received with error condition set. */
+  EF_EVENT_TYPE_RX_MULTI_DISCARD,
 };
 
 
@@ -285,6 +310,8 @@ enum {
 /*! \brief True if the iSCSIOK flag is set for an RX event */
 #define EF_EVENT_RX_ISCSI_OKAY(e)       ((e).rx.flags & EF_EVENT_FLAG_ISCSI_OK)
 
+/* RX-event flags. */
+
 /*! \brief Start Of Packet flag. */
 #define EF_EVENT_FLAG_SOP             0x1
 /*! \brief CONTinuation Of Packet flag. */
@@ -296,8 +323,16 @@ enum {
 /*! \brief Packed Stream Next Buffer flag. */
 #define EF_EVENT_FLAG_PS_NEXT_BUFFER  0x10
 
+/* TX-event flags. */
+
+/*! \brief Packets were sent successfully with CTPIO. */
+#define EF_EVENT_FLAG_CTPIO           0x1
+
 /*! \brief Get the TX descriptor ring ID used for a transmitted packet. */
 #define EF_EVENT_TX_Q_ID(e)     ((e).tx.q_id)
+
+/*! \brief True if packets were sent successfully with CTPIO. */
+#define EF_EVENT_TX_CTPIO(e)    ((e).tx.flags & EF_EVENT_FLAG_CTPIO)
 
 /*! \brief Get the RX descriptor ring ID used for a discarded packet. */
 #define EF_EVENT_RX_DISCARD_Q_ID(e)  ((e).rx_discard.q_id)
@@ -321,6 +356,8 @@ enum {
 /*! \brief True if the Start Of Packet flag is set for an RX HT event */
 #define EF_EVENT_RX_MULTI_SOP(e)              ((e).rx_multi.flags & \
                                                EF_EVENT_FLAG_SOP)
+/*! \brief Get the reason for an EF_EVENT_TYPE_RX_MULTI_DISCARD event */
+#define EF_EVENT_RX_MULTI_DISCARD_TYPE(e)     ((e).rx_multi_discard.subtype)
 
 /*! \brief The reason for an EF_EVENT_TYPE_RX_DISCARD event */
 enum {
@@ -338,6 +375,8 @@ enum {
   EF_EVENT_RX_DISCARD_EV_ERROR,
   /** Other unspecified reason */
   EF_EVENT_RX_DISCARD_OTHER,
+  /** Inner IP header or TCP/UDP checksum error */
+  EF_EVENT_RX_DISCARD_INNER_CSUM_BAD,
 };
 
 /*! \brief Get the TX descriptor ring ID used for a transmit error */
@@ -424,16 +463,16 @@ enum ef_vi_flags {
   /** Default setting */
   EF_VI_FLAGS_DEFAULT     = 0x0,
   /** Receive iSCSI header digest enable: hardware verifies header digest
-  ** (CRC) when packet is iSCSI. */
+   ** (CRC) when packet is iSCSI */
   EF_VI_ISCSI_RX_HDIG     = 0x2,
   /** Transmit iSCSI header digest enable: hardware calculates and inserts
-  ** header digest (CRC) when packet is iSCSI. */
+   ** header digest (CRC) when packet is iSCSI */
   EF_VI_ISCSI_TX_HDIG     = 0x4,
   /** Receive iSCSI data digest enable: hardware verifies data digest (CRC)
-  ** when packet is iSCSI. */
+   ** when packet is iSCSI */
   EF_VI_ISCSI_RX_DDIG     = 0x8,
   /** Transmit iSCSI data digest enable: hardware calculates and inserts
-  ** data digest (CRC) when packet is iSCSI. */
+   ** data digest (CRC) when packet is iSCSI */
   EF_VI_ISCSI_TX_DDIG     = 0x10,
   /** Use physically addressed TX descriptor ring */
   EF_VI_TX_PHYS_ADDR      = 0x20,
@@ -449,13 +488,13 @@ enum ef_vi_flags {
   ** (5000 and 6000 series only) */
   EF_VI_TX_FILTER_IP      = 0x400,              /* Siena only */
   /** Drop packets with a mismatched MAC source address
-  ** (5000 and 6000 series only) */
+   ** (5000 and 6000 series only) */
   EF_VI_TX_FILTER_MAC     = 0x800,              /* Siena only */
   /** Set lowest bit of queue ID to 0 when matching within filter block
-  ** (5000 and 6000 series only) */
+   ** (5000 and 6000 series only) */
   EF_VI_TX_FILTER_MASK_1  = 0x1000,             /* Siena only */
   /** Set lowest 2 bits of queue ID to 0 when matching within filter block
-  ** (5000 and 6000 series only) */
+   ** (5000 and 6000 series only) */
   EF_VI_TX_FILTER_MASK_2  = 0x2000,             /* Siena only */
   /** Set lowest 3 bits of queue ID to 0 when matching within filter block
   ** (5000 and 6000 series only) */
@@ -463,31 +502,37 @@ enum ef_vi_flags {
   /** Disable using TX descriptor push, so always use doorbell for transmit */
   EF_VI_TX_PUSH_DISABLE   = 0x4000,
   /** Always use TX descriptor push, so never use doorbell for transmit
-  ** (7000 series and newer) */
+   ** (7000 series and newer) */
   EF_VI_TX_PUSH_ALWAYS    = 0x8000,             /* ef10 only */
   /** Add timestamp to received packets (7000 series and newer) */
   EF_VI_RX_TIMESTAMPS     = 0x10000,            /* ef10 only */
-  /** Add timestamp to transmitted packets (7000 series and newer) */
+  /** Add timestamp to transmitted packets (7000 series and newer),
+   ** cannot be combined with EF_VI_TX_ALT */
   EF_VI_TX_TIMESTAMPS     = 0x20000,            /* ef10 only */
   /* Flag EF_VI_TX_LOOPBACK (0x40000) has been removed. Similar
    * functionality can now be achieved with protection domain and
    * EF_PD_MCAST_LOOP flag.
    * Flag value 0x40000 is not to be reused. */
-  /** Enable packed stream mode for received packets (7000 series or newer) */
+  /** Enable packed stream mode for received packets (7000 series and newer) */
   EF_VI_RX_PACKED_STREAM  = 0x80000,            /* ef10 only */
   /** Use 64KiB packed stream buffers, instead of the 1024KiB default (7000
-   * series and newer).
-   */
+   *  series and newer) */
   EF_VI_RX_PS_BUF_SIZE_64K = 0x100000,          /* ef10 only */
-  /** Enable RX event merging mode for received packets
-   *  See ef_vi_receive_unbundle() and ef_vi_receive_get_bytes() for more
-   *  details on using RX event merging mode. */
+  /** Enable RX event merging mode for received packets;
+   ** see ef_vi_receive_unbundle() and ef_vi_receive_get_bytes() for more
+   ** details on using RX event merging mode */
   EF_VI_RX_EVENT_MERGE = 0x200000,          /* ef10 only */
-  /** Enable the "TX alternatives" feature (8000 series and newer). */
+  /** Enable the "TX alternatives" feature (8000 series and newer),
+   ** cannot be combined with EF_VI_TX_TIMESTAMPS */
   EF_VI_TX_ALT             = 0x400000,
-  /** Controls, on 8000 series and newer, whether the hardware event timer
-   *  is enabled */
+  /** Controls whether the hardware event timer is enabled (8000 series and
+   ** newer) */
   EF_VI_ENABLE_EV_TIMER = 0x800000,
+  /** Enable the "cut-through PIO" feature (X2000 series and newer). */
+  EF_VI_TX_CTPIO           = 0x1000000,
+  /** When using CTPIO, prevent poisoned frames from reaching the wire (X2000
+   ** series and newer). */
+  EF_VI_TX_CTPIO_NO_POISON = 0x2000000,
 };
 
 
@@ -501,16 +546,30 @@ enum ef_vi_out_flags {
 /*! \brief Flags that define which errors will cause RX_DISCARD events. */
 enum ef_vi_rx_discard_err_flags {
   /** TCP or UDP checksum error */
-  EF_VI_DISCARD_RX_L4_CSUM_ERR      = 0x1,
+  EF_VI_DISCARD_RX_L4_CSUM_ERR       = 0x1,
   /** IP checksum error */
-  EF_VI_DISCARD_RX_L3_CSUM_ERR      = 0x2,
+  EF_VI_DISCARD_RX_L3_CSUM_ERR       = 0x2,
   /** Ethernet FCS error */
-  EF_VI_DISCARD_RX_ETH_FCS_ERR      = 0x4,
+  EF_VI_DISCARD_RX_ETH_FCS_ERR       = 0x4,
   /** Ethernet frame length error */
-  EF_VI_DISCARD_RX_ETH_LEN_ERR      = 0x8,      /* ef10 only */
+  EF_VI_DISCARD_RX_ETH_LEN_ERR       = 0x8,      /* ef10 only */
   /** To be discard in software (includes frame length error) */
-  EF_VI_DISCARD_RX_TOBE_DISC        = 0x10      /* Siena only */
+  EF_VI_DISCARD_RX_TOBE_DISC         = 0x10,     /* Siena only */
+  /* Inner TCP or UDP checksum error */
+  EF_VI_DISCARD_RX_INNER_L4_CSUM_ERR = 0x20,
+  /* Inner IP checksum error */
+  EF_VI_DISCARD_RX_INNER_L3_CSUM_ERR = 0x40
+
+
 };
+
+
+/*! \brief Timestamp formats supported by various cards. */
+enum ef_timestamp_format {
+        TS_FORMAT_SECONDS_27FRACTION = 0,
+        TS_FORMAT_SECONDS_QTR_NANOSECONDS = 1
+};
+
 
 /**********************************************************************
  * ef_vi data structure ***********************************************
@@ -520,7 +579,7 @@ enum ef_vi_rx_discard_err_flags {
 enum ef_vi_arch {
   /** 5000 and 6000-series NICs */
   EF_VI_ARCH_FALCON,
-  /** 7000-series NICs */
+  /** 7000 and 8000-series NICs */
   EF_VI_ARCH_EF10,
 };
 
@@ -544,8 +603,8 @@ typedef struct {
 ** Users should not access this structure.
 */
 typedef struct {
-  /** Descriptors previously added to the ring, but unhandled */
-  uint32_t  prev_added;
+  /** Descriptors posted to the nic */
+  uint32_t  posted;
   /** Descriptors added to the ring */
   uint32_t  added;
   /** Descriptors removed from the ring */
@@ -554,12 +613,10 @@ typedef struct {
   uint32_t  in_jumbo;                           /* ef10 only */
   /** Bytes received as part of a jumbo (7000-series only) */
   uint32_t  bytes_acc;                          /* ef10 only */
-  /** Count of packets received in packed stream (7000-series only) */
-  uint16_t  rx_ps_pkt_count;                    /* ef10 only */
+  /** Last descriptor index completed (7000-series only) */
+  uint16_t  last_desc_i;                        /* ef10 only */
   /** Credit for packed stream handling (7000-series only) */
   uint16_t  rx_ps_credit_avail;                 /* ef10 only */
-  /** Last descriptor to be completed (when RX batching) */
-  uint32_t  last_completed;                     /* ef10 only */
 } ef_vi_rxq_state;
 
 /*! \brief State of event queue
@@ -569,15 +626,17 @@ typedef struct {
 typedef struct {
   /** Event queue pointer */
   ef_eventq_ptr evq_ptr;
+  /** For internal use only */
+  int32_t       evq_clear_stride;
   /** Timestamp (major part) */
   uint32_t      sync_timestamp_major;
   /** Timestamp (minor part) */
   uint32_t      sync_timestamp_minor;
   /** Smallest possible seconds value for given sync_timestamp_major */
   uint32_t      sync_timestamp_minimum;
-  /** Timestamp synchronised with adapter */
+  /** Timestamp synchronized with adapter */
   uint32_t      sync_timestamp_synchronised; /* with adapter */
-  /** Time synchronisation flags */
+  /** Time synchronization flags */
   uint32_t      sync_flags;
 } ef_eventq_state;
 
@@ -649,6 +708,24 @@ struct ef_vi_nic_type {
   unsigned char  revision;
 };
 
+/*! \brief Per-packet overhead information
+**
+** This structure is used by ef_vi_transmit_alt_usage() to calculate
+** the amount of buffering needed to store a packet. It should be
+** filled in by ef_vi_transmit_alt_query_overhead() or similar. Its
+** members are not intended to be meaningful to the application and
+** should not be obtained or interpreted in any other way.
+*/
+struct ef_vi_transmit_alt_overhead {
+  /** Bytes to add before rounding */
+  uint32_t pre_round;
+  /** Rounding mask */
+  uint32_t mask;
+  /** Bytes to add after rounding */
+  uint32_t post_round;
+};
+
+
 struct ef_pio;
 
 
@@ -679,6 +756,8 @@ typedef struct ef_vi {
   int                           rx_ts_correction;
   /** The timestamp correction (ns) for transmitted packets */
   int                           tx_ts_correction_ns;
+  /** The timestamp format used by the hardware */
+  enum ef_timestamp_format      ts_format;
   /** Pointer to virtual interface memory */
   char*                         vi_mem_mmap_ptr;
   /** Length of virtual interface memory */
@@ -687,6 +766,10 @@ typedef struct ef_vi {
   char*                         vi_io_mmap_ptr;
   /** Length of virtual interface I/O region */
   int                           vi_io_mmap_bytes;
+  /** Pointer to CTPIO region */
+  char*                         vi_ctpio_mmap_ptr;
+  /** Controls rate of writes into CTPIO aperture */
+  uint32_t                      vi_ctpio_wb_ticks;
   /** True if the virtual interface is in a cluster */
   int                           vi_clustered;
   /** True if packed stream mode is enabled for the virtual interface */
@@ -759,10 +842,19 @@ typedef struct ef_vi {
     /** Transmit a packet already resident in Programmed I/O */
     int (*transmit_pio)(struct ef_vi*, int offset, int len,
                         ef_request_id dma_id);
-    /** Transmit a packet already resident in Programmed I/O */
+    /** Copy a packet to Programmed I/O region and transmit it */
     int (*transmit_copy_pio)(struct ef_vi*, int pio_offset,
                              const void* src_buf, int len,
                              ef_request_id dma_id);
+    /** Warm Programmed I/O transmit path for subsequent transmit */
+    void (*transmit_pio_warm)(struct ef_vi*);
+    /** Copy a packet to Programmed I/O region and warm transmit path */
+    void (*transmit_copy_pio_warm)(struct ef_vi*, int pio_offset,
+                                   const void* src_buf, int len);
+    /** Transmit a vector of packet buffers using CTPIO */
+    void (*transmitv_ctpio)(struct ef_vi*, size_t frame_len,
+                            const struct iovec* iov,
+                            int iov_len, unsigned threshold);
     /** Select a TX alternative as the destination for future sends */
     int (*transmit_alt_select)(struct ef_vi*, unsigned alt_id);
     /** Select the "normal" data path as the destination for future sends */
@@ -870,6 +962,7 @@ extern const char* ef_vi_version_str(void);
 extern const char* ef_vi_driver_interface_str(void);
 
 
+
 /**********************************************************************
  * Receive interface **************************************************
  **********************************************************************/
@@ -888,7 +981,7 @@ extern const char* ef_vi_driver_interface_str(void);
 **
 ** When a large packet is received that is scattered over multiple packet
 ** buffers, the prefix is only present in the first buffer.
-*/ef_vi_inline int ef_vi_receive_prefix_len(ef_vi* vi)
+*/ef_vi_inline int ef_vi_receive_prefix_len(const ef_vi* vi)
 {
   return vi->rx_prefix_len;
 }
@@ -909,7 +1002,7 @@ extern const char* ef_vi_driver_interface_str(void);
 ** as the value returned by this function, else there is a risk that a DMA
 ** may overrun the buffer.
 */
-ef_vi_inline int ef_vi_receive_buffer_len(ef_vi* vi)
+ef_vi_inline int ef_vi_receive_buffer_len(const ef_vi* vi)
 {
   return vi->rx_buffer_len;
 }
@@ -943,7 +1036,7 @@ ef_vi_inline void ef_vi_receive_set_buffer_len(ef_vi* vi, unsigned buf_len)
 ** number of slots that are available for pushing a new descriptor (and an
 ** associated unfilled packet buffer).
 */
-ef_vi_inline int ef_vi_receive_space(ef_vi* vi)
+ef_vi_inline int ef_vi_receive_space(const ef_vi* vi)
 {
   ef_vi_rxq_state* qs = &vi->ep_state->rxq;
   return vi->vi_rxq.mask - (qs->added - qs->removed);
@@ -962,7 +1055,7 @@ ef_vi_inline int ef_vi_receive_space(ef_vi* vi)
 ** The fill level should be kept as high as possible, so there are enough
 ** slots available to handle a burst of incoming packets.
 */
-ef_vi_inline int ef_vi_receive_fill_level(ef_vi* vi)
+ef_vi_inline int ef_vi_receive_fill_level(const ef_vi* vi)
 {
   ef_vi_rxq_state* qs = &vi->ep_state->rxq;
   return qs->added - qs->removed;
@@ -978,7 +1071,7 @@ ef_vi_inline int ef_vi_receive_fill_level(ef_vi* vi)
 **
 ** Returns the total capacity of the RX descriptor ring.
 */
-ef_vi_inline int ef_vi_receive_capacity(ef_vi* vi)
+ef_vi_inline int ef_vi_receive_capacity(const ef_vi* vi)
 {
   return vi->vi_rxq.mask;
 }
@@ -1091,13 +1184,13 @@ extern int ef_vi_receive_get_timestamp(ef_vi* vi, const void* pkt,
 **                  the sync flags for the packet.
 **
 ** \return 0 on success, or a negative error code:\n
-**         - ENOMSG - Synchronisation with adapter has not yet been
+**         - ENOMSG - Synchronization with adapter has not yet been
 **           achieved.\n
 **           This only happens with old firmware.\n
 **         - ENODATA - Packet does not have a timestamp.\n
 **           On current Solarflare adapters, packets that are switched from
 **           TX to RX do not get timestamped.\n
-**         - EL2NSYNC - Synchronisation with adapter has been lost.\n
+**         - EL2NSYNC - Synchronization with adapter has been lost.\n
 **           This should never happen!
 **
 ** Retrieve the UTC timestamp associated with a received packet, and the
@@ -1189,6 +1282,20 @@ extern int ef_vi_receive_unbundle(ef_vi* ep, const ef_event* event,
                                   ef_request_id* ids);
 
 
+/*! \brief Set which errors cause an EF_EVENT_TYPE_RX_DISCARD event
+**
+** \param vi                The virtual interface to configure.
+** \param discard_err_flags Flags which indicate which errors will cause
+**                          discard events
+**
+** \return 0 on success, or a negative error code.
+**
+** Set which errors cause an EF_EVENT_TYPE_RX_DISCARD event
+*/
+extern int
+ef_vi_receive_set_discards(ef_vi* vi, unsigned discard_err_flags);
+
+
 /**********************************************************************
  * Transmit interface *************************************************
  **********************************************************************/
@@ -1204,7 +1311,7 @@ extern int ef_vi_receive_unbundle(ef_vi* ep, const ef_event* event,
 ** number of slots that are available for pushing a new descriptor (and an
 ** associated filled packet buffer).
 */
-ef_vi_inline int ef_vi_transmit_space(ef_vi* vi)
+ef_vi_inline int ef_vi_transmit_space(const ef_vi* vi)
 {
   ef_vi_txq_state* qs = &vi->ep_state->txq;
   return vi->vi_txq.mask - (qs->added - qs->removed);
@@ -1224,7 +1331,7 @@ ef_vi_inline int ef_vi_transmit_space(ef_vi* vi)
 ** recently been posted for transmission. A consistently high fill level
 ** should be investigated.
 */
-ef_vi_inline int ef_vi_transmit_fill_level(ef_vi* vi)
+ef_vi_inline int ef_vi_transmit_fill_level(const ef_vi* vi)
 {
   ef_vi_txq_state* qs = &vi->ep_state->txq;
   return qs->added - qs->removed;
@@ -1240,7 +1347,7 @@ ef_vi_inline int ef_vi_transmit_fill_level(ef_vi* vi)
 **
 ** Returns the total capacity of the TX descriptor ring.
 */
-ef_vi_inline int ef_vi_transmit_capacity(ef_vi* vi)
+ef_vi_inline int ef_vi_transmit_capacity(const ef_vi* vi)
 {
   return vi->vi_txq.mask;
 }
@@ -1313,8 +1420,10 @@ extern int ef_vi_transmit_init(ef_vi* vi, ef_addr addr, int bytes,
 ** Submit newly initialized TX descriptors to the NIC. The NIC can then
 ** transmit packets from the associated packet buffers.
 **
-** This may be called at most once after TX descriptors have been
-** initialized using ef_vi_transmit_init() or ef_vi_transmitv_init().
+** New TX descriptors must have been initialized using ef_vi_transmit_init()
+** or ef_vi_transmitv_init() before calling this function, and so in particular
+** it is not legal to call this function more than once without initializing
+** new descriptors in between those calls.
 */
 #define ef_vi_transmit_push(vi) (vi)->ops.transmit_push((vi))
 
@@ -1463,6 +1572,83 @@ extern int ef_vi_transmit_init(ef_vi* vi, ef_addr addr, int bytes,
                               (len), (dma_id))
 
 
+/*! \brief Warm Programmed I/O transmit path for subsequent transmit
+**
+** \param vi     The virtual interface from which transmit is planned.
+**
+** \return None
+**
+** Warm Programmed I/O transmit path for a subsequent transmit.
+**
+** The application can call this function in advance of calls to
+** ef_vi_transmit_pio() to reduce latency jitter caused by code and state
+** being evicted from cache during delays between transmits. This is also
+** effective before the first transmit using Programmed I/O.
+**
+** While this may also benefit a subsequent call to ef_vi_transmit_copy_pio(),
+** it follows a different code path. See ef_vi_transmit_copy_pio_warm() for
+** a warming function designed to warm for ef_vi_transmit_copy_pio().
+*/
+#define ef_vi_transmit_pio_warm(vi)   \
+  (vi)->ops.transmit_pio_warm((vi))
+
+
+/*! \brief Copy a packet to Programmed I/O region and warm transmit path
+**
+** \param vi         The virtual interface from which transmit is planned.
+** \param pio_offset The offset within its Programmed I/O region to the
+**                   start of the packet. This must be aligned to at least
+**                   a 64-byte boundary.
+** \param src_buf    The source buffer from which to read the packet.
+** \param len        Length of the packet to transmit. This must be at
+**                   least 16 bytes.
+**
+** \return None
+**
+** Copy a packet to Programmed I/O region and warm transmit path
+**
+** The application can call this function in advance of calls to
+** ef_vi_transmit_copy_pio() to reduce latency jitter caused by code and state
+** being evicted from cache during delays between transmits.  This is also
+** effective before the first transmit using Programmed I/O.
+**
+** No data is sent but this function will copy data to the Programmed I/O
+** region. Therefore all constraints regarding copying to the
+** Programmed I/O region must be met. This includes not reusing a region
+** previously transmitted from until the corresponding TX completion has
+** been handled. See ef_vi_transmit_copy_pio() for full details of the
+** constraints.
+**
+** While this may also benefit a subsequent call to ef_vi_transmit_pio(),
+** it follows a different code path. See ef_vi_transmit_pio_warm() for
+** a warming function designed to warm for ef_vi_transmit_pio().
+*/
+#define ef_vi_transmit_copy_pio_warm(vi, pio_offset, src_buf, len)        \
+  (vi)->ops.transmit_copy_pio_warm((vi), (pio_offset), (src_buf), (len))
+
+
+/*! \brief Remove all TX descriptors from the TX descriptor ring that have
+**         been initialized since last transmit.
+**
+** \param vi     The virtual interface for which to remove initialized TX
+**               descriptors from the TX descriptor ring.
+**
+** \return None
+**
+** Remove all TX descriptors from the TX descriptor ring that have been
+** initialized since last transmit.  This will undo the effects of calls
+** made to ef_vi_transmit_init or ef_vi_transmitv_init since the last
+** "push".
+**
+** Initializing and then removing descriptors can have a warming effect
+** on the transmit code path for subsequent transmits.  This can reduce
+** latency jitter caused by code and state being evicted from cache during
+** delays between transmitting packets.  This technique is also effective
+** before the first transmit.
+*/
+extern void ef_vi_transmit_init_undo(ef_vi* vi);
+
+
 /*! \brief Maximum number of transmit completions per transmit event. */
 #define EF_VI_TRANSMIT_BATCH  64
 
@@ -1584,7 +1770,7 @@ extern unsigned ef_vi_transmit_alt_num_ids(ef_vi* vi);
 ** the alternative are discarded.
 **
 ** As packets are discarded, events of type EF_EVENT_TYPE_TX_ALT are
-** returned to the applicatino. The application should normally wait until
+** returned to the application. The application should normally wait until
 ** all packets have been discarded before transitioning to a different state.
 **
 ** Memory for the TX alternative remains allocated, and is not freed until
@@ -1592,6 +1778,61 @@ extern unsigned ef_vi_transmit_alt_num_ids(ef_vi* vi);
 */
 #define ef_vi_transmit_alt_discard(vi, alt_id)          \
   (vi)->ops.transmit_alt_discard((vi), (alt_id))
+
+
+/*! \brief Query per-packet overhead parameters
+**
+** \param vi          Interface to be queried
+** \param params      Returned overhead parameters
+**
+** \return 0 on success or -EINVAL if this VI doesn't support
+** alternatives.
+**
+** This function returns parameters which are needed by the
+** ef_vi_transmit_alt_usage() function below.
+*/
+extern int ef_vi_transmit_alt_query_overhead(ef_vi* vi, 
+                                             struct ef_vi_transmit_alt_overhead* params);
+
+
+/*! \brief Calculate a packet's buffer usage
+**
+** \param params      Parameters returned by 
+**                    ef_vi_transmit_alt_query_overhead
+**
+** \param pkt_len     Packet length in bytes
+**
+** \return Packet buffer usage in bytes including per-packet overhead
+**
+** This function calculates the number of bytes of buffering which
+** will be used by the NIC to store a packet with the given length.
+**
+** The returned value includes per-packet overheads, but does not
+** include any other overhead which may be incurred by the hardware.
+** Note that if the application has successfully requested N bytes of
+** buffering using ef_vi_transmit_alt_alloc() then it is guaranteed to
+** be able to store at least N bytes of packet data + per-packet
+** overhead as calculated by this function.
+**
+** It is possible that the application may be able to use more space
+** in some situations if the non-per-packet overheads are low enough.
+**
+** It is important that callers do not use ef_vi_capabilities_get() to
+** query the available buffering. That function does not take into
+** account non-per-packet overheads and so is likely to return more
+** space than can actually be used by the application.  This function
+** is provided instead to allow applications to calculate their buffer
+** usage accurately.
+*/
+ef_vi_inline ef_vi_pure uint32_t
+ef_vi_transmit_alt_usage(const struct ef_vi_transmit_alt_overhead* params,
+                         uint32_t pkt_len)
+{
+  pkt_len += params->pre_round;
+  pkt_len &= params->mask;
+  pkt_len += params->post_round;
+  return pkt_len;
+}
 
 
 /*! \brief Set the threshold at which to switch from using TX descriptor
@@ -1616,6 +1857,142 @@ extern unsigned ef_vi_transmit_alt_num_ids(ef_vi* vi);
 extern void ef_vi_set_tx_push_threshold(ef_vi* vi, unsigned threshold);
 
 
+/*! \brief Transmit a packet using CTPIO from an array of buffers
+**
+** \param vi            The virtual interface on which to transmit.
+** \param frame_len     Frame length in bytes.
+** \param frame_iov     Buffers containing the frame to transmit.
+** \param frame_iov_len Length of frame_iov.
+** \param ct_threshold  Number of bytes of the packet to buffer before
+**                      starting to cut-through to the wire.
+**
+** Transmit a packet using the CTPIO datapath.  The CTPIO interface gives
+** the lowest latency in most cases, and can be used by any number of VIs.
+**
+** This function implements the latency critical part of a CTPIO send.  It
+** should be followed by a call to ef_vi_transmit_ctpio_fallback() or
+** similar before doing any further send calls on the same VI.
+** ef_vi_transmit_ctpio_fallback() provides a fallback frame which is sent
+** in cases where the CTPIO send fails.
+**
+** It is possible for a CTPIO send to fail for a number of reasons,
+** including contention for adapter resources, and timeout due to the whole
+** frame not being written to the adapter sufficiently quickly.
+**
+** The @p ct_threshold indicates how many bytes of the packet should be
+** buffered by the adapter before starting to emit the packet.  To disable
+** cut-through behavior this must be at least as large as the frame
+** length.  To disable cut-through across all packet sizes, use
+** EF_VI_CTPIO_CT_THRESHOLD_SNF.
+**
+** The CTPIO path bypasses the adapter's normal transmit path, including
+** checksum offloads, and so the packet is transmitted unmodified.  The
+** Ethernet FCS is appended as normal.
+**
+** The caller must ensure that @p frame_len is equal to the sum of the
+** lengths in @p frame_iov.
+**
+** The buffers referenced by @p frame_iov can be reused as soon as this
+** call returns.
+*/
+#define ef_vi_transmitv_ctpio(vi, frame_len, frame_iov,         \
+                              frame_iov_len, ct_threshold)         \
+  (vi)->ops.transmitv_ctpio((vi), (frame_len), (frame_iov),     \
+                            (frame_iov_len), (ct_threshold))
+
+
+/*! \brief Transmit a packet using CTPIO
+**
+** \param vi            The virtual interface on which to transmit.
+** \param frame_buf     Buffer containing the frame to transmit.
+** \param frame_len     Frame length in bytes.
+** \param ct_threshold  Number of bytes of the packet to buffer before
+**                      starting to cut-through to the wire.
+**
+** Transmit a packet using the CTPIO datapath.  The CTPIO interface gives
+** the lowest latency in most cases, and can be used by any number of VIs.
+**
+** This function implements the latency critical part of a CTPIO send.  It
+** should be followed by a call to ef_vi_transmit_ctpio_fallback() or
+** similar before doing any further send calls on the same VI.
+** ef_vi_transmit_ctpio_fallback() provides a fallback frame which is sent
+** in cases where the CTPIO send fails.
+**
+** It is possible for a CTPIO send to fail for a number of reasons,
+** including contention for adapter resources, and timeout due to the whole
+** frame not being written to the adapter sufficiently quickly.
+**
+** The @p ct_threshold indicates how many bytes of the packet should be
+** buffered by the adapter before starting to emit the packet.  To disable
+** cut-through behavior this must be at least as large as the frame
+** length.  To disable cut-through across all packet sizes, use
+** EF_VI_CTPIO_CT_THRESHOLD_SNF.
+**
+** The CTPIO path bypasses the adapter's normal transmit path, including
+** checksum offloads, and so the packet is transmitted unmodified.  The
+** Ethernet FCS is appended as normal.
+**
+** The buffer @p frame_buf can be reused as soon as this call returns.
+*/
+ef_vi_inline void
+ef_vi_transmit_ctpio(ef_vi* vi, const void* frame_buf, size_t frame_len,
+                     unsigned ct_threshold)
+{
+  struct iovec iov = { (void*) frame_buf, frame_len };
+  ef_vi_transmitv_ctpio(vi, frame_len, &iov, 1, ct_threshold);
+}
+
+
+/*! \brief Post fallback frame for a CTPIO transmit
+**
+** \param vi            The virtual interface on which to transmit.
+** \param dma_addr      DMA address of frame.
+** \param len           Frame length in bytes.
+** \param dma_id        DMA ID to be returned on completion.
+**
+** \return 0 on success, or a negative error code:\n
+**         -EAGAIN if the descriptor ring is full.
+**
+** This should be called after ef_vi_transmit_ctpio() or similar.  It
+** provides the fallback frame which is sent in the event that a CTPIO
+** transmit fails.
+**
+** Ordinarily the fallback frame will be the same as the CTPIO frame, but
+** it doesn't have to be.
+*/
+extern int ef_vi_transmit_ctpio_fallback(ef_vi* vi, ef_addr dma_addr,
+                                         size_t len, ef_request_id dma_id);
+
+
+/*! \brief Post fallback frame for a CTPIO transmit
+**
+** \param vi            The virtual interface on which to transmit.
+** \param dma_iov       Array of source buffer DMA addresses.
+** \param dma_iov_len   Length of dma_iov.
+** \param dma_id        DMA ID to be returned on completion.
+**
+** \return 0 on success, or a negative error code:\n
+**         -EAGAIN if the descriptor ring is full.
+**
+** This should be called after ef_vi_transmit_ctpio() or similar.  It
+** provides the fallback frame which is sent in the event that a CTPIO
+** transmit fails.
+**
+** Ordinarily the fallback frame will be the same as the CTPIO frame, but
+** it doesn't have to be.
+*/
+extern int ef_vi_transmitv_ctpio_fallback(ef_vi* vi, const ef_iovec* dma_iov,
+                                          int dma_iov_len,
+                                          ef_request_id dma_id);
+
+
+/*! Cut-through threshold to use if store-and-forward behavior is wanted
+** for all packet sizes.  For use with ef_vi_transmit_ctpio() and
+** ef_vi_transmitv_ctpio().
+*/
+#define EF_VI_CTPIO_CT_THRESHOLD_SNF  0xffff
+
+
 /**********************************************************************
  * Eventq interface ***************************************************
  **********************************************************************/
@@ -1628,7 +2005,7 @@ extern void ef_vi_set_tx_push_threshold(ef_vi* vi, unsigned threshold);
 **
 ** Returns true if ef_eventq_poll() will return event(s).
 */
-extern int ef_eventq_has_event(ef_vi* vi);
+extern int ef_eventq_has_event(const ef_vi* vi);
 
 
 /*! \brief Returns true if there are a given number of events in the event
@@ -1648,7 +2025,7 @@ extern int ef_eventq_has_event(ef_vi* vi);
 ** This function returns quickly. It is useful for an application to
 ** determine whether it is falling behind in its event processing.
 */
-extern int ef_eventq_has_many_events(ef_vi* evq, int n_events);
+extern int ef_eventq_has_many_events(const ef_vi* evq, int n_events);
 
 
 /*! \brief Prime a virtual interface allowing you to go to sleep blocking
@@ -1690,17 +2067,20 @@ extern int ef_eventq_has_many_events(ef_vi* evq, int n_events);
 **
 ** \return The capacity of an event queue.
 **
-** Returns the capacity of an event queue.
+** Returns the capacity of an event queue.  This is the maximum number of
+** events that can be stored into the event queue before overflow.
+**
+** It is up to the application to avoid event queue overflow by ensuring
+** that the maximum number of events that can be delivered into an event
+** queue is limited to its capacity.  In general each RX descriptor and TX
+** descriptor posted can cause an event to be generated.
+**
+** In addition, when time-stamping is enabled time-sync events are
+** generated at a rate of 4 per second.  When TX timestamps are enabled you
+** may get up to one event for each descriptor plus two further events per
+** packet.
 */
-ef_vi_inline int ef_eventq_capacity(ef_vi* vi)
-{
-  return (vi->evq_mask + 1u) / 8
-#ifdef __powerpc__
-/* take into account reserved entries see ef10/falcon_event.c */
-         - 16
-#endif
-         ;
-}
+extern int ef_eventq_capacity(ef_vi* vi);
 
 
 /*! \brief Get the current offset into the event queue.

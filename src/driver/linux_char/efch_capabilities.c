@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -125,13 +125,13 @@ int efch_capabilities_op(struct efch_capabilities_in* in,
      * whether NIC_FLAG_VAR_PACKED_STREAM is set.
      */
     if( nic->flags & NIC_FLAG_VAR_PACKED_STREAM ) {
-      out->support_rc = 1024 | 64;
-      out->val = 0;
+      out->support_rc = 0;
+      out->val = 1024 | 64;
       break;
     }
     else if( nic->flags & NIC_FLAG_PACKED_STREAM ) {
-      out->support_rc = 1024;
-      out->val = 0;
+      out->support_rc = 0;
+      out->val = 1024;
       break;
     }
     else {
@@ -281,6 +281,32 @@ int efch_capabilities_op(struct efch_capabilities_in* in,
 
   case EF_VI_CAP_TX_ALTERNATIVES:
     get_from_nic_flags(nic, NIC_FLAG_TX_ALTERNATIVES, out);
+    break;
+
+  case EF_VI_CAP_TX_ALTERNATIVES_VFIFOS:
+    get_from_nic_flags(nic, NIC_FLAG_TX_ALTERNATIVES, out);
+    if( out->support_rc == 0 )
+      out->val = nic->tx_alts_vfifos;
+    break;
+
+  case EF_VI_CAP_TX_ALTERNATIVES_CP_BUFFERS:
+    get_from_nic_flags(nic, NIC_FLAG_TX_ALTERNATIVES, out);
+    if( out->support_rc == 0 )
+      out->val = nic->tx_alts_cp_bufs;
+    break;
+
+  case EF_VI_CAP_RX_FW_VARIANT:
+    out->support_rc = 0;
+    out->val = nic->rx_variant;
+    break;
+
+  case EF_VI_CAP_TX_FW_VARIANT:
+    out->support_rc = 0;
+    out->val = nic->tx_variant;
+    break;
+
+  case EF_VI_CAP_CTPIO:
+    get_from_nic_flags(nic, NIC_FLAG_TX_CTPIO, out);
     break;
 
   default:

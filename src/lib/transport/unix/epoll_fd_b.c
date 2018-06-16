@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -84,7 +84,7 @@ citp_epollb_postpone_syscall_pre(citp_epollb_fdi *epi,
       if( fd_fdi_using && fd == fd_fdi_using->fd )
         fd_fdi = fd_fdi_using;
       else {
-        fd_fdi = citp_fdtable_lookup_noprobe(fd);
+        fd_fdi = citp_fdtable_lookup_noprobe(fd, 0);
         if( fd_fdi_using )
           ci_assert_nequal(fd_fdi, fd_fdi_using);
       }
@@ -230,7 +230,9 @@ citp_protocol_impl citp_epollb_protocol_impl = {
     .tmpl_update    = citp_nonsock_tmpl_update,
     .tmpl_abort     = citp_nonsock_tmpl_abort,
 #if CI_CFG_USERSPACE_EPOLL
+#if CI_CFG_TIMESTAMPING
     .ordered_data   = citp_nonsock_ordered_data,
+#endif
 #endif
     .is_spinning    = citp_nonsock_is_spinning,
 #if CI_CFG_FD_CACHING
@@ -528,6 +530,13 @@ int citp_epollb_ctl(citp_fdinfo* fdi, int eop, int fd,
     citp_fdinfo_release_ref(fd_fdi, 0);
     errno = EBADF;
     return -1;
+  }
+
+  if( fd_fdi->protocol->type == CITP_EPOLLB_FD ) {
+    citp_epollb_fdi *epi_low = fdi_to_epollb_fdi(fd_fdi);
+    int low_fd = epi_low->kepfd;
+    citp_fdinfo_release_ref(fd_fdi, 0);
+    return ci_sys_epoll_ctl(epi->kepfd, eop, low_fd, event);
   }
 
   /* This is onload fd now. */

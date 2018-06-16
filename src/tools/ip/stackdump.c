@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -43,6 +43,7 @@ static ci_cfg_desc cfg_opts[] = {
   {   0, "samples",   CI_CFG_UINT, &cfg_samples, "number of samples"        },
   { 't', "notable",   CI_CFG_FLAG, &cfg_notable, "toggle table mode"},
   { 'z', "zombie",    CI_CFG_FLAG, &cfg_zombie,  "force dump of orphan stacks"},
+  {   0, "nopids",    CI_CFG_FLAG, &cfg_nopids,  "disable dumping of PIDs"},
 };
 #define N_CFG_OPTS (sizeof(cfg_opts) / sizeof(cfg_opts[0]))
 
@@ -93,12 +94,10 @@ static void do_stack_ops(int argc, char* argv[])
       --argc;
       ++argv;
     }
-    else if( op->flags & FL_ARG_SU ) {
+    else if( op->flags & FL_ARG_SV ) {
       arg_s[0] = argv[1];
-      if( sscanf(argv[2], " %u %c", &arg_u[0], &dummy) != 1 ) {
-        ci_log("Bad argument to '%s' (expected unsigned)", op->name);
-        ci_app_usage(0);
-      }
+      arg_s[1] = argv[2];
+      /* type need to be checked later */
       --argc;  ++argv;
       --argc;  ++argv;
     }
@@ -195,9 +194,10 @@ static void usage(const char* msg)
   ci_log(" ");
   ci_log("misc commands:");
   ci_log("  doc");
-  ci_log("  threads            Show thread information of onload processes");
-  ci_log("  env                Show onload related environment of processes");
-  ci_log("  processes          Show list of onloaded processes");
+  ci_log("  threads   Show thread information of onload processes");
+  ci_log("  env       Show onload related environment of processes");
+  ci_log("  processes Show list of onloaded processes");
+  ci_log("  stacks    Show list of stacks, names, PIDs (default if no args)");
 
   ci_log(" ");
   ci_log("stack commands:");
@@ -251,12 +251,14 @@ static int is_max_str (const char *max_str)
 static void print_docs(int argc, char* argv[])
 {
 #undef CI_CFG_OPT
+#undef CI_CFG_STR_OPT
 #define IFDOC(env)  if( strlen(env) )
 
   static struct {
         const char *item_env;
         const char *item_name;
         unsigned    item_deflt;
+        char*       item_deflt_str;
         const char *item_doc;
         const char *item_min_str;
         const char *item_max_str;
@@ -266,13 +268,21 @@ static void print_docs(int argc, char* argv[])
 #define CI_CFG_OPT(env, name, type, doc, bits, group, deflt, min, max, pres) \
       { .item_env = env, .item_name = #name, .item_deflt = deflt, \
         .item_doc = doc, .item_min_str=#min, .item_max_str=#max, .item_kind="per-process"},
+#define CI_CFG_STR_OPT(env, name, type, doc, bits, group, deflt, min, max, pres) \
+      { .item_env = env, .item_name = #name, .item_deflt_str = deflt, \
+        .item_doc = doc, .item_min_str=#min, .item_max_str=#max, .item_kind="per-process"},
 #include <ci/internal/opts_citp_def.h>
 #undef CI_CFG_OPT
+#undef CI_CFG_STR_OPT
 #define CI_CFG_OPT(env, name, type, doc, bits, group, deflt, min, max, pres) \
       { .item_env = env, .item_name = #name, .item_deflt = deflt, \
         .item_doc = doc, .item_min_str=#min, .item_max_str=#max, .item_kind="per-stack"},
+#define CI_CFG_STR_OPT(env, name, type, doc, bits, group, deflt, min, max, pres) \
+      { .item_env = env, .item_name = #name, .item_deflt_str = deflt, \
+        .item_doc = doc, .item_min_str=#min, .item_max_str=#max, .item_kind="per-stack"},
 #include <ci/internal/opts_netif_def.h>
 #undef CI_CFG_OPT
+#undef CI_CFG_STR_OPT
   };
 
 #define NUM_ITEMS ( sizeof items / sizeof items[0])
@@ -286,9 +296,14 @@ static void print_docs(int argc, char* argv[])
             "</tr>\n");
     unsigned i;
     for( i = 0; i < NUM_ITEMS; ++i )
-      if( items[i].item_env[0] && items[i].item_doc[0] )
-        printf("<tr><td>%s</td><td>%u</td><td> %s</td></tr>\n",
-               items[i].item_env, items[i].item_deflt, items [i].item_doc);
+      if( items[i].item_env[0] && items[i].item_doc[0] ) {
+        if( items [i].item_deflt_str == NULL )
+          printf("<tr><td>%s</td><td>%u</td><td> %s</td></tr>\n",
+                 items[i].item_env, items[i].item_deflt, items [i].item_doc);
+        else
+          printf("<tr><td>%s</td><td>%s</td><td> %s</td></tr>\n",
+                 items[i].item_env, items[i].item_deflt_str, items [i].item_doc);
+      }
     printf("</table>\n");
   }
   else if( argc == 2 && ! strcmp(argv[1], "rtf") ) {
@@ -305,7 +320,10 @@ static void print_docs(int argc, char* argv[])
       printf("\\sb480 \\li0\\f0\\fs28 \\b %s \\plain", items [i].item_env);
       printf("\\par \\li240 \\sb120 \\fs20 Name: \\f1 %s \\f0 ",
               items [i].item_name);
-      printf ("default: \\f1 %u \\f0", items [i].item_deflt);
+      if( items [i].item_deflt_str == NULL )
+        printf ("default: \\f1 %u \\f0", items [i].item_deflt);
+      else
+        printf ("default: \\f1 %s \\f0", items [i].item_deflt_str);
       if (is_min_str (items[i].item_min_str))
           printf ("    min: \\f1 %s \\f0", items[i].item_min_str);
       if (is_max_str (items[i].item_max_str))
@@ -323,9 +341,14 @@ static void print_docs(int argc, char* argv[])
       if (!items[i].item_env[0] || !items[i].item_doc[0])
         continue;
 
-      printf("%-25s (%s, %s)\ndefault: %d\n",
-           items[i].item_env, items[i].item_name, items[i].item_kind,
-           items[i].item_deflt);
+      if( items [i].item_deflt_str == NULL )
+        printf("%-25s (%s, %s)\ndefault: %d\n",
+             items[i].item_env, items[i].item_name, items[i].item_kind,
+             items[i].item_deflt);
+      else
+        printf("%-25s (%s, %s)\ndefault: %s\n",
+             items[i].item_env, items[i].item_name, items[i].item_kind,
+             items[i].item_deflt_str);
       if (is_min_str (items[i].item_min_str))
         printf ("min: %s\n", items[i].item_min_str);
       if (is_max_str (items[i].item_max_str))
@@ -428,18 +451,29 @@ int main(int argc, char* argv[])
     }
     else if( ! strcmp(argv[0], "threads") ) {
       if( doing_sockets || doing_stacks )
-        ci_app_usage("Cannot mix doc with other commands");
-      CI_TRY(libstack_threads_print());
+        ci_app_usage("Cannot mix threads with other commands");
+       if( cfg_nopids )
+        ci_app_usage("Cannot mix threads command with --nopids");
+     CI_TRY(libstack_threads_print());
     }
     else if( ! strcmp(argv[0], "env") ) {
       if( doing_sockets || doing_stacks )
-        ci_app_usage("Cannot mix doc with other commands");
+        ci_app_usage("Cannot mix env with other commands");
+      if( cfg_nopids )
+        ci_app_usage("Cannot mix env command with --nopids");
       CI_TRY(libstack_env_print());
     }
     else if( ! strcmp(argv[0], "processes") ) {
       if( doing_sockets || doing_stacks )
-        ci_app_usage("Cannot mix doc with other commands");
+        ci_app_usage("Cannot mix processes with other commands");
+      if( cfg_nopids )
+        ci_app_usage("Cannot mix processes command with --nopids");
       libstack_pid_mapping_print();
+    }
+    else if( ! strcmp(argv[0], "stacks") ) {
+      if( doing_sockets || doing_stacks )
+        ci_app_usage("Cannot mix stacks with other commands");
+      libstack_stack_mapping_print();
     }
     else if( ! cfg_zombie && ! strcmp(argv[0], "kill") ) {
       ci_app_usage("Cannot use kill without -z");

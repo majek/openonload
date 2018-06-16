@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -40,8 +40,8 @@
 #include <ci/internal/transport_config_opt.h>
 #include <ci/efrm/nic_set.h>
 #include <ci/net/ethernet.h>
-#include <cplane/shared_types.h>
 #include <onload/signals.h> /* for OO_SIGHANGLER_DFL_MAX */
+#include <cplane/cplane.h>
 
 
 
@@ -65,7 +65,6 @@ enum oo_device_type {
   OO_MAX_DEV /* not a device type */
 };
 
-
 # define EFAB_DEV_NAME  "onload"  
 
 # define OO_EPOLL_DEV_NAME "onload_epoll"
@@ -80,13 +79,17 @@ enum { OO_VER_STR_LEN = 40 };
 enum { CI_CHSUM_STR_LEN = 32 };
 
 
+typedef struct oo_version_check_s {
+  char                    in_version[OO_VER_STR_LEN + 1];
+  char                    in_uk_intf_ver[CI_CHSUM_STR_LEN + 1];
+  int32_t                 debug;
+} oo_version_check_t;
 
 /*! This data structure contains the arguments required to create a new
  *  tcp helper resource and the results that the allocation operation
  *  subsequently returns.
  */
 typedef struct ci_resource_onload_alloc_s {
-  ci_fixed_descriptor_t   cplane_handle;
   ci_user_ptr_t           in_opts  CI_ALIGN(8);
   ci_uint16               in_flags;
   char                    in_version[OO_VER_STR_LEN + 1];
@@ -142,6 +145,7 @@ typedef struct {
   char      cluster_name[CI_CFG_CLUSTER_NAME_LEN + 1];
   ci_int32  cluster_size;
   ci_uint32 cluster_restart_opt;
+  ci_uint32 cluster_hot_restart_opt;
   ci_uint32 addr_be32;
   ci_uint16 port_be16;
 } oo_tcp_reuseport_bind_t;
@@ -288,13 +292,13 @@ typedef struct {
 } oo_ofe_config_t;
 
 
-
 typedef struct {
   oo_pkt_p	pkt;
   ci_uint32	retrieve_rc;
   ci_uerr_t	os_rc;
   ci_uerr_t	rc;
   ci_ifid_t     ifindex;
+  ci_uint32     next_hop;
 } cp_user_defer_send_t;
 
 typedef struct {
@@ -334,54 +338,43 @@ typedef struct {
 } ci_ep_info_t;
 
 typedef struct {
+  ci_user_ptr_t stats_data;
+  ci_uint32 intf_i;
+  ci_uint32 data_len;
+  ci_uint8 do_reset;
+} ci_vi_stats_query_t;
+
+
+typedef struct {
   ci_uint64             do_cloexec; /* it's u8 really, but we need to be compat */
   ci_fixed_descriptor_t fd;
 } ci_clone_fd_t;
 
-typedef ci_uint32 ci_cfg_ioctl_desc_err_t;
 
-/*! Data structure used by the CI_IOCTL_(GET|SET|QUERY) ioctls. */
-typedef struct ci_cfg_ioctl_desc_s {
-  /*! During set  : Ptr to database blob
-   *  During get  : Ptr to a buffer where the database blob can be written
-   *  During query: Ptr to a memory location of type ci_ioctl_cfg_query_t.
-   *                On the way down, this data struct holds the uid and process
-   *                name to be used for the query, if any of the uid or
-   *                proc_name pointers aren't set then they are automatically
-   *                retrieved from the current context.
-   *                On the way up it holds the data for the data structures
-   *                citp_opts_t and ci_netif_config_opts.
-   */
-  ci_user_ptr_t ptr CI_ALIGN(8);
-  
-  /*! length of the database blob (during set operation) or size of the buffer
-   *  where the database blob is to be written (during get operation)
-   *  TODO: explain query????
-   */
-  ci_uint32 len CI_ALIGN(4);
+/* "Donation" shared memory ioctl structures. */
 
-  /*! return code, 0 is good */
-  ci_cfg_ioctl_desc_err_t err CI_ALIGN(4);
-#define CICFG_DESC_ENOTINST   1 /* database not installed */
-#define CICFG_DESC_ETOOSMALL  2 /* descriptor too small */
-#define CICFG_DESC_EPROCEXCL  3 /* process is excluded */
-#define CICFG_DESC_EBADUID    4 /* bad uid or uid descriptor */
-#define CICFG_DESC_EBADPNAME  5 /* bad process id or process id descriptor */
-#define CICFG_DESC_EFAULT     6 /* bad pointer in pdesc */
-#define CICFG_DESC_EBADCMD    7 /* bad ioctl cmd value */
-#define CICFG_DESC_EPERM      8 /* not authorised to install database */
-#define CICFG_DESC_ENOMEM     9 /* not enough memory */
-#define CICFG_DESC_EINVAL    10 /* database not valid */
-#define CICFG_DESC_EAGAIN    11 /* retry the operation */
-} ci_cfg_ioctl_desc_t;
+typedef struct {
+  ci_int32       shm_class;
+  ci_user_ptr_t  buffer;
+  ci_uint32      length;
+  ci_int32       buffer_id;
+} oo_dshm_register_t;
+
+typedef struct {
+  ci_int32       shm_class;
+  ci_user_ptr_t  buffer_ids;
+  ci_uint32      count;
+} oo_dshm_list_t;
+
+typedef struct {
+  ci_int32       laddr_be32;
+} oo_alloc_active_wild_t;
 
 /*--------------------------------------------------------------------
  *
  * Platform dependent IOCTLS
  *
  *--------------------------------------------------------------------*/
-
-
 
 
 
@@ -432,6 +425,7 @@ struct oo_op_tcp_drop_from_acceptq {
   oo_sp sock_id;
 };
 
+
 /*----------------------------------------------------------------------------
  *
  *  Optional debug interface for resources
@@ -440,6 +434,14 @@ struct oo_op_tcp_drop_from_acceptq {
 
 #include <onload/debug_intf.h>   
 
+
+/*----------------------------------------------------------------------------
+ *
+ *  Driver entry points used from the Control Plane
+ *
+ *---------------------------------------------------------------------------*/
+
+#include <cplane/ioctl.h>
 
 /*--------------------------------------------------------------------
  *

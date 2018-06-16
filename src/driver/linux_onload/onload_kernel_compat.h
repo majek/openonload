@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -17,8 +17,10 @@
 #define __ONLOAD_KERNEL_COMPAT_H__
 
 #include <driver/linux_net/kernel_compat.h>
+#include <driver/linux_net/autocompat.h>
 #include <driver/linux_affinity/autocompat.h>
 #include <linux/file.h>
+#include <linux/signal.h>
 
 #ifndef current_fsuid
 #define current_fsuid() current->fsuid
@@ -27,52 +29,15 @@
 #define current_fsgid() current->fsgid
 #endif
 
-#ifdef EFX_HAVE_KMEM_CACHE_S
+#ifdef EFRM_HAVE_KMEM_CACHE_S
 #define kmem_cache kmem_cache_s
 #endif
 
-
-/* >=2.6.24 has sig_kernel_* macros in the header;
- * 2.6.18 has them in .c */
-#ifndef sig_kernel_only
-
-#ifdef SIGEMT
-#define M_SIGEMT	M(SIGEMT)
-#else
-#define M_SIGEMT	0
+#if defined(EFRM_ALLOC_FILE_TAKES_STRUCT_PATH) || \
+  defined(EFRM_ALLOC_FILE_TAKES_CONST_STRUCT_PATH)
+#define EFRM_HAVE_STRUCT_PATH
 #endif
 
-#if SIGRTMIN > BITS_PER_LONG
-#define M(sig) (1ULL << ((sig)-1))
-#else
-#define M(sig) (1UL << ((sig)-1))
-#endif
-#define T(sig, mask) (M(sig) & (mask))
-
-#define SIG_KERNEL_ONLY_MASK (\
-	M(SIGKILL)   |  M(SIGSTOP)                                   )
-
-#define SIG_KERNEL_STOP_MASK (\
-	M(SIGSTOP)   |  M(SIGTSTP)   |  M(SIGTTIN)   |  M(SIGTTOU)   )
-
-#define SIG_KERNEL_COREDUMP_MASK (\
-        M(SIGQUIT)   |  M(SIGILL)    |  M(SIGTRAP)   |  M(SIGABRT)   | \
-        M(SIGFPE)    |  M(SIGSEGV)   |  M(SIGBUS)    |  M(SIGSYS)    | \
-        M(SIGXCPU)   |  M(SIGXFSZ)   |  M_SIGEMT                     )
-
-#define SIG_KERNEL_IGNORE_MASK (\
-        M(SIGCONT)   |  M(SIGCHLD)   |  M(SIGWINCH)  |  M(SIGURG)    )
-
-#define sig_kernel_only(sig) \
-		(((sig) < SIGRTMIN)  && T(sig, SIG_KERNEL_ONLY_MASK))
-#define sig_kernel_coredump(sig) \
-		(((sig) < SIGRTMIN)  && T(sig, SIG_KERNEL_COREDUMP_MASK))
-#define sig_kernel_ignore(sig) \
-		(((sig) < SIGRTMIN)  && T(sig, SIG_KERNEL_IGNORE_MASK))
-#define sig_kernel_stop(sig) \
-		(((sig) < SIGRTMIN)  && T(sig, SIG_KERNEL_STOP_MASK))
-
-#endif
 
 #ifndef __NFDBITS
 # define __NFDBITS BITS_PER_LONG
@@ -119,6 +84,37 @@ efrm_get_unused_fd_flags(unsigned flags)
 #else /* ! O_CLOEXEC */
 #define get_unused_fd_flags(flags) get_unused_fd()
 #endif
+#endif
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(3,14,0))
+#define ci_call_usermodehelper call_usermodehelper
+#else
+extern int
+ci_call_usermodehelper(char *path, char **argv, char **envp, int wait);
+#endif
+
+
+#ifndef get_file_rcu
+/* Linux <= 4.0 */
+#define get_file_rcu(x) atomic_long_inc_not_zero(&(x)->f_count)
+#endif
+
+/* A change to module_param_call() in Linux 4.15 highlighted that our
+ * callbacks should have had a const argument.  The change to use a
+ * const argument is much older than that (2.6.36)
+ */
+#ifdef EFRM_HAVE_CONST_KERNEL_PARAM
+#define ONLOAD_MPC_CONST const
+#else
+#define ONLOAD_MPC_CONST
+#endif
+
+/* init_timer() was removed in Linux 4.15, with timer_setup()
+ * replacing it */
+#ifndef EFRM_HAVE_TIMER_SETUP
+#define timer_setup(timer, callback, flags)     \
+  init_timer(timer);                            \
+  (timer)->data = 0;                            \
+  (timer)->function = &callback;
 #endif
 
 #endif /* __ONLOAD_KERNEL_COMPAT_H__ */

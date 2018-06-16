@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -28,6 +28,7 @@
 #define _GNU_SOURCE /* for strsignal */
 #include <stdlib.h>
 #include <ci/internal/ip.h>
+#include "libc_compat.h"
 
 #if CI_CFG_TCPDUMP
 #if CI_HAVE_PCAP
@@ -43,7 +44,10 @@
 #define LOG_DUMP(x)
 
 struct oo_pcap_pkthdr {
-  struct oo_timeval ts;
+  union{
+    struct oo_timeval tv;
+    struct oo_timespec ts;
+  } t;
   ci_uint32 caplen;
   ci_uint32 len;
 };
@@ -52,14 +56,20 @@ struct oo_pcap_pkthdr {
 static int cfg_snaplen = MAXIMUM_SNAPLEN;
 static int cfg_dump_os = 1;
 static int cfg_if_is_loop = 0;
+static int cfg_dump_no_match_only = 0;
+
+/* capture precision */
+static const char *cfg_precision = "micro";
+static int do_nano = 0;
 static struct timeval tv_now;
+static struct timespec ts_now;
 
 /* Interface to dump */
 static const char *cfg_interface = "any";
 static int cfg_ifindex = -1;
 static cicp_encap_t cfg_encap;
-#define CI_HWPORT_ID_LO CPLANE_MAX_REGISTER_INTERFACES
-ci_int8 dump_hwports[CPLANE_MAX_REGISTER_INTERFACES+2];
+#define CI_HWPORT_ID_LO CI_CFG_MAX_HWPORTS
+ci_int8 dump_hwports[CI_CFG_MAX_HWPORTS+2];
 
 /* Data for dynamic update of the stack list */
 static oo_fd onload_fd = (oo_fd)-1;
@@ -80,6 +90,10 @@ static ci_cfg_desc cfg_opts[] = {
   {'i', "interface", CI_CFG_STR,  &cfg_interface,
                 "interface to listen on, default to \"any\", man tcpdump"},
   {  1, "dump-os",   CI_CFG_FLAG, &cfg_dump_os, "dump packets sent via OS"},
+  {'n', "no-match",  CI_CFG_FLAG, &cfg_dump_no_match_only,
+                           "dump only packets not matching onload sockets"},
+  {  2, "time-stamp-precision", CI_CFG_STR, &cfg_precision,
+                 "set the timestamp precision, default to \"micro\", man tcpdump"},
 };
 #define N_CFG_OPTS (sizeof(cfg_opts) / sizeof(cfg_opts[0]))
 
@@ -103,53 +117,49 @@ static void usage(const char* msg)
   exit(-1);
 }
 
+
+static inline ci_uint8 dump_hwport_val_get(void) {
+  return cfg_dump_no_match_only ? OO_INTF_I_DUMP_NO_MATCH :
+                                  OO_INTF_I_DUMP_ALL;
+}
+
+
 /* Using cicp_llap_retrieve(), convert cfg_ifindex to the interface bitmask
  * dump_hwports. */
 static void ifindex_to_intf_i(ci_netif *ni)
 {
-  ci_hwport_id_t hwport;
-  ci_ifid_t base_ifindex;
+  cicp_hwport_mask_t hwports;
   int rc;
 
-  memset(dump_hwports, 0, sizeof(dump_hwports));
+  memset(dump_hwports, OO_INTF_I_DUMP_NONE, sizeof(dump_hwports));
 
   if( cfg_if_is_loop ) {
-    dump_hwports[CI_HWPORT_ID_LO] = 1;
+    dump_hwports[CI_HWPORT_ID_LO] = dump_hwport_val_get();
     LOG_DUMP(ci_log("dump on loopback"));
     return;
   }
 
-  rc = cicp_llap_retrieve(CICP_HANDLE(ni), cfg_ifindex, NULL/*mtu*/,
-                          &hwport, NULL/*mac*/, &cfg_encap,
-                          &base_ifindex, NULL);
+  rc = oo_cp_find_llap(ni->cplane, cfg_ifindex, NULL/*mtu*/,
+                       &hwports, NULL /*rxhwports*/, NULL/*mac*/, &cfg_encap);
 
   if( rc != 0 ) {
     ci_log("unknown interface %d: %s", cfg_ifindex, cfg_interface);
     goto suicide;
   }
-  if( cfg_encap.type == CICP_LLAP_TYPE_NONE ) {
+  if( hwports == 0 ) {
     ci_log("non-onload interface %d: %s", cfg_ifindex, cfg_interface);
     goto suicide;
   }
 
-#if CPLANE_TEAMING
-  /* Is it bond? */
-  if( cfg_encap.type & CICP_LLAP_TYPE_BOND ) {
-    rc = ci_bond_get_hwport_list(CICP_HANDLE(ni), base_ifindex, dump_hwports);
-    if( rc == 0 ) {
-      LOG_DUMP(
-        int i;
-        for(i = 0; i < CPLANE_MAX_REGISTER_INTERFACES; i++)
-          ci_log("dump_hwports[%d]=%d", i, dump_hwports[i]);
-      )
-      return;
+  ci_assert_nequal(hwports, 0);
+  {
+    int i;
+    for(i = 0; i < CI_CFG_MAX_HWPORTS; i++) {
+      if( cp_hwport_make_mask(i) & hwports )
+        dump_hwports[i] = dump_hwport_val_get();
     }
   }
-#endif
-
-  ci_assert_nequal(hwport, CI_HWPORT_ID_BAD);
-  dump_hwports[hwport] = 1;
-  LOG_DUMP(ci_log("dump on hwport=%d", hwport));
+  LOG_DUMP(ci_log("dump on hwports=%x", hwports));
 
   return;
 
@@ -205,7 +215,7 @@ static void stack_dump_on(ci_netif *ni)
     ci_hwport_id_t hwport_i;
     int intf_i;
     for( hwport_i = 0;
-         hwport_i < CPLANE_MAX_REGISTER_INTERFACES;
+         hwport_i < CI_CFG_MAX_HWPORTS;
          hwport_i++ ) {
       intf_i = ci_netif_get_hwport_to_intf_i(ni)[hwport_i];
       if( intf_i >= 0 )
@@ -213,7 +223,8 @@ static void stack_dump_on(ci_netif *ni)
     }
     ni->state->dump_intf[OO_INTF_I_LOOPBACK] = dump_hwports[CI_HWPORT_ID_LO];
   }
-  ni->state->dump_intf[OO_INTF_I_SEND_VIA_OS] = cfg_dump_os;
+  ni->state->dump_intf[OO_INTF_I_SEND_VIA_OS] = cfg_dump_os ?
+                                                OO_INTF_I_DUMP_ALL : 0;
   libstack_netif_unlock(ni);
 }
 
@@ -280,8 +291,20 @@ static void stack_dump(ci_netif *ni)
     /* If we are listening on a VLAN, take care of the additional header.
      */
     if( strip_vlan ) {
-      if( pkt->vlan != cfg_encap.vlan_id )
-        continue;
+      if( pkt->vlan != cfg_encap.vlan_id ) {
+        /* Need to do more detailed check if pkt->vlan == 0 as we can't then 
+         * rely on it being accurate: Onload doesn't set it on the TX path
+         */
+        if( pkt->vlan == 0 ) {
+          uint16_t* p_ether_type;
+          p_ether_type = &(oo_ether_hdr(pkt)->ether_type);
+          if( p_ether_type[0] != CI_ETHERTYPE_8021Q ||
+              (CI_BSWAP_BE16(p_ether_type[1]) & 0xfff) != cfg_encap.vlan_id )
+            continue;
+        }
+        else
+          continue;
+      }
 
       if( pkt->intf_i == OO_INTF_I_SEND_VIA_OS )
         do_strip_vlan = 0;
@@ -300,14 +323,20 @@ static void stack_dump(ci_netif *ni)
     if( pkt->n_buffers > 1 )
       fraglen = CI_MIN(fraglen, pkt->buf_len);
     hdr.len = paylen;
-    hdr.ts.tv_sec = tv_now.tv_sec;
+    if( do_nano )
+      hdr.t.ts.tv_sec = ts_now.tv_sec;
+    else
+      hdr.t.tv.tv_sec = tv_now.tv_sec;
     /* Avoid another gettimeofday().
      * Possibly, we should increment tv_now.tv_usec, but:
      * 10Gbit/sec=10Kbit/usec=1Kbyte/usec.
      * I.e., for one interface with 10Gbit/sec,
      * minimal packet of 64bytes takes less than usec.
      * For 2 full-duplex 10Gbit/s interfaces things are worse. */
-    hdr.ts.tv_usec = tv_now.tv_usec;
+    if( do_nano )
+      hdr.t.ts.tv_nsec = ts_now.tv_nsec;
+    else
+      hdr.t.tv.tv_usec = tv_now.tv_usec;
     LOG_DUMP(ci_log("%u: got ni %d pkt %d len %d ref %d",
                     ni->state->dump_read_i, ni->state->stack_id,
                     OO_PKT_FMT(pkt), paylen, pkt->refcount));
@@ -445,7 +474,10 @@ static void write_pcap_header(void)
 {
   struct pcap_file_header hdr;
 
-  hdr.magic = 0xa1b2c3d4;
+  if( do_nano )
+    hdr.magic = 0xa1b23c4d; //pcap-ns
+  else
+    hdr.magic = 0xa1b2c3d4; //pcap
   hdr.version_major = PCAP_VERSION_MAJOR;
   hdr.version_minor = PCAP_VERSION_MINOR;
   hdr.thiszone = 0;
@@ -515,7 +547,7 @@ static void parse_interface(void)
 
   /* Now cfg_interface is an interface name.  Find the ifindex. */
   if( strcmp(cfg_interface, "any") == 0 ) {
-    memset(dump_hwports, 1, sizeof(dump_hwports));
+    memset(dump_hwports, dump_hwport_val_get(), sizeof(dump_hwports));
     return;
   }
   else
@@ -554,8 +586,8 @@ error:
   /* We do not exit in case of error: we just do our best and turn on
    * tcpdump on ALL interfaces.  If onload_tcpdump script is used,
    * tcpdump will report the proper error. */
-  memset(dump_hwports, 1, CI_CFG_MAX_INTERFACES);
-  dump_hwports[OO_INTF_I_LOOPBACK] = 1;
+  memset(dump_hwports, dump_hwport_val_get(), CI_CFG_MAX_INTERFACES);
+  dump_hwports[OO_INTF_I_LOOPBACK] = dump_hwport_val_get();
 }
 
 int main(int argc, char* argv[])
@@ -572,6 +604,9 @@ int main(int argc, char* argv[])
   master_thread = pthread_self();
   CI_TRY(libstack_init(sighandlers));
 
+  if( strcmp(cfg_precision, "nano") == 0 ){
+    do_nano = 1;
+  }
   /* Fix cfg_snaplen value. */
   if( cfg_snaplen == 0 )
     cfg_snaplen = MAXIMUM_SNAPLEN; /* tcpdump compatibility */
@@ -638,7 +673,12 @@ int main(int argc, char* argv[])
         ci_spinloop_pause();
     }
 
-    gettimeofday(&tv_now, NULL);
+    if( do_nano ) {
+      clock_gettime(CLOCK_REALTIME, &ts_now);
+    }
+    else {
+      gettimeofday(&tv_now, NULL);
+    }
     for_each_stack(stack_dump, 0);
     /* Re-enable signals */
 

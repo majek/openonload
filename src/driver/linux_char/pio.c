@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -70,6 +70,7 @@ pio_rm_rsops(efch_resource_t* rs, ci_resource_table_t* priv_opt,
 	struct efrm_resource *vi_resource;
 	struct efrm_vi *vi;
 	int rc;
+	bool freed_resource;
 
 	pio = efrm_pio_from_resource(rs->rs_base);
 
@@ -106,10 +107,13 @@ pio_rm_rsops(efch_resource_t* rs, ci_resource_table_t* priv_opt,
 		}
 
 		vi = efrm_to_vi_resource(vi_resource);
-		rc = efrm_pio_unlink_vi(pio, vi);
+		rc = efrm_pio_unlink_vi(pio, vi, &freed_resource);
 		if (rc < 0)
 			EFCH_ERR("%s: efrm_pio_unlink_vi failed %d",
 				 __FUNCTION__, rc);
+		/* This prevents double-frees. */
+		if (freed_resource)
+			rs->rs_base = NULL;
 		break;
 
 	default:

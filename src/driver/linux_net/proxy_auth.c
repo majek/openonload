@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -15,7 +15,7 @@
 
 /****************************************************************************
  * Driver for Solarflare network controllers and boards
- * Copyright 2014-2015 Solarflare Communications Inc.
+ * Copyright 2014-2017 Solarflare Communications Inc.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 as published
@@ -230,6 +230,7 @@ static int efx_proxy_auth_mc_config(struct proxy_admin_state *pa)
 	memcpy(MCDI_PTR(inbuf, PROXY_CONFIGURE_IN_ALLOWED_MCDI_MASK),
 			pa->op_mask, sizeof(pa->op_mask));
 
+
 	rc = efx_mcdi_rpc(pa->efx, MC_CMD_PROXY_CONFIGURE,
 			inbuf, sizeof(inbuf), NULL, 0, NULL);
 
@@ -310,6 +311,8 @@ int efx_proxy_auth_configure_list(struct efx_nic *efx,
 	struct proxy_admin_state *pa;
 	int block_count;
 	int rc;
+
+	netif_warn(efx, drv, efx->net_dev, "Proxy MCDI authorization is a deprecated feature and will be removed in a future release of this driver.\n");
 
 	if (default_result > MC_CMD_PROXY_COMPLETE_IN_TIMEDOUT)
 		return -EINVAL;
@@ -790,6 +793,13 @@ static int efx_proxy_auth_send_response(struct proxy_admin_state *pa, u32 index,
 		if (req->result == MC_CMD_PROXY_COMPLETE_IN_AUTHORIZED)
 			mc_state->granted_privileges = req->granted_privileges;
 
+		/* Before we tell the MC we've finished we need to stop
+		 * using the request context, since we may receive another
+		 * request immediately.
+		 */
+		atomic_set(&req->state, PROXY_REQ_IDLE);
+		req = NULL;
+
 		rc = efx_mcdi_rpc(pa->efx, MC_CMD_PROXY_COMPLETE,
 				inbuf, sizeof(inbuf),
 				NULL, 0, NULL);
@@ -799,8 +809,6 @@ static int efx_proxy_auth_send_response(struct proxy_admin_state *pa, u32 index,
 					"%s: MC complete returned %d\n",
 					__func__, rc);
 	}
-
-	atomic_set(&req->state, PROXY_REQ_IDLE);
 
 	return rc;
 }
@@ -1008,7 +1016,7 @@ int efx_proxy_auth_complete_request(struct efx_nic *efx, u64 uhandle,
 	 * MC reboot).
 	 */
 	if (pa->state != PROXY_AUTH_ADMIN_READY) {
-		EFX_BUG_ON_PARANOID(pa->state != PROXY_AUTH_ADMIN_RESTARTING);
+		EFX_WARN_ON_PARANOID(pa->state != PROXY_AUTH_ADMIN_RESTARTING);
 		rc = -ESHUTDOWN;
 		goto out_unlock;
 	}

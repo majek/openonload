@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -191,12 +191,14 @@ int citp_nonsock_tmpl_abort(citp_fdinfo* fdi, struct oo_msg_template* omt)
 
 
 #if CI_CFG_USERSPACE_EPOLL
+#if CI_CFG_TIMESTAMPING
 int citp_nonsock_ordered_data(citp_fdinfo* fdi, struct timespec* limit,
                               struct timespec* first_out, int* bytes_out)
 {
   Log_V(log(LPF "ordered_data(%d)", fdi->fd));
   return -EOPNOTSUPP;
 }
+#endif
 #endif
 
 int citp_nonsock_is_spinning(citp_fdinfo* fdi)

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -16,7 +16,7 @@
 /****************************************************************************
  * Driver for Solarflare network controllers and boards
  * Copyright 2005-2006 Fen Systems Ltd.
- * Copyright 2006-2015 Solarflare Communications Inc.
+ * Copyright 2006-2017 Solarflare Communications Inc.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 as published
@@ -43,15 +43,15 @@ struct efx_loopback_self_tests {
 
 /* Efx self test results
  * For fields which are not counters, 1 indicates success and -1
- * indicates failure.
+ * indicates failure; 0 indicates test could not be run.
  */
 struct efx_self_tests {
 	/* online tests */
 	int phy_alive;
 	int nvram;
 	int interrupt;
-	int eventq_dma[EFX_MAX_CHANNELS];
-	int eventq_int[EFX_MAX_CHANNELS];
+	int *eventq_dma;
+	int *eventq_int;
 	/* offline tests */
 	int memory;
 	int registers;

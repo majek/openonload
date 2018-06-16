@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -13,6 +13,7 @@
 ** GNU General Public License for more details.
 */
 
+#include <driver/linux_onload/onload_kernel_compat.h>
 
 #include <onload/debug.h>
 #include <onload/tcp_helper_fns.h>
@@ -52,6 +53,12 @@ DECLARE_COMPLETION(cpu_khz_stabilized_completion);
 /* Look at comments above oo_timesync_cpu_khz */
 void oo_timesync_wait_for_cpu_khz_to_stabilize(void)
 {
+  /* There are a technically limited number of completions available, so
+   * don't consume them when it's already known we don't have to wait.
+   */
+  if( signal_cpu_khz_stabilized == 2 )
+    return;
+
   wait_for_completion(&cpu_khz_stabilized_completion);
 }
 
@@ -171,8 +178,13 @@ static void oo_timesync_stabilize_cpu_khz(struct oo_timesync* oo_ts)
   }
 }
 
-
+/* Linux 4.14 changed the argument type for the timer callback
+ * function */
+#ifdef EFRM_HAVE_TIMER_SETUP
+static void stabilize_cpu_khz_timer(struct timer_list *unused)
+#else
 static void stabilize_cpu_khz_timer(unsigned long unused)
+#endif
 {
   oo_timesync_update(efab_tcp_driver.timesync);
   /* If oo_timesync_update called too soon.  Start timer
@@ -189,15 +201,18 @@ static spinlock_t timesync_lock;
 int oo_timesync_ctor(struct oo_timesync *oo_ts)
 {
   ci_uint64 now_frc;
-  struct timespec now;
+  struct timespec mono_now, wall_now;
 
   ci_frc64(&now_frc);
-  getnstimeofday(&now);
+  ktime_get_ts(&mono_now);
+  getnstimeofday(&wall_now);
 
-  oo_ts->clock.tv_sec = now.tv_sec;
-  oo_ts->clock.tv_nsec = now.tv_nsec;
+  oo_ts->wall_clock.tv_sec = wall_now.tv_sec;
+  oo_ts->wall_clock.tv_nsec = wall_now.tv_nsec;
+  oo_ts->mono_clock.tv_sec = mono_now.tv_sec;
+  oo_ts->mono_clock.tv_nsec = mono_now.tv_nsec;
   oo_ts->clock_made = now_frc;
-  
+
   /* Set to zero to prevent smoothing when first set */
   oo_ts->smoothed_ticks = 0;
   oo_ts->smoothed_ns = 0;
@@ -206,10 +221,8 @@ int oo_timesync_ctor(struct oo_timesync *oo_ts)
 
   spin_lock_init(&timesync_lock);
 
-  init_timer(&timer_node);
+  timer_setup(&timer_node, stabilize_cpu_khz_timer, 0);
   timer_node.expires = jiffies + 1;
-  timer_node.data = 0;
-  timer_node.function = &stabilize_cpu_khz_timer;
   add_timer(&timer_node);
 
   return 0;
@@ -232,83 +245,95 @@ static ci_uint64 timesync_smooth_tick_samples[TIMESYNC_SMOOTH_SAMPLES];
 static ci_uint64 timesync_smooth_ns_samples[TIMESYNC_SMOOTH_SAMPLES];
 static int timesync_smooth_i = 0;
 
+#define ONE_SECOND_IN_NS 1000000000llu
+#define TEN_SECOND_IN_NS 10000000000llu
+
 void oo_timesync_update(struct oo_timesync *oo_ts)
 {
   ci_uint64 frc, ticks, ns;
-  struct timespec ts;
-  int reset = 0;
+  struct timespec mono_ts, wall_ts;
+  int use_this_sample = 1;
 
   if( time_after(jiffies, (unsigned long)oo_ts->update_jiffies) ) {
-    spin_lock(&timesync_lock);
+    spin_lock_bh(&timesync_lock);
     /* Re-check incase it was updated while we waited for the lock */
     if( time_after(jiffies, (unsigned long)oo_ts->update_jiffies) ) {
       ci_frc64(&frc);
-      getnstimeofday(&ts);
+      /* We need to use two system clocks: one monotonic
+       * (ktime_get_ts()) to provide accurate estimates of time
+       * deltas, and one wall clock (getnstimeofday()) for using as a
+       * basis for reporting timestamps through the APIs
+       *
+       * In future getmonotonicraw() might be better than
+       * ktime_get_ts() (it doesn't include NTP adjustments) but it's
+       * not available on older (RHEL5) kernels
+       */
+      ktime_get_ts(&mono_ts);
+      getnstimeofday(&wall_ts);
 
       /* FRC ticks since last update */
       ticks = frc - oo_ts->clock_made;
 
       /* Nanoseconds since last update */
-      if( ts.tv_sec == oo_ts->clock.tv_sec && 
-          ts.tv_nsec > oo_ts->clock.tv_nsec ) {
-        ns = ts.tv_nsec - oo_ts->clock.tv_nsec;
+      if( mono_ts.tv_sec == oo_ts->mono_clock.tv_sec &&
+          mono_ts.tv_nsec > oo_ts->mono_clock.tv_nsec ) {
+        ns = mono_ts.tv_nsec - oo_ts->mono_clock.tv_nsec;
+        ci_assert_lt(ns, ONE_SECOND_IN_NS);
       }
-      else if( ts.tv_sec > oo_ts->clock.tv_sec ) {
-        ci_assert(oo_ts->clock.tv_nsec <= 1000000000);
-        ns = ts.tv_nsec + (1000000000 - oo_ts->clock.tv_nsec) + 
-          (ts.tv_sec - oo_ts->clock.tv_sec - 1) * 1000000000llu;
+      else if( mono_ts.tv_sec > oo_ts->mono_clock.tv_sec ) {
+        ci_assert_le(oo_ts->mono_clock.tv_nsec, ONE_SECOND_IN_NS);
+        ns = mono_ts.tv_nsec + (ONE_SECOND_IN_NS - oo_ts->mono_clock.tv_nsec) +
+          (mono_ts.tv_sec - oo_ts->mono_clock.tv_sec - 1) * ONE_SECOND_IN_NS;
+
+        if( ns > TEN_SECOND_IN_NS ) {
+          /* We've seen a big gap, which is suspicious (e.g. clock has
+           * jumped), so don't include this period in the smoothing
+           * state.
+           *
+           * There could just be a big gap due to no stacks existing,
+           * so don't shout about it.
+           */
+          use_this_sample = 0;
+        }
       } 
       else {
         /* Time has gone backwards. Work around this by not taking a
          * sample, but updating state about time clock made so that
-         * next time we update we'll (hopefully) get a better estimate
+         * next time we update we'll (hopefully) get a better estimate.
+         *
+         * This really shouldn't happen: ktime_get_ts() is monotonic
          */
         OO_DEBUG_VERB(ci_log("%s: time has jumped backwards, ignoring sample",
                              __FUNCTION__));
-        ++oo_ts->generation_count;
-        ci_wmb();
-        goto store_time_made;
-      }
-
-      /* scale down ns and ticks to avoid overflow */
-      while( ns > 10000000000llu ) {
-        ns = ns >> 1;
-        ticks = ticks >> 1;
-
-        /* We've seen a big gap, which means the old values are
-         * probably not much use, so reset the smoothing state
-         */
-        reset = 1;
+        ns = 0; /* Keep compiler happy */
+        use_this_sample = 0;
       }
 
       ++oo_ts->generation_count;
       ci_wmb();
-      
-      if( reset ) {
-        oo_ts->smoothed_ticks = 0;
-        oo_ts->smoothed_ns = 0;
-        for( timesync_smooth_i = 0; 
-             timesync_smooth_i < TIMESYNC_SMOOTH_SAMPLES;
-             ++timesync_smooth_i ) {
-          timesync_smooth_tick_samples[timesync_smooth_i] = 0;
-          timesync_smooth_ns_samples[timesync_smooth_i] = 0;
-        }
-        timesync_smooth_i = 0;
-      }
-      
-      oo_ts->smoothed_ticks += ticks;
-      oo_ts->smoothed_ticks -=
-        timesync_smooth_tick_samples[timesync_smooth_i];
-      timesync_smooth_tick_samples[timesync_smooth_i] = ticks;
-      oo_ts->smoothed_ns += ns;
-      oo_ts->smoothed_ns -= timesync_smooth_ns_samples[timesync_smooth_i];
-      timesync_smooth_ns_samples[timesync_smooth_i] = ns;
-      timesync_smooth_i = 
-        (timesync_smooth_i + 1) & TIMESYNC_SMOOTH_SAMPLES_MASK;
 
-    store_time_made:
-      oo_ts->clock.tv_sec = ts.tv_sec;
-      oo_ts->clock.tv_nsec = ts.tv_nsec;
+      if( use_this_sample ) {
+        /* We used to scale ns and ticks down to guarantee this, but
+         * now shouldn't get here if there has been a big gap.
+         */
+        ci_assert_le(ns, TEN_SECOND_IN_NS);
+
+        oo_ts->smoothed_ticks += ticks;
+        oo_ts->smoothed_ticks -=
+          timesync_smooth_tick_samples[timesync_smooth_i];
+        timesync_smooth_tick_samples[timesync_smooth_i] = ticks;
+        oo_ts->smoothed_ns += ns;
+        oo_ts->smoothed_ns -= timesync_smooth_ns_samples[timesync_smooth_i];
+        timesync_smooth_ns_samples[timesync_smooth_i] = ns;
+        timesync_smooth_i =
+          (timesync_smooth_i + 1) & TIMESYNC_SMOOTH_SAMPLES_MASK;
+      }
+
+      /* Store the current times as a baseline for next sample */
+      oo_ts->wall_clock.tv_sec = wall_ts.tv_sec;
+      oo_ts->wall_clock.tv_nsec = wall_ts.tv_nsec;
+      oo_ts->mono_clock.tv_sec = mono_ts.tv_sec;
+      oo_ts->mono_clock.tv_nsec = mono_ts.tv_nsec;
       oo_ts->clock_made = frc;
 
       oo_ts->update_jiffies = jiffies + msecs_to_jiffies(timesync_period);
@@ -322,10 +347,13 @@ void oo_timesync_update(struct oo_timesync *oo_ts)
         oo_ts->generation_count = 2;
       else
         ++oo_ts->generation_count;
-    }
-    oo_timesync_stabilize_cpu_khz(oo_ts);
 
-    spin_unlock(&timesync_lock);
+      /* Only consider this a useful sample if we were able to use the sample
+       */
+      if( use_this_sample )
+        oo_timesync_stabilize_cpu_khz(oo_ts);
+    }
+    spin_unlock_bh(&timesync_lock);
   }
 }
 #endif

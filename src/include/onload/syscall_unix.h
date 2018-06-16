@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -40,6 +40,7 @@
 #include <sys/uio.h>
 #include <signal.h>
 
+#include "libc_compat.h"
 #include <ci/internal/transport_config_opt.h>
 
 
@@ -102,7 +103,6 @@ extern int ci_sys_sendmmsg(int fd, struct mmsghdr* msg, unsigned vlen,
 #  define ci_sys_fstat64(__fd, __statbuf)                       \
           ci_sys___fxstat64(_STAT_VER, (__fd), (__statbuf))
 # endif
-
 
 
 #endif /* defined(__unix__) && defined(__GNUC__) */

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -109,6 +109,7 @@ efrm_resource_manager_ctor(struct efrm_resource_manager *rm,
 	spin_lock_init(&rm->rm_lock);
 	rm->rm_resources = 0;
 	rm->rm_resources_hiwat = 0;
+        rm->rm_resources_total = -1;
 	INIT_LIST_HEAD(&rm->rm_resources_list);
 	EFRM_RESOURCE_MANAGER_ASSERT_VALID(rm);
 	return 0;
@@ -213,6 +214,30 @@ void efrm_resource_release(struct efrm_resource *rs)
 	}
 }
 EXPORT_SYMBOL(efrm_resource_release);
+
+
+void efrm_resource_manager_add_total(int rs_type, int n_avail)
+{
+	struct efrm_resource_manager *rm = efrm_rm_table[rs_type];
+
+	spin_lock_bh(&efrm_nic_tablep->lock);
+        if( rm->rm_resources_total == -1 )
+                rm->rm_resources_total = n_avail;
+        else
+                rm->rm_resources_total += n_avail;
+	spin_unlock_bh(&efrm_nic_tablep->lock);
+}
+
+
+void efrm_resource_manager_del_total(int rs_type, int n_avail)
+{
+	struct efrm_resource_manager *rm = efrm_rm_table[rs_type];
+
+	spin_lock_bh(&efrm_nic_tablep->lock);
+        EFRM_ASSERT(rm->rm_resources_total >= n_avail);
+        rm->rm_resources_total -= n_avail;
+	spin_unlock_bh(&efrm_nic_tablep->lock);
+}
 
 /*
  * vi: sw=8:ai:aw

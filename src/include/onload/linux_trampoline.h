@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -83,7 +83,7 @@ extern asmlinkage long
 efab_linux_trampoline_handler_close3232(struct pt_regs *regs);
 #else /* x86_64 */
 extern asmlinkage long
-efab_linux_trampoline_handler_close64(int fd, struct pt_regs *regs);
+efab_linux_trampoline_handler_close64(int fd);
 #ifdef CONFIG_COMPAT
 extern asmlinkage int
 efab_linux_trampoline_handler_close32(unsigned long bx, unsigned long cx,
@@ -110,7 +110,12 @@ efab_linux_trampoline_sigaction(int sig, const struct sigaction *act,
                                 struct sigaction *oact, size_t sigsetsize);
 #ifdef CONFIG_COMPAT
 #if ! defined (__PPC__)
-#include <asm/ia32.h>
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,9,0)
+# include <linux/compat.h>
+# define sigaction32 compat_sigaction
+#else
+# include <asm/ia32.h>
+#endif
 #else
 #include <linux/compat.h>
 /* sigaction32 is not public on PPC, extracted from arch/powerpc/kernel/ppc32.h */

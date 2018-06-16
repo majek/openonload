@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -59,7 +59,7 @@ efrm_pio_realloc(struct efrm_pd *pd, struct efrm_pio *pio, struct efrm_vi *vi);
 extern int
 efrm_pio_alloc(struct efrm_pd *, struct efrm_pio **);
 
-extern void
+extern bool
 efrm_pio_release(struct efrm_pio *, bool);
 
 extern struct efrm_resource *
@@ -72,15 +72,23 @@ extern int
 efrm_pio_link_vi(struct efrm_pio *, struct efrm_vi *);
 
 extern int
-efrm_pio_unlink_vi(struct efrm_pio *, struct efrm_vi *);
+efrm_pio_unlink_vi(struct efrm_pio *, struct efrm_vi *,
+		   bool* freed_resource_out);
 
 extern int
-efrm_pio_map_kernel(struct efhw_nic *, struct efrm_vi *, void **);
+efrm_pio_map_kernel(struct efrm_vi *, void **);
 
 extern void
 efrm_pio_unmap_kernel(struct efrm_vi *, void *);
 
 extern int 
 efrm_pio_get_size(struct efrm_pio *);
+
+extern int
+efrm_ctpio_map_kernel(struct efrm_vi *, void **);
+
+extern void
+efrm_ctpio_unmap_kernel(struct efrm_vi *, void *);
+
 
 #endif /* __CI_EFRM_PIO_H__ */

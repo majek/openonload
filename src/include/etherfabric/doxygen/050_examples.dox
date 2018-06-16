@@ -141,6 +141,7 @@ receives traffic. Assuming there is a sockaddr to work from:
 
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~{.c}
   struct sockaddr_in sa_local;  /* TODO: Fill this out somehow */
+  ef_filter_spec filter_spec;
   ef_filter_spec_init(&filter_spec, EF_FILTER_FLAG_NONE);
   TRY(ef_filter_spec_set_ip4_local(&filter_spec, IPPROTO_UDP,
                                    sa_local.sin_addr.s_addr,

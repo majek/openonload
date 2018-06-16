@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -68,7 +68,7 @@ static void usage(const char* msg)
 }
 
 
-#define MAX_PATHNAME 200
+#define MAX_PATHNAME 300
 #define MAX_CMDNAME 16
 #define MAX_CMDLINE 60
 
@@ -150,7 +150,9 @@ main(int argc, char* argv[])
         break;
        }
     }
+    closedir(fd_dir);
   }
+  closedir(proc_dir);
 
   /* print or kill */
   for( proc = proc_head; proc != NULL; proc = proc->next ) {

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -15,7 +15,7 @@
 
 /****************************************************************************
  * Driver for Solarflare network controllers and boards
- * Copyright 2014-2015 Solarflare Communications Inc.
+ * Copyright 2014-2017 Solarflare Communications Inc.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 as published
@@ -86,15 +86,6 @@ static struct nla_policy efx_mcdi_proxy_genl_policy[__EFX_MCDI_PROXY_A_MAX] = {
 	[EFX_MCDI_PROXY_A_PRIVILEGES]	= { .type = NLA_U32 },
 };
 
-/* family */
-static struct genl_family efx_mcdi_proxy_genl_family = {
-	.id = GENL_ID_GENERATE,
-	.hdrsize = 0,
-	.name = "EFX_MCDI_PROXY",
-	.version = 1,
-	.maxattr = __EFX_MCDI_PROXY_A_MAX - 1,
-};
-
 /* commands */
 enum {
 	EFX_MCDI_PROXY_C_UNSPEC,
@@ -111,6 +102,72 @@ enum {
 	EFX_MCDI_PROXY_C_PROXY_ACTION_RESP,
 	__EFX_MCDI_PROXY_C_MAX,
 };
+
+/* Operation handler functions */
+static int efx_mcdi_proxy_missing_handler(struct sk_buff *skb,
+					  struct genl_info *info);
+static int efx_mcdi_proxy_wrong_way_handler(struct sk_buff *skb,
+					    struct genl_info *info);
+static int efx_mcdi_proxy_do_configure_list(struct sk_buff *skb,
+					    struct genl_info *info);
+static int efx_mcdi_proxy_do_configure_one(struct sk_buff *skb,
+					   struct genl_info *info);
+static int efx_mcdi_proxy_do_configure_none(struct sk_buff *skb,
+					    struct genl_info *info);
+static int efx_mcdi_proxy_do_proxy_allow(struct sk_buff *skb,
+					 struct genl_info *info);
+static int efx_mcdi_proxy_do_proxy_deny(struct sk_buff *skb,
+					struct genl_info *info);
+static int efx_mcdi_proxy_do_proxy_done(struct sk_buff *skb,
+					struct genl_info *info);
+static int efx_mcdi_proxy_do_proxy_ack(struct sk_buff *skb,
+				       struct genl_info *info);
+static int efx_mcdi_proxy_do_proxy_action_req(struct sk_buff *skb,
+					      struct genl_info *info);
+
+/* operation definition */
+#define EFX_MCDI_PROXY_OP(_cmd, _handler) [ EFX_MCDI_PROXY_C_## _cmd ] = { \
+	.cmd = EFX_MCDI_PROXY_C_## _cmd,				   \
+	.flags = GENL_ADMIN_PERM,					   \
+	.policy = efx_mcdi_proxy_genl_policy,				   \
+	.doit = efx_mcdi_proxy_## _handler,				   \
+	.dumpit = NULL,							   \
+	}
+static struct genl_ops efx_mcdi_proxy_genl_ops[__EFX_MCDI_PROXY_C_MAX] = {
+	EFX_MCDI_PROXY_OP(UNSPEC, missing_handler),
+	EFX_MCDI_PROXY_OP(CONFIGURE_LIST, do_configure_list),
+	EFX_MCDI_PROXY_OP(CONFIGURE_ONE, do_configure_one),
+	EFX_MCDI_PROXY_OP(CONFIGURE_NONE, do_configure_none),
+	EFX_MCDI_PROXY_OP(PROXY_REQUEST, wrong_way_handler),
+	EFX_MCDI_PROXY_OP(PROXY_ALLOW, do_proxy_allow),
+	EFX_MCDI_PROXY_OP(PROXY_DENY, do_proxy_deny),
+	EFX_MCDI_PROXY_OP(PROXY_DONE, do_proxy_done),
+	EFX_MCDI_PROXY_OP(PROXY_ACK, do_proxy_ack),
+	EFX_MCDI_PROXY_OP(PROXY_RC, wrong_way_handler),
+	EFX_MCDI_PROXY_OP(PROXY_ACTION_REQ, do_proxy_action_req),
+	EFX_MCDI_PROXY_OP(PROXY_ACTION_RESP, wrong_way_handler),
+};
+
+/* family */
+#if !defined(EFX_USE_KCOMPAT) || !defined(GENL_ID_GENERATE)
+static struct genl_family efx_mcdi_proxy_genl_family = {
+	.hdrsize = 0,
+	.name = "EFX_MCDI_PROXY",
+	.version = 1,
+	.maxattr = __EFX_MCDI_PROXY_A_MAX - 1,
+	.module = THIS_MODULE,
+	.ops = efx_mcdi_proxy_genl_ops,
+	.n_ops = ARRAY_SIZE(efx_mcdi_proxy_genl_ops),
+};
+#else
+static struct genl_family efx_mcdi_proxy_genl_family = {
+	.id = GENL_ID_GENERATE,
+	.hdrsize = 0,
+	.name = "EFX_MCDI_PROXY",
+	.version = 1,
+	.maxattr = __EFX_MCDI_PROXY_A_MAX - 1,
+};
+#endif
 
 static int efx_mcdi_proxy_send_request(struct efx_nic *efx, u64 uhandle,
 			   u16 pf, u16 vf, u16 rid,
@@ -280,7 +337,7 @@ static int efx_mcdi_proxy_do_configure_none(struct sk_buff *skb, struct genl_inf
 	rc = efx_proxy_auth_stop(efx, false);
 	if (rc == 0)
 		efx_mcdi_proxy_daemon_pid = 0;
-out:
+
 	dev_put(dev);
 	return rc;
 }
@@ -326,7 +383,8 @@ static void efx_mcdi_proxy_stopped(struct efx_nic *efx)
 			/* genlmsg_unicast frees the skb in the event of failure. */
 			return;
 		if(wait_event_timeout(efx_mcdi_proxy_ack_waitq, efq_mcdi_proxy_request_acked,
-				      EFX_MCDI_PROXY_ACK_TIMEOUT) > 0)
+				      EFX_MCDI_PROXY_ACK_TIMEOUT) > 0 ||
+		  efq_mcdi_proxy_request_acked)
 			return;
 	}
 	return;
@@ -445,7 +503,7 @@ static int efx_mcdi_proxy_do_proxy_action_req(struct sk_buff *skb,
 	}
 
 	rc = efx_mcdi_rpc_async(efx, *mcdi_cmd,
-		   nla_data(req), nla_len(req), *outlen,
+		   nla_data(req), nla_len(req),
 		   efx_mcdi_proxy_async_completer, *cookie);
 
 out1:
@@ -607,29 +665,6 @@ static int efx_mcdi_proxy_do_proxy_ack(struct sk_buff *skb, struct genl_info *in
 	return 0;
 }
 
-/* operation definition */
-#define EFX_MCDI_PROXY_OP(_cmd, _handler) [ EFX_MCDI_PROXY_C_## _cmd ] = { \
-	.cmd = EFX_MCDI_PROXY_C_## _cmd,				   \
-	.flags = GENL_ADMIN_PERM,					   \
-	.policy = efx_mcdi_proxy_genl_policy,				   \
-	.doit = efx_mcdi_proxy_## _handler,				   \
-	.dumpit = NULL,							   \
-	}
-static struct genl_ops efx_mcdi_proxy_genl_ops[__EFX_MCDI_PROXY_C_MAX] = {
-	EFX_MCDI_PROXY_OP(UNSPEC, missing_handler),
-	EFX_MCDI_PROXY_OP(CONFIGURE_LIST, do_configure_list),
-	EFX_MCDI_PROXY_OP(CONFIGURE_ONE, do_configure_one),
-	EFX_MCDI_PROXY_OP(CONFIGURE_NONE, do_configure_none),
-	EFX_MCDI_PROXY_OP(PROXY_REQUEST, wrong_way_handler),
-	EFX_MCDI_PROXY_OP(PROXY_ALLOW, do_proxy_allow),
-	EFX_MCDI_PROXY_OP(PROXY_DENY, do_proxy_deny),
-	EFX_MCDI_PROXY_OP(PROXY_DONE, do_proxy_done),
-	EFX_MCDI_PROXY_OP(PROXY_ACK, do_proxy_ack),
-	EFX_MCDI_PROXY_OP(PROXY_RC, wrong_way_handler),
-	EFX_MCDI_PROXY_OP(PROXY_ACTION_REQ, do_proxy_action_req),
-	EFX_MCDI_PROXY_OP(PROXY_ACTION_RESP, wrong_way_handler),
-};
-
 static int efx_mcdi_proxy_send_request(struct efx_nic *efx, u64 uhandle,
 			   u16 pf, u16 vf, u16 rid,
 			   const void *request_buffer, size_t request_len)
@@ -687,7 +722,8 @@ static int efx_mcdi_proxy_send_request(struct efx_nic *efx, u64 uhandle,
 		if (rc != 0)
 			return rc;
 		if(wait_event_timeout(efx_mcdi_proxy_ack_waitq, efq_mcdi_proxy_request_acked,
-				      EFX_MCDI_PROXY_ACK_TIMEOUT) > 0)
+				      EFX_MCDI_PROXY_ACK_TIMEOUT) > 0 ||
+		   efq_mcdi_proxy_request_acked)
 			return 0;
 	}
 	return -ETIMEDOUT;
@@ -701,7 +737,9 @@ int efx_mcdi_proxy_nl_register(void)
 {
 	int rc;
 
-#if !defined(EFX_USE_KCOMPAT) || defined(genl_register_family_with_ops) /* It became a macro at the same time the arguments changed */
+#if !defined(EFX_USE_KCOMPAT) || !defined(GENL_ID_GENERATE)
+	rc = genl_register_family(&efx_mcdi_proxy_genl_family);
+#elif defined(genl_register_family_with_ops) /* It became a macro at the same time the arguments changed */
 	rc = genl_register_family_with_ops(&efx_mcdi_proxy_genl_family,
 					   efx_mcdi_proxy_genl_ops);
 #else

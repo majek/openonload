@@ -62,7 +62,7 @@ event queue must be specified.
 A virtual interface also has a few hardware resources:
 - a doorbell register to inform the card that new RX buffers are available 
   for it to use
-- a doorbell register to inform the card that new TX buffers are aeady for 
+- a doorbell register to inform the card that new TX buffers are ready for 
   it to send
 - some timers
 - a share of an interrupt.
@@ -110,6 +110,7 @@ A _protection domain_ identifies a separate address space for the DMA
 addresses passed to the adapter. It is used to protect multiple %ef_vi 
 applications from one another, or to allow them to share resources:
 - Each \ref vi is associated with one protection domain.
+- Multiple VIs can be associated with the same protection domain. 
 - Each \ref memory_region is registered with one or more protection domains.
 - A memory region can only be used by a virtual interface that is in the 
   same protection domain.
@@ -138,9 +139,9 @@ meets the requirements of %ef_vi:
   The adapter translates the DMA addresses provided by the application to 
   I/O addresses used on the PCIe bus.
 - The memory region is page-aligned, for performance.
-- The size of the memory region is a muliple of the packet buffer size, so
+- The size of the memory region is a multiple of the packet buffer size, so
   no memory is wasted.
-
+  
 \section packet_buffer Packet Buffer
 
 A _packet buffer_ is a memory allocations on the host which the card will 
@@ -186,9 +187,61 @@ the packet data can optionally be updated before being transmitted. This
 improves latency because it reduces the amount of data that needs to be 
 passed to the adapter on the critical path.
 
-\section filters Filters
+\section ctpio Cut-through PIO
 
-_Filters_ select which packets are delivered to a virtual interfacen. 
+CTPIO (Cut-through PIO) improves send latency by moving packets from the PCIe 
+bus to network port with minimal latency.  It can be used in three modes:
+-# Cut-through: The frame is transmitted onto the network as it is streamed 
+   across the PCIe bus.  This mode offers the best latency.
+-# Store-and-forward: The frame is buffered on the adapter before 
+   transmitting onto the network.
+-# Store-and-forward with poison disabled: As for (2), except that it is 
+   guaranteed that frames are never poisoned.  When this mode is enabled on 
+   any VI, all VIs are placed into store-and-forward mode.
+
+Due to differences in hardware architecture, CTPIO is not available on
+SFN8000-series or earlier adapters.
+   
+\subsection poisoning Underrun, poisoning and fallback:
+
+When using cut-through mode, if the frame is not streamed to the adapter
+at at least line rate, then the frame is likely to be poisoned.  This is
+most likely to happen if the application thread is interrupted while
+writing the frame to the adapter.  In the underrun case, the frame is
+terminated with an invalid FCS -- this is referred to as "poisoning" --
+and so will be discarded by the link partner.  Cut-through mode is
+currently expected to perform well only on 10G links.
+
+CTPIO may be aborted for other reasons, including timeout while writing a
+frame, contention between threads using CTPIO at the same time, and the
+CPU writing data to the adapter in the wrong order.
+
+In all of the above failure cases the adapter falls-back to sending via
+the traditional DMA mechanism, which incurs a latency penalty.  So a valid
+copy of the packet is always transmitted, whether the CTPIO operation
+succeeds or not.
+
+Normally only an underrun in cut-through mode will result in a poisoned
+frame being transmitted.  In rare cases it is also possible for a poisoned
+frame to be emitted in store-and-forward mode.  If it is necessary to
+strictly prevent poisoned packets from reaching the network, then
+poisoning can be disabled globally.
+
+\subsection ctpio_diagnostics CTPIO diagnostics
+
+The adapter maintains counters that show whether CTPIO is being used, and any 
+reasons for CTPIO sends failing.  These can be inspected as follows: 
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~{.sh}
+ethtool -S ethX | grep ctpio
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Note that some of these counters are maintained on a per-adapter basis, 
+whereas others are per network port.
+
+ \section filters Filters
+
+_Filters_ select which packets are delivered to a virtual interface. 
 Packets that are not selected are ignored and allowed to pass on to the 
 kernel.
 
@@ -228,12 +281,12 @@ handled at a higher level:
 
 \section tx_alternatives TX Alternatives
 
-_TX alternatives_ provide multiple alternative queues for transmission, that 
-can be used to minimize latency. Different possible responses can be pushed 
-through the TX path on the NIC, and held in different queues ready to 
-transmit. When it is decided which response to transmit, the appropriate 
-alternative queue is selected, and the queued packets are sent. Becasue the 
-packets are already prepared, and are held close to the wire, latency is 
-greatly reduced. 
+_TX alternatives_ is a feature available on Solarflare SFN8000 series adapters
+to provide multiple alternative queues for transmission, that can be used to
+minimize latency. Different possible responses can be pushed through the TX path 
+on the NIC, and held in different queues ready to transmit. When it is decided 
+which response to transmit, the appropriate alternative queue is selected, and 
+the queued packets are sent. Because the packets are already prepared, and are held 
+close to the wire, latency is greatly reduced. 
 
 */

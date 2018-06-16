@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -45,8 +45,7 @@
 #include <onload/debug.h>
 #include <ci/internal/ip.h>
 #include <ci/internal/ip_log.h>
-#include <cplane/prot.h>
-#include <cplane/exported.h>
+#include <onload/cplane_prot.h>
 #include <ci/internal/transport_config_opt.h>
 #include <ci/tools/dllist.h>
 #include <ci/tools.h>
@@ -99,15 +98,15 @@ static int pkt_chain_copy(ci_netif* ni, ci_ip_pkt_fmt* src_head,
   char* dst_ptr = (void*) (dst + 1);
   const char* src_ptr;
 
-  ci_assert_equal(oo_ether_type_get(src_head), CI_ETHERTYPE_IP);
-  ci_assert_equal(CI_IP4_IHL(oo_tx_ip_hdr(src_head)), sizeof(ci_ip4_hdr));
+  ci_assert_equal(CI_IP4_IHL((ci_ip4_hdr*)oo_tx_outer_l3_hdr(src_head)),
+                  sizeof(ci_ip4_hdr));
   n_seg = CI_MIN(src_head->n_buffers, CI_IP_PKT_SEGMENTS_MAX);
 
   bytes_copied = 0;
   seg_i = 0;
   /* Start copying from the IP header. */
-  n = src_pkt->buf_len - oo_ether_hdr_size(src_pkt);
-  src_ptr = PKT_START(src_pkt) + oo_ether_hdr_size(src_pkt);
+  src_ptr = oo_tx_outer_l3_hdr(src_pkt);
+  n = src_pkt->buf_len - (src_ptr - (const char*) oo_ether_hdr(src_pkt));
 
   while( 1 ) {
     if( bytes_copied + n > CI_MAX_ETH_FRAME_LEN )
@@ -177,7 +176,7 @@ int cicppl_ip_pkt_flatten_copy(ci_netif* ni, oo_pkt_p src_pktid,
 extern int /* bool */
 cicp_user_defer_send(ci_netif *netif, cicpos_retrieve_rc_t retrieve_rc,
 		     ci_uerr_t *ref_os_rc, oo_pkt_p pkt_id,
-                     ci_ifid_t ifindex)
+                     ci_ifid_t ifindex, ci_uint32 next_hop)
 {
   /* TODO: Perform any service request implied by retrieve_rc:
    *    
@@ -200,8 +199,7 @@ cicp_user_defer_send(ci_netif *netif, cicpos_retrieve_rc_t retrieve_rc,
      */
     IGNORE(ci_log(CODEID": defer this send, pending ARP"););
     return cicppl_mac_defer_send(netif, ref_os_rc,
-                                 oo_tx_ip_hdr(PKT(netif,pkt_id))->ip_daddr_be32,
-                                 pkt_id, ifindex);
+                                 next_hop, pkt_id, ifindex);
 
   case retrrc_noroute:
     CI_IPV4_STATS_INC_OUT_NO_ROUTES(netif);

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -27,6 +27,24 @@
 #include "internal.h"
 
 
+ci_inline int prepare_thread_specific_opts(ci_netif_config_opts** opts_out)
+{
+  struct oo_per_thread* pt = oo_per_thread_get();
+
+  if( pt->thread_local_netif_opts == NULL ) {
+    ci_netif_config_opts* default_opts;
+
+    pt->thread_local_netif_opts = malloc(sizeof(*pt->thread_local_netif_opts));
+    if( ! pt->thread_local_netif_opts)
+      return -ENOMEM;
+    default_opts = &ci_cfg_opts.netif_opts;
+    memcpy(pt->thread_local_netif_opts, default_opts, sizeof(*default_opts));
+  }
+  *opts_out = pt->thread_local_netif_opts;
+  return 0;
+}
+
+
 int onload_stack_opt_get_int(const char* opt_env, int64_t* opt_val)
 {
   struct oo_per_thread* pt;
@@ -40,10 +58,46 @@ int onload_stack_opt_get_int(const char* opt_env, int64_t* opt_val)
   }
 
   #undef CI_CFG_OPT
+  #undef CI_CFG_STR_OPT
+  #define CI_CFG_STR_OPT(...)
   #define CI_CFG_OPT(env, name, p3, p4, p5, p6, p7, p8, p9, p10)    \
     {                                                               \
       if( ! strcmp(env, opt_env) ) {                                \
         *opt_val = opts->name;                                      \
+        return 0;                                                   \
+      }                                                             \
+    }
+
+  #include <ci/internal/opts_netif_def.h>
+  LOG_E(ci_log("%s: Requested option %s not found", __FUNCTION__, opt_env));
+  return -EINVAL;
+}
+
+
+extern int
+onload_stack_opt_get_str(const char* opt_env, char* val_out, size_t* val_out_len)
+{
+  struct oo_per_thread* pt;
+  ci_netif_config_opts* opts;
+
+  pt = oo_per_thread_get();
+  opts = pt->thread_local_netif_opts;
+
+  if( opts == NULL) {
+    opts = &ci_cfg_opts.netif_opts;
+  }
+
+  #undef CI_CFG_OPT
+  #undef CI_CFG_STR_OPT
+  #define CI_CFG_OPT(...)
+  #define CI_CFG_STR_OPT(env, name, p3, p4, p5, p6, p7, p8, p9, p10)  \
+    {                                                               \
+      if( ! strcmp(env, opt_env) ) {                                \
+        size_t buf_len = *val_out_len;                              \
+        *val_out_len = strlen(opts->name) + 1;                      \
+        if( buf_len < *val_out_len )                                \
+          return -ENOSPC;                                           \
+        strcpy(val_out, opts->name);                                \
         return 0;                                                   \
       }                                                             \
     }
@@ -61,23 +115,17 @@ int onload_stack_opt_get_int(const char* opt_env, int64_t* opt_val)
  * if absent, use the default copy.  */
 int onload_stack_opt_set_int(const char* opt_env, int64_t opt_val)
 {
-  struct oo_per_thread* pt;
-  ci_netif_config_opts* default_opts;
-
-  pt = oo_per_thread_get();
-
-  if( pt->thread_local_netif_opts == NULL ) {
-    pt->thread_local_netif_opts = malloc(sizeof(*pt->thread_local_netif_opts));
-    if( ! pt->thread_local_netif_opts)
-      return -ENOMEM;
-    default_opts = &ci_cfg_opts.netif_opts;
-    memcpy(pt->thread_local_netif_opts, default_opts, sizeof(*default_opts));
-  }
+  ci_netif_config_opts* opts;
+  int rc = prepare_thread_specific_opts(&opts);
+  if( rc != 0 )
+    return rc;
 
   #define ci_uint32_fmt   "%u"
   #define ci_uint16_fmt   "%u"
+  #define ci_uint8_fmt    "%u"
   #define ci_int32_fmt    "%d"
   #define ci_int16_fmt    "%d"
+  #define ci_int8_fmt     "%d"
   #define ci_iptime_t_fmt "%u"
 
   #define _CI_CFG_BITVAL   _optbits
@@ -91,6 +139,7 @@ int onload_stack_opt_set_int(const char* opt_env, int64_t opt_val)
 
   #undef CI_CFG_OPTFILE_VERSION
   #undef CI_CFG_OPT
+  #undef CI_CFG_STR_OPT
   #undef CI_CFG_OPTGROUP
   #undef MIN
   #undef MAX
@@ -104,6 +153,7 @@ int onload_stack_opt_set_int(const char* opt_env, int64_t opt_val)
   #define SMAX (MAX >> 1)
   #define SMIN (-SMAX-1)
   
+  #define CI_CFG_STR_OPT(...)
   #define CI_CFG_OPT(env, name, type, doc, bits, group, default, min, max, presentation) \
     {                                                                   \
       type _max;                                                        \
@@ -121,7 +171,42 @@ int onload_stack_opt_set_int(const char* opt_env, int64_t opt_val)
                        __FUNCTION__, opt_val, _min, _max, opt_env));    \
           return -EINVAL;                                               \
         }                                                               \
-        pt->thread_local_netif_opts->name = opt_val;                    \
+        opts->name = opt_val;                                           \
+        return 0;                                                       \
+      }                                                                 \
+    }
+
+  #include <ci/internal/opts_netif_def.h>
+  LOG_E(ci_log("%s: Requested option %s not found", __FUNCTION__, opt_env));
+  return -EINVAL;
+}
+
+
+int onload_stack_opt_set_str(const char* opt_env, const char* opt_val)
+{
+  ci_netif_config_opts* opts;
+  int rc = prepare_thread_specific_opts(&opts);
+  if( rc != 0 )
+    return rc;
+
+  #undef CI_CFG_OPTFILE_VERSION
+  #undef CI_CFG_OPT
+  #undef CI_CFG_STR_OPT
+  #undef CI_CFG_OPTGROUP
+
+  #define CI_CFG_OPTFILE_VERSION(version)
+  #define CI_CFG_OPTGROUP(group, category, expertise)
+
+  #define CI_CFG_OPT(...)
+  #define CI_CFG_STR_OPT(env, name, type, doc, bits, group, default, min, max, presentation) \
+    {                                                                   \
+      if( ! strcmp(env, opt_env) ) {                                    \
+        if( strlen(opt_val) >= sizeof(type) ) {                         \
+          LOG_E(ci_log("%s: value string too long for %s",              \
+                       __FUNCTION__, opt_env));                         \
+          return -EINVAL;                                               \
+        }                                                               \
+        strcpy(opts->name, opt_val);                                    \
         return 0;                                                       \
       }                                                                 \
     }

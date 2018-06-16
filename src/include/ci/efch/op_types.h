@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -109,10 +109,10 @@ struct efch_vi_set_alloc {
 struct efch_memreg_alloc {
   int32_t             in_vi_or_pd_fd;
   efch_resource_id_t  in_vi_or_pd_id;
-  uint64_t            in_mem_ptr;
+  uint64_t            in_mem_ptr CI_ALIGN(8);
   uint64_t            in_mem_bytes;
   uint64_t            in_addrs_out_ptr;
-  int                 in_addrs_out_stride;
+  uint64_t            in_addrs_out_stride;
 };
 
 
@@ -199,6 +199,8 @@ typedef struct ci_resource_op_s {
 # define                CI_RSOP_FILTER_ADD_ETHER_TYPE   0x84
 # define                CI_RSOP_VI_GET_TS_CORRECTION    0x85
 # define                CI_RSOP_VI_TX_ALT_ALLOC         0x86
+# define                CI_RSOP_VI_TX_ALT_FREE          0x87
+# define                CI_RSOP_VI_GET_TS_FORMAT        0x88
 
   union {
     struct {
@@ -288,6 +290,10 @@ typedef struct ci_resource_op_s {
     struct {
       uint8_t           alt_ids[32];
     } vi_tx_alt_alloc_out;
+    struct {
+      /* enum ef_timestamp_format */
+      uint32_t          out_ts_format;
+    } vi_ts_format;
   } u CI_ALIGN(8);
 } ci_resource_op_t;
 
@@ -359,11 +365,12 @@ typedef struct ci_license_challenge_op_s {
   efch_resource_id_t    pd_id;
 
   ci_int16          feature;
-/* Feature IDs. Well known. */
-#define CI_LCOP_CHALLENGE_FEATURE_ONLOAD    (1)
-#define CI_LCOP_CHALLENGE_FEATURE_SCPRO     (4)
-#define CI_LCOP_CHALLENGE_FEATURE_SCLIVE    (32)
-#define CI_LCOP_CHALLENGE_FEATURE_SCSI      (64)
+/* Feature IDs. Well known. Defined in SF-116142-SW. */
+#define CI_LCOP_CHALLENGE_FEATURE_ONLOAD    0x0001
+#define CI_LCOP_CHALLENGE_FEATURE_SCPRO     0x0004
+#define CI_LCOP_CHALLENGE_FEATURE_SCLIVE    0x0020
+#define CI_LCOP_CHALLENGE_FEATURE_SCSI      0x0040
+#define CI_LCOP_CHALLENGE_FEATURE_SCALEOUT  0x2000
 
   uint32_t          expiry;
   uint8_t           challenge[CI_LCOP_CHALLENGE_CHALLENGE_LEN];
@@ -390,14 +397,14 @@ typedef struct ci_license_challenge_op_s {
 **  BASE_MACADDR[6 bytes],
 **  CURRENT_MACADDR[6 bytes],
 */
-#define CI_LCOP_V3_CHALLENGE_MESSAGE_LEN (70)
+#define CI_LCOP_V3_CHALLENGE_MESSAGE_LEN (76)
 
 typedef struct ci_v3_license_challenge_op_s {
   int32_t               fd;
   efch_resource_id_t    pd_id;
 
   uint8_t           challenge[CI_LCOP_V3_CHALLENGE_CHALLENGE_LEN];
-  uint64_t          app_id;
+  uint64_t          app_id CI_ALIGN(8);
 /* app ids as in ci_license_challenge_op_s and: */
 #define CI_LCOP_CHALLENGE_FEATURE_TCP_DIRECT (0x100)
 
@@ -435,7 +442,7 @@ struct efch_capabilities_in {
 
 struct efch_capabilities_out {
   int32_t support_rc;
-  uint64_t val;
+  uint64_t val CI_ALIGN(8);
 };
 
 typedef struct ci_capabilities_op_s {

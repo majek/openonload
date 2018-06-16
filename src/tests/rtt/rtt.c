@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -25,7 +25,14 @@
 
 static void usage_msg(FILE* f)
 {
-  fprintf(f, "usage:  rtt ping|pong TX [RX]\n");
+  fprintf(f, "usage:\n");
+  fprintf(f, "  rtt [OPTIONS] ping|pong TX [RX]\n");
+  fprintf(f, "\n");
+  fprintf(f, "options:\n");
+  fprintf(f, "  -i ITERATIONS           - num iterations\n");
+  fprintf(f, "  -w WARMUPS              - num warm-up iterations\n");
+  fprintf(f, "  -f FRAME_LEN            - frame length (bytes)\n");
+  fprintf(f, "  -g GAP_NANOS            - pause between iterations (nanos)\n");
 }
 
 
@@ -175,6 +182,11 @@ static void do_pinger(const struct rtt_options* opts,
     rx_ep->pong(rx_ep);
   }
 
+  if( tx_ep->reset_stats )
+    tx_ep->reset_stats(tx_ep);
+  if( rx_ep->reset_stats )
+    rx_ep->reset_stats(rx_ep);
+
   /* Touch to ensure resident. */
   memset(results, 0, n_iters * sizeof(results[0]));
   struct timespec start, end;
@@ -192,7 +204,11 @@ static void do_pinger(const struct rtt_options* opts,
     }
   }
 
-  printf("# measurement_overhead = %d\n", overhead);
+  printf("# measurement_overhead: %d\n", overhead);
+  if( tx_ep->dump_info != NULL )
+    tx_ep->dump_info(tx_ep, stdout);
+  if( rx_ep != tx_ep && rx_ep->dump_info != NULL )
+    rx_ep->dump_info(rx_ep, stdout);
   for( i = 0; i < n_iters; ++i )
     printf("%d\n", results[i]);
 }
@@ -202,13 +218,27 @@ static void do_ponger(const struct rtt_options* opts,
                       struct rtt_endpoint* tx_ep,
                       struct rtt_endpoint* rx_ep)
 {
-  int n_iters_total = opts->n_warm_ups + opts->n_iters;
   int i;
 
-  for( i = 0; i < n_iters_total; ++i ) {
+  for( i = 0; i < opts->n_warm_ups; ++i ) {
     rx_ep->pong(rx_ep);
     tx_ep->ping(tx_ep);
   }
+
+  if( tx_ep->reset_stats )
+    tx_ep->reset_stats(tx_ep);
+  if( rx_ep->reset_stats )
+    rx_ep->reset_stats(rx_ep);
+
+  for( i = 0; i < opts->n_iters; ++i ) {
+    rx_ep->pong(rx_ep);
+    tx_ep->ping(tx_ep);
+  }
+
+  if( tx_ep->dump_info != NULL )
+    tx_ep->dump_info(tx_ep, stdout);
+  if( rx_ep != tx_ep && rx_ep->dump_info != NULL )
+    rx_ep->dump_info(rx_ep, stdout);
 }
 
 
@@ -232,7 +262,7 @@ int main(int argc, char* argv[])
   opts.inter_iter_gap_ns = 0;
 
   int c;
-  while( (c = getopt(argc, argv, "i:w:f:g:")) != -1 )
+  while( (c = getopt(argc, argv, "i:w:f:g:h")) != -1 )
     switch( c ) {
     case 'i':
       opts.n_iters = atoi(optarg);
@@ -246,6 +276,10 @@ int main(int argc, char* argv[])
       break;
     case 'g':
       opts.inter_iter_gap_ns = atoi(optarg);
+      break;
+    case 'h':
+      usage_msg(stdout);
+      exit(0);
       break;
     case '?':
       usage_err();

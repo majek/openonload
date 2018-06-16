@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -129,7 +129,7 @@ unsigned long efrm_pt_iova_base;
  * PCI IDs and init
  *
  ****************************************************************************/
-static DEFINE_PCI_DEVICE_TABLE(efrm_pci_vf_table) = {
+static const struct pci_device_id efrm_pci_vf_table[] = {
 	{PCI_DEVICE(PCI_VENDOR_ID_SOLARFLARE, 0x1000 | 0x0803)},/* SFC9020 */
 	{PCI_DEVICE(PCI_VENDOR_ID_SOLARFLARE, 0x1000 | 0x0813)},/* SFL9021 */
 	{0}			/* end of list */
@@ -237,13 +237,10 @@ static int efrm_vf_interrupts_probe(struct efrm_vf *vf)
 
 	for (pos = 0; pos < vf->irq_count; pos++)
 		msix[pos].entry = pos;
-	rc = pci_enable_msix(pci_dev, msix, vf->irq_count);
-	if (rc > 0) {
-		vf->irq_count = rc;
-		rc = pci_enable_msix(pci_dev, msix, rc);
-	}
-	if (rc != 0)
+	rc = pci_enable_msix_range(pci_dev, msix, 1, vf->irq_count);
+	if (rc <= 0)
 		goto fail;
+	vf->irq_count = rc;
 	for (pos = 0; pos < vf->irq_count; pos++) {
 		vf->vi[pos].irq = msix[pos].vector;
 		vf->vi[pos].index = pos;
@@ -1336,7 +1333,9 @@ void *efrm_find_ksym(const char *name)
         
 	t.name = name;
 	t.addr = NULL;
+	mutex_lock(&module_mutex);
 	kallsyms_on_each_symbol(efrm_check_ksym, &t);
+	mutex_unlock(&module_mutex);
 	return t.addr;
 }
 EXPORT_SYMBOL(efrm_find_ksym);

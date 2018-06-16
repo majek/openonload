@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -151,7 +151,7 @@ citp_init_trampoline(ci_fd_t fd)
 #endif
   }
 #else
-  /* x86, x86_64, ia64 - no toc or user fixup, function pointers mean what they say */
+  /* x86, x86_64 - no toc or user fixup, function pointers mean what they say */
   CI_USER_PTR_SET (args.trampoline_entry, ci_trampoline_handler_entry);  
   CI_USER_PTR_SET (args.trampoline_toc,   NULL);
   CI_USER_PTR_SET (args.trampoline_user_fixup, NULL );

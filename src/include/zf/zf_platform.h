@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -15,31 +15,22 @@
 
 /**************************************************************************\
 *//*! \file
-** <L5_PRIVATE L5_HEADER >
-** \author  mj
-**  \brief  ZF API
-**   \date  2015/10/20
-**    \cop  (c) SolarFlare Communications.
-** </L5_PRIVATE>
+**  \brief  TCPDirect platform API
+**
+** This file contains platform-dependent code that is used by the other
+** header files. It has no end-user API.
+**
+*//*! \cond NODOC
 *//*
 \**************************************************************************/
 
 #ifndef __ZF_PLATFORM_H__
 #define __ZF_PLATFORM_H__
 
-/** \cond NODOC */
-
-#ifdef __GNUC__
-#define _GNU_SOURCE 1
+#ifndef __IN_ZF_TOP_H__
+# error "Please include zf.h to use TCPDirect."
 #endif
 
-/* Tell stdint.h to generate macros such as PRIx64 also in C++ */
-#ifndef __STDC_FORMAT_MACROS
-# define __STDC_FORMAT_MACROS
-#endif
-#include <stdint.h>
-#include <stdbool.h>
-#include <inttypes.h>
 #include <time.h>
 # include <sys/types.h>
 
@@ -51,26 +42,65 @@
 #  define ZF_HOT
 #  define ZF_COLD
 # endif
+# if __GNUC__ > 4 || (__GNUC__ >= 4 && __GNUC_MINOR__ >= 5)
+#  define ZF_NOCLONE __attribute__((noclone))
+# else
+#  define ZF_NOCLONE
+# endif
 # define ZF_CONSTFUNC __attribute__((const))
 # define ZF_LIKELY(t)    __builtin_expect((t), 1)
 # define ZF_UNLIKELY(t)  __builtin_expect((t), 0)
 # define ZF_UNREACHABLE __builtin_unreachable
+# define ZF_NOINLINE __attribute__((noinline))
+# define ZF_VISIBLE __attribute__((visibility("default")))
 #endif
 
 #if defined(__x86_64__) || defined(__i386__)
 # include <zf/sysdep/x86.h>
-#elif defined(__PPC__)
-# include <zf/sysdep/ppc.h>
 #else
 # error Unsupported platform.
 #endif
 
 #ifdef __cplusplus
-#define LIBENTRY extern "C" __attribute__((visibility("default")))
+#define ZF_LIBENTRY extern "C" __attribute__((visibility("default")))
 #else
-#define LIBENTRY extern
+#define ZF_LIBENTRY extern
 #endif
 
-/** \endcond NODOC */
+#ifdef __cplusplus
+  #ifdef __GNUC__
+    #if __GNUC__
+      /* Flexible array is a GCC extension for C++ */
+      #define ZF_FLEXIBLE_ARRAY_COUNT
+    #endif
+  #endif
+#else
+  #ifdef __STDC__VERSION__
+    #if __STDC_VERSION__ >= 199901L
+      /* C99 */
+      #define ZF_FLEXIBLE_ARRAY_COUNT
+    #else
+      /* C<99 && C>=95 */
+      #ifdef __GNUC__
+        /* Work around GCC4.8 bug by using zero-length extension */
+        #define ZF_FLEXIBLE_ARRAY_COUNT 0
+      #endif
+    #endif
+  #else
+    /* C<95 */
+    #ifdef __GNUC__
+      /* Work around GCC4.8 bug by using zero-length extension */
+      #define ZF_FLEXIBLE_ARRAY_COUNT 0
+    #endif
+  #endif
+#endif
+
+#ifndef ZF_FLEXIBLE_ARRAY_COUNT
+/* non-gnu C++, non-gnu C<99 */
+#define ZF_FLEXIBLE_ARRAY_COUNT 1
+#endif
 
 #endif /* __ZF_PLATFORM_H__ */
+/** @}
+ * \endcond NODOC
+ */

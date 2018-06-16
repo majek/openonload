@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -71,6 +71,25 @@ ci_ip_stats_clear(ci_ip_stats *stats)
   memset(stats, 0, sizeof(ci_ip_stats));
 }
 
+ci_inline void
+ci_tcp_stats_count_update(ci_tcp_stats_count* dst, const ci_tcp_stats_count* src)
+{
+#define OO_STAT(desc, type, name, kind) \
+  dst->name += src->name;
+#include <ci/internal/tcp_stats_count_def.h>
+#undef OO_STAT
+}
+
+ci_inline void
+ci_tcp_ext_stats_count_update(ci_tcp_ext_stats_count* dst, const ci_tcp_ext_stats_count* src)
+{
+#define OO_STAT(desc, type, name, kind) \
+  dst->name += src->name;
+#include <ci/internal/tcp_ext_stats_count_def.h>
+#undef OO_STAT
+}
+
+
 /* Add statistics from source ci_ip_stats structure to destination */
 ci_inline void
 ci_ip_stats_update(ci_ip_stats *dest_stats, ci_ip_stats *src_stats) {
@@ -98,12 +117,7 @@ ci_ip_stats_update(ci_ip_stats *dest_stats, ci_ip_stats *src_stats) {
     dest[ctr] += src[ctr];
   }
 
-  /* Update tcp counters */
-  src = (CI_IP_STATS_TYPE*)&src_stats->tcp;
-  dest = (CI_IP_STATS_TYPE*)&dest_stats->tcp;
-  for( ctr = 0; ctr < CI_TCP_STATS_COUNT_LEN; ctr++ ) {
-      dest[ctr] += src[ctr];
-  }
+  ci_tcp_stats_count_update(&dest_stats->tcp, &src_stats->tcp);
 
   /* Update udp counters */
   src = (CI_IP_STATS_TYPE*)&src_stats->udp;
@@ -112,12 +126,7 @@ ci_ip_stats_update(ci_ip_stats *dest_stats, ci_ip_stats *src_stats) {
       dest[ctr] += src[ctr];
   }
 
-  /* Update tcp_ext counters */
-  src = (CI_IP_STATS_TYPE*)&src_stats->tcp_ext;
-  dest = (CI_IP_STATS_TYPE*)&dest_stats->tcp_ext;
-  for( ctr = 0; ctr < CI_TCP_EXT_STATS_COUNT_LEN; ctr++ ) {
-      dest[ctr] += src[ctr];
-  }
+  ci_tcp_ext_stats_count_update(&dest_stats->tcp_ext, &src_stats->tcp_ext);
 }
 
 
@@ -429,6 +438,8 @@ ci_ip_stats_update(ci_ip_stats *dest_stats, ci_ip_stats *src_stats) {
       __CI_TCP_EXT_STATS_INC( (netif), paws_active_rejected )
 #define CI_TCP_EXT_STATS_INC_PAWS_ESTAB_REJECTED( netif ) \
       __CI_TCP_EXT_STATS_INC( (netif), paws_estab_rejected )
+#define CI_TCP_EXT_STATS_INC_TSO_MISSING( netif ) \
+      __CI_TCP_EXT_STATS_INC( (netif), tso_missing )
 
 #define CI_TCP_EXT_STATS_INC_DELAYED_ACK( netif ) \
       __CI_TCP_EXT_STATS_INC( (netif), delayed_ack )

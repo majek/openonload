@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -28,6 +28,7 @@ typedef struct ci_tcp_socket_listen_s	ci_tcp_socket_listen;
 typedef struct ci_udp_state_s		ci_udp_state;
 typedef union  citp_waitable_obj_u	citp_waitable_obj;
 typedef struct citp_socket_s            citp_socket;
+typedef struct ci_active_wild_s         ci_active_wild;
 
 
 /*! The stack's measure of time.  In ticks. */

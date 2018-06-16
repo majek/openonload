@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -14,7 +14,7 @@
 */
 
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -55,7 +55,7 @@ static uint8_t mcast_mac[6];
 static struct sockaddr_in sa_local, sa_mcast;
 
 int init_udp_pkt(void* pkt_buf, int paylen, ef_vi *vi,
-                 ef_driver_handle dh)
+                 ef_driver_handle dh, int vlan)
 {
   int ip_len = sizeof(ci_ip4_hdr) + sizeof(ci_udp_hdr) + paylen;
   ci_ether_hdr* eth;
@@ -63,19 +63,29 @@ int init_udp_pkt(void* pkt_buf, int paylen, ef_vi *vi,
   ci_udp_hdr* udp;
 
   eth = pkt_buf;
-  ip4 = (void*) ((char*) eth + 14);
+  int etherlen = ETH_HLEN + ((vlan >= 0) ? 4 : 0);
+  ip4 = (void*) ((char*) eth + etherlen);
   udp = (void*) (ip4 + 1);
 
+  if(vlan >= 0) {
+    ci_ethhdr_vlan_t* ethv = pkt_buf;
+    ethv->ether_vtype = htons(0x8100);
+    ethv->ether_vtag = htons(vlan);
+    ethv->ether_type = htons(0x0800);
+  }
+  else {
+    eth->ether_type = htons(0x0800);
+  }
   memcpy(eth->ether_dhost, mcast_mac, 6);
   ef_vi_get_mac(vi, dh, eth->ether_shost);
-  eth->ether_type = htons(0x0800);
+
   ci_ip4_hdr_init(ip4, CI_NO_OPTS, ip_len, 0, IPPROTO_UDP,
 		  sa_local.sin_addr.s_addr,
 		  sa_mcast.sin_addr.s_addr, 0);
   ci_udp_hdr_init(udp, ip4, sa_local.sin_port,
 		  sa_mcast.sin_port, udp + 1, paylen, 0);
 
-  return ETH_HLEN + ip_len;
+  return etherlen + ip_len;
 }
 
 void common_usage()
@@ -95,7 +105,7 @@ void common_usage()
   fprintf(stderr, "  -l <local-port>     - change local port to send from\n");
 }
 
-void parse_args(char *argv[], int *ifindex, int local_port)
+void parse_args(char *argv[], int *ifindex, int local_port, int vlan)
 {
   const char *interface, *mcast_ip;
   char* local_ip;
@@ -105,7 +115,7 @@ void parse_args(char *argv[], int *ifindex, int local_port)
   mcast_ip = (argv++)[0];
   mcast_port = atoi(argv[0]);
 
-  get_ipaddr_of_intf(interface, &local_ip);
+  get_ipaddr_of_vlan_intf(interface, vlan, &local_ip);
   CL_CHK(parse_interface(interface, ifindex));
   CL_CHK(parse_host(local_ip, &sa_local.sin_addr));
   sa_local.sin_port = htons(local_port);

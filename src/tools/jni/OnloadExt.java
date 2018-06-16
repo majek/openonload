@@ -79,7 +79,12 @@ public class OnloadExt {
     public static final int ONLOAD_SPIN_STACK_LOCK   = 12;
     /** Alter spin for when socket is already locked only.  @see SetSpin */
     public static final int ONLOAD_SPIN_SOCK_LOCK    = 13;
-    
+    /** Alter spin for busy poll.  @see SetSpin */
+    public static final int ONLOAD_SPIN_SO_BUSY_POLL = 14;
+    /** Alter spin for TCP connect.  @see SetSpin */
+    public static final int ONLOAD_SPIN_TCP_CONNECT  = 15;
+    /** Set all spin types set via EF_POLL_USEC. @see SetSpin */
+    public static final int ONLOAD_SPIN_MIMIC_EF_POLL= 16;
     /** Is the ONLOAD_MSG_WARM feature supported? @see CheckFeature */
     public static final int ONLOAD_FD_FEAT_MSG_WARM  = 0;
     
@@ -235,7 +240,25 @@ public class OnloadExt {
      * @note This method only currently suports connected TCP sockets.
      */
     public static native int MoveFd ( java.net.ServerSocket socket );
-    
+
+    /** Create a new UDP socket that does not accelerate unicast rx.
+     * The newly created socket will not use hardware resources for
+     * unicast rx.  Multicast rx will be accelerated and
+     * use hardware resources as usual.
+     * @param port   port to bind the new socket to.
+     * @return new UDP socket or throws exception java.net.SocketException.
+     */
+    public static java.net.DatagramSocket UnicastNonaccel(int port)
+                                            throws java.net.SocketException {
+      java.net.DatagramSocket s = new java.net.DatagramSocket(port);
+      int rc = UnicastNonaccel_(s);
+      if ( rc < 0 )
+        throw new java.net.SocketException("Creating UnicastNonaccel socket failed");
+      return s;
+    }
+
+    private static native int UnicastNonaccel_ ( java.net.DatagramSocket socket );
+
     /** Simple unit test and example */
     public static void main(String[] args) throws java.net.SocketException,
                                                   java.io.IOException
@@ -375,8 +398,25 @@ public class OnloadExt {
         ok &= stat.endpointId > 0;
         ok &= stat.endpointState == 0x3331; //CI_TCP_ESTABLISHED
 
+        java.net.DatagramSocket ds3 = UnicastNonaccel(5403);
+        ok &= ds3 != null;
+
+        rc = OnloadExt.FdStat( ds3, stat );
+        System.out.println( "\n        Rval: " + rc
+                  + " Stack ID: " + stat.stackId
+                  + " Name: " + stat.stackName
+                  + " Endpoint ID: " + stat.endpointId
+                  + " Endpoint State: " + Integer.toHexString(stat.endpointState)
+                );
+        ok &= rc > 0;
+        ok &= stat.stackName.equals("Joe");
+        ok &= stat.endpointId > 0;
+        ok &= stat.endpointState == 0xb000; //CI_TCP_STATE_UDP
+        System.out.println( "Expect: Rval: x Stack ID: y Name: Joe Endpoint ID: nn Endpoint State: b000" );
+
         ds1.close();
         ds2.close();
+        ds3.close();
         ss1.close();
         ss2.close();
         ss3.close();

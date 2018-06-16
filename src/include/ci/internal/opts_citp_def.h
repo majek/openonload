@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -135,6 +135,8 @@ CI_CFG_OPT("EF_EPOLL_CTL_FAST", ul_epoll_ctl_fast, ci_uint32,
 "exec() in cojuction with epoll file descriptors or with the sockets "
 "monitored by epoll.\n"
 "* If you monitor the epoll fd in another poll, select or epoll set, "
+"and have this option enabled, it may not give correct results.\n"
+"* If you monitor the epoll fd in another poll, select or epoll set, "
 "and the effects of epoll_ctl() are latency critical, then this option can "
 "cause latency spikes or even deadlock.\n"
 "* With EF_UL_EPOLL=2, this option is harmful if you are calling "
@@ -166,6 +168,17 @@ CI_CFG_OPT("EF_EPOLL_MT_SAFE", ul_epoll_mt_safe, ci_uint32,
 "This option improves performance with EF_UL_EPOLL=1 or 3 and also with "
 "EF_UL_EPOLL=2 and EF_EPOLL_CTL_FAST=1.",
            1, , 0, 0, 1, yesno)
+
+CI_CFG_OPT("EF_WODA_SINGLE_INTERFACE", woda_single_if, ci_uint32,
+"This option alters the behaviour of onload_ordered_epoll_wait().  This "
+"function would normally ensure correct ordering across multiple interfaces. "
+"However, this impacts latency, as only events arriving before the first "
+"interface polled can be returned and still guarantee ordering.  If the "
+"traffic being ordered is only arriving on a single interface then this "
+"additional constraint is not necessary.  If this option is enabled then "
+"traffic will only be ordered relative to other traffic arriving on the same "
+"interface.\n",
+          , , 0, 0, 1, yesno)
 #endif
 
 CI_CFG_OPT("EF_FDS_MT_SAFE", fds_mt_safe, ci_uint32,
@@ -198,6 +211,11 @@ CI_CFG_OPT("EF_FDTABLE_STRICT", fdtable_strict, ci_uint32,
 /* FIXME: what are the symptoms to look for to find if this is causing
  * problems?
  */
+           1, , 0, 0, 1, yesno)
+
+CI_CFG_OPT("EF_LOG_TIMESTAMPS", log_timestamps, ci_uint32,
+"If enabled this will add a timestamp to every Onload output log entry. "
+"Timestamps are originated from the FRC counter.",
            1, , 0, 0, 1, yesno)
 
 CI_CFG_OPT("EF_LOG_VIA_IOCTL", log_via_ioctl, ci_uint32,
@@ -387,10 +405,6 @@ CI_CFG_OPT("EF_SA_ONSTACK_INTERCEPT", sa_onstack_intercept, ci_uint32,
 "work, but OpenOnload library will do its best.",
            1, , 0, 0, 1, yesno)
 
-/* Not set via environment. */
-CI_CFG_OPT("", intercept, ci_uint32,
-           "", 1, , 1, 0, 1, yesno)
-
 #define CI_UNIX_PIPE_DONT_ACCELERATE 0
 #define CI_UNIX_PIPE_ACCELERATE 1
 #define CI_UNIX_PIPE_ACCELERATE_IF_NETIF 2
@@ -491,6 +505,15 @@ CI_CFG_OPT("EF_SPIN_USEC", ul_spin_usec, ci_uint32,
 OO_SPIN_BLURB,
            , , 0, MIN, MAX, time:usec)
 
+CI_CFG_OPT("EF_SLEEP_SPIN_USEC", sleep_spin_usec, ci_uint32, 
+"Sets the duration in microseconds of sleep after each spin iteration. "
+"Currently applies to EPOLL3 epoll_wait only. "
+"Enabling the option trades some of the benefits of spinning - latency - for reduction "
+"in CPU utilisation and power consumption. "
+"\n"
+OO_SPIN_BLURB,
+           , , 0, MIN, MAX, time:usec)
+
 CI_CFG_OPT("EF_POLL_FAST_USEC", ul_poll_fast_usec, ci_uint32,
 "When spinning in a poll() call, causes accelerated sockets to be polled for N "
 "usecs before unaccelerated sockets are polled.  This reduces "
@@ -546,13 +569,16 @@ CI_CFG_OPT("EF_SIGNALS_NOPOSTPONE", signals_no_postpone, ci_uint64,
 "Comma-separated list of signal numbers to avoid postponing "
 "of the signal handlers.  "
 "Your application will deadlock if one of the handlers uses socket "
-"function.  By default, the list includes SIGBUS, SIGSEGV and SIGPROF.\n"
+"function.  By default, the list includes SIGBUS, SIGFPE, SIGSEGV and "
+"SIGPROF.\n"
 "Please specify numbers, not string aliases: EF_SIGNALS_NOPOSTPONE=7,11,27 "
-"instead of EF_SIGNALS_NOPOSTPONE=SIGBUS,SIGSEGV,SIGPROF.\n"
+"instead of EF_SIGNALS_NOPOSTPONE=SIGILL,SIGBUS,SIGSEGV,SIGPROF.\n"
 "You can set EF_SIGNALS_NOPOSTPONE to empty value to postpone "
 "all signal handlers in the same way if you suspect these signals "
 "to call network functions.",
-        A8,, (1 << (SIGBUS-1)) | (1 << (SIGSEGV-1) | (1 << (SIGPROF-1))),
+        A8,,
+        (1 << (SIGILL-1)) | (1 << (SIGBUS-1)) | (1 << (SIGFPE-1)) |
+        (1 << (SIGSEGV-1)) | (1 << (SIGPROF-1)),
         0, (ci_uint64)(-1), bitmask)
 
 # define CITP_VFORK_USE_FORK           0
@@ -578,7 +604,7 @@ CI_CFG_OPT("EF_CLUSTER_SIZE", cluster_size, ci_uint32,
 "sockets than specified here join the cluster, then some traffic will"
 "be lost.  Refer to the SO_REUSEPORT section in the manual for more"
 "detail.\n",
-           , , 2, 2, MAX, count)
+           , , 2, 1, MAX, count)
 
 # define CITP_CLUSTER_RESTART_FAIL              0
 # define CITP_CLUSTER_RESTART_TERMINATE_ORPHANS 1
@@ -588,6 +614,17 @@ CI_CFG_OPT("EF_CLUSTER_RESTART", cluster_restart_opt, ci_uint32,
 "limitation such as an orphan stack from the previous process:\n "
 " 0 - return an error.\n"
 " 1 - terminate the orphan to allow the new process to continue",
+           , , 0, 0, 1, level)
+
+CI_CFG_OPT("EF_CLUSTER_HOT_RESTART", cluster_hot_restart_opt, ci_uint32,
+    "This option controls whether or not clusters support the hot/seamless "
+    "restart of applications. Enabling this reuses existing stacks in the "
+    "cluster to allow up to two processes per stack to bind to the same port "
+    "simultaneously. Note that it is required there will be as many new "
+    "sockets on the port as old ones; traffic will be lost otherwise when the "
+    "old sockets close.\n"
+    " 0 - disable per-port stack sharing. (default)\n"
+    " 1 - enable per-port stack sharing for hot restarts.",
            , , 0, 0, 1, level)
 
 CI_CFG_OPT("EF_TCP_FORCE_REUSEPORT", tcp_reuseports, ci_uint64,
@@ -609,6 +646,35 @@ CI_CFG_OPT("EF_SOCKET_CACHE_PORTS", sock_cache_ports, ci_uint64,
 "be eligible to be cached.\n",
            A8, , 0, MIN, MAX, list)
 #endif
+
+CI_CFG_OPT("EF_ONLOAD_FD_BASE", fd_base, ci_uint32,
+"Onload uses fds internally that are not visible to the application.  This can "
+"cause problems for applications that make assumptions about their use of the "
+"fd space, for example by doing dup2/3 onto a specific file descriptor.  If "
+"this is done onto an fd that is internally in use by onload than an error of "
+"the form 'citp_ep_dup3(29, 3): target is reserved, see EF_ONLOAD_FD_BASE' "
+"will be emitted.\n"
+"This option specifies a base file descriptor value, that onload should try to "
+"make it's internal file descriptors greater than or equal to.  This allows "
+"the application to direct onload to a part of the fd space that it is not "
+"expecting to explicitly use.\n",
+           A8, , 4, MIN, MAX, count)
+
+CI_CFG_OPT("EF_SYNC_CPLANE_AT_CREATE", sync_cplane, ci_uint32,
+"When this option is set to 2 Onload will force a sync of control plane "
+"information from the kernel when a stack is created.  This can help to "
+"ensure up to date information is used where a stack is created immediately "
+"following interface configuration."
+"\n"
+"If this option is set to 1 then Onload will perform a lightweight sync of "
+"control plane information without performing a full dump.  "
+"It is the default mode."
+"\n"
+"Setting this option to 0 will disable forced sync.  Synchronising data from "
+"the kernel will continue to happen periodically."
+"\n"
+"Sync operation time is limited by cplane_init_timeout onload module option.",
+           2, , 1, 0, 2, oneof:never;first;always)
 
 #ifdef CI_CFG_OPTGROUP
 /* put definitions of categories and expertise levels here */

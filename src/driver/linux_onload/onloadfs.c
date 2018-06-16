@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -29,6 +29,7 @@
 #include "onload_internal.h"
 #include <onload/linux_onload_internal.h>
 #include "onload_kernel_compat.h"
+#include <onload/dshm.h>
 
 
 static struct file_operations *oo_fops_by_type(int fd_type)
@@ -84,7 +85,7 @@ static void onload_destroy_inode(struct inode *inode)
 
 
 static
-#ifdef EFX_HAVE_D_DNAME
+#ifdef EFRM_HAVE_D_DNAME
 const
 #endif
 struct super_operations onloadfs_ops = {
@@ -111,15 +112,16 @@ static const char *priv_type_to_str(char fd_type)
 static int onloadfs_name(ci_private_t *priv, char *buffer, int buflen)
 {
   int len;
+  int sock_id = priv->sock_id;
 
   if( priv->fd_type == CI_PRIV_TYPE_NETIF)
     len = snprintf(buffer, buflen, "[stack:%d]", priv->thr->id);
-#ifdef EFX_HAVE_D_DNAME
+#ifdef EFRM_HAVE_D_DNAME
   /* without d_dname, this is called before listen(), so
    * we have no chance to print tcpl:N:N. */
-  else if( priv->fd_type == CI_PRIV_TYPE_TCP_EP &&
+  else if( priv->fd_type == CI_PRIV_TYPE_TCP_EP && sock_id >= 0 &&
            SP_TO_WAITABLE_OBJ(&priv->thr->netif,
-                              priv->sock_id)->waitable.state ==
+                              sock_id)->waitable.state ==
            CI_TCP_LISTEN)
     len = snprintf(buffer, buflen, "[tcpl:%d:%d]",
                    priv->thr->id, priv->sock_id);
@@ -131,7 +133,7 @@ static int onloadfs_name(ci_private_t *priv, char *buffer, int buflen)
   buffer[buflen-1] = '\0';
   return len + 1;
 }
-#ifdef EFX_HAVE_D_DNAME
+#ifdef EFRM_HAVE_D_DNAME
 static char *onloadfs_dname(struct dentry *dentry, char *buffer, int buflen)
 {
   struct onload_inode *ei = container_of(dentry->d_inode,
@@ -151,10 +153,10 @@ static char *onloadfs_dname(struct dentry *dentry, char *buffer, int buflen)
 }
 #endif
 
-#ifndef EFX_HAVE_STRUCT_PATH
+#ifndef EFRM_HAVE_STRUCT_PATH
 static int onloadfs_delete_dentry(struct dentry *dentry)
 {
-#ifdef EFX_HAVE_D_DNAME
+#ifdef EFRM_HAVE_D_DNAME
   /* see comments in linux/net/socket.c */
   dentry->d_flags |= DCACHE_UNHASHED;
   return 0;
@@ -166,49 +168,49 @@ static int onloadfs_delete_dentry(struct dentry *dentry)
 #endif
 
 static
-#ifdef EFX_HAVE_CONST_D_OP
+#ifdef EFRM_HAVE_CONST_D_OP
 const
 #endif
 struct dentry_operations onloadfs_dentry_operations = {
-#ifdef EFX_HAVE_D_DNAME
+#ifdef EFRM_HAVE_D_DNAME
   .d_dname  = onloadfs_dname,
 #endif
-#ifndef EFX_HAVE_STRUCT_PATH
+#ifndef EFRM_HAVE_STRUCT_PATH
   .d_delete = onloadfs_delete_dentry,
 #endif
 };
 
 #if LINUX_VERSION_CODE == KERNEL_VERSION(2,6,37)
-#define EFX_OLD_MOUNT_PSEUDO
+#define EFRM_OLD_MOUNT_PSEUDO
 #endif
 
-#ifdef EFX_FSTYPE_HAS_MOUNT
+#ifdef EFRM_FSTYPE_HAS_MOUNT
 static struct dentry *
 onloadfs_mount(struct file_system_type *fs_type, int flags,
                const char *dev_name, void *data)
 {
   return mount_pseudo(fs_type, "onload:", &onloadfs_ops,
-#ifndef EFX_OLD_MOUNT_PSEUDO
+#ifndef EFRM_OLD_MOUNT_PSEUDO
                       &onloadfs_dentry_operations,
 #endif
                       ONLOADFS_MAGIC);
 }
 #else
 static
-#ifdef EFX_NEED_VFSMOUNT_PARAM_IN_GET_SB
+#ifdef EFRM_NEED_VFSMOUNT_PARAM_IN_GET_SB
 int
 #else
 struct super_block *
 #endif
 onloadfs_get_sb(struct file_system_type *fs_type, int flags,
                 const char *dev_name, void *data
-#ifdef EFX_NEED_VFSMOUNT_PARAM_IN_GET_SB
+#ifdef EFRM_NEED_VFSMOUNT_PARAM_IN_GET_SB
                 , struct vfsmount *mnt
 #endif
                 )
 {
   return get_sb_pseudo(fs_type, "onload:", &onloadfs_ops, ONLOADFS_MAGIC
-#ifdef EFX_NEED_VFSMOUNT_PARAM_IN_GET_SB
+#ifdef EFRM_NEED_VFSMOUNT_PARAM_IN_GET_SB
                        , mnt
 #endif
                        );
@@ -218,7 +220,7 @@ onloadfs_get_sb(struct file_system_type *fs_type, int flags,
 
 static struct file_system_type onload_fs_type = {
   .name    = "onloadfs",
-#ifdef EFX_FSTYPE_HAS_MOUNT
+#ifdef EFRM_FSTYPE_HAS_MOUNT
   .mount   = onloadfs_mount,
 #else
   .get_sb  = onloadfs_get_sb,
@@ -227,11 +229,11 @@ static struct file_system_type onload_fs_type = {
 };
 
 static void init_once(
-#if defined(EFX_HAVE_KMEM_CACHE_DTOR) || defined(EFX_HAVE_KMEM_CACHE_FLAGS)
+#if defined(EFRM_HAVE_KMEM_CACHE_DTOR) || defined(EFRM_HAVE_KMEM_CACHE_FLAGS)
                       void *foo, struct kmem_cache *cachep,
                       unsigned long flags
 #else
-#ifdef EFX_HAVE_KMEM_CACHE_CACHEP
+#ifdef EFRM_HAVE_KMEM_CACHE_CACHEP
                       struct kmem_cache *cachep,
 #endif
                       void *foo
@@ -239,7 +241,7 @@ static void init_once(
                       )
 {
   struct onload_inode *ei = (struct onload_inode *)foo;
-#if defined(EFX_HAVE_KMEM_CACHE_DTOR) || defined(EFX_HAVE_KMEM_CACHE_FLAGS)
+#if defined(EFRM_HAVE_KMEM_CACHE_DTOR) || defined(EFRM_HAVE_KMEM_CACHE_FLAGS)
 # ifdef SLAB_CTOR_VERIFY
     if((flags & SLAB_CTOR_VERIFY) == 0)
 #endif
@@ -258,7 +260,7 @@ int __init onloadfs_init(void)
   onload_inode_cachep = kmem_cache_create("onloadfs_inode_cache",
                                           sizeof(struct onload_inode), 0, 0,
                                           init_once
-#ifdef EFX_HAVE_KMEM_CACHE_DTOR
+#ifdef EFRM_HAVE_KMEM_CACHE_DTOR
                                           , NULL
 #endif
                                           );
@@ -277,7 +279,7 @@ int __init onloadfs_init(void)
 }
 void onloadfs_fini(void)
 {
-#ifdef EFX_HAVE_KERN_UMOUNT
+#ifdef EFRM_HAVE_KERN_UMOUNT
   kern_unmount(onload_mnt);
 #else
   mntput(onload_mnt);
@@ -287,7 +289,7 @@ void onloadfs_fini(void)
   kmem_cache_destroy(onload_inode_cachep);
 }
 
-#ifndef EFX_HAVE_ALLOC_FILE
+#ifndef EFRM_HAVE_ALLOC_FILE
 static struct file *alloc_file(struct vfsmount *mnt, struct dentry *dentry,
                                mode_t mode, struct file_operations *fop)
 {
@@ -310,7 +312,7 @@ onload_alloc_file(tcp_helper_resource_t *thr, oo_sp ep_id,
                   int flags, int fd_type, ci_private_t **priv_p)
 {
   struct qstr name = { .name = "" };
-#ifdef EFX_HAVE_STRUCT_PATH
+#ifdef EFRM_HAVE_STRUCT_PATH
   struct path path;
 #define my_dentry path.dentry
 #else
@@ -330,19 +332,15 @@ onload_alloc_file(tcp_helper_resource_t *thr, oo_sp ep_id,
   inode = new_inode(onload_mnt->mnt_sb);
   if( inode == NULL )
     return -ENOMEM;
-#ifdef EFX_FSTYPE_HAS_MOUNT
+#ifdef EFRM_FSTYPE_HAS_MOUNT
   inode->i_ino = get_next_ino();
 #endif
-  if( fd_type == CI_PRIV_TYPE_NETIF )
+  /* We can't set S_IFSOCK, as the kernel would assume incorrectly that our
+   * inode is preceded by a struct socket.  This is no real loss: we intercept
+   * fstat() at user-level and report the flag there. */
+  if( fd_type == CI_PRIV_TYPE_NETIF || fd_type == CI_PRIV_TYPE_TCP_EP ||
+      fd_type == CI_PRIV_TYPE_UDP_EP )
     inode->i_mode = S_IRWXUGO;
-  if( fd_type == CI_PRIV_TYPE_TCP_EP || fd_type == CI_PRIV_TYPE_UDP_EP )
-    inode->i_mode = 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,21)
-        /* in 2.6.18 this flag makes us "socket" and sendmsg crashes;
-         * see sock_from_file() */
-                    S_IFSOCK |
-#endif
-                    S_IRWXUGO;
   else
     inode->i_mode = S_IFIFO | S_IRUSR | S_IWUSR;
   inode->i_uid = current_fsuid();
@@ -351,8 +349,9 @@ onload_alloc_file(tcp_helper_resource_t *thr, oo_sp ep_id,
   priv->thr = thr;
   priv->sock_id = ep_id;
   priv->fd_type = fd_type;
+  priv->priv_cp = NULL;
 
-#ifdef EFX_FSTYPE_HAS_MOUNT
+#ifdef EFRM_FSTYPE_HAS_MOUNT
 #if LINUX_VERSION_CODE <= KERNEL_VERSION(2,6,37)
   path.dentry = d_alloc(onload_mnt->mnt_sb->s_root, &name);
   if( path.dentry != NULL )
@@ -360,8 +359,8 @@ onload_alloc_file(tcp_helper_resource_t *thr, oo_sp ep_id,
 #else
   path.dentry = d_alloc_pseudo(onload_mnt->mnt_sb, &name);
 #endif
-#else /* EFX_FSTYPE_HAS_MOUNT */
-#ifdef EFX_HAVE_D_DNAME
+#else /* EFRM_FSTYPE_HAS_MOUNT */
+#ifdef EFRM_HAVE_D_DNAME
   my_dentry = d_alloc(onload_mnt->mnt_sb->s_root, &name);
 #else
   {
@@ -374,33 +373,33 @@ onload_alloc_file(tcp_helper_resource_t *thr, oo_sp ep_id,
     my_dentry = d_alloc(onload_mnt->mnt_sb->s_root, &name);
   }
 #endif
-#endif /* EFX_FSTYPE_HAS_MOUNT */
+#endif /* EFRM_FSTYPE_HAS_MOUNT */
 
   if( my_dentry == NULL ) {
     iput(inode);
     return -ENOMEM;
   }
 
-#if !defined(EFX_FSTYPE_HAS_MOUNT) || defined(EFX_OLD_MOUNT_PSEUDO)
+#if !defined(EFRM_FSTYPE_HAS_MOUNT) || defined(EFRM_OLD_MOUNT_PSEUDO)
   my_dentry->d_op = &onloadfs_dentry_operations;
-#if !defined(EFX_HAVE_STRUCT_PATH) && defined(EFX_HAVE_D_DNAME)
+#if !defined(EFRM_HAVE_STRUCT_PATH) && defined(EFRM_HAVE_D_DNAME)
   my_dentry->d_flags &= ~DCACHE_UNHASHED;
 #endif
 #endif
   d_instantiate(my_dentry, inode);
-#ifndef EFX_HAVE_D_DNAME
+#ifndef EFRM_HAVE_D_DNAME
   d_rehash(my_dentry);
 #endif
   inode->i_fop = fops;
 
-#ifdef EFX_HAVE_STRUCT_PATH
+#ifdef EFRM_HAVE_STRUCT_PATH
   path.mnt = mntget(onload_mnt);
   file = alloc_file(&path, FMODE_READ | FMODE_WRITE, fops);
 #else
   file = alloc_file(onload_mnt, dentry, FMODE_READ | FMODE_WRITE, fops);
 #endif
   if( file == NULL) {
-#ifdef EFX_HAVE_STRUCT_PATH
+#ifdef EFRM_HAVE_STRUCT_PATH
     path_put(&path);
 #else
     dput(dentry);
@@ -421,14 +420,17 @@ onload_alloc_file(tcp_helper_resource_t *thr, oo_sp ep_id,
 
 void onload_priv_free(ci_private_t *priv)
 {
-  if( priv->_filp->f_vfsmnt != onload_mnt)
+  if( priv->_filp->f_vfsmnt != onload_mnt ) {
+    oo_dshm_free_handle_list(&priv->dshm_list);
     ci_free(priv);
+  }
   /* inode will free the priv automatically */
 }
 
 
 int
-oo_create_fd(tcp_helper_resource_t* thr, oo_sp ep_id, int flags, int fd_type)
+oo_create_fd(tcp_helper_resource_t* thr, oo_sp ep_id, int flags, int fd_type,
+             struct file** _filp)
 {
   int fd, rc;
   ci_private_t *priv;
@@ -437,18 +439,43 @@ oo_create_fd(tcp_helper_resource_t* thr, oo_sp ep_id, int flags, int fd_type)
   if( fd < 0 )
     return fd;
 
-  rc = onload_alloc_file(thr, ep_id, flags, fd_type, &priv);
-  if( rc != 0 ) {
-    OO_DEBUG_ERR(ci_log("%s: ERROR: onload_alloc_file failed (%d) "
-                        "for [%d:%d]", __func__,
-                        rc, thr->id, ep_id));
-    put_unused_fd(fd);
-    return rc;
+  if( _filp && *_filp ) {
+    rcu_read_lock();
+    rc = get_file_rcu(*_filp);
+    rcu_read_unlock();
+    if( rc == 0 ) {
+      OO_DEBUG_TCPH(ci_log("%s: fd=%d reuses file", __FUNCTION__, fd));
+      CITP_STATS_NETIF_INC(&thr->netif, sock_attach_fd_more_fail);
+      rc = -ENOANO;
+      goto ret_put_fd;
+    }
+    priv = (*_filp)->private_data;
+    ci_assert_equal(priv->fd_type, CI_PRIV_TYPE_TCP_EP);
+    CITP_STATS_NETIF_INC(&thr->netif, sock_attach_fd_more);
+  }
+  else {
+    if( fd_type == -1 ) {
+      rc = -EINVAL;
+      goto ret_put_fd;
+    }
+    rc = onload_alloc_file(thr, ep_id, flags, fd_type, &priv);
+    if( rc != 0 ) {
+      OO_DEBUG_ERR(ci_log("%s: ERROR: onload_alloc_file failed (%d) "
+                          "for [%d:%d]", __func__,
+                          rc, thr->id, ep_id));
+      goto ret_put_fd;
+    }
+    efab_thr_ref(thr);
   }
 
-  efab_thr_ref(thr);
   fd_install(fd, priv->_filp);
+  if( _filp )
+    *_filp = priv->_filp;
   return fd;
+
+ret_put_fd:
+  put_unused_fd(fd);
+  return rc;
 }
 
 
@@ -465,7 +492,7 @@ onloadfs_get_dev_t(ci_private_t* priv, void* arg)
 void
 oo_file_moved(ci_private_t* priv)
 {
-#ifndef EFX_HAVE_D_DNAME
+#ifndef EFRM_HAVE_D_DNAME
   {
     /* tell everybody that we've changed the name.
      * Assume the name is short (DNAME_INLINE_LEN_MIN=36). */

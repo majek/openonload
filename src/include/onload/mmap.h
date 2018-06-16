@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -16,11 +16,12 @@
 #ifndef __ONLOAD_MMAP_H__
 #define __ONLOAD_MMAP_H__
 
-/*********************************************************************
-***************************** Memory maps ****************************
-*********************************************************************/
+/* For CI_CFG_* */
+#include <ci/internal/transport_config_opt.h>
+#include <onload/mmap_base.h>
+#include <cplane/mmap.h>
 
-/* Mmap areas:
+/* OO_MMAP_TYPE_NETIF offsets has following IDs:
  * - CI_NETIF_MMAP_ID_STATE     netif shared state; ep buffers
  * - CI_NETIF_MMAP_ID_TIMESYNC  timesync shared state, read-only
  *                              (could be extended to other global shared
@@ -29,15 +30,12 @@
  * - CI_NETIF_MMAP_ID_IOBUFS    VI resource: queues
  *   + if CI_CFG_PKTS_AS_HUGE_PAGES=1, mmap pkt_shm_id array
  * - CI_NETIF_MMAP_ID_PIO       VI resource: PIO IO BAR
+ * - CI_NETIF_MMAP_ID_CTPIO     VI resource: CTPIO IO BAR
  * - CI_NETIF_MMAP_ID_OFE_RO    OFE read-only part of engine
  * - CI_NETIF_MMAP_ID_OFE_RW    OFE read-write part of engine
+ * - CI_NETIF_MMAP_ID_CPLANE    Control plame MIBs mapping
  * - CI_NETIF_MMAP_ID_PKTS + packet set id
  *   packet sets
- *
- * Offset for each area is CI_NETIF_MMAP_ID_* << CI_NETIF_MMAP_ID_SHIFT
- * In Linux, area size may be larger than 1<<CI_NETIF_MMAP_ID_SHIFT,
- * so they "virtally overlap".  In reality, each area gets its own nopage
- * handler.
  */
 #define CI_NETIF_MMAP_ID_STATE    0
 #define CI_NETIF_MMAP_ID_TIMESYNC 1
@@ -46,18 +44,39 @@
 #if CI_CFG_PIO
 #define CI_NETIF_MMAP_ID_PIO      4
 #endif
-#ifdef ONLOAD_OFE
-#define CI_NETIF_MMAP_ID_OFE_RO   5
-#define CI_NETIF_MMAP_ID_OFE_RW   6
+#if CI_CFG_CTPIO
+#define CI_NETIF_MMAP_ID_CTPIO    5
 #endif
-#define CI_NETIF_MMAP_ID_PKTS     7
+#ifdef ONLOAD_OFE
+#define CI_NETIF_MMAP_ID_OFE_RO   6
+#define CI_NETIF_MMAP_ID_OFE_RW   7
+#endif
+#define CI_NETIF_MMAP_ID_PKTS     8
 #define CI_NETIF_MMAP_ID_PKTSET(id) (CI_NETIF_MMAP_ID_PKTS+(id))
 
-/* Mmap start should be aligned by page, so
- * CI_NETIF_MMAP_ID_SHIFT >= CI_PAGE_SHIFT.
- * Let's take the minimal value.
- * I hope it is good for Solaris as well.
- */
-#define CI_NETIF_MMAP_ID_SHIFT  CI_PAGE_SHIFT
+
+/* OO_MMAP_TYPE_DSHM:
+ * "Donation" shm mmap IDs encode buffer ID and class. */
+#ifdef OO_MMAP_TYPE_DSHM
+# define OO_MMAP_DSHM_BUFFER_ID_WIDTH 32
+# define OO_MMAP_DSHM_SHM_CLASS_WIDTH 12
+# define OO_MMAP_DSHM_BUFFER_ID(map_id) \
+    ((map_id) & ((1ull << OO_MMAP_DSHM_BUFFER_ID_WIDTH) - 1))
+# define OO_MMAP_DSHM_SHM_CLASS(map_id) \
+    (((map_id) >> OO_MMAP_DSHM_BUFFER_ID_WIDTH) & \
+     ((1ull << OO_MMAP_DSHM_SHM_CLASS_WIDTH) - 1))
+# define OO_MMAP_DSHM_MAKE_ID(shm_class, buffer_id) \
+    ((ci_uint64) (buffer_id) | \
+     ((ci_uint64) (shm_class) << OO_MMAP_DSHM_BUFFER_ID_WIDTH))
+#endif
+
+
+static inline unsigned
+OO_MMAP_OFFSET_TO_MAP_ID(off_t offset)
+{
+  return offset >> OO_MMAP_ID_SHIFT;
+}
+
+#define VMA_OFFSET(vma)  ((vma)->vm_pgoff << PAGE_SHIFT)
 
 #endif

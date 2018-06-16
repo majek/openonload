@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -17,7 +17,8 @@
 #define __ONLOAD_DRV_DUMP_TO_USER_H__
 
 
-typedef void (*oo_dump_log_fn_t)(void* log_fn_arg, const char* fmt, ...);
+typedef void (*oo_dump_log_fn_t)(void* log_fn_arg, const char* fmt, ...)
+  __attribute__((format(printf,2,3)));
 
 typedef void (*oo_dump_fn_t)(void* oo_dump_fn_arg, oo_dump_log_fn_t log,
                              void* log_arg);

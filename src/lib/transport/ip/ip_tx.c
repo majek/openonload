@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -46,7 +46,6 @@ void ci_ip_send_pkt_lookup(ci_netif* ni,
     sock_cp = *sock_cp_opt;
   else
     oo_sock_cplane_init(&sock_cp);
-  ci_ip_cache_init(ipcache);
   sock_cp.ip_laddr_be32 = pkt_ip->ip_saddr_be32;
   ipcache->ip.ip_daddr_be32 = pkt_ip->ip_daddr_be32;
 
@@ -78,7 +77,7 @@ int ci_ip_send_pkt_send(ci_netif* ni, ci_ip_pkt_fmt* pkt,
     return 0;
   case retrrc_nomac:
     cicp_user_defer_send(ni, retrrc_nomac, &os_rc, OO_PKT_P(pkt),
-                         ipcache->ifindex);
+                         ipcache->ifindex, ipcache->nexthop);
     return 0;
   case retrrc_noroute:
     return -EHOSTUNREACH;
@@ -102,6 +101,7 @@ int ci_ip_send_pkt(ci_netif* ni, const struct oo_sock_cplane* sock_cp_opt,
                    ci_ip_pkt_fmt* pkt)
 {
   ci_ip_cached_hdrs ipcache;
+  ci_ip_cache_init(&ipcache);
   ci_ip_send_pkt_lookup(ni, sock_cp_opt, pkt, &ipcache);
   return ci_ip_send_pkt_send(ni, pkt, &ipcache);
 }
@@ -112,7 +112,10 @@ void ci_ip_send_tcp_slow(ci_netif* ni, ci_tcp_state* ts, ci_ip_pkt_fmt* pkt)
   /* We're here because the ipcache is not valid. */
   int rc, prev_mtu = ts->s.pkt.mtu;
 
-  cicp_user_retrieve(ni, &ts->s.pkt, &ts->s.cp);
+  if(CI_UNLIKELY( ! oo_cp_verinfo_is_valid(ni->cplane,
+                                           &ts->s.pkt.mac_integrity) )) {
+    cicp_user_retrieve(ni, &ts->s.pkt, &ts->s.cp);
+  }
 
   if( ts->s.pkt.status == retrrc_success ) {
     if( ts->s.pkt.mtu != prev_mtu )
@@ -148,14 +151,15 @@ void ci_ip_send_tcp_slow(ci_netif* ni, ci_tcp_state* ts, ci_ip_pkt_fmt* pkt)
         return;
       }
     }
-    cicp_user_defer_send(ni, retrrc_nomac, &rc, OO_PKT_P(pkt), 
-                         ts->s.pkt.ifindex);
     ++ts->stats.tx_nomac_defer;
+    /* Fall through. */
+  case retrrc_alienroute:
+    cicp_user_defer_send(ni, ts->s.pkt.status, &rc, OO_PKT_P(pkt),
+                         ts->s.pkt.ifindex, ts->s.pkt.nexthop);
     return;
   case retrrc_noroute:
     rc = -EHOSTUNREACH;
     break;
-  case retrrc_alienroute:
   case retrrc_localroute:
     /* ?? TODO: inc some stat */
     return;

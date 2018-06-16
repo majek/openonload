@@ -11,7 +11,7 @@ include $(TOP)/mk/site/citools.mk
 include $(TOP)/mk/site/ciapp.mk
 include $(TOP)/mk/site/ciul.mk
 include $(TOP)/mk/site/ciip.mk
-include $(TOP)/mk/site/ocplane.mk
+include $(TOP)/mk/site/cplane.mk
 include $(TOP)/mk/site/citpcommon.mk
 include $(TOP)/mk/site/efrm.mk
 include $(TOP)/mk/site/efhwdef.mk

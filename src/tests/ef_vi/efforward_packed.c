@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -14,7 +14,7 @@
 */
 
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -65,6 +65,7 @@
 
 struct buf {
   int                      buf_id;
+  int                      port_id;
   int                      full;
   int                      refs;
   ef_packed_stream_packet* ps_pkt_start;
@@ -85,12 +86,13 @@ struct port {
   struct buf**             posted_bufs_tail;
   struct buf*              tx_bufs;
   struct buf**             tx_bufs_tail;
+  bool                     tx_stopped;
   int                      max_fill;
   int                      fwd_to;
   ef_packed_stream_params  ps_params;
-  int                      need_tx_push;
   const char*              interface;
   const char*              filter;
+  struct buf*              free_bufs;
 };
 
 
@@ -99,7 +101,6 @@ struct thread {
   int          ports_n;
   struct buf** bufs;
   int          bufs_n;
-  struct buf*  free_bufs;
   int          n_rx_pkts;
   uint64_t     n_rx_bytes;
 };
@@ -133,8 +134,11 @@ static inline void buf_release(struct thread* thread, struct buf* buf)
 {
   assert(buf->refs > 0);
   if( --(buf->refs) == 0 ) {
-    buf->next = thread->free_bufs;
-    thread->free_bufs = buf;
+    struct port* p = &(thread->ports[buf->port_id]);
+    assert( p->port_id == buf->port_id );
+    LOGV("RELEASE: port=%d buf=%d\n", p->port_id, buf->buf_id);
+    buf->next = p->free_bufs;
+    p->free_bufs = buf;
   }
 }
 
@@ -152,12 +156,14 @@ static void handle_rx_ps(struct thread* thread, struct port* rx_port,
   struct buf* buf;
 
   if( EF_EVENT_RX_PS_NEXT_BUFFER(*pev) ) {
+    struct buf* next_buf = posted_buf_get(rx_port);
     if( rx_port->current_buf != NULL ) {
-      LOGV("NEXT_BUF: %d.refs=%d\n", rx_port->current_buf->buf_id,
-           rx_port->current_buf->refs);
+      LOGV("RX_NEXT_BUF: prev=%d refs=%d next=%d\n",
+           rx_port->current_buf->buf_id,
+           rx_port->current_buf->refs, next_buf->buf_id);
       rx_port->current_buf->full = 1;
     }
-    buf = rx_port->current_buf = posted_buf_get(rx_port);
+    buf = rx_port->current_buf = next_buf;
     buf->ps_pkt_start =
       ef_packed_stream_packet_first(buf, rx_port->ps_params.psp_start_offset);
     buf->ps_pkt_end = buf->ps_pkt_start;
@@ -194,8 +200,8 @@ static void do_sends(struct thread* thread, struct port* port)
     assert(buf->refs > 0);
     assert(buf->ps_pkt_start <= buf->ps_pkt_end);
     while( ps_pkt < buf->ps_pkt_end ) {
-      int off = ((uintptr_t) ef_packed_stream_packet_payload(ps_pkt) -
-                 (uintptr_t) buf);
+      uintptr_t off = ((uintptr_t) ef_packed_stream_packet_payload(ps_pkt) -
+                       (uintptr_t) buf);
       int rc = ef_vi_transmit_init(&(port->vi),
                                    buf->ef_addr[port->port_id] + off,
                                    ps_pkt->ps_cap_len, buf->buf_id);
@@ -204,6 +210,7 @@ static void do_sends(struct thread* thread, struct port* port)
         ++n;
       }
       else {
+        port->tx_stopped = true;
         goto done;
       }
       ps_pkt = ef_packed_stream_packet_next(ps_pkt);
@@ -213,6 +220,7 @@ static void do_sends(struct thread* thread, struct port* port)
       goto done;
     }
     else {
+      LOGV("TX_NEXT_BUF:\n");
       port->tx_bufs = buf->next;
       buf_release(thread, buf);
       if( port->tx_bufs == NULL ) {
@@ -234,8 +242,28 @@ static void complete_tx(struct thread* thread, struct port* port, int rq_id)
 {
   assert((unsigned) rq_id < (unsigned) thread->bufs_n);
   struct buf* buf = thread_buf(thread, rq_id);
-  LOGV("COMPLETE: %d.refs=%d\n", buf->buf_id, buf->refs);
+  LOGV("COMPLETE: port=%d %d.refs=%d\n", port->port_id, buf->buf_id, buf->refs);
   buf_release(thread, buf);
+}
+
+
+static void port_fill_rx_ring(struct port* port)
+{
+  while( ef_vi_receive_fill_level(&(port->vi)) < port->max_fill &&
+         port->free_bufs != NULL ) {
+    struct buf* buf = port->free_bufs;
+    port->free_bufs = buf->next;
+    assert( buf->refs == 0 );
+    buf->refs = 1;
+    TRY( ef_vi_receive_post(&port->vi, buf->ef_addr[port->port_id], 0) );
+    posted_buf_put(port, buf);
+  }
+}
+
+
+static inline bool tx_is_low(ef_vi* vi)
+{
+  return ef_vi_transmit_fill_level(vi) < ef_vi_transmit_capacity(vi) / 2;
 }
 
 
@@ -266,16 +294,10 @@ static void thread_main_loop(struct thread* thread)
           break;
         }
       }
-      if( ef_vi_receive_fill_level(&port->vi) < port->max_fill &&
-          thread->free_bufs ) {
-        struct buf* buf = thread->free_bufs;
-        thread->free_bufs = buf->next;
-        ef_vi_receive_post(&port->vi, buf->ef_addr[port->port_id], 0);
-        assert(buf->refs == 0);
-        buf->refs = 1;
-        posted_buf_put(port, buf);
-      }
-      if( port->tx_bufs != NULL )
+      port_fill_rx_ring(port);
+      if( port->tx_stopped && tx_is_low(&(port->vi)) )
+        port->tx_stopped = false;
+      if( port->tx_bufs != NULL && ! port->tx_stopped )
         do_sends(thread, port);
     }
 }
@@ -349,8 +371,8 @@ static void usage_err(void)
 }
 
 
-static void add_port(struct thread* thread, const char* rx_intf,
-                     const char* tx_port_id, const char* filter)
+static struct port* add_port(struct thread* thread, const char* rx_intf,
+                             const char* tx_port_id, const char* filter)
 {
   struct port* p = &(thread->ports[thread->ports_n]);
   p->port_id = (thread->ports_n)++;
@@ -358,18 +380,26 @@ static void add_port(struct thread* thread, const char* rx_intf,
   p->posted_bufs_tail = &(p->posted_bufs);
   p->tx_bufs = NULL;
   p->tx_bufs_tail = &(p->tx_bufs);
+  p->tx_stopped = false;
   p->interface = strdup(rx_intf);
-  p->filter = strdup(filter ? filter : "all");
   p->fwd_to = atoi(tx_port_id);
 
   int rxq_cap = (p->fwd_to >= 0) ? -1 : 0;
+  if( rxq_cap == 0 ) {
+    TEST( filter == NULL );
+    p->filter = NULL;
+  }
+  else {
+    p->filter = strdup(filter ? filter : "all");
+  }
 
   TRY(ef_driver_open(&p->dh));
   TRY(ef_pd_alloc_by_name(&p->pd, p->dh, p->interface, EF_PD_RX_PACKED_STREAM));
   TRY(ef_vi_alloc_from_pd(&p->vi, p->dh, &p->pd, p->dh,
-                          -1, rxq_cap, -1, NULL, -1,
+                          -1, rxq_cap, 2048, NULL, -1,
                           EF_VI_RX_PACKED_STREAM |
-                          EF_VI_RX_PS_BUF_SIZE_64K));
+                          EF_VI_RX_PS_BUF_SIZE_64K |
+                          EF_VI_TX_PUSH_DISABLE));
   TRY(ef_vi_packed_stream_get_params(&p->vi, &(p->ps_params)));
   /* To keep things simple, we insist that all ports support the same
    * packed buffer size.
@@ -383,22 +413,32 @@ static void add_port(struct thread* thread, const char* rx_intf,
   if( p->fwd_to < 0 )
     p->max_fill = 0;
 
+  return p;
+}
+
+
+static void port_install_filters(struct port* port)
+{
   ef_filter_spec filter_spec;
-  if( ! strcmp(p->filter, "all") ) {
-    ef_filter_spec_init(&filter_spec, EF_FILTER_FLAG_NONE);
-    TRY(ef_filter_spec_set_unicast_all(&filter_spec));
-    TRY(ef_vi_filter_add(&p->vi, p->dh, &filter_spec, NULL));
-    ef_filter_spec_init(&filter_spec, EF_FILTER_FLAG_NONE);
-    TRY(ef_filter_spec_set_multicast_all(&filter_spec));
-    TRY(ef_vi_filter_add(&p->vi, p->dh, &filter_spec, NULL));
-  }
-  else {
-    if( filter_parse(&filter_spec, p->filter) != 0 ) {
-      LOGE("ERROR: Bad filter spec '%s'\n", p->filter);
-      exit(1);
-    }
-    TRY(ef_vi_filter_add(&(p->vi), p->dh, &filter_spec, NULL));
-  }
+
+ if( port->fwd_to < 0 )
+    return;
+
+ if( ! strcmp(port->filter, "all") ) {
+   ef_filter_spec_init(&filter_spec, EF_FILTER_FLAG_NONE);
+   TRY( ef_filter_spec_set_unicast_all(&filter_spec) );
+   TRY( ef_vi_filter_add(&(port->vi), port->dh, &filter_spec, NULL) );
+   ef_filter_spec_init(&filter_spec, EF_FILTER_FLAG_NONE);
+   TRY( ef_filter_spec_set_multicast_all(&filter_spec) );
+   TRY( ef_vi_filter_add(&(port->vi), port->dh, &filter_spec, NULL) );
+ }
+ else {
+   if( filter_parse(&filter_spec, port->filter) != 0 ) {
+     LOGE("ERROR: Bad filter spec '%s'\n", port->filter);
+     exit(1);
+   }
+   TRY( ef_vi_filter_add(&(port->vi), port->dh, &filter_spec, NULL) );
+ }
 }
 
 
@@ -437,8 +477,10 @@ int main(int argc, char* argv[])
     const char* filter = strtok(NULL, "~");
     if( rx_intf == NULL || tx_port_id == NULL )
       usage_err();
-    add_port(thread, rx_intf, tx_port_id, filter);
-    n_bufs_wanted += thread->ports[thread->ports_n - 1].max_fill;
+    struct port* port = add_port(thread, rx_intf, tx_port_id, filter);
+    /* max_fill for RX plus one for TX. */
+    if( port->max_fill )
+      n_bufs_wanted += port->max_fill + 1;
   }
 
   for( port_id = 0; port_id < thread->ports_n; ++port_id ) {
@@ -447,14 +489,13 @@ int main(int argc, char* argv[])
       LOGE("ERROR: Bad tx port id '%d'\n", p->fwd_to);
       exit(1);
     }
-    LOGI("p%d %s (%s, vi%d) => %s\n", p->port_id, p->interface, p->filter,
-         ef_vi_instance(&(p->vi)), thread->ports[p->fwd_to].interface);
+    if( p->fwd_to >= 0 )
+      LOGI("p%d %s (%s, vi%d) => %s\n", p->port_id, p->interface, p->filter,
+           ef_vi_instance(&(p->vi)), thread->ports[p->fwd_to].interface);
+    else
+      LOGI("p%d %s TX_ONLY vi%d\n", p->port_id, p->interface,
+           ef_vi_instance(&(p->vi)));
   }
-
-  /* Allocate an extra buffer for each port to account for TX completion
-   * latency.
-   */
-  n_bufs_wanted += thread->ports_n;
 
   /* Packed stream mode requires large contiguous buffers, so allocate
    * huge pages.  (Also makes consuming packets more efficient of
@@ -481,13 +522,14 @@ int main(int argc, char* argv[])
 
   thread->bufs_n = n_bufs_wanted;
   thread->bufs = calloc(thread->bufs_n, sizeof(thread->bufs[0]));
+  struct buf* all_bufs = NULL;
   for( i = 0; i < thread->bufs_n; ++i ) {
     struct buf* buf = (void*) ((char*) ptr + i * buf_size);
     buf->buf_id = i;
     buf->refs = 0;
     thread->bufs[i] = buf;
-    buf->next = thread->free_bufs;
-    thread->free_bufs = buf;
+    buf->next = all_bufs;
+    all_bufs = buf;
   }
 
   /* DMA map the buffers for use with each port. */
@@ -500,7 +542,34 @@ int main(int argc, char* argv[])
     }
   }
 
+  /* Assign some buffers to each port. */
+  for( port_id = 0; port_id < thread->ports_n; ++port_id ) {
+    struct port* p = &(thread->ports[port_id]);
+    if( p->max_fill == 0 )
+      continue;
+    for( i = 0; i < p->max_fill + 1; ++i ) {
+      struct buf* buf = all_bufs;
+      all_bufs = all_bufs->next;
+      buf->port_id = port_id;
+      buf->next = p->free_bufs;
+      p->free_bufs = buf;
+    }
+  }
+  TEST( all_bufs == NULL );
+
   TEST(pthread_create(&thread_id, NULL, monitor_fn, thread) == 0);
+
+  /* Install filters at the last minute.  Reason is that as soon as we
+   * install filters packets are directed to our RXQ.  If we do this before
+   * posting buffers, we'll get no-desc drops reported.  Also if done much
+   * before starting the event loop then we'll build up a backlog that will
+   * never clear if packets are arriving at line rate.
+   */
+  for( port_id = 0; port_id < thread->ports_n; ++port_id )
+    port_fill_rx_ring(&(thread->ports[port_id]));
+  for( port_id = 0; port_id < thread->ports_n; ++port_id )
+    port_install_filters(&(thread->ports[port_id]));
+
   thread_main_loop(thread);
 
   return 0;

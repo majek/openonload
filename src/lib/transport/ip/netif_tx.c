@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -32,12 +32,26 @@
 #include <ci/internal/pio_buddy.h>
 
 
-static void __ci_netif_dmaq_shove(ci_netif* ni, int intf_i)
+/* [is_fresh] is a hint indicating that the requested TXs are latency-
+ * sensitive. */
+static void __ci_netif_dmaq_shove(ci_netif* ni, int intf_i, int is_fresh)
 {
   oo_pktq* dmaq = &ni->state->nic[intf_i].dmaq;
   ef_vi* vi = &ni->nic_hw[intf_i].vi;
-  ci_ip_pkt_fmt* pkt;
+  ci_ip_pkt_fmt* pkt = PKT_CHK(ni, dmaq->head);
   int rc;
+#if CI_CFG_USE_CTPIO && !defined(__KERNEL__)
+  int ctpio = is_fresh;
+#endif
+#if CI_CFG_CTPIO && !defined(__KERNEL__)
+  /* In a non-CTPIO world, we don't need to track whether we've posted any DMA
+   * descriptors because the caller has checked that we have available TXQ
+   * space and so we're guaranteed to post some.  With CTPIO, though, we might
+   * consume all of that space before trying DMAs, and so we need to keep track
+   * of whether there are outstanding DMA descriptors to push at the end of the
+   * function. */
+  int posted_dma = 0;
+#endif
 
   do {
     pkt = PKT_CHK(ni, dmaq->head);
@@ -46,7 +60,37 @@ static void __ci_netif_dmaq_shove(ci_netif* ni, int intf_i)
     {
       ef_iovec iov[CI_IP_PKT_SEGMENTS_MAX];
       ci_netif_pkt_to_iovec(ni, pkt, iov, sizeof(iov) / sizeof(iov[0]));
-      rc = ef_vi_transmitv_init(vi, iov, pkt->n_buffers, OO_PKT_ID(pkt));
+#if CI_CFG_USE_CTPIO && !defined(__KERNEL__)
+      if( ctpio && (pkt->n_buffers < 1 ||
+                    pkt->n_buffers > CI_IP_PKT_SEGMENTS_MAX ||
+                    ! ci_netif_may_ctpio(ni, intf_i, pkt->pay_len)) )
+        ctpio = 0;
+      if( ctpio ) {
+        ci_netif_state_nic_t* nsn = &ni->state->nic[intf_i];
+        struct iovec host_iov[CI_IP_PKT_SEGMENTS_MAX];
+        unsigned total_length;
+
+        ci_assert(! posted_dma);
+
+        total_length = ci_netif_pkt_to_host_iovec(ni, pkt, host_iov,
+                                                  sizeof(host_iov) / sizeof(host_iov[0]));
+        oo_pkt_calc_checksums(ni, pkt, host_iov);
+        ef_vi_transmitv_ctpio(vi, total_length, host_iov, pkt->n_buffers,
+                              nsn->ctpio_ct_threshold);
+        CITP_STATS_NETIF_INC(ni, ctpio_pkts);
+        rc = ef_vi_transmitv_ctpio_fallback(vi, iov, pkt->n_buffers,
+                                            OO_PKT_ID(pkt));
+        ci_assert_equal(rc, 0);
+      }
+      else
+#endif
+      {
+        rc = ef_vi_transmitv_init(vi, iov, pkt->n_buffers, OO_PKT_ID(pkt));
+#if CI_CFG_CTPIO && !defined(__KERNEL__)
+        if( rc >= 0 )
+          posted_dma = 1;
+#endif
+      }
       if( rc >= 0 ) {
         __oo_pktq_next(ni, dmaq, pkt, netif.tx.dmaq_next);
         CI_DEBUG(pkt->netif.tx.dmaq_next = OO_PP_NULL);
@@ -63,6 +107,18 @@ static void __ci_netif_dmaq_shove(ci_netif* ni, int intf_i)
   }
   while( oo_pktq_not_empty(dmaq) );
 
+#if CI_CFG_CTPIO && !defined(__KERNEL__)
+  /* If everything went out by CTPIO, there will be no outstanding DMA
+   * descriptors to pushed, and we're finished.  Otherwise, we still need to
+   * hit the doorbell for those DMA sends. */
+  if( ! posted_dma )
+    return;
+
+  /* We're doing a DMA send, so there's no point attempting CTPIO now until
+   * the TXQ has drained. */
+  ci_netif_ctpio_desist(ni, intf_i);
+#endif
+
   ef_vi_transmit_push(vi);
   CITP_STATS_NETIF_INC(ni, tx_dma_doorbells);
 }
@@ -72,15 +128,15 @@ void ci_netif_dmaq_shove1(ci_netif* ni, int intf_i)
 {
   ef_vi* vi = &ni->nic_hw[intf_i].vi;
   if( ef_vi_transmit_space(vi) >= (ef_vi_transmit_capacity(vi) >> 1) )
-    __ci_netif_dmaq_shove(ni, intf_i);
+    __ci_netif_dmaq_shove(ni, intf_i, 0 /*is_fresh*/);
 }
 
 
-void ci_netif_dmaq_shove2(ci_netif* ni, int intf_i)
+void ci_netif_dmaq_shove2(ci_netif* ni, int intf_i, int is_fresh)
 {
   ef_vi* vi = &ni->nic_hw[intf_i].vi;
   if( ef_vi_transmit_space(vi) > CI_IP_PKT_SEGMENTS_MAX )
-    __ci_netif_dmaq_shove(ni, intf_i);
+    __ci_netif_dmaq_shove(ni, intf_i, is_fresh);
 }
 
 
@@ -132,7 +188,8 @@ void ci_netif_send(ci_netif* netif, ci_ip_pkt_fmt* pkt)
      */
     order = ci_log2_ge(pkt->pay_len, CI_CFG_MIN_PIO_BLOCK_ORDER);
     buddy = &netif->state->nic[intf_i].pio_buddy;
-    if( netif->state->nic[intf_i].oo_vi_flags & OO_VI_FLAGS_PIO_EN ) {
+    if( ! ci_netif_may_ctpio(netif, intf_i, pkt->pay_len) &&
+        netif->state->nic[intf_i].oo_vi_flags & OO_VI_FLAGS_PIO_EN ) {
       if( pkt->pay_len <= NI_OPTS(netif).pio_thresh && pkt->n_buffers == 1 ) {
         if( (offset = ci_pio_buddy_alloc(netif, buddy, order)) >= 0 ) {
           rc = ef_vi_transmit_copy_pio(&netif->nic_hw[pkt->intf_i].vi, offset,
@@ -162,16 +219,40 @@ void ci_netif_send(ci_netif* netif, ci_ip_pkt_fmt* pkt)
 #endif
     ci_netif_pkt_to_iovec(netif, pkt, iov,
                           sizeof(iov) / sizeof(iov[0]));
+#if CI_CFG_USE_CTPIO && !defined(__KERNEL__)
+    if( (pkt->n_buffers > 0) &&
+        (pkt->n_buffers <= CI_IP_PKT_SEGMENTS_MAX) &&
+        ci_netif_may_ctpio(netif, intf_i, pkt->pay_len) ) {
+      ci_netif_state_nic_t* nsn = &netif->state->nic[intf_i];
+      struct iovec host_iov[CI_IP_PKT_SEGMENTS_MAX];
+      unsigned total_length;
+      total_length = ci_netif_pkt_to_host_iovec(netif, pkt, host_iov,
+                                                sizeof(host_iov) / sizeof(host_iov[0]));
+      oo_pkt_calc_checksums(netif, pkt, host_iov);
+      ef_vi_transmitv_ctpio(vi, total_length, host_iov,
+                            pkt->n_buffers, nsn->ctpio_ct_threshold);
+      CITP_STATS_NETIF_INC(netif, ctpio_pkts);
+      rc = ef_vi_transmitv_ctpio_fallback(vi, iov, pkt->n_buffers,
+                                          OO_PKT_ID(pkt));
+      ci_assert_equal(rc, 0);
+    }
+    else
+#endif
     if( (rc = ef_vi_transmitv(vi, iov, pkt->n_buffers, OO_PKT_ID(pkt))) == 0 ) {
+      /* After a DMA send, stop attempting CTPIO sends until the TXQ has
+       * drained. */
+      ci_netif_ctpio_desist(netif, intf_i);
       CITP_STATS_NETIF_INC(netif, tx_dma_doorbells);
+    }
+    if( rc == 0 ) {
       LOG_AT(ci_analyse_pkt(oo_ether_hdr(pkt), pkt->buf_len));
       LOG_DT(ci_hex_dump(ci_log_fn, oo_ether_hdr(pkt), pkt->buf_len, 0));
       goto done;
     }
   }
-  
+
   /* drop to here if any of the above methods to send directly failed
-   * - put it on the DMA queue instead 
+   * - put it on the DMA queue instead
    */
   LOG_NT(log("%s: ENQ id=%d", __FUNCTION__, OO_PKT_FMT(pkt)));
   __ci_netif_dmaq_put(netif, dmaq, pkt);

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -38,12 +38,6 @@
 #include <linux/unistd.h> /* for __NR_epoll_pwait */
 #include "onload_internal.h"
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,29)
-/* Normal Linux epoll depth check does not work for us.
- * We should check that we do not poll ourself inside epoll_wait call. */
-#define OO_EPOLL_NEED_NEST_PROTECTION
-#endif
-
 /* This is needed for RHEL4 and similar vintage kernels */
 #ifndef __MODULE_PARM_TYPE
 #define __MODULE_PARM_TYPE(name, _type)                 \
@@ -53,10 +47,20 @@
 /*************************************************************
  * EPOLL2 private file data
  *************************************************************/
-static int set_max_stacks(const char *val, struct kernel_param *kp);
+static int set_max_stacks(const char *val, 
+                          ONLOAD_MPC_CONST struct kernel_param *kp);
 static unsigned epoll_max_stacks = CI_CFG_EPOLL_MAX_STACKS;
+#ifdef EFRM_HAVE_KERNEL_PARAM_OPS
+static const struct kernel_param_ops epoll_max_stacks_ops = {
+  .set = set_max_stacks,
+  .get = param_get_uint,
+};
+module_param_cb(epoll_max_stacks, &epoll_max_stacks_ops, 
+                &epoll_max_stacks, S_IRUGO | S_IWUSR);
+#else
 module_param_call(epoll_max_stacks, set_max_stacks, param_get_uint,
                   &epoll_max_stacks, S_IRUGO);
+#endif
 __MODULE_PARM_TYPE(epoll_max_stacks, "uint");
 MODULE_PARM_DESC(epoll_max_stacks,
 "Maximum number of onload stacks handled by single epoll object.");
@@ -64,16 +68,7 @@ MODULE_PARM_DESC(epoll_max_stacks,
 struct oo_epoll2_private {
   struct file  *kepo;
   int           do_spin;
-#ifdef OO_EPOLL_NEED_NEST_PROTECTION
-  struct list_head busy_tasks;
-#endif
 };
-#ifdef OO_EPOLL_NEED_NEST_PROTECTION
-struct oo_epoll_busy_task {
-  struct list_head  link;
-  struct task_struct *task;
-};
-#endif
 
 
 /*************************************************************
@@ -86,7 +81,7 @@ struct oo_epoll1_private {
 
   /* Poll table and workqueue, used in callback */
   poll_table pt;
-  wait_queue_t wait;
+  wait_queue_entry_t wait;
   wait_queue_head_t *whead;
 
   /* kernel epoll file */
@@ -179,7 +174,8 @@ static void oo_epoll_release_common(struct oo_epoll_private* priv)
 /*************************************************************
  * EPOLL2-specific code
  *************************************************************/
-static int set_max_stacks(const char *val, struct kernel_param *kp)
+static int set_max_stacks(const char *val, 
+                          ONLOAD_MPC_CONST struct kernel_param *kp)
 {
   int rc = param_set_uint(val, kp);
   if( rc != 0 )
@@ -205,14 +201,12 @@ static int oo_epoll2_init(struct oo_epoll_private *priv,
   if( rc != 0 )
     return rc;
 
-#ifdef OO_EPOLL_NEED_NEST_PROTECTION
-  INIT_LIST_HEAD(&priv->p.p2.busy_tasks);
-#endif
   priv->p.p2.kepo = kepo;
 
   priv->type = OO_EPOLL_TYPE_2;
   return 0;
 }
+
 
 static int oo_epoll2_ctl(struct oo_epoll_private *priv, int op_kepfd,
                          int op_op, int op_fd, struct epoll_event *op_event)
@@ -244,28 +238,24 @@ static int oo_epoll2_ctl(struct oo_epoll_private *priv, int op_kepfd,
   /* Fixme: epoll fd - do we want to accelerate something? */
   if( file->f_op != &linux_tcp_helper_fops_udp &&
       file->f_op != &linux_tcp_helper_fops_tcp ) {
-    int rc;
-#ifdef OO_EPOLL_NEED_NEST_PROTECTION
-    struct oo_epoll_busy_task t;
-    t.task = current;
-    spin_lock(&priv->lock);
-    list_add(&t.link, &priv->p.p2.busy_tasks);
-    spin_unlock(&priv->lock);
-#endif
-
 #if CI_CFG_USERSPACE_PIPE
     if( ( file->f_op == &linux_tcp_helper_fops_pipe_reader ||
-          file->f_op == &linux_tcp_helper_fops_pipe_writer ) )
+          file->f_op == &linux_tcp_helper_fops_pipe_writer ) ) {
       priv->p.p2.do_spin = 1;
+    }
+    else
 #endif
+    if( file->f_op == &oo_epoll_fops &&
+        ((struct oo_epoll_private *)file->private_data)->type ==
+        OO_EPOLL_TYPE_2 ) {
+      /* Protect from the loops.  Kernel does it.  Our UL must provide
+       * the OS epoll fd in such a case. */
+      fput(file);
+      return -ELOOP;
+    }
+
     fput(file);
-    rc = efab_linux_sys_epoll_ctl(op_kepfd, op_op, op_fd, op_event);
-#ifdef OO_EPOLL_NEED_NEST_PROTECTION
-      spin_lock(&priv->lock);
-      list_del(&t.link);
-      spin_unlock(&priv->lock);
-#endif
-    return rc;
+    return efab_linux_sys_epoll_ctl(op_kepfd, op_op, op_fd, op_event);
   }
 
   /* Onload socket here! */
@@ -467,6 +457,7 @@ static void oo_epoll2_wait(struct oo_epoll_private *priv,
   OO_EPOLL_FOR_EACH_STACK(priv, i, thr, ni) {
     ci_atomic32_dec(&ni->state->n_spinners);
     tcp_helper_request_wakeup(thr);
+    CITP_STATS_NETIF_INC(&thr->netif, muxer_primes);
   }
 
   /* Block */
@@ -530,14 +521,6 @@ static int oo_epoll2_action(struct oo_epoll_private *priv,
 #endif
     }
 
-#ifdef OO_EPOLL_NEED_NEST_PROTECTION
-    {
-      struct oo_epoll_busy_task t;
-      t.task = current;
-      spin_lock(&priv->lock);
-      list_add(&t.link, &priv->p.p2.busy_tasks);
-      spin_unlock(&priv->lock);
-#endif
     if( priv->p.p2.do_spin )
       oo_epoll2_wait(priv, op);
     else {
@@ -545,18 +528,15 @@ static int oo_epoll2_action(struct oo_epoll_private *priv,
                                          CI_USER_PTR_GET(op->events),
                                          op->maxevents, op->timeout);
     }
-#ifdef OO_EPOLL_NEED_NEST_PROTECTION
-      spin_lock(&priv->lock);
-      list_del(&t.link);
-      spin_unlock(&priv->lock);
-    }
-#endif
 
     if( CI_USER_PTR_GET(op->sigmask) ) {
 #ifdef __NR_epoll_pwait
       if (op->rc == -EINTR) {
         memcpy(&current->saved_sigmask, &sigsaved, sizeof(sigsaved));
-#ifdef HAVE_SET_RESTORE_SIGMASK
+/* Must check for both symbols: see def'n of EFRM_HAVE_SET_RESTORE_SIGMASK. */
+#if defined(HAVE_SET_RESTORE_SIGMASK) || \
+    defined(EFRM_HAVE_SET_RESTORE_SIGMASK) || \
+    defined(EFRM_HAVE_SET_RESTORE_SIGMASK1)
         set_restore_sigmask();
 #else
         set_thread_flag(TIF_RESTORE_SIGMASK);
@@ -585,30 +565,12 @@ static void oo_epoll2_release(struct oo_epoll_private *priv)
 
   oo_epoll_release_common(priv);
 
-#ifdef OO_EPOLL_NEED_NEST_PROTECTION
-  ci_assert(list_empty(&priv->p.p2.busy_tasks));
-#endif
 }
 
 static unsigned oo_epoll2_poll(struct oo_epoll_private* priv,
                                poll_table* wait)
 {
-#ifdef OO_EPOLL_NEED_NEST_PROTECTION
-  if( current ) {
-    struct oo_epoll_busy_task *t;
-    spin_lock(&priv->lock);
-    list_for_each_entry(t, &priv->p.p2.busy_tasks, link) {
-      if( t->task == current) {
-        spin_unlock(&priv->lock);
-        return POLLNVAL;
-      }
-    }
-    spin_unlock(&priv->lock);
-  }
-#endif
-
   /* Fixme: poll all netifs? */
-
   return priv->p.p2.kepo->f_op->poll(priv->p.p2.kepo, wait);
 }
 
@@ -628,8 +590,8 @@ static void oo_epoll1_set_shared_flag(struct oo_epoll1_private* priv, int set)
   } while( ci_cas32u_fail(&priv->sh->flag, tmp, new) );
 }
 
-static int oo_epoll1_callback(wait_queue_t *wait, unsigned mode, int sync,
-                              void *key)
+static int oo_epoll1_callback(wait_queue_entry_t *wait, unsigned mode,
+                              int sync, void *key)
 {
   struct oo_epoll1_private* priv = container_of(wait,
                                                 struct oo_epoll1_private,
@@ -648,17 +610,12 @@ static void oo_epoll1_queue_proc(struct file *file,
   priv->whead = whead;
   add_wait_queue(whead, &priv->wait);
 }
-static int oo_epoll1_mmap(struct oo_epoll1_private* priv,
-                          struct vm_area_struct* vma)
+
+/* Allocate the shared memory to notify UL about OS socket events */
+static int oo_epoll1_setup_shared(struct oo_epoll1_private* priv)
 {
   int rc;
 
-  if (vma->vm_end - vma->vm_start != PAGE_SIZE)
-    return -EINVAL;
-  if (vma->vm_flags & VM_WRITE)
-    return -EPERM;
-
-  /* Allocate shared memory */
 #ifdef __GFP_ZERO
   priv->page = alloc_page(GFP_KERNEL|__GFP_ZERO);
 #else
@@ -679,11 +636,8 @@ static int oo_epoll1_mmap(struct oo_epoll1_private* priv,
     goto fail1;
   }
   priv->os_file = fget(priv->sh->epfd);
-
-  /* Map memory to user */
-  if( remap_pfn_range(vma, vma->vm_start, page_to_pfn(priv->page),
-                      PAGE_SIZE, vma->vm_page_prot) < 0) {
-    rc = -EIO;
+  if( priv->os_file == NULL ) {
+    rc = -EINVAL;
     goto fail2;
   }
 
@@ -694,12 +648,29 @@ static int oo_epoll1_mmap(struct oo_epoll1_private* priv,
   return 0;
 
 fail2:
-  fput(priv->os_file);
   efab_linux_sys_close(priv->sh->epfd);
 fail1:
   priv->sh = NULL;
   __free_page(priv->page);
   return rc;
+}
+
+static int oo_epoll1_mmap(struct oo_epoll1_private* priv,
+                          struct vm_area_struct* vma)
+{
+  if (vma->vm_end - vma->vm_start != PAGE_SIZE)
+    return -EINVAL;
+  if (vma->vm_flags & VM_WRITE)
+    return -EPERM;
+
+  /* Map memory to user */
+  if( priv->page == NULL ||
+      remap_pfn_range(vma, vma->vm_start, page_to_pfn(priv->page),
+                      PAGE_SIZE, vma->vm_page_prot) < 0) {
+    return -EIO;
+  }
+
+  return 0;
 }
 
 static int oo_epoll1_release(struct oo_epoll_private* priv)
@@ -787,6 +758,7 @@ static void oo_epoll_prime_all_stacks(struct oo_epoll_private* priv)
   
   OO_EPOLL_FOR_EACH_STACK(priv, i, thr, ni) {
     tcp_helper_request_wakeup(thr);
+    CITP_STATS_NETIF_INC(&thr->netif, muxer_primes);
   }
 }
 
@@ -818,7 +790,7 @@ static unsigned oo_epoll1_poll(struct file* filp, poll_table* wait)
 
 struct oo_epoll_poll_table {
   poll_table pt;
-  wait_queue_t wq[2];
+  wait_queue_entry_t wq[2];
   wait_queue_head_t* w[2];
   struct task_struct* task;
   struct file* filp;
@@ -840,7 +812,7 @@ static void oo_epoll1_block_on_callback(struct file* filp,
   add_wait_queue(w, &ept->wq[i]);
 }
 
-static inline int oo_epoll1_wake_home_callback(wait_queue_t* wait,
+static inline int oo_epoll1_wake_home_callback(wait_queue_entry_t* wait,
                                                unsigned mode, int sync,
                                                void* key)
 {
@@ -850,7 +822,7 @@ static inline int oo_epoll1_wake_home_callback(wait_queue_t* wait,
   ept->rc |= OO_EPOLL1_EVENT_ON_HOME;
   return wake_up_process(ept->task);
 }
-static inline int oo_epoll1_wake_other_callback(wait_queue_t* wait,
+static inline int oo_epoll1_wake_other_callback(wait_queue_entry_t* wait,
                                                 unsigned mode, int sync,
                                                 void* key)
 {
@@ -907,6 +879,123 @@ static int oo_epoll1_block_on(struct file* home_filp,
   return ret;
 }
 
+static int oo_epoll_has_event(struct file* filp)
+{
+  struct oo_epoll_private *priv = filp->private_data;
+  int i;
+  tcp_helper_resource_t* thr;
+  ci_netif* ni;
+
+  OO_EPOLL_FOR_EACH_STACK(priv, i, thr, ni) {
+    if( ci_netif_has_event(ni) )
+      return OO_EPOLL1_EVENT_ON_EVQ | (
+             (thr == priv->p.p1.home_stack) ?
+               OO_EPOLL1_EVENT_ON_HOME :
+               OO_EPOLL1_EVENT_ON_OTHER);
+  }
+  return 0;
+}
+
+
+static int oo_epoll1_spin_on(struct file* home_filp,
+                             struct file* other_filp,
+                             int timeout_us, int sleep_iter_us)
+{
+  struct oo_epoll_poll_table ept;
+  int rc, ret = 0;
+  struct oo_epoll_private *priv = home_filp->private_data;
+  tcp_helper_resource_t* thr = priv->p.p1.home_stack;
+
+  if( ! thr )
+    return 0;
+
+  ept.rc = 0;
+  ept.filp = home_filp;
+  ept.task = current;
+
+again:
+  ept.w[0] = ept.w[1] = NULL;
+
+  init_poll_funcptr(&ept.pt, oo_epoll1_block_on_callback);
+  init_waitqueue_func_entry(&ept.wq[0], oo_epoll1_wake_home_callback);
+
+  if( (ret = oo_epoll_has_event(home_filp)) != 0 )
+    goto out;
+
+  if(  oo_epoll1_poll(home_filp, &ept.pt) != 0 ) {
+    ret = OO_EPOLL1_EVENT_ON_HOME;
+    goto out;
+  }
+
+  rc = other_filp->f_op->poll(other_filp, NULL);
+  if( rc ) {
+    ret =  OO_EPOLL1_EVENT_ON_OTHER;
+    goto out;
+  }
+
+  init_waitqueue_func_entry(&ept.wq[1], oo_epoll1_wake_other_callback);
+  rc = other_filp->f_op->poll(other_filp, &ept.pt);
+  if( rc ) {
+    ret = OO_EPOLL1_EVENT_ON_OTHER;
+    goto out;
+  }
+  /* We are spinning here on eventq of the home and other stacks
+   * We have events armed to wake us in case stacks are polled by
+   * other context. */
+  set_current_state(TASK_INTERRUPTIBLE);
+  if( ept.rc != 0 ) {
+    /* Callback might have tried waking up us before us entering TASK_INTERRUPTIBLE
+     * state.  To address this case the state is reset. */
+    __set_current_state(TASK_RUNNING);
+  }
+  else {
+    ktime_t kt;
+    /* sleep up to between iter_usec and 2 * iter_usec */
+    kt = ktime_set(0, sleep_iter_us * 1000);
+    ret = schedule_hrtimeout_range(&kt, sleep_iter_us * 1000, HRTIMER_MODE_REL);
+    if( ret != 0 ) {
+      /* We have been woken up by relevant event or a signal,
+       * either of these is good to terminate the loop. */
+      timeout_us = 0;
+    }
+  }
+  /* task is always in TASK_RUNNING state here */
+
+  ret = ept.rc;
+  timeout_us -= sleep_iter_us;
+out:
+  if( ept.w[0] != NULL )
+    remove_wait_queue(ept.w[0], &ept.wq[0]);
+  if( ept.w[1] != NULL )
+    remove_wait_queue(ept.w[1], &ept.wq[1]);
+  /* FIXME optimize use of wqs */
+  if( ret == 0 && timeout_us > 0 )
+    goto again;
+
+  return ret;
+}
+
+
+static int oo_epoll_move_fd(struct oo_epoll1_private* priv, int epoll_fd)
+{
+  struct file* epoll_file = fget(epoll_fd);
+
+  /* We expect that os_file is non-NULL, but we can't rely on it because
+   * we do not trust UL.  In a "good" case, we just check that the new
+   * epoll_fd points to the same underlying os_file.  In the "bad" case we
+   * just avoid crashing; misbehaving UL should be happy with any result
+   * from this ioctl. */
+  if( epoll_file != priv->os_file ) {
+    if( epoll_file != NULL )
+      fput(epoll_file);
+    return -EINVAL;
+  }
+  if( epoll_file != NULL )
+    fput(epoll_file);
+
+  priv->sh->epfd = epoll_fd;
+  return 0;
+}
 
 /*************************************************************
  * Common /dev/onload_epoll code
@@ -985,6 +1074,8 @@ static long oo_epoll_fop_unlocked_ioctl(struct file* filp,
       return -EFAULT;
 
     sock_file = fget(sock_fd);
+    if( sock_file == NULL )
+      return -EINVAL;
     if( sock_file->f_op != &linux_tcp_helper_fops_udp &&
         sock_file->f_op != &linux_tcp_helper_fops_tcp ) {
       fput(sock_file);
@@ -1002,8 +1093,8 @@ static long oo_epoll_fop_unlocked_ioctl(struct file* filp,
 
   case OO_EPOLL1_IOC_SET_HOME_STACK: {
     struct oo_epoll1_set_home_arg local_arg;
-    struct file *sock_file;
-    ci_private_t *sock_priv;
+    struct file *stack_file;
+    ci_private_t *stack_priv;
 
     ci_assert_equal(_IOC_SIZE(cmd), sizeof(local_arg));
     if( priv->type != OO_EPOLL_TYPE_1 )
@@ -1011,22 +1102,23 @@ static long oo_epoll_fop_unlocked_ioctl(struct file* filp,
     if( copy_from_user(&local_arg, argp, _IOC_SIZE(cmd)) )
       return -EFAULT;
 
-    sock_file = fget(local_arg.sockfd);
-    if( sock_file->f_op != &linux_tcp_helper_fops_udp &&
-        sock_file->f_op != &linux_tcp_helper_fops_tcp ) {
-      fput(sock_file);
+    stack_file = fget(local_arg.sockfd);
+    if( stack_file == NULL )
+      return -EINVAL;
+    if( stack_file->f_op != &oo_fops ) {
+      fput(stack_file);
       return -EINVAL;
     }
-    sock_priv = sock_file->private_data;
+    stack_priv = stack_file->private_data;
 
     rc = 0;
-    if( oo_epoll_add_stack(priv, sock_priv->thr) )
-      oo_epoll1_set_home_stack(&priv->p.p1, sock_priv->thr,
+    if( oo_epoll_add_stack(priv, stack_priv->thr) )
+      oo_epoll1_set_home_stack(&priv->p.p1, stack_priv->thr,
                                local_arg.ready_list);
     else
       rc = -ENOSPC;
 
-    fput(sock_file);
+    fput(stack_file);
     break;
   }
 
@@ -1037,6 +1129,7 @@ static long oo_epoll_fop_unlocked_ioctl(struct file* filp,
     rc = 0;
     break;
 
+  case OO_EPOLL1_IOC_SPIN_ON:
   case OO_EPOLL1_IOC_BLOCK_ON: {
     struct oo_epoll1_block_on_arg local_arg;
 #ifdef __NR_epoll_pwait
@@ -1069,7 +1162,11 @@ static long oo_epoll_fop_unlocked_ioctl(struct file* filp,
     /* drop OO_EPOLL1_FLAG_HOME_STACK_CHANGED flag */
     priv->p.p1.flags = 0;
 
-    rc = oo_epoll1_block_on(filp, other_filp, local_arg.timeout_ms);
+    if( cmd == OO_EPOLL1_IOC_BLOCK_ON )
+      rc = oo_epoll1_block_on(filp, other_filp, local_arg.timeout_ms);
+    else
+      rc = oo_epoll1_spin_on(filp, other_filp, local_arg.timeout_ms,
+                                               local_arg.sleep_iter_us);
 
     if( signal_pending(current) )
       rc = -EINTR;
@@ -1078,7 +1175,10 @@ static long oo_epoll_fop_unlocked_ioctl(struct file* filp,
     if( local_arg.flags & OO_EPOLL1_HAS_SIGMASK ) {
       if( signal_pending(current) ) {
         memcpy(&current->saved_sigmask, &sigsaved, sizeof(sigsaved));
-#ifdef HAVE_SET_RESTORE_SIGMASK
+/* Must check for both symbols: see def'n of EFRM_HAVE_SET_RESTORE_SIGMASK. */
+#if defined(HAVE_SET_RESTORE_SIGMASK) || \
+    defined(EFRM_HAVE_SET_RESTORE_SIGMASK) || \
+    defined(EFRM_HAVE_SET_RESTORE_SIGMASK1)
         set_restore_sigmask();
 #else
         set_thread_flag(TIF_RESTORE_SIGMASK);
@@ -1091,7 +1191,8 @@ static long oo_epoll_fop_unlocked_ioctl(struct file* filp,
 
     /* no guarantee if stupid user have called us with wrong flags: */
     ci_assert_equal(local_arg.flags &
-                    (OO_EPOLL1_EVENT_ON_HOME | OO_EPOLL1_EVENT_ON_OTHER), 0);
+                    (OO_EPOLL1_EVENT_ON_HOME | OO_EPOLL1_EVENT_ON_OTHER |
+                     OO_EPOLL1_EVENT_ON_EVQ), 0);
     if( rc > 0 ) {
       local_arg.flags |= rc;
       rc = 0;
@@ -1121,6 +1222,22 @@ static long oo_epoll_fop_unlocked_ioctl(struct file* filp,
       return -EFAULT;
     return 0;
   }
+
+  case OO_EPOLL1_IOC_MOVE_FD: {
+    ci_fixed_descriptor_t epoll_fd;
+    ci_assert_equal(_IOC_SIZE(cmd), sizeof(epoll_fd));
+    if( priv->type != OO_EPOLL_TYPE_1 )
+      return -EINVAL;
+    if( copy_from_user(&epoll_fd, argp, _IOC_SIZE(cmd)) )
+      return -EFAULT;
+
+    rc = oo_epoll_move_fd(&priv->p.p1, epoll_fd);
+    break;
+  }
+
+  case OO_EPOLL1_IOC_INIT:
+    rc = oo_epoll1_setup_shared(&priv->p.p1);
+    break;
 
   default:
     /* If libc is used on our sockets, sometimes it may call TCGETS ioctl to
@@ -1252,17 +1369,6 @@ int __init oo_epoll_chrdev_ctor(void)
     major = rc;
   oo_epoll_major = major;
 
-#ifdef NEED_IOCTL32
-  {
-    /* Register 64 bit handler for 32 bit ioctls.  In 2.6.11 onwards, this
-     * uses the .compat_ioctl file op instead.
-     */
-    int ioc;
-    for( ioc = 0; ioc < OO_OP_END; ++ioc )
-      register_ioctl32_conversion(oo_epoll_operations[ioc].ioc_cmd, NULL);
-  }
-#endif
-
   return 0;
 }
 
@@ -1270,15 +1376,6 @@ void oo_epoll_chrdev_dtor(void)
 {
   if( oo_epoll_major )
     unregister_chrdev(oo_epoll_major, OO_EPOLL_DEV_NAME);
-
-#ifdef NEED_IOCTL32
-  {
-    /* unregister 64 bit handler for 32 bit ioctls */
-    int ioc;
-    for( ioc = 0; ioc < OO_OP_END; ++ioc )
-      unregister_ioctl32_conversion(oo_epoll_operations[ioc].ioc_cmd);
-  }
-#endif
 }
 
 #endif

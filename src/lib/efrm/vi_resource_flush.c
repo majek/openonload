@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -126,6 +126,7 @@ efrm_vi_resource_tx_flush_done(struct efrm_vi *virs, bool *completed)
 			  __FUNCTION__, virs->rs.rs_instance);	
 }
 
+void efrm_vi_rm_may_complete_flushes(struct efrm_nic *efrm_nic);
 
 static void
 __efrm_vi_resource_issue_flush(struct efrm_vi *virs, int queue, bool *completed)
@@ -158,6 +159,7 @@ __efrm_vi_resource_issue_flush(struct efrm_vi *virs, int queue, bool *completed)
 			efrm_vi_resource_tx_flush_done(virs, completed);
 		else
 			efrm_vi_resource_rx_flush_done(virs, completed);
+		efrm_vi_rm_may_complete_flushes(efrm_nic);
 		return;
 	}
 
@@ -176,6 +178,7 @@ __efrm_vi_resource_issue_flush(struct efrm_vi *virs, int queue, bool *completed)
 			efrm_vi_resource_tx_flush_done(virs, completed);
 		else
 			efrm_vi_resource_rx_flush_done(virs, completed);
+		efrm_vi_rm_may_complete_flushes(efrm_nic);
 	}
 	if (!q->flushing)
 		return;
@@ -268,7 +271,7 @@ static bool efrm_vi_rm_flushes_pending_nic(struct efhw_nic *nic)
 	return false;
 }
 
-static void efrm_vi_rm_may_complete_flushes(struct efrm_nic *efrm_nic)
+void efrm_vi_rm_may_complete_flushes(struct efrm_nic *efrm_nic)
 {
 	if (!efrm_vi_rm_flushes_pending(efrm_nic))
 		cancel_delayed_work(&efrm_nic->nvi.flush_work_item);

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -139,6 +139,9 @@ typedef struct {
   int  (*socket      )(int domain, int type, int protocol);
   citp_fdinfo*
        (*dup         )(citp_fdinfo*);
+#if CI_CFG_FD_CACHING
+  void (*close       )(citp_fdinfo*);
+#endif
   void (*dtor        )(citp_fdinfo*, int fdt_locked);
   int  (*bind        )(citp_fdinfo*, const struct sockaddr*, socklen_t);
   int  (*listen      )(citp_fdinfo*, int);
@@ -168,9 +171,11 @@ typedef struct {
                        struct oo_ul_select_state*);
   int  (*poll        )(citp_fdinfo*, struct pollfd*, struct oo_ul_poll_state*);
 #if CI_CFG_USERSPACE_EPOLL
-  /* epoll() returns "poll again" bool */
+  /* epoll() and sleep_seq() should be present both or none.
+   * epoll() returns "poll again" bool */
   int (*epoll       )(citp_fdinfo*, struct citp_epoll_member* eitem,
                        struct oo_ul_epoll_state*, int* stored_event);
+  ci_uint64 (*sleep_seq)(citp_fdinfo*);
 #endif
 #endif
   int  (*zc_send     )(citp_fdinfo*, struct onload_zc_mmsg*, int);
@@ -183,12 +188,14 @@ typedef struct {
                       unsigned);
   int  (*tmpl_abort)(citp_fdinfo*, struct oo_msg_template*);
 #if CI_CFG_USERSPACE_EPOLL
+#if CI_CFG_TIMESTAMPING
   /* Examines receive queue up to timespec limit, and fills in first_out
    * with the timestamp of the first data available, and bytes_out with the
    * number of bytes available to be read before reaching limit.
    */
   int  (*ordered_data)(citp_fdinfo*, struct timespec* limit,
                        struct timespec* first_out, int* bytes_out);
+#endif
 #endif
   int (*is_spinning)(citp_fdinfo*);
 #if CI_CFG_FD_CACHING
@@ -432,6 +439,9 @@ ci_inline void citp_fdinfo_ref_fast(citp_fdinfo* fdinfo) {
     citp_fdinfo_ref(fdinfo);
 }
 
+/* Called when refcount reaches zero. */
+# define citp_fdinfo_free	CI_FREE_OBJ
+
 
 /* Hands-over the socket to the kernel.  That is, it replaces the
 ** user-level socket in the kernel fd table with the O/S socket (which is
@@ -542,6 +552,8 @@ extern int ci_setup_fork(void);
 /*! Handles user-level netif internals pre bproc_move() */
 extern void citp_netif_pre_bproc_move_hook(void) CI_HF;
 
+extern void citp_uncache_fds_ul(ci_netif* netif);
+extern void uncache_active_netifs(void);
 
 /**********************************************************************
  ** Misc.
@@ -773,7 +785,7 @@ extern citp_fdinfo*  citp_fdtable_lookup(unsigned fd) CI_HF;
 extern citp_fdinfo*  citp_fdtable_lookup_fast(citp_lib_context_t*,
                                               unsigned fd) CI_HF;
 
-extern citp_fdinfo*  citp_fdtable_lookup_noprobe(unsigned fd) CI_HF;
+extern citp_fdinfo*  citp_fdtable_lookup_noprobe(unsigned fd, int fdt_locked) CI_HF;
 
 extern citp_fdinfo* citp_reprobe_moved(citp_fdinfo* fdinfo,
                                        int from_fast_lookup,
@@ -835,6 +847,10 @@ extern int
 citp_passthrough_accept(citp_fdinfo* fdi,
                         struct sockaddr* sa, socklen_t* p_sa_len, int flags,
                         citp_lib_context_t* lib_context);
+extern int
+citp_passthrough_connect(citp_fdinfo* fdi,
+                         const struct sockaddr* sa, socklen_t sa_len,
+                         citp_lib_context_t* lib_context);
 
 /**********************************************************************
  ** Stack name state access
@@ -1045,9 +1061,7 @@ extern int citp_sock_fcntl(citp_sock_fdi*, int fd, int cmd, long arg) CI_HF;
 
 extern int onload_close(int fd) CI_HF;
 
-
-# define ci_major(dev) ((dev) & 0xff00)
-
+#define ci_major(dev) ((dev) & 0xff00)
 
 /**********************************************************************
  * poll, select, epoll
@@ -1100,7 +1114,7 @@ int citp_ul_do_select(int nfds, fd_set* rds, fd_set* wrs, fd_set* exs,
  * Known bug
  * ---------
  * When spinning for a limited time (i.e. we spin, then block).
- * Is a SIGX is allowed by sigsaved, it MAY be handled silently by
+ * If a SIGX is allowed by sigsaved, it MAY be handled silently by
  * ppoll/pselect/epoll_pwait.  No reasonable application I can imagine
  * should not be broken by this.
  *
@@ -1153,13 +1167,9 @@ citp_ul_pwait_spin_done(citp_lib_context_t *lib_context,
 }
 
 
-/* Poll the stack if allowed, needed and we can grab the lock.  Return true
- * if we did poll the stack, otherwise return false.
- *
- * Used by poll(), select() and epoll_wait().
- */
-static inline int citp_poll_if_needed(ci_netif* ni, ci_uint64 recent_frc,
-                                      int is_spinning)
+/* As citp_poll_if_needed(), but leaves the stack locked after polling. */
+static inline int __citp_poll_if_needed(ci_netif* ni, ci_uint64 recent_frc,
+                                        int is_spinning)
 {
   if( ci_netif_may_poll(ni) &&
       ci_netif_need_poll_maybe_spinning(ni, recent_frc, is_spinning) &&
@@ -1167,10 +1177,24 @@ static inline int citp_poll_if_needed(ci_netif* ni, ci_uint64 recent_frc,
     ci_netif_poll_n(ni, NI_OPTS(ni).evs_per_poll);
     if( is_spinning )
       ni->state->last_spin_poll_frc = IPTIMER_STATE(ni)->frc;
-    ci_netif_unlock(ni);
     return 1;
   }
   return 0;
+}
+
+
+/* Poll the stack if allowed, needed and we can grab the lock.
+ * Return true if we did poll the stack, otherwise return false.
+ *
+ * Used by poll(), select() and epoll_wait().
+ */
+static inline int citp_poll_if_needed(ci_netif* ni, ci_uint64 recent_frc,
+                                      int is_spinning)
+{
+  int rc = __citp_poll_if_needed(ni, recent_frc, is_spinning);
+  if( rc != 0 )
+    ci_netif_unlock(ni);
+  return rc;
 }
 
 

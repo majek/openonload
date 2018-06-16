@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -622,6 +622,8 @@ ci_netif_stats_report_xml(ci_netif* netif, char *buf, int count)
                         paws_active_rejected);
   __XML_NETIF_COUNT_LOG("Paws_estab_rejected", tcp_ext,
                         paws_estab_rejected);
+  __XML_NETIF_COUNT_LOG("Tso_missing", tcp_ext,
+                        tso_missing);
   __XML_NETIF_COUNT_LOG("Delayed_ack", tcp_ext,
                         delayed_ack);
   __XML_NETIF_COUNT_LOG("Delayed_ack_locked", tcp_ext,

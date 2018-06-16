@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -57,7 +57,7 @@ typedef pthread_t thread_os_t;
 #define OS_FS_NOWHERE "/dev/null"
 #define OS_FS_DIR_HERE "."
 
-#if defined(__ia64__) || defined(__x86_64__)
+#if defined(__x86_64__)
 #define _SIZEOF_LONG 8
 #endif
 

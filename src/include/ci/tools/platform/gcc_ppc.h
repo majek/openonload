@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -643,9 +643,9 @@ static inline  long __ci_xchg( volatile void *ptr,long x, int size)
 }
 
 #ifdef __powerpc64__
-#define ci_xchg_uintptr(p, v) xchg((volatile ci_uint64*) (p), v)
+#define ci_xchg_uintptr(p, v) xchg((ci_uint64*) (p), v)
 #else
-#define ci_xchg_uintptr(p, v) xchg((volatile ci_uint32*) (p), v)
+#define ci_xchg_uintptr(p, v) xchg((ci_uint32*) (p), v)
 #endif
 
 /*  Define this macro ONLY if it is NOT a KERNEL build because <asm/system.h> defines it otherwise */
@@ -655,7 +655,7 @@ static inline  long __ci_xchg( volatile void *ptr,long x, int size)
 
 ci_inline 	int	ci_atomic_xchg (ci_atomic_t *a, int v)
 {
-   return xchg(&a->n,v);
+  return xchg((int *)&a->n,v);
 }
 
 

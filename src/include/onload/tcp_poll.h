@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -38,9 +38,12 @@ ci_tcp_poll_events_listen(ci_netif *ni, ci_tcp_socket_listen *tls)
 ci_inline int/*bool*/
 ci_tcp_poll_events_nolisten_haspri(ci_netif *ni, ci_tcp_state *ts)
 {
-  return ( tcp_urg_data(ts) & CI_TCP_URG_IS_HERE ) ||
-         ( (ts->s.s_aflags & CI_SOCK_AFLAG_SELECT_ERR_QUEUE) &&
-           ci_udp_recv_q_not_empty(&ts->timestamp_q) );
+  return ( tcp_urg_data(ts) & CI_TCP_URG_IS_HERE )
+#if CI_CFG_TIMESTAMPING
+         || ( (ts->s.s_aflags & CI_SOCK_AFLAG_SELECT_ERR_QUEUE)
+              && ci_udp_recv_q_not_empty(&ts->timestamp_q) )
+#endif
+         ;
 }
 
 /* This function should not be used for listening sockets.
@@ -60,7 +63,11 @@ ci_tcp_poll_events_nolisten(ci_netif *ni, ci_tcp_state *ts)
   if( ts->s.tx_errno && TCP_RX_DONE(ts) )
     revents |= POLLHUP; /* SHUT_RDWR */
   /* Errors */
-  if( ts->s.so_error || ci_udp_recv_q_not_empty(&ts->timestamp_q) )
+  if( ts->s.so_error
+#if CI_CFG_TIMESTAMPING
+      || ci_udp_recv_q_not_empty(&ts->timestamp_q)
+#endif
+      )
     revents |= POLLERR;
 
   /* synchronised: !CLOSED !SYN_SENT */
@@ -149,7 +156,10 @@ ci_udp_poll_events(ci_netif* ni, ci_udp_state* us)
   if( us->s.os_sock_status & OO_OS_STATUS_RX )
     events |= POLLIN | POLLRDNORM;
 
-  if( ci_udp_recv_q_not_empty(&us->timestamp_q) ||
+  if(
+#if CI_CFG_TIMESTAMPING
+     ci_udp_recv_q_not_empty(&us->timestamp_q) ||
+#endif
       (us->s.os_sock_status & OO_OS_STATUS_ERR) ) {
     events |= POLLERR;
     if( us->s.s_aflags & CI_SOCK_AFLAG_SELECT_ERR_QUEUE )

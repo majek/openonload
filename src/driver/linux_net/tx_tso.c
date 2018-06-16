@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -16,7 +16,7 @@
 /****************************************************************************
  * Driver for Solarflare network controllers and boards
  * Copyright 2005-2006 Fen Systems Ltd.
- * Copyright 2005-2015 Solarflare Communications Inc.
+ * Copyright 2005-2017 Solarflare Communications Inc.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 as published
@@ -138,15 +138,15 @@ static void efx_tx_queue_insert(struct efx_tx_queue *tx_queue,
 	struct efx_tx_buffer *buffer;
 	unsigned int dma_len;
 
-	EFX_BUG_ON_PARANOID(len <= 0);
+	EFX_WARN_ON_ONCE_PARANOID(len <= 0);
 
 	while (1) {
 		buffer = efx_tx_queue_get_insert_buffer(tx_queue);
 		++tx_queue->insert_count;
 
-		EFX_BUG_ON_PARANOID(tx_queue->insert_count -
-				    tx_queue->read_count >=
-				    tx_queue->efx->txq_entries);
+		EFX_WARN_ON_ONCE_PARANOID(tx_queue->insert_count -
+					  tx_queue->read_count >=
+					  tx_queue->efx->txq_entries);
 
 		buffer->dma_addr = dma_addr;
 
@@ -163,7 +163,7 @@ static void efx_tx_queue_insert(struct efx_tx_queue *tx_queue,
 		len -= dma_len;
 	}
 
-	EFX_BUG_ON_PARANOID(!len);
+	EFX_WARN_ON_ONCE_PARANOID(!len);
 	buffer->len = len;
 	*final_buffer = buffer;
 }
@@ -180,7 +180,7 @@ static int efx_tso_check_protocol(struct sk_buff *skb, __be16 *protocol)
 	if (((struct ethhdr *)skb->data)->h_proto != *protocol)
 		return -EINVAL;
 
-#if !defined(EFX_USE_KCOMPAT) || defined(EFX_USE_NETDEV_VLAN_FEATURES) || defined(NETIF_F_VLAN_TSO) || defined(__VMKLNX__)
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_USE_NETDEV_VLAN_FEATURES) || defined(NETIF_F_VLAN_TSO)
 	if (*protocol == htons(ETH_P_8021Q)) {
 		struct vlan_ethhdr *veh = (struct vlan_ethhdr *)skb->data;
 
@@ -219,20 +219,20 @@ static u8 *efx_tsoh_get_buffer(struct efx_tx_queue *tx_queue,
 {
 	u8 *result;
 
-	EFX_BUG_ON_PARANOID(buffer->len);
-	EFX_BUG_ON_PARANOID(buffer->flags);
-	EFX_BUG_ON_PARANOID(buffer->unmap_len);
+	EFX_WARN_ON_ONCE_PARANOID(buffer->len);
+	EFX_WARN_ON_ONCE_PARANOID(buffer->flags);
+	EFX_WARN_ON_ONCE_PARANOID(buffer->unmap_len);
 
 	result = efx_tx_get_copy_buffer_limited(tx_queue, buffer, len);
 
 	if (result) {
 		buffer->flags = EFX_TX_BUF_CONT;
 	} else {
-		buffer->heap_buf = kmalloc(NET_IP_ALIGN + len, GFP_ATOMIC);
-		if (unlikely(!buffer->heap_buf))
+		buffer->buf = kmalloc(NET_IP_ALIGN + len, GFP_ATOMIC);
+		if (unlikely(!buffer->buf))
 			return NULL;
 		tx_queue->tso_long_headers++;
-		result = (u8 *)buffer->heap_buf + NET_IP_ALIGN;
+		result = (u8 *)buffer->buf + NET_IP_ALIGN;
 		buffer->flags = EFX_TX_BUF_CONT | EFX_TX_BUF_HEAP;
 	}
 
@@ -257,7 +257,7 @@ static int efx_tso_put_header(struct efx_tx_queue *tx_queue,
 						  DMA_TO_DEVICE);
 		if (unlikely(dma_mapping_error(&tx_queue->efx->pci_dev->dev,
 					       buffer->dma_addr))) {
-			kfree(buffer->heap_buf);
+			kfree(buffer->buf);
 			buffer->len = 0;
 			buffer->flags = 0;
 			return -ENOMEM;
@@ -300,9 +300,9 @@ static int tso_start(struct tso_state *st, struct efx_nic *efx,
 	}
 	st->seqnum = ntohl(tcp_hdr(skb)->seq);
 
-	EFX_BUG_ON_PARANOID(tcp_hdr(skb)->urg);
-	EFX_BUG_ON_PARANOID(tcp_hdr(skb)->syn);
-	EFX_BUG_ON_PARANOID(tcp_hdr(skb)->rst);
+	EFX_WARN_ON_ONCE_PARANOID(tcp_hdr(skb)->urg);
+	EFX_WARN_ON_ONCE_PARANOID(tcp_hdr(skb)->syn);
+	EFX_WARN_ON_ONCE_PARANOID(tcp_hdr(skb)->rst);
 
 	st->out_len = skb->len - header_len;
 
@@ -371,8 +371,8 @@ static void tso_fill_packet_with_fragment(struct efx_tx_queue *tx_queue,
 	if (st->packet_space == 0)
 		return;
 
-	EFX_BUG_ON_PARANOID(st->in_len <= 0);
-	EFX_BUG_ON_PARANOID(st->packet_space <= 0);
+	EFX_WARN_ON_ONCE_PARANOID(st->in_len <= 0);
+	EFX_WARN_ON_ONCE_PARANOID(st->packet_space <= 0);
 
 	n = min(st->in_len, st->packet_space);
 
@@ -401,21 +401,20 @@ static void tso_fill_packet_with_fragment(struct efx_tx_queue *tx_queue,
 	st->dma_addr += n;
 }
 
-
-#define TCP_FLAGS_OFFSET 13
-
 /**
  * tso_start_new_packet - generate a new header and prepare for the new packet
  * @tx_queue:		Efx TX queue
  * @skb:		Socket buffer
  * @st:			TSO state
+ * @is_first:		true if this is the first packet
  *
  * Generate a new header and prepare for the new packet.  Return 0 on
  * success, or -%ENOMEM if failed to alloc header.
  */
 static int tso_start_new_packet(struct efx_tx_queue *tx_queue,
 				const struct sk_buff *skb,
-				struct tso_state *st)
+				struct tso_state *st,
+				bool is_first)
 {
 	struct efx_tx_buffer *buffer =
 		efx_tx_queue_get_insert_buffer(tx_queue);
@@ -424,11 +423,14 @@ static int tso_start_new_packet(struct efx_tx_queue *tx_queue,
 
 	if (!is_last) {
 		st->packet_space = skb_shinfo(skb)->gso_size;
-		tcp_flags_mask = 0x09; /* mask out FIN and PSH */
+		tcp_flags_mask = TCPHDR_FIN | TCPHDR_PSH;
 	} else {
 		st->packet_space = st->out_len;
-		tcp_flags_mask = 0x00;
+		tcp_flags_mask = 0;
 	}
+
+	if (!is_first)
+		tcp_flags_mask |= TCPHDR_CWR; /* Congestion control */
 
 	if (!st->header_unmap_len) {
 		/* Allocate and insert a DMA-mapped header buffer. */
@@ -447,7 +449,7 @@ static int tso_start_new_packet(struct efx_tx_queue *tx_queue,
 		memcpy(header, skb->data, st->header_len);
 
 		tsoh_th->seq = htonl(st->seqnum);
-		((u8 *)tsoh_th)[TCP_FLAGS_OFFSET] &= ~tcp_flags_mask;
+		tcp_flag_byte(tsoh_th) &= ~tcp_flags_mask;
 
 		ip_length = st->ip_base_len + st->packet_space;
 
@@ -471,8 +473,7 @@ static int tso_start_new_packet(struct efx_tx_queue *tx_queue,
 		/* Send the original headers with a TSO option descriptor
 		 * in front
 		 */
-		u8 tcp_flags = ((u8 *)tcp_hdr(skb))[TCP_FLAGS_OFFSET] &
-				~tcp_flags_mask;
+		u8 tcp_flags = tcp_flag_byte(tcp_hdr(skb)) & ~tcp_flags_mask;
 
 		buffer->flags = EFX_TX_BUF_OPTION;
 		buffer->len = 0;
@@ -563,7 +564,7 @@ int efx_tx_tso_sw(struct efx_tx_queue *tx_queue, struct sk_buff *skb,
 
 	if (likely(state.in_len == 0)) {
 		/* Grab the first payload fragment. */
-		EFX_BUG_ON_PARANOID(skb_shinfo(skb)->nr_frags < 1);
+		EFX_WARN_ON_ONCE_PARANOID(skb_shinfo(skb)->nr_frags < 1);
 		frag_i = 0;
 		rc = tso_get_fragment(&state, efx,
 				      skb_shinfo(skb)->frags + frag_i);
@@ -574,7 +575,7 @@ int efx_tx_tso_sw(struct efx_tx_queue *tx_queue, struct sk_buff *skb,
 		frag_i = -1;
 	}
 
-	if (tso_start_new_packet(tx_queue, skb, &state) < 0)
+	if (tso_start_new_packet(tx_queue, skb, &state, true) < 0)
 		goto mem_err;
 
 	prefetch_ptr(tx_queue);
@@ -595,7 +596,7 @@ int efx_tx_tso_sw(struct efx_tx_queue *tx_queue, struct sk_buff *skb,
 
 		/* Start at new packet? */
 		if (state.packet_space == 0 &&
-		    tso_start_new_packet(tx_queue, skb, &state) < 0)
+		    tso_start_new_packet(tx_queue, skb, &state, false) < 0)
 			goto mem_err;
 	}
 

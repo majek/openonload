@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -60,6 +60,8 @@
 #define CI_CPU_OOS	   0	/* CPU does out of order stores */
 
 #define CI_CPU_HAS_IOSPACE 1 /* CPU has a separate IO space */
+
+#define CI_MAX_TIME_T 0x7fffffffL
 
 #endif  /* __CI_COMPAT_X86_H__ */
 

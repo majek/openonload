@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -69,13 +69,15 @@ citp_passthrough_accept(citp_fdinfo* fdi,
                         sa, p_sa_len);
 #endif
 }
-static int
+int
 citp_passthrough_connect(citp_fdinfo* fdi,
                          const struct sockaddr* sa, socklen_t sa_len,
                          citp_lib_context_t* lib_context)
 {
-  int rc = ci_sys_connect(fdi_to_alien_fdi(fdi)->os_socket,
-                          sa, sa_len);
+  int rc;
+  citp_exit_lib(lib_context, 0);
+  rc = ci_sys_connect(fdi_to_alien_fdi(fdi)->os_socket, sa, sa_len);
+  citp_reenter_lib(lib_context);
   citp_fdinfo_release_ref(fdi, 0);
   return rc;
 }

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -16,7 +16,7 @@
 /****************************************************************************
  * Driver for Solarflare network controllers and boards
  * Copyright 2005-2006 Fen Systems Ltd.
- * Copyright 2005-2015 Solarflare Communications Inc.
+ * Copyright 2005-2017 Solarflare Communications Inc.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 as published
@@ -55,7 +55,9 @@
 #ifndef EFX_USE_KCOMPAT
 #include <net/busy_poll.h>
 #endif
-
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_XDP_RXQ_INFO)
+#include <net/xdp.h>
+#endif
 
 #ifdef EFX_NOT_UPSTREAM
 #include "config.h"
@@ -72,9 +74,14 @@
 
 #include "enum.h"
 #include "bitfield.h"
+#ifdef EFX_NOT_UPSTREAM
+#include "sfctool.h" /* Provides missing 'struct ethtool_*' declarations */
 #define EFX_DRIVERLINK_API_VERSION_MINOR EFX_DRIVERLINK_API_VERSION_MINOR_MAX
-#include "driverlink_api.h"
+#include "driverlink_api.h" /* Indirectly includes filter.h */
 #include "driverlink.h"
+#else
+#include "filter.h"
+#endif
 
 /**************************************************************************
  *
@@ -82,29 +89,22 @@
  *
  **************************************************************************/
 
-#define EFX_DRIVER_VERSION	"4.8.2.1004"
+#define EFX_DRIVER_VERSION	"4.13.1.1034"
 
 #ifdef DEBUG
-#define EFX_BUG_ON_PARANOID(x) BUG_ON(x)
+#define EFX_WARN_ON_ONCE_PARANOID(x) WARN_ON_ONCE(x)
 #define EFX_WARN_ON_PARANOID(x) WARN_ON(x)
 #else
-#define EFX_BUG_ON_PARANOID(x) do {} while (0)
+#define EFX_WARN_ON_ONCE_PARANOID(x) do {} while (0)
 #define EFX_WARN_ON_PARANOID(x) do {} while (0)
 #endif
 
-/* if @cond then downgrade to debug, else print at @level */
-#define netif_cond_dbg(priv, type, netdev, cond, level, fmt, args...)     \
-	do {                                                              \
-		if (cond)                                                 \
-			netif_dbg(priv, type, netdev, fmt, ##args);       \
-		else                                                      \
-			netif_ ## level(priv, type, netdev, fmt, ##args); \
-	} while (0)
-
-#if defined(EFX_NOT_UPSTREAM) && !defined(__VMKLNX__)
+#if defined(EFX_NOT_UPSTREAM)
 #define EFX_RX_PAGE_SHARE	1
 #if IS_ENABLED(CONFIG_VLAN_8021Q)
+#ifndef EFX_HAVE_CSUM_LEVEL
 #define EFX_USE_FAKE_VLAN_RX_ACCEL 1
+#endif
 #ifdef EFX_HAVE_SKB_VLANTCI
 #define EFX_USE_FAKE_VLAN_TX_ACCEL 1
 #endif
@@ -129,6 +129,7 @@
 
 #if defined(EFX_NOT_UPSTREAM) && defined(EFX_ENABLE_MCDI_PROXY_AUTH)
 #define EFX_USE_MCDI_PROXY_AUTH
+#include <linux/version.h>
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,32)) && defined(CONFIG_NET_NS)
 #define EFX_USE_MCDI_PROXY_AUTH_NL
 #endif
@@ -140,28 +141,30 @@
  *
  **************************************************************************/
 
-#define EFX_MAX_CHANNELS 32U
+#define EFX_MAX_CHANNELS 64U
 #define EFX_MAX_RX_QUEUES EFX_MAX_CHANNELS
 #define EFX_EXTRA_CHANNEL_IOV	0
 #define EFX_EXTRA_CHANNEL_PTP	1
 #define EFX_MAX_EXTRA_CHANNELS	2U
 
+#define EFX_SIENA_MAX_CHANNELS 32U
+
 /* Checksum generation is a per-queue option in hardware, so each
  * queue visible to the networking core is backed by two hardware TX
  * queues. */
-#if !defined(EFX_USE_KCOMPAT) || defined(EFX_USE_TX_MQ)
 #define EFX_MAX_CORE_TX_QUEUES	EFX_MAX_CHANNELS
-#else
-#define EFX_MAX_CORE_TX_QUEUES	1U
-#endif
-#define EFX_TXQ_TYPE_CSUM_OFFLOAD	0
-#define EFX_TXQ_TYPE_NO_OFFLOAD		1
+#define EFX_TXQ_TYPE_NO_OFFLOAD		0
+#define EFX_TXQ_TYPE_CSUM_OFFLOAD	1
 #define EFX_TXQ_TYPE_INNER_CSUM_OFFLOAD	2
+#define EFX_TXQ_TYPE_BOTH_CSUM_OFFLOAD  3
 #define EFX_TXQ_TYPES			3
 #define EFX_MAX_TX_QUEUES	(EFX_TXQ_TYPES * EFX_MAX_CORE_TX_QUEUES)
 
 /* Maximum possible MTU the driver supports */
 #define EFX_MAX_MTU (9 * 1024)
+
+/* Minimum MTU, from RFC791 (IP) */
+#define EFX_MIN_MTU 68
 
 /* Maximum total header length for TSOv2 */
 #define EFX_TSO2_MAX_HDRLEN	208
@@ -172,9 +175,7 @@
  */
 #define EFX_RX_USR_BUF_SIZE	(2048 - 256)
 #else
-/* Size of an RX scatter buffer. Page can't be shared on ESX, so use
- * maximum aligned to cache line size.
- */
+/* Size of an RX scatter buffer. */
 #define EFX_RX_USR_BUF_SIZE	(PAGE_SIZE - L1_CACHE_BYTES)
 #endif
 
@@ -188,11 +189,6 @@
 #define EFX_RX_BUF_ALIGNMENT	4
 #endif
 
-#if defined(EFX_NOT_UPSTREAM) && defined(EFX_WITH_VMWARE_NETQ)
-/* Forward declare structures used in the VMWare netq support. */
-struct netq_sw_filter;
-struct netq_hw_filter;
-#endif
 
 /* Forward declare Precision Time Protocol (PTP) support structure. */
 struct efx_ptp_data;
@@ -259,8 +255,9 @@ struct efx_special_buffer {
  * struct efx_tx_buffer - buffer state for a TX descriptor
  * @skb: When @flags & %EFX_TX_BUF_SKB, the associated socket buffer to be
  *	freed when descriptor completes
- * @heap_buf: When @flags & %EFX_TX_BUF_HEAP, the associated heap buffer to be
- *	freed when descriptor completes.
+ * @buf: When @flags & %EFX_TX_BUF_HEAP, the associated heap buffer to be
+ *	freed when descriptor completes. When @flags & %EFX_TX_BUF_XDP the
+ *      associated buffer to drop a page reference on.
  * @option: When @flags & %EFX_TX_BUF_OPTION, a NIC-specific option descriptor.
  * @dma_addr: DMA address of the fragment.
  * @flags: Flags for allocation and DMA mapping type
@@ -273,7 +270,7 @@ struct efx_special_buffer {
 struct efx_tx_buffer {
 	union {
 		const struct sk_buff *skb;
-		void *heap_buf;
+		void *buf;
 	};
 	union {
 		efx_qword_t option;
@@ -289,6 +286,7 @@ struct efx_tx_buffer {
 #define EFX_TX_BUF_HEAP		4	/* buffer was allocated with kmalloc() */
 #define EFX_TX_BUF_MAP_SINGLE	8	/* buffer was mapped with dma_map_single() */
 #define EFX_TX_BUF_OPTION	0x10	/* empty buffer for option descriptor */
+#define EFX_TX_BUF_XDP		0x20	/* buffer was sent with XDP */
 
 /**
  * struct efx_tx_queue - An Efx TX queue
@@ -305,6 +303,8 @@ struct efx_tx_buffer {
  *
  * @efx: The associated Efx NIC
  * @queue: DMA queue number
+ * @label: Queue label - distinguishes this queue from others sharing evq. Used
+ *	as an index in to %efx_channel->tx_queues
  * @csum_offload: Is checksum offloading enabled for this queue?
  * @tso_version: Version of TSO in use for this queue.
  * @tso_encap: Is encapsulated TSO supported? Supported in TSOv2 on 8000 series.
@@ -317,8 +317,8 @@ struct efx_tx_buffer {
  * @piobuf: PIO buffer region for this TX queue (shared with its partner).
  *	Size of the region is efx_piobuf_size.
  * @piobuf_offset: Buffer offset to be specified in PIO descriptors
- * @tx_min_size: Minimum transmit size for this queue. Depends on HW.
  * @timestamping: Is timestamping enabled for this channel?
+ * @xdp_tx: Is this an XDP tx queue?
  * @handle_vlan: VLAN insertion offload handler.
  * @handle_tso: TSO offload handler.
  * @read_count: Current read pointer.
@@ -330,8 +330,6 @@ struct efx_tx_buffer {
  *	avoid cache-line ping-pong between the xmit path and the
  *	completion path.
  * @merge_events: Number of TX merged completion events
- * @completed_desc_ptr: Most recent completed pointer - only used with
- *      timestamping.
  * @completed_timestamp_major: Top part of the most recent tx timestamp.
  * @completed_timestamp_minor: Low part of the most recent tx timestamp.
  * @insert_count: Current insert pointer
@@ -363,7 +361,6 @@ struct efx_tx_buffer {
  * @notify_count: Count of notified descriptors to the NIC
  * @sarfs_sample_count: Number of TCP packets since we last inspected
  *	one for SARFS.
- * @sarfs_update: Number of updates to SARFS filter requested from this queue
  * @xmit_pending: Are any packets waiting to be pushed to the NIC
  * @empty_read_count: If the completion path has seen the queue as empty
  *	and the transmission path has not yet checked this, the value of
@@ -373,6 +370,7 @@ struct efx_tx_queue {
 	/* Members which don't change on the fast path */
 	struct efx_nic *efx ____cacheline_aligned_in_smp;
 	unsigned int queue;
+	unsigned int label;
 	unsigned int csum_offload;
 	unsigned int tso_version;
 	bool tso_encap;
@@ -384,8 +382,8 @@ struct efx_tx_queue {
 	unsigned int ptr_mask;
 	void __iomem *piobuf;
 	unsigned int piobuf_offset;
-	unsigned int tx_min_size;
 	bool timestamping;
+	bool xdp_tx;
 #ifdef CONFIG_SFC_DEBUGFS
 	struct dentry *debug_dir;
 #endif
@@ -401,7 +399,6 @@ struct efx_tx_queue {
 	unsigned int doorbell_notify_comp;
 	unsigned int bytes_compl;
 	unsigned int pkts_compl;
-	unsigned int completed_desc_ptr;
 	u32 completed_timestamp_major;
 	u32 completed_timestamp_minor;
 
@@ -421,9 +418,6 @@ struct efx_tx_queue {
 	unsigned int notify_count;
 #if defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_SARFS)
 	unsigned int sarfs_sample_count;
-#ifdef CONFIG_SFC_DEBUGFS
-	unsigned int sarfs_update;
-#endif
 #endif
 	/* Statistics to supplement MAC stats */
 #ifdef EFX_NOT_UPSTREAM
@@ -464,7 +458,9 @@ struct efx_rx_buffer {
 #define EFX_RX_BUF_LAST_IN_PAGE		0x0001
 #define EFX_RX_PKT_CSUMMED		0x0002
 #define EFX_RX_PKT_DISCARD		0x0004
-#define EFX_RX_PKT_VLAN			0x0008
+#if defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_FAKE_VLAN_RX_ACCEL)
+#define EFX_RX_PKT_VLAN                 0x0008
+#endif
 #define EFX_RX_PKT_IPV4			0x0010
 #define EFX_RX_PKT_IPV6			0x0020
 #define EFX_RX_PKT_TCP			0x0040
@@ -491,10 +487,10 @@ struct efx_rx_page_state {
 /**
  * struct efx_rx_queue - An Efx RX queue
  * @efx: The associated Efx NIC
- * @core_index: Index of network core RX queue.  Will be >= 0 iff this
- *	is associated with a real RX queue.
  * @buffer: The software buffer ring
  * @rxd: The hardware descriptor ring
+ * @core_index: Index of network core RX queue.  Will be >= 0 iff this
+ *	is associated with a real RX queue.
  * @ptr_mask: The size of the ring minus 1.
  * @refill_enabled: Enable refill whenever fill level is low
  * @flush_pending: Set when a RX flush is pending. Has the same lifetime as
@@ -521,16 +517,16 @@ struct efx_rx_page_state {
  *	refill was triggered.
  * @recycle_count: RX buffer recycle counter.
  * @slow_fill: Timer used to defer efx_nic_generate_fill_event().
+ * @xdp_rxq_info: XDP specific RX queue information.
  */
 struct efx_rx_queue {
 	struct efx_nic *efx;
-	int core_index;
 	struct efx_rx_buffer *buffer;
 	struct efx_special_buffer rxd;
+	int core_index;
 	unsigned int ptr_mask;
 	bool refill_enabled;
 	bool flush_pending;
-
 	unsigned int added_count;
 	unsigned int notified_count;
 	unsigned int removed_count;
@@ -556,13 +552,20 @@ struct efx_rx_queue {
 	unsigned int failed_flush_count;
 	/* Statistics to supplement MAC stats */
 	unsigned long rx_packets;
-
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4,2,0) && !(defined(RHEL_MAJOR) && RHEL_MAJOR >= 7)
 #define SKB_CACHE_SIZE 8
+#else
+#define SKB_CACHE_SIZE 0
+#endif
 	struct sk_buff *skb_cache[SKB_CACHE_SIZE];
 	unsigned int skb_cache_next_unused;
 
 #ifdef CONFIG_SFC_DEBUGFS
 	struct dentry *debug_dir;
+#endif
+
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_XDP_RXQ_INFO)
+	struct xdp_rxq_info xdp_rxq_info;
 #endif
 };
 
@@ -682,26 +685,36 @@ struct efx_sarfs_state {
 	unsigned int conns_mask;
 	struct efx_sarfs_entry *conns;
 	unsigned long last_modified;
-	spinlock_t lock;
+	struct mutex lock;
 };
 #endif
 
-#ifdef EFX_USE_IRQ_NOTIFIERS
-struct efx_irq_affinity_notify {
-	struct irq_affinity_notify notifier;
-	struct efx_nic *efx;
-	int channel;
-};
-#endif
 
-#if defined(EFX_NOT_UPSTREAM) && defined(EFX_WITH_VMWARE_NETQ)
-/* VMware netqueue use flags */
-#define NETQ_USE_DEFAULT	(0U)
-#define NETQ_USE_RX		(1U)
-#define NETQ_USE_TX		(2U)
-#define NETQ_USE_RSS		(4U)
-#define NETQ_USE_LRO		(8U)
+/* The reserved RSS context value */
+#define EFX_EF10_RSS_CONTEXT_INVALID	0xffffffff
+/**
+ * struct efx_rss_context - A user-defined RSS context for filtering
+ * @list: node of linked list on which this struct is stored
+ * @context_id: the RSS_CONTEXT_ID returned by MC firmware, or
+ *	%EFX_EF10_RSS_CONTEXT_INVALID if this context is not present on the NIC.
+ *	For Siena, 0 if RSS is active, else %EFX_EF10_RSS_CONTEXT_INVALID.
+ * @user_id: the rss_context ID exposed to userspace over ethtool.
+ * @flags: Hashing flags for this RSS context
+ * @rx_hash_key: Toeplitz hash key for this RSS context
+ * @indir_table: Indirection table for this RSS context
+ */
+struct efx_rss_context {
+	struct list_head list;
+	u32 context_id;
+	u32 user_id;
+	u32 flags;
+#ifdef EFX_NOT_UPSTREAM
+	/* Number of queues targeted by this context (set at alloc time) */
+	u8 num_queues;
 #endif
+	u8 rx_hash_key[40];
+	u32 rx_indir_table[128];
+};
 
 /**
  * struct efx_channel - An Efx channel
@@ -722,14 +735,14 @@ struct efx_irq_affinity_notify {
  * @irq_moderation_us: IRQ moderation value (in microseconds)
  * @napi_dev: Net device used with NAPI
  * @napi_str: NAPI control structure
- * @state: state for NAPI vs busy polling
- * @state_lock: lock protecting @state
+ * @xdp_prog: Current XDP programme for this queue.
  * @eventq: Event queue buffer
  * @eventq_mask: Event queue pointer mask
  * @eventq_read_ptr: Event queue read pointer
  * @event_test_cpu: Last CPU to handle interrupt or test event for this channel
  * @irq_count: Number of IRQs since last adaptive moderation decision
  * @irq_mod_score: IRQ moderation score
+ * @filter_work: Work item for efx_filter_rfs_expire()
  * @rps_flow_id: Flow IDs of filters allocated for accelerated RFS,
  *      indexed by filter ID
  * @n_rx_tobe_disc: Count of RX_TOBE_DISC errors
@@ -744,12 +757,17 @@ struct efx_irq_affinity_notify {
  *	lack of descriptors
  * @n_rx_merge_events: Number of RX merged completion events
  * @n_rx_merge_packets: Number of RX packets completed by merged events
+ * @n_rx_xdp_drops: Count of RX packets intentionally dropped due to XDP
+ * @n_rx_xdp_bad_drops: Count of RX packets dropped due to XDP errors
+ * @n_rx_xdp_tx: Count of RX packets retransmitted due to XDP
+ * @n_rx_xdp_redirect: Count of RX packets redirected to a different NIC by XDP
  * @rx_pkt_n_frags: Number of fragments in next packet to be delivered by
  *	__efx_rx_packet(), or zero if there is none
  * @rx_pkt_index: Ring index of first buffer for next packet to be delivered
  *	by __efx_rx_packet(), if @rx_pkt_n_frags != 0
  * @rx_queue: RX queue for this channel
- * @tx_queue: TX queues for this channel
+ * @tx_queue_count: Number of TX queues pointed to by %tx_queues
+ * @tx_queues: Pointer to TX queues for this channel
 #ifdef EFX_USE_IRQ_NOTIFIERS
  * @irq_notifier: IRQ notifier for changes to irq affinity
 #endif
@@ -770,8 +788,13 @@ struct efx_channel {
 	unsigned int irq_moderation_us;
 	struct net_device *napi_dev;
 	struct napi_struct napi_str;
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_XDP)
+	struct bpf_prog __rcu *xdp_prog;
+#endif
+#if defined(EFX_USE_KCOMPAT) && defined(EFX_WANT_DRIVER_BUSY_POLL)
 #ifdef CONFIG_NET_RX_BUSY_POLL
 	unsigned long busy_poll_state;
+#endif
 #endif
 	struct efx_special_buffer eventq;
 	unsigned int eventq_mask;
@@ -782,6 +805,7 @@ struct efx_channel {
 	unsigned int irq_mod_score;
 #ifdef CONFIG_RFS_ACCEL
 	unsigned int rfs_filters_added;
+	struct work_struct filter_work;
 #define RPS_FLOW_ID_INVALID 0xFFFFFFFF
 	u32 *rps_flow_id;
 #endif
@@ -815,19 +839,20 @@ struct efx_channel {
 	unsigned int n_rx_nodesc_trunc;
 	unsigned int n_rx_merge_events;
 	unsigned int n_rx_merge_packets;
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_XDP)
+	unsigned int n_rx_xdp_drops;
+	unsigned int n_rx_xdp_bad_drops;
+	unsigned int n_rx_xdp_tx;
+	unsigned int n_rx_xdp_redirect;
+#endif
 
 	unsigned int rx_pkt_n_frags;
 	unsigned int rx_pkt_index;
 
-#if defined(EFX_NOT_UPSTREAM) && defined(EFX_WITH_VMWARE_NETQ)
-	/** Used to track use by VMWare netqueue code. */
-	unsigned int netq_flags;
-	struct net_device_stats	netq_stats;
-	char irqid[IFNAMSIZ + 8];
-#endif
 
 	struct efx_rx_queue rx_queue;
-	struct efx_tx_queue tx_queue[EFX_TXQ_TYPES];
+	unsigned int tx_queue_count;
+	struct efx_tx_queue *tx_queues;
 
 #ifdef CONFIG_SFC_PTP
 	enum efx_sync_events_state sync_events_state;
@@ -839,11 +864,20 @@ struct efx_channel {
 	cpumask_var_t available_cpus;
 #endif
 	int irq_mem_node;
+
+#ifdef EFX_USE_IRQ_NOTIFIERS
+	struct {
+		struct irq_affinity_notify notifier;
+		struct completion complete;
+	} irq_affinity;
+#endif
 };
 
+#if defined(EFX_USE_KCOMPAT) && defined(EFX_WANT_DRIVER_BUSY_POLL)
 #ifdef CONFIG_NET_RX_BUSY_POLL
 enum efx_channel_busy_poll_state {
 	EFX_CHANNEL_STATE_IDLE = 0,
+	EFX_CHANNEL_STATE_NAPI_BIT = 0,
 	EFX_CHANNEL_STATE_NAPI = BIT(0),
 	EFX_CHANNEL_STATE_NAPI_REQ_BIT = 1,
 	EFX_CHANNEL_STATE_NAPI_REQ = BIT(1),
@@ -863,6 +897,9 @@ static inline bool efx_channel_lock_napi(struct efx_channel *channel)
 	unsigned long prev, old = READ_ONCE(channel->busy_poll_state);
 
 	while (1) {
+		if (test_bit(EFX_CHANNEL_STATE_DISABLE_BIT, &old))
+			return false;
+
 		switch (old) {
 		case EFX_CHANNEL_STATE_POLL:
 			/* Ensure efx_channel_try_lock_poll() wont starve us */
@@ -888,9 +925,7 @@ static inline bool efx_channel_lock_napi(struct efx_channel *channel)
 
 static inline void efx_channel_unlock_napi(struct efx_channel *channel)
 {
-	/* Make sure write has completed from efx_channel_lock_napi() */
-	smp_wmb();
-	WRITE_ONCE(channel->busy_poll_state, EFX_CHANNEL_STATE_IDLE);
+	clear_bit_unlock(EFX_CHANNEL_STATE_NAPI_BIT, &channel->busy_poll_state);
 }
 
 /* Called from efx_busy_poll(). */
@@ -922,6 +957,7 @@ static inline void efx_channel_enable(struct efx_channel *channel)
 static inline bool efx_channel_disable(struct efx_channel *channel)
 {
 	set_bit(EFX_CHANNEL_STATE_DISABLE_BIT, &channel->busy_poll_state);
+	clear_bit(EFX_CHANNEL_STATE_NAPI_REQ_BIT, &channel->busy_poll_state);
 	/* Implicit barrier in efx_channel_busy_polling() */
 	return !efx_channel_busy_polling(channel);
 }
@@ -964,6 +1000,7 @@ static inline bool efx_channel_disable(struct efx_channel *channel)
 	return true;
 }
 #endif /* CONFIG_NET_RX_BUSY_POLL */
+#endif /* EFX_WANT_DRIVER_BUSY_POLL */
 
 /**
  * struct efx_msi_context - Context for each MSI
@@ -998,7 +1035,7 @@ struct efx_channel_type {
 	int (*pre_probe)(struct efx_channel *);
 	void (*post_remove)(struct efx_channel *);
 	void (*get_name)(struct efx_channel *, char *buf, size_t len);
-	struct efx_channel *(*copy)(const struct efx_channel *);
+	struct efx_channel *(*copy)(struct efx_channel *);
 	bool (*receive_skb)(struct efx_channel *, struct sk_buff *);
 	bool keep_eventq;
 };
@@ -1085,6 +1122,10 @@ static inline bool efx_link_state_equal(const struct efx_link_state *left,
  *	Serialised by the mac_lock.
  * @get_settings: Get ethtool settings. Serialised by the mac_lock.
  * @set_settings: Set ethtool settings. Serialised by the mac_lock.
+ * @get_ksettings: Get ethtool link settings.  Serialised by the mac_lock.
+ * @set_ksettings: Set ethtool link settings.  Serialised by the mac_lock.
+ * @get_fecparam: Get Forward Error Correction settings. Serialised by mac_lock.
+ * @set_fecparam: Set Forward Error Correction settings. Serialised by mac_lock.
  * @set_npage_adv: Set abilities advertised in (Extended) Next Page
  *	(only needed where AN bit is set in mmds)
  * @test_alive: Test that PHY is 'alive' (online)
@@ -1103,6 +1144,15 @@ struct efx_phy_operations {
 			      struct ethtool_cmd *ecmd);
 	int (*set_settings) (struct efx_nic *efx,
 			     struct ethtool_cmd *ecmd);
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_ETHTOOL_LINKSETTINGS)
+	void (*get_ksettings) (struct efx_nic *efx,
+			       struct ethtool_link_ksettings *settings);
+	int (*set_ksettings) (struct efx_nic *efx,
+			      const struct ethtool_link_ksettings *settings);
+#endif
+	int (*get_fecparam)(struct efx_nic *efx, struct ethtool_fecparam *fec);
+	int (*set_fecparam)(struct efx_nic *efx,
+			    const struct ethtool_fecparam *fec);
 	void (*set_npage_adv) (struct efx_nic *efx, u32);
 	int (*test_alive) (struct efx_nic *efx);
 	const char *(*test_name) (struct efx_nic *efx, unsigned int index);
@@ -1176,6 +1226,75 @@ struct efx_nic_errors {
 
 struct vfdi_status;
 
+/* Useful collections of RSS flags.  Caller needs mcdi_pcol.h. */
+#define RSS_CONTEXT_FLAGS_DEFAULT	(1 << MC_CMD_RSS_CONTEXT_GET_FLAGS_OUT_TOEPLITZ_IPV4_EN_LBN |\
+					 1 << MC_CMD_RSS_CONTEXT_GET_FLAGS_OUT_TOEPLITZ_TCPV4_EN_LBN |\
+					 1 << MC_CMD_RSS_CONTEXT_GET_FLAGS_OUT_TOEPLITZ_IPV6_EN_LBN |\
+					 1 << MC_CMD_RSS_CONTEXT_GET_FLAGS_OUT_TOEPLITZ_TCPV6_EN_LBN)
+#define RSS_CONTEXT_FLAGS_ADDITIONAL_MASK	~0xff
+#define RSS_MODE_HASH_ADDRS	(1 << RSS_MODE_HASH_SRC_ADDR_LBN |\
+				 1 << RSS_MODE_HASH_DST_ADDR_LBN)
+#define RSS_MODE_HASH_PORTS	(1 << RSS_MODE_HASH_SRC_PORT_LBN |\
+				 1 << RSS_MODE_HASH_DST_PORT_LBN)
+#define RSS_MODE_HASH_4TUPLE	(RSS_MODE_HASH_ADDRS | RSS_MODE_HASH_PORTS)
+#define RSS_CONTEXT_FLAGS_DEFAULT_ADDITIONAL	(\
+		RSS_MODE_HASH_4TUPLE << MC_CMD_RSS_CONTEXT_GET_FLAGS_OUT_TCP_IPV4_RSS_MODE_LBN |\
+		RSS_MODE_HASH_ADDRS << MC_CMD_RSS_CONTEXT_GET_FLAGS_OUT_UDP_IPV4_RSS_MODE_LBN |\
+		RSS_MODE_HASH_ADDRS << MC_CMD_RSS_CONTEXT_GET_FLAGS_OUT_OTHER_IPV4_RSS_MODE_LBN |\
+		RSS_MODE_HASH_4TUPLE << MC_CMD_RSS_CONTEXT_GET_FLAGS_OUT_TCP_IPV6_RSS_MODE_LBN |\
+		RSS_MODE_HASH_ADDRS << MC_CMD_RSS_CONTEXT_GET_FLAGS_OUT_UDP_IPV6_RSS_MODE_LBN |\
+		RSS_MODE_HASH_ADDRS << MC_CMD_RSS_CONTEXT_GET_FLAGS_OUT_OTHER_IPV6_RSS_MODE_LBN)
+
+#ifdef CONFIG_RFS_ACCEL
+/* Order of these is important, since filter_id >= %EFX_ARFS_FILTER_ID_PENDING
+ * is used to test if filter does or will exist.
+ */
+#define EFX_ARFS_FILTER_ID_PENDING	-1
+#define EFX_ARFS_FILTER_ID_ERROR	-2
+#define EFX_ARFS_FILTER_ID_REMOVING	-3
+/**
+ * struct efx_arfs_rule - record of an ARFS filter and its IDs
+ * @node: linkage into hash table
+ * @spec: details of the filter (used as key for hash table).  Use efx->type to
+ *	determine which member to use.
+ * @rxq_index: channel to which the filter will steer traffic.
+ * @arfs_id: filter ID which was returned to ARFS
+ * @filter_id: index in software filter table.  May be
+ *	%EFX_ARFS_FILTER_ID_PENDING if filter was not inserted yet,
+ *	%EFX_ARFS_FILTER_ID_ERROR if filter insertion failed, or
+ *	%EFX_ARFS_FILTER_ID_REMOVING if expiry is currently removing the filter.
+ */
+struct efx_arfs_rule {
+	struct hlist_node node;
+	struct efx_filter_spec spec;
+	u16 rxq_index;
+	u16 arfs_id;
+	s32 filter_id;
+};
+
+/* Size chosen so that the table is one page (4kB) */
+#define EFX_ARFS_HASH_TABLE_SIZE	512
+
+/**
+ * struct efx_async_filter_insertion - Request to asynchronously insert a filter
+ * @net_dev: Reference to the netdevice
+ * @spec: The filter to insert
+ * @work: Workitem for this request
+ * @rxq_index: Identifies the channel for which this request was made
+ * @flow_id: Identifies the kernel-side flow for which this request was made
+ */
+struct efx_async_filter_insertion {
+	struct net_device *net_dev;
+	struct efx_filter_spec spec;
+	struct work_struct work;
+	u16 rxq_index;
+	u32 flow_id;
+};
+
+/* Maximum number of ARFS workitems that may be in flight on an efx_nic */
+#define EFX_RPS_MAX_IN_FLIGHT	8
+#endif /* CONFIG_RFS_ACCEL */
+
 /**
  * struct efx_nic - an Efx NIC
  * @name: Device name (net device name or bus id before net device registered)
@@ -1188,12 +1307,12 @@ struct vfdi_status;
  *	functions of the controller, if this is for the primary function.
  *	Serialised by rtnl_lock.
  * @revision: Hardware architecture revision
- * @dl_revision: Revision name for driverlink
  * @type: Controller type attributes
  * @legacy_irq: IRQ number
  * @reset_work: Scheduled reset workitem
  * @membase_phys: Memory BAR value as physical address
  * @membase: Memory BAR value
+ * @vi_stride: step between per-VI registers / memory regions
  * @interrupt_mode: Interrupt mode
  * @timer_quantum_ns: Interrupt timer quantum, in nanoseconds
  * @timer_max_ns: Interrupt timer maximum value, in nanoseconds
@@ -1209,6 +1328,8 @@ struct vfdi_status;
  * @msi_context: Context for each MSI
  * @extra_channel_types: Types of extra (non-traffic) channels that
  *	should be allocated for this NIC
+ * @xdp_tx_queue_count: Number of entries in %xdp_tx_queues.
+ * @xdp_tx_queues: Array of pointers to tx queues used for XDP transmit.
  * @rxq_entries: Size of receive queues requested by user.
  * @txq_entries: Size of transmit queues requested by user.
  * @txq_stop_thresh: TX queue fill level at or above which we stop it.
@@ -1219,19 +1340,18 @@ struct vfdi_status;
  * @rx_dc_base: Base qword address in SRAM of RX queue descriptor caches
  * @sram_lim_qw: Qword address limit of SRAM
  * @next_buffer_table: Next buffer table index to use
- * @farch_resources: Falcon driverlink parameters
- * @ef10_resources: EF10 driverlink parameters
  * @n_channels: Number of channels in use
  * @n_rx_channels: Number of channels used for RX (= number of RX queues)
  * @n_rss_channels: Number of rx channels available for RSS.
  * @rss_spread: Number of event queues to spread traffic over.
  * @n_tx_channels: Number of channels used for TX
  * @tx_channel_offset: Offset of zeroth channel used for TX.
- * @tx_channel_stride: Stride between channels used for TX (only in VMware port)
+ * @tx_queues_per_channel: Number of TX queues on a normal (non-XDP) TX channel.
+ * @n_xdp_channels: Number of channels used for XDP TX
+ * @xdp_channel_offset: Offset of zeroth channel used for XPD TX.
+ * @xdp_tx_per_channel: Max number of TX queues on an XDP TX channel.
  * @n_wanted_channels: Number of interrupts efx_probe_interrupts() attempted
  *     to enable.
- * @n_rx_netqs: Number of receive NETQs including default (only in VMware port)
- * @n_rx_netqs_no_rss: Number of receive NETQs without RSS (only in VMware port)
  * @rx_ip_align: RX DMA address offset to have IP header aligned in
  *	in accordance with NET_IP_ALIGN
  * @rx_dma_len: Current maximum RX DMA length
@@ -1245,9 +1365,12 @@ struct vfdi_status;
  *	(valid only for NICs that set %EFX_RX_PKT_PREFIX_LEN; always negative)
  * @rx_packet_ts_offset: Offset of timestamp from start of packet data
  *	(valid only if channel->sync_timestamps_enabled; always negative)
- * @rx_hash_key: Toeplitz hash key for RSS
- * @rx_indir_table: Indirection table for RSS
  * @rx_scatter: Scatter mode enabled for receives
+ * @rss_context: Main RSS context.  Its @list member is the head of the list of
+ *	RSS contexts created by user requests
+ * @rss_lock: Protects custom RSS context software state in @rss_context.list
+ * @cpu_channel_map_lock: Lock used to serialise rebuilding the map.
+ *	Doesn't need to be locked to read the map.
  * @cpu_channel_map: Mapping of CPUs to channels. Used to assign flows.
  * @errors: Error condition stats
  * @int_error_count: Number of internal errors seen recently
@@ -1259,6 +1382,7 @@ struct vfdi_status;
  * @irq_level: IRQ level/index for IRQs not triggered by an event queue
  * @selftest_work: Work item for asynchronous self-test
  * @mtd_list: List of MTDs attached to the NIC
+ * @mtd_parts: Memory allocated for MTD data
  * @nic_data: Hardware dependent state
  * @mcdi: Management-Controller-to-Driver Interface state
  * @mac_lock: MAC access lock. Protects @port_enabled, @link_up, @phy_mode,
@@ -1275,6 +1399,8 @@ struct vfdi_status;
 #if defined(EFX_USE_KCOMPAT) && !defined(EFX_HAVE_NETDEV_HW_FEATURES) && !defined(EFX_HAVE_NETDEV_EXTENDED_HW_FEATURES)
  * @hw_features: Features which may be enabled/disabled
 #endif
+ * @num_mac_stats: Number of MAC stats reported by firmware (MAC_STATS_NUM_STATS
+ *	field of %MC_CMD_GET_CAPABILITIES_V4 response, or %MC_CMD_MAC_NSTATS)
  * @stats_buffer: DMA buffer for statistics
  * @phy_type: PHY type
  * @phy_op: PHY interface
@@ -1285,6 +1411,8 @@ struct vfdi_status;
  * @phy_power_follows_link: PHY powers off when link is taken down.
  * @phy_power_force_off: PHY always powered off - only useful for test.
  * @link_advertising: Autonegotiation advertising flags
+ * @fec_config: Forward Error Correction configuration flags.  For bit positions
+ *	see &enum ethtool_fec_config_bits.
  * @link_state: Current state of the link
  * @n_link_state_changes: Number of times the link has changed state
  * @unicast_filter: Flag for Falcon-arch simple unicast filter.
@@ -1298,15 +1426,18 @@ struct vfdi_status;
  * @loopback_mode: Loopback status
  * @loopback_modes: Supported loopback mode bitmask
  * @loopback_selftest: Offline self-test private state
- * @filter_sem: Filter table rw_semaphore, for freeing the table
- * @filter_lock: Filter table lock, for mere content changes
+ * @filter_sem: Filter table rw_semaphore, protects existence of @filter_state
  * @filter_state: Architecture-dependent filter table state
+ * @rps_mutex: Protects RPS state of all channels
  * @rps_expire_channel: Next channel to check for expiry
  * @rps_expire_index: Next index to check for expiry in
  *	@rps_expire_channel's @rps_flow_id
- * @dl_info: Linked list of hardware parameters exposed through driverlink
- * @dl_node: Driverlink port list
- * @dl_device_list: Driverlink device list
+ * @rps_slot_map: bitmap of in-flight entries in @rps_slot
+ * @rps_slot: array of ARFS insertion requests for efx_filter_rfs_work()
+ * @rps_hash_lock: Protects ARFS filter mapping state (@rps_hash_table and
+ *	@rps_next_id).
+ * @rps_hash_table: Mapping between ARFS filters and their various IDs
+ * @rps_next_id: next arfs_id for an ARFS filter
  * @active_queues: Count of RX and TX queues that haven't been flushed and drained.
  * @rxq_flush_pending: Count of number of receive queues that need to be flushed.
  *	Decremented when the efx_flush_rx_queue() is called.
@@ -1329,7 +1460,9 @@ struct vfdi_status;
  *	and must be released by caller after statistics processing/copying
  *	if required.
  * @n_rx_noskb_drops: Count of RX packets dropped due to failure to allocate an skb
+#if defined(EFX_USE_KCOMPAT) && !defined(EFX_HAVE_ETHTOOL_FCS)
  * @forward_fcs: Flag to enable appending of 4-byte Frame Checksum to Rx packet
+#endif
  * @proxy_admin: State for proxy auth admin
  * @proxy_admin_lock: RW lock for proxy auth admin locking
  * @proxy_admin_mutex: Mutex for serialising proxy auth admin shutdown
@@ -1356,6 +1489,8 @@ struct efx_nic {
 	resource_size_t membase_phys;
 	void __iomem *membase;
 
+	unsigned int vi_stride;
+
 	enum efx_int_mode interrupt_mode;
 	unsigned int timer_quantum_ns;
 	unsigned int timer_max_ns;
@@ -1377,6 +1512,9 @@ struct efx_nic {
 	const struct efx_channel_type *
 	extra_channel_type[EFX_MAX_EXTRA_CHANNELS];
 
+	unsigned int xdp_tx_queue_count;
+	struct efx_tx_queue **xdp_tx_queues;
+
 	unsigned int rxq_entries;
 	unsigned int txq_entries;
 	unsigned int txq_stop_thresh;
@@ -1388,9 +1526,13 @@ struct efx_nic {
 	unsigned int rx_dc_base;
 	unsigned int sram_lim_qw;
 	unsigned int next_buffer_table;
+#ifdef EFX_NOT_UPSTREAM
+/* Falcon driverlink parameters */
 	struct efx_dl_falcon_resources farch_resources;
+/* EF10 driverlink parameters */
 	struct efx_dl_ef10_resources ef10_resources;
 	struct efx_dl_aoe_resources aoe_resources;
+#endif
 
 	unsigned int max_channels;
 	unsigned int max_tx_channels;
@@ -1401,11 +1543,10 @@ struct efx_nic {
 	unsigned int n_tx_channels;
 	unsigned int tx_channel_offset;
 	unsigned int tx_queues_per_channel;
+	unsigned int n_xdp_channels;
+	unsigned int xdp_channel_offset;
+	unsigned int xdp_tx_per_channel;
 	unsigned int n_wanted_channels;
-#if defined(EFX_NOT_UPSTREAM) && defined(EFX_WITH_VMWARE_NETQ)
-	unsigned int n_rx_netqs;
-	unsigned int n_rx_netqs_no_rss;
-#endif
 	unsigned int rx_ip_align;
 	unsigned int rx_dma_len;
 	unsigned int rx_buffer_order;
@@ -1417,11 +1558,12 @@ struct efx_nic {
 	int rx_packet_hash_offset;
 	int rx_packet_len_offset;
 	int rx_packet_ts_offset;
-	u8 rx_hash_key[40];
-	u32 rx_indir_table[128];
 	bool rx_scatter;
+	struct efx_rss_context rss_context;
+	struct mutex rss_lock;
 
 #ifdef EFX_TX_STEERING
+	struct mutex cpu_channel_map_lock;
 	int *cpu_channel_map;
 #endif
 	struct efx_tx_queue *(*select_tx_queue)(struct efx_channel *channel,
@@ -1443,6 +1585,8 @@ struct efx_nic {
 
 #ifdef CONFIG_SFC_MTD
 	struct list_head mtd_list;
+	void *mtd_parts;
+	struct kref mtd_parts_kref;
 #endif
 
 #if defined(EFX_USE_KCOMPAT) && defined(EFX_NEED_PCI_VPD_ATTR)
@@ -1474,14 +1618,15 @@ struct efx_nic {
 	netdev_features_t hw_features;
 #endif
 
+	bool stats_enabled;
+	u16 num_mac_stats;
+	unsigned int stats_period_ms;
+
 	struct efx_buffer stats_buffer;
 	u64 rx_nodesc_drops_total;
 	u64 rx_nodesc_drops_while_down;
 	bool rx_nodesc_drops_prev_state;
 
-#if defined(EFX_USE_KCOMPAT) && !defined(EFX_USE_NETDEV_PERM_ADDR)
-	unsigned char perm_addr[ETH_ALEN] __aligned(2);
-#endif
 #if defined(EFX_NOT_UPSTREAM) && defined(EFX_HAVE_VLAN_RX_PATH)
 	struct vlan_group *vlan_group;
 #endif
@@ -1496,7 +1641,8 @@ struct efx_nic {
 	bool phy_power_follows_link;
 	bool phy_power_force_off;
 
-	u32 link_advertising;
+	__ETHTOOL_DECLARE_LINK_MODE_MASK(link_advertising);
+	u32 fec_config;
 	struct efx_link_state link_state;
 	unsigned int n_link_state_changes;
 
@@ -1510,17 +1656,25 @@ struct efx_nic {
 	void *loopback_selftest;
 
 	struct rw_semaphore filter_sem;
-	spinlock_t filter_lock;
 	void *filter_state;
 #ifdef CONFIG_RFS_ACCEL
+	struct mutex rps_mutex;
 	unsigned int rps_expire_channel;
 	unsigned int rps_expire_index;
+	unsigned long rps_slot_map;
+	struct efx_async_filter_insertion rps_slot[EFX_RPS_MAX_IN_FLIGHT];
+	spinlock_t rps_hash_lock;
+	struct hlist_head *rps_hash_table;
+	u32 rps_next_id;
 #endif
 
-	struct efx_dl_device_info *dl_info;
-	struct list_head dl_node;
-	struct list_head dl_device_list;
 #ifdef EFX_NOT_UPSTREAM
+/* Linked list of hardware parameters exposed through driverlink */
+	struct efx_dl_device_info *dl_info;
+/* Driverlink net device list node */
+	struct list_head dl_node;
+/* Driverlink client device list */
+	struct list_head dl_device_list;
 /* Mutex protecting @dl_block_kernel_count and corresponding per-client state */
 	struct mutex dl_block_kernel_mutex;
 /* Number of times Driverlink clients are blocking the kernel stack from
@@ -1539,9 +1693,6 @@ struct efx_nic {
 /* Port debugfs sym-link (if_eth%d) */
 	struct dentry *debug_port_symlink;
 #endif
-#if defined(EFX_NOT_UPSTREAM) && defined(EFX_WITH_VMWARE_NETQ)
-	int netq_active;
-#endif
 
 	atomic_t active_queues;
 	atomic_t rxq_flush_pending;
@@ -1559,6 +1710,7 @@ struct efx_nic {
 #ifdef CONFIG_SFC_PTP
 	struct efx_ptp_data *ptp_data;
 #endif
+	unsigned int ptp_capability;
 
 #ifdef CONFIG_SFC_DUMP
 	struct efx_dump_data *dump_data;
@@ -1579,7 +1731,9 @@ struct efx_nic {
 	spinlock_t stats_lock;
 	atomic_t n_rx_noskb_drops;
 	char *vpd_sn;
+#if defined(EFX_USE_KCOMPAT) && !defined(EFX_HAVE_ETHTOOL_FCS)
 	bool forward_fcs;
+#endif
 #ifdef EFX_USE_MCDI_PROXY_AUTH
 	struct proxy_admin_state *proxy_admin_state;
 	rwlock_t proxy_admin_lock;
@@ -1605,6 +1759,7 @@ static inline unsigned int efx_port_num(struct efx_nic *efx)
 #ifdef CONFIG_SFC_MTD
 struct efx_mtd_partition {
 	struct list_head node;
+	struct efx_nic *efx;
 	struct mtd_info mtd;
 #if defined(EFX_USE_KCOMPAT) && !defined(EFX_USE_MTD_WRITESIZE)
 	size_t writesize;
@@ -1612,6 +1767,10 @@ struct efx_mtd_partition {
 	const char *dev_type_name;
 	const char *type_name;
 	char name[IFNAMSIZ + 20];
+	/* MCDI related attributes */
+	bool updating;
+	u16 nvram_type;
+	u16 fw_subtype;
 };
 #endif
 
@@ -1686,6 +1845,9 @@ struct efx_udp_tunnel {
  * @mcdi_poll_reboot: Test whether the MCDI has rebooted.  If so,
  *	return an appropriate error code for aborting any current
  *	request; otherwise return 0.
+ * @mcdi_reboot_detected: Called when the MCDI module detects an MC reboot
+ * @mcdi_get_buf: Get a free buffer for MCDI
+ * @mcdi_put_buf: Return a buffer from MCDI
  * @irq_enable_master: Enable IRQs on the NIC.  Each event queue must
  *	be separately enabled after this.
  * @irq_test_generate: Generate a test IRQ
@@ -1701,6 +1863,13 @@ struct efx_udp_tunnel {
  * @tx_write: Write TX descriptors and doorbell
  * @rx_push_rss_config: Write RSS hash key and indirection table to the NIC
  * @rx_pull_rss_config: Read RSS hash key and indirection table back from the NIC
+ * @rx_push_rss_context_config: Write RSS hash key and indirection table for
+ *	user RSS context to the NIC
+ * @rx_pull_rss_context_config: Read RSS hash key and indirection table for user
+ *	RSS context back from the NIC
+ * @rx_restore_rss_contexts: Restore user RSS contexts removed from hardware
+ * @rx_set_rss_flags: Write RSS flow-hashing flags to the NIC
+ * @rx_get_rss_flags: Read RSS flow-hashing flags back from the NIC
  * @rx_probe: Allocate resources for RX queue
  * @rx_init: Initialise RX queue on the NIC
  * @rx_remove: Free resources for RX queue
@@ -1711,30 +1880,22 @@ struct efx_udp_tunnel {
  * @ev_fini: Deinitialise event queue on the NIC
  * @ev_remove: Free resources for event queue
  * @ev_process: Process events for a queue, up to the given NAPI quota
+ * @ev_mcdi_pending: Peek at event queue, return whether MCDI event is pending
  * @ev_read_ack: Acknowledge read events on a queue, rearming its IRQ
  * @ev_test_generate: Generate a test event
  * @filter_table_probe: Probe filter capabilities and set up filter software state
  * @filter_table_restore: Restore filters removed from hardware
  * @filter_table_remove: Remove filters from hardware and tear down software state
+ * @filter_match_supported: Check if specified filter match supported
  * @filter_update_rx_scatter: Update filters after change to rx scatter setting
  * @filter_insert: add or replace a filter
  * @filter_remove_safe: remove a filter by ID, carefully
-#ifdef __VMKLNX__
- * @filter_get_unsafe_id: get filter ID which uniquely identify it but
- *	possibly has no extra information for safety checks
- * @filter_remove_unsafe: remove a filter by ID
-#endif
  * @filter_get_safe: retrieve a filter by ID, carefully
  * @filter_clear_rx: Remove all RX filters whose priority is less than or
  *	equal to the given priority and is not %EFX_FILTER_PRI_AUTO
- * @filter_redirect: update the queue for an existing RX filter
  * @filter_count_rx_used: Get the number of filters in use at a given priority
  * @filter_get_rx_id_limit: Get maximum value of a filter id, plus 1
  * @filter_get_rx_ids: Get list of RX filters at a given priority
- * @filter_rfs_insert: Add or replace a filter for RFS.  This must be
- *	atomic.  The hardware change may be asynchronous but should
- *	not be delayed for long.  It may fail if this can't be done
- *	atomically.
  * @filter_rfs_expire_one: Consider expiring a filter inserted for RFS.
  *	This must check whether the specified table entry is used by RFS
  *	and that rps_may_expire_flow() returns true for it.
@@ -1755,9 +1916,9 @@ struct efx_udp_tunnel {
  * @ptp_set_ts_config: Set hardware timestamp configuration.  The flags
  *	and tx_type will already have been validated but this operation
  *	must validate and update rx_filter.
+ * @get_phys_port_id: Get the underlying physical port id.
  * @sriov_init: Initialise VFs when vf-count is set via module parameter.
  * @sriov_fini: Disable sriov
- * @sriov_get_phys_port_id: Get the underlying physical port id.
  * @sriov_wanted: Check that max_vf > 0.
  * @sriov_respet: Reset sriov, siena only.
  * @sriov_configure: Enable VFs.
@@ -1768,14 +1929,6 @@ struct efx_udp_tunnel {
  * @sriov_set_vf_spoofchk: Checks if sppokcheck is supported.
  * @sriov_get_vf_config: Gets VF config
  * @sriov_set_vf_link_state: Set VF Link state
-#if defined(__VMKLNX__) && defined(CONFIG_SFC_SRIOV)
- * @sriov_vf_quiesce: Quiesce VF
- * @sriov_get_vf_stats: Get VF stats in VMware-spec structures
- * @sriov_set_vf_rx_mode: Configure what kind of traffic VF is allowed
- *       to receive
- * @sriov_vf_vlan_range: Add/delete VLANs range allowed for VF
- * @sriov_set_vf_mtu: Set VF MTU
-#endif
  * @vswitching_probe: Allocate vswitches and vports.
  * @vswitching_restore: Restore vswitching following a reset.
  * @vswitching_remove: Free the vports and vswitches.
@@ -1804,10 +1957,6 @@ struct efx_udp_tunnel {
  * @max_interrupt_mode: Highest capability interrupt mode supported
  *	from &enum efx_init_mode.
  * @timer_period_max: Maximum period of interrupt timer (in ticks)
- * @farch_resources: Resources to be shared via driverlink (copied and
- *	updated as efx_nic::farch_resources)
- * @ef10_resources: Resources to be shared via driverlink (copied and
- *	updated as efx_nic::ef10_resources)
  * @offload_features: net_device feature flags for protocol offload
  *	features implemented in hardware
  * @mcdi_max_ver: Maximum MCDI version supported
@@ -1815,7 +1964,7 @@ struct efx_udp_tunnel {
  */
 struct efx_nic_type {
 	bool is_vf;
-	unsigned int mem_bar;
+	unsigned int (*mem_bar)(struct efx_nic *efx);
 	unsigned int (*mem_map_size)(struct efx_nic *efx);
 	int (*probe)(struct efx_nic *efx);
 	int (*dimension_resources)(struct efx_nic *efx);
@@ -1846,6 +1995,7 @@ struct efx_nic_type {
 	void (*start_stats)(struct efx_nic *efx);
 	void (*pull_stats)(struct efx_nic *efx);
 	void (*stop_stats)(struct efx_nic *efx);
+	void (*update_stats_period)(struct efx_nic *efx);
 	void (*set_id_led)(struct efx_nic *efx, enum efx_led_mode mode);
 	void (*push_irq_moderation)(struct efx_channel *channel);
 	int (*reconfigure_port)(struct efx_nic *efx);
@@ -1861,27 +2011,26 @@ struct efx_nic_type {
 			void (*pattern)(unsigned int, efx_qword_t *, int, int),
 			int a, int b);
 	int (*test_nvram)(struct efx_nic *efx);
-	void (*mcdi_request)(struct efx_nic *efx,
+	void (*mcdi_request)(struct efx_nic *efx, u8 bufid,
 			     const efx_dword_t *hdr, size_t hdr_len,
 			     const efx_dword_t *sdu, size_t sdu_len);
-	bool (*mcdi_poll_response)(struct efx_nic *efx);
-	void (*mcdi_read_response)(struct efx_nic *efx, efx_dword_t *pdu,
-				   size_t pdu_offset, size_t pdu_len);
+	bool (*mcdi_poll_response)(struct efx_nic *efx, u8 bufid);
+	void (*mcdi_read_response)(struct efx_nic *efx, u8 bufid,
+				   efx_dword_t *pdu, size_t pdu_offset,
+				   size_t pdu_len);
 	int (*mcdi_poll_reboot)(struct efx_nic *efx);
+	void (*mcdi_record_bist_event)(struct efx_nic *efx);
+	int (*mcdi_poll_bist_end)(struct efx_nic *efx);
 	void (*mcdi_reboot_detected)(struct efx_nic *efx);
+	bool (*mcdi_get_buf)(struct efx_nic *efx, u8 *bufid);
+	void (*mcdi_put_buf)(struct efx_nic *efx, u8 bufid);
 	void (*irq_enable_master)(struct efx_nic *efx);
 	int (*irq_test_generate)(struct efx_nic *efx);
 	void (*irq_disable_non_ev)(struct efx_nic *efx);
-#if !defined(EFX_USE_KCOMPAT) || !defined(EFX_HAVE_IRQ_HANDLER_REGS)
 	irqreturn_t (*irq_handle_msi)(int irq, void *dev_id);
 	irqreturn_t (*irq_handle_legacy)(int irq, void *dev_id);
-#else
-	irqreturn_t (*irq_handle_msi)(int irq, void *dev_id, struct pt_regs *);
-	irqreturn_t (*irq_handle_legacy)(int irq, void *dev_id,
-					 struct pt_regs *);
-#endif
 	int (*tx_probe)(struct efx_tx_queue *tx_queue);
-	void (*tx_init)(struct efx_tx_queue *tx_queue);
+	int (*tx_init)(struct efx_tx_queue *tx_queue);
 	void (*tx_remove)(struct efx_tx_queue *tx_queue);
 	void (*tx_write)(struct efx_tx_queue *tx_queue);
 	void (*tx_notify)(struct efx_tx_queue *tx_queue);
@@ -1890,8 +2039,19 @@ struct efx_nic_type {
 	int (*rx_push_rss_config)(struct efx_nic *efx, bool user,
 				  const u32 *rx_indir_table, const u8 *key);
 	int (*rx_pull_rss_config)(struct efx_nic *efx);
+	int (*rx_push_rss_context_config)(struct efx_nic *efx,
+					  struct efx_rss_context *ctx,
+					  const u32 *rx_indir_table,
+					  const u8 *key);
+	int (*rx_pull_rss_context_config)(struct efx_nic *efx,
+					  struct efx_rss_context *ctx);
+	void (*rx_restore_rss_contexts)(struct efx_nic *efx);
+	u32 (*rx_get_default_rss_flags)(struct efx_nic *efx);
+	int (*rx_set_rss_flags)(struct efx_nic *efx, struct efx_rss_context *ctx,
+				u32 flags);
+	int (*rx_get_rss_flags)(struct efx_nic *efx, struct efx_rss_context *ctx);
 	int (*rx_probe)(struct efx_rx_queue *rx_queue);
-	void (*rx_init)(struct efx_rx_queue *rx_queue);
+	int (*rx_init)(struct efx_rx_queue *rx_queue);
 	void (*rx_remove)(struct efx_rx_queue *rx_queue);
 	void (*rx_write)(struct efx_rx_queue *rx_queue);
 	int (*rx_defer_refill)(struct efx_rx_queue *rx_queue);
@@ -1900,11 +2060,14 @@ struct efx_nic_type {
 	void (*ev_fini)(struct efx_channel *channel);
 	void (*ev_remove)(struct efx_channel *channel);
 	int (*ev_process)(struct efx_channel *channel, int quota);
+	bool (*ev_mcdi_pending)(struct efx_channel *channel);
 	void (*ev_read_ack)(struct efx_channel *channel);
 	void (*ev_test_generate)(struct efx_channel *channel);
 	int (*filter_table_probe)(struct efx_nic *efx);
 	void (*filter_table_restore)(struct efx_nic *efx);
 	void (*filter_table_remove)(struct efx_nic *efx);
+	bool (*filter_match_supported)(struct efx_nic *efx, bool encap,
+				       unsigned int match_flags);
 	void (*filter_update_rx_scatter)(struct efx_nic *efx);
 	s32 (*filter_insert)(struct efx_nic *efx,
 			     const struct efx_filter_spec *spec, bool replace);
@@ -1916,26 +2079,20 @@ struct efx_nic_type {
 			       u32 filter_id, struct efx_filter_spec *);
 	int (*filter_clear_rx)(struct efx_nic *efx,
 			       enum efx_filter_priority priority);
-	int (*filter_redirect)(struct efx_nic *efx, u32 filter_id,
-			       int rxq_i, int stack_id);
 	u32 (*filter_count_rx_used)(struct efx_nic *efx,
 				    enum efx_filter_priority priority);
 	u32 (*filter_get_rx_id_limit)(struct efx_nic *efx);
 	s32 (*filter_get_rx_ids)(struct efx_nic *efx,
 				 enum efx_filter_priority priority,
 				 u32 *buf, u32 size);
-#if (defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_SARFS)) || defined(CONFIG_RFS_ACCEL)
-	s32 (*filter_async_insert)(struct efx_nic *efx,
-				   const struct efx_filter_spec *spec);
-#endif
 #ifdef CONFIG_RFS_ACCEL
 	bool (*filter_rfs_expire_one)(struct efx_nic *efx, u32 flow_id,
 				      unsigned int index);
 #endif
-#if defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_SARFS)
-	int (*filter_async_remove)(struct efx_nic *efx, u32 filter_id);
-#endif
 #ifdef EFX_NOT_UPSTREAM
+/* update the queue (and RSS context if not NULL) for an existing RX filter */
+	int (*filter_redirect)(struct efx_nic *efx, u32 filter_id,
+			       u32 *rss_context, int rxq_i, int stack_id);
 /* Block kernel from receiving packets except through explicit
  * configuration, i.e. remove and disable filters with priority < MANUAL
  */
@@ -1970,12 +2127,12 @@ struct efx_nic_type {
 	int (*vlan_rx_add_vid)(struct efx_nic *efx, __be16 proto, u16 vid);
 	int (*vlan_rx_kill_vid)(struct efx_nic *efx, __be16 proto, u16 vid);
 #endif
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_NEED_GET_PHYS_PORT_ID)
+	int (*get_phys_port_id)(struct efx_nic *efx,
+				struct netdev_phys_item_id *ppid);
+#endif
 	int (*sriov_init)(struct efx_nic *efx);
 	void (*sriov_fini)(struct efx_nic *efx);
-#if !defined(EFX_USE_KCOMPAT) || defined(EFX_NEED_GET_PHYS_PORT_ID)
-	int (*sriov_get_phys_port_id)(struct efx_nic *efx,
-				      struct netdev_phys_item_id *ppid);
-#endif
 	bool (*sriov_wanted)(struct efx_nic *efx);
 	void (*sriov_reset)(struct efx_nic *efx);
 	int (*sriov_configure)(struct efx_nic *efx, int num_vfs);
@@ -2019,9 +2176,15 @@ struct efx_nic_type {
 	unsigned int min_interrupt_mode;
 	unsigned int max_interrupt_mode;
 	unsigned int timer_period_max;
+#ifdef EFX_NOT_UPSTREAM
+/* Resources to be shared via driverlink (copied and updated as efx_nic::farch_resources)
+ */
 	struct efx_dl_falcon_resources farch_resources;
+/* Resources to be shared via driverlink (copied and updated as efx_nic::ef10_resources)
+ */
 	struct efx_dl_ef10_resources ef10_resources;
 	struct efx_dl_hash_insertion dl_hash_insertion;
+#endif
 	netdev_features_t offload_features;
 	int mcdi_max_ver;
 	unsigned int max_rx_ip_filters;
@@ -2029,11 +2192,13 @@ struct efx_nic_type {
 	unsigned int rx_hash_key_size;
 };
 
+#ifdef EFX_NOT_UPSTREAM
 /* Is Driverlink supported on this device? */
 static inline bool efx_dl_supported(struct efx_nic *efx)
 {
 	return efx->dl_info != NULL;
 }
+#endif
 
 /**************************************************************************
  *
@@ -2044,7 +2209,7 @@ static inline bool efx_dl_supported(struct efx_nic *efx)
 static inline struct efx_channel *
 efx_get_channel(struct efx_nic *efx, unsigned int index)
 {
-	EFX_BUG_ON_PARANOID(index >= efx->n_channels);
+	EFX_WARN_ON_ONCE_PARANOID(index >= efx->n_channels);
 	return efx->channel[index];
 }
 
@@ -2065,42 +2230,69 @@ efx_get_channel(struct efx_nic *efx, unsigned int index)
 static inline struct efx_channel *
 efx_get_tx_channel(struct efx_nic *efx, unsigned int index)
 {
-	EFX_BUG_ON_PARANOID(index >= efx->n_tx_channels);
+	EFX_WARN_ON_ONCE_PARANOID(index >= efx->n_tx_channels);
 	return efx->channel[efx->tx_channel_offset + index];
+}
+
+static inline struct efx_channel *
+efx_get_xdp_channel(struct efx_nic *efx, unsigned int index)
+{
+	EFX_WARN_ON_ONCE_PARANOID(index >= efx->n_xdp_channels);
+	return efx->channel[efx->xdp_channel_offset + index];
 }
 
 static inline bool efx_channel_has_tx_queues(struct efx_channel *channel)
 {
 	return channel->channel - channel->efx->tx_channel_offset <
-		channel->efx->n_tx_channels;
+	       channel->efx->n_tx_channels;
 }
 
 static inline struct efx_tx_queue *
-efx_channel_get_tx_queue(struct efx_channel *channel, unsigned int queue)
+efx_channel_get_tx_queue(struct efx_channel *channel, unsigned int label)
 {
-	struct efx_nic *efx = channel->efx;
-	unsigned int queue_base = channel->channel * efx->tx_queues_per_channel;
+	if (unlikely(label > channel->tx_queue_count)) {
+		netif_err(channel->efx, drv, channel->efx->net_dev,
+			  "Queue label %d out of range on channel %d (max %d)\n",
+			  label, channel->channel, channel->tx_queue_count);
+		return NULL;
+	}
 
-	/* queue may be chopped to 5-bits. add back in the top bits */
-	queue = queue_base + (queue - queue_base) % 32;
+	return channel->tx_queues + label;
+}
 
-	/* Odd-numbered channels have their offloaded Tx queues reversed */
-	if (efx->tx_queues_per_channel % 2 == 0)
-		queue ^= channel->channel & 1;
+static inline struct efx_tx_queue *
+efx_get_tx_queue_from_index(struct efx_nic *efx, unsigned int index)
+{
+	struct efx_channel *channel;
 
-	queue %= efx->tx_queues_per_channel;
+	if (index < efx->n_tx_channels * efx->tx_queues_per_channel) {
+		channel = efx_get_tx_channel(efx,
+					     index / efx->tx_queues_per_channel);
+		index %= efx->tx_queues_per_channel;
+		if (efx->tx_queues_per_channel % 2)
+			index ^= channel->channel & 1;
+		return efx_channel_get_tx_queue(channel, index);
+	}
 
-	return &channel->tx_queue[queue];
+	index -= efx->n_tx_channels * efx->tx_queues_per_channel;
+	if (index < efx->n_xdp_channels * efx->xdp_tx_per_channel) {
+		channel = efx_get_xdp_channel(efx,
+					      index / efx->xdp_tx_per_channel);
+		index %= efx->xdp_tx_per_channel;
+		return efx_channel_get_tx_queue(channel, index);
+	}
+
+	return NULL;
 }
 
 /* Iterate over all TX queues belonging to a channel */
 #define efx_for_each_channel_tx_queue(_tx_queue, _channel)		 \
-	if (!efx_channel_has_tx_queues(_channel))			 \
+	if (!(_channel)->tx_queues)					 \
 		;							 \
 	else								 \
-		for (_tx_queue = (_channel)->tx_queue;			 \
-		     _tx_queue < (_channel)->tx_queue +			 \
-				 (_channel)->efx->tx_queues_per_channel; \
+		for (_tx_queue = (_channel)->tx_queues;			 \
+		     _tx_queue < (_channel)->tx_queues +		 \
+				 (_channel)->tx_queue_count;	 \
 		     _tx_queue++)
 
 static inline bool efx_channel_has_rx_queue(struct efx_channel *channel)
@@ -2111,7 +2303,7 @@ static inline bool efx_channel_has_rx_queue(struct efx_channel *channel)
 static inline struct efx_rx_queue *
 efx_channel_get_rx_queue(struct efx_channel *channel)
 {
-	EFX_BUG_ON_PARANOID(!efx_channel_has_rx_queue(channel));
+	EFX_WARN_ON_ONCE_PARANOID(!efx_channel_has_rx_queue(channel));
 	return &channel->rx_queue;
 }
 
@@ -2123,6 +2315,12 @@ efx_channel_get_rx_queue(struct efx_channel *channel)
 		for (_rx_queue = &(_channel)->rx_queue;			\
 		     _rx_queue;						\
 		     _rx_queue = NULL)
+
+static inline bool efx_channel_is_xdp_tx(struct efx_channel *channel)
+{
+	return channel->channel - channel->efx->xdp_channel_offset <
+	       channel->efx->n_xdp_channels;
+}
 
 /* Name formats */
 #define EFX_CHANNEL_NAME(_channel) "chan%d", (_channel)->channel
@@ -2279,9 +2477,9 @@ efx_tx_queue_get_insert_buffer(const struct efx_tx_queue *tx_queue)
 	struct efx_tx_buffer *buffer =
 		__efx_tx_queue_get_insert_buffer(tx_queue);
 
-	EFX_BUG_ON_PARANOID(buffer->len);
-	EFX_BUG_ON_PARANOID(buffer->flags);
-	EFX_BUG_ON_PARANOID(buffer->unmap_len);
+	EFX_WARN_ON_ONCE_PARANOID(buffer->len);
+	EFX_WARN_ON_ONCE_PARANOID(buffer->flags);
+	EFX_WARN_ON_ONCE_PARANOID(buffer->unmap_len);
 
 	return buffer;
 }

@@ -117,6 +117,8 @@
     onload_delegated_send_cancel;
     oo_raw_send;
     onload_get_tcp_info;
+    onload_socket_nonaccel;
+    onload_socket_unicast_nonaccel;
   local:
     /* everything else must not be in the dynamic symbol table */
     *;

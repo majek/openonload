@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -53,8 +53,10 @@
 
 #if defined(__x86_64__) || defined(__i386__)
 # define EF_VI_CACHE_LINE_SIZE       64
+# define EF_VI_WRITE_BUFFER_SIZE     64
 #elif defined(__PPC__)
 # define EF_VI_CACHE_LINE_SIZE       128
+# define EF_VI_WRITE_BUFFER_SIZE     128  /* todo: check this */
 #else
 # error "Need to define EF_VI_CACHE_LINE_SIZE"
 #endif

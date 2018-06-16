@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -92,8 +92,15 @@ static int __ef_pd_alloc(ef_pd* pd, ef_driver_handle pd_dh,
   }
   if( if_indextoname(ifindex, pd->pd_intf_name) == NULL ) {
     free(pd->pd_intf_name);
-    LOGVV(ef_log("ef_pd_alloc: if_indextoname failed %d", errno));
-    return -errno;
+    ef_log("ef_pd_alloc: warning: if_indextoname failed %d", errno);
+    pd->pd_intf_name = NULL;
+    /* TODO the above is a work around
+     * base interface resides in different namespace
+     * allocating PD was allowed nevertheless.
+     * we intend to do this for license checking only, but
+     * FIXME: pd alloc() should be allowed to be done through
+     * upper (MACVLAN/VLAN) interface.
+     */
   }
 
   pd->pd_cluster_name = NULL;

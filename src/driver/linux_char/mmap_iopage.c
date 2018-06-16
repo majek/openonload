@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -25,7 +25,9 @@
 /* HACK FIXME: PPC kernels that we support do have pgprot_writecombine(),
  * but kernel-compat doesn't detect (I think because it is a macro).
  */
+#ifndef EFRM_HAVE_PGPROT_WRITECOMBINE
 # define EFRM_HAVE_PGPROT_WRITECOMBINE
+#endif
 #endif
 
 

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -149,6 +149,8 @@ static int socket_build_endpoint(struct rtt_endpoint** ep_out,
   sep->ep.ping = socket_ping;
   sep->ep.pong = socket_pong;
   sep->ep.cleanup = NULL;
+  sep->ep.reset_stats = NULL;
+  sep->ep.dump_info = NULL;
   sep->sock = sock;
   const ssize_t headers = 14 + 20 + 8;
   RTT_TEST( opts->ping_frame_len >= headers );

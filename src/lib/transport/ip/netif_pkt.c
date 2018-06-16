@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -69,6 +69,7 @@ ci_ip_pkt_fmt* __ci_netif_pkt(ci_netif* ni, unsigned id)
 #endif
   {
     rc = oo_resource_mmap(ci_netif_get_driver_handle(ni),
+                          OO_MMAP_TYPE_NETIF,
                           CI_NETIF_MMAP_ID_PKTSET(setid),
                           CI_CFG_PKT_BUF_SIZE * PKTS_PER_SET,
                           OO_MMAP_FLAG_DEFAULT,
@@ -87,8 +88,11 @@ ci_ip_pkt_fmt* __ci_netif_pkt(ci_netif* ni, unsigned id)
 
  out:
   pthread_mutex_unlock(&citp_pkt_map_lock);
-  if( CI_UNLIKELY(pkt == NULL) )
-    ci_log("Failed to map packets!  Crashing...");
+  if( CI_UNLIKELY(pkt == NULL) ) {
+    ci_log("Failed to map packets!");
+    ci_netif_unlock(ni);
+    ci_fail(("Crashing..."));
+  }
   return pkt;
 }
 
@@ -351,5 +355,62 @@ int ci_netif_pkt_alloc_block(ci_netif* ni, ci_sock_cmn* s,
     return rc;
   goto again;
 }
+
+
+int ci_netif_pkt_pass_to_kernel(ci_netif* ni, ci_ip_pkt_fmt* pkt)
+{
+  ci_assert(ci_netif_is_locked(ni));
+
+#ifdef __KERNEL__
+  if( ! (ni->flags & CI_NETIF_FLAG_MAY_INJECT_TO_KERNEL) )
+#else
+  if( ! (ni->state->flags & CI_NETIF_FLAG_DO_INJECT_TO_KERNEL) )
+#endif
+    return 0;
+
+  if( pkt->intf_i < 0 || pkt->intf_i >= CI_CFG_MAX_INTERFACES ) {
+    /* ignore loopback packets */
+    CITP_STATS_NETIF_INC(ni, no_match_bad_intf_i);
+    return 0;
+  }
+
+  /* Multicast packets can be replicated across multiple Onload stacks and so we
+   * cannot simply inject non-matching multicast packets into the kernel.
+   * However, in most cases we should not see kernel-destined multicast packets
+   * anyway: the packet cannot have come via a MAC filter, since Onload only uses
+   * unicast MAC filters, and if it matched an IP filter then it should be stolen
+   * by Onload.  The only time we expect to be on this path, where a multicast
+   * packet matched a hardware IP filter but did not match any socket, is when
+   * the firmware is not capable of filtering by VLAN and the VLAN of the packet
+   * is incorrect.  In this case the packet could usefully be delivered to the
+   * kernel stack, but as cross-VLAN-stealing with low-latency firmware is a
+   * long-standing limitation, and as this is a distinct problem from the one
+   * that packet-injection was introduced to solve (namely the disruption of
+   * kernel traffic resulting from the use of scalable filters), we make no
+   * attempt to work around the aforementioned replication problem, and we just
+   * drop the packet. */
+  if( ci_eth_addr_is_multicast(oo_ether_dhost(pkt)) )
+    return 0;
+
+  /* offbuf for the first segment may be tweaked in attempt to deliver this
+   * packet to Onload.  We have to restore it now. */
+  oo_offbuf_set_start(&pkt->buf, oo_ether_hdr(pkt));
+
+  /* Enqueue the packet for later injection into the kernel's network stack. */
+  if( OO_PP_IS_NULL(ni->state->kernel_packets_head) ) {
+    ci_assert(OO_PP_IS_NULL(ni->state->kernel_packets_tail));
+    ci_assert_equal(ni->state->kernel_packets_pending, 0);
+    ni->state->kernel_packets_head = OO_PKT_P(pkt);
+  }
+  else {
+    PKT_CHK(ni, ni->state->kernel_packets_tail)->next = OO_PKT_P(pkt);
+  }
+  ++ni->state->kernel_packets_pending;
+  ni->state->kernel_packets_tail = OO_PKT_P(pkt);
+  pkt->next = OO_PP_NULL;
+
+  return 1;
+}
+
 
 /*! \cidoxg_end */

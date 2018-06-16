@@ -1,6 +1,6 @@
 /****************************************************************************
  * Copyright 2004-2005: Level 5 Networks Inc.
- * Copyright 2005-2016: Solarflare Communications Inc,
+ * Copyright 2005-2017: Solarflare Communications Inc,
  *                      7505 Irvine Center Drive, Suite 100
  *                      Irvine, CA 92618, USA
  *
@@ -27,8 +27,8 @@
 *//*! \file
 ** \author    Solarflare Communications, Inc.
 ** \brief     Additional Doxygen-format documentation for ef_vi.
-** \date      2016/06/13
-** \copyright Copyright &copy; 2016 Solarflare Communications, Inc. All
+** \date      2017/02/21
+** \copyright Copyright &copy; 2017 Solarflare Communications, Inc. All
 **            rights reserved. Solarflare, OpenOnload and EnterpriseOnload
 **            are trademarks of Solarflare Communications, Inc.
 *//*
@@ -51,8 +51,8 @@ distribution directory:
 
 \section compiling Compiling and Linking
 
-Applications or libraries using ef_vi will need to include the header
-files in src/include/etherfabic/
+Applications or libraries using %ef_vi will need to include the header
+files in src/include/etherfabric/
 
 The application will need to be linked with libciul1.a or libciul.so,
 which can be found under the "build" directory after running
@@ -61,12 +61,12 @@ scripts/onload_build or scripts/onload_install.
 If compiling your application against one version of Onload, and
 running on a system with a different version of Onload, some care is
 required.  Onload currently preserves compatibility and provides a
-stable API between the ef_vi user-space and the kernel drivers, so
-that applications compiled using an older ef_vi library will work when
+stable API between the %ef_vi user-space and the kernel drivers, so
+that applications compiled using an older %ef_vi library will work when
 run with newer drivers.  Compatibility in the other direction (newer
 ef_vi libraries running with older drivers) is not guaranteed.
 Finally, Onload does not currently maintain compatibility between
-compiling against one version of the ef_vi libraries, and then running
+compiling against one version of the %ef_vi libraries, and then running
 against another.
 
 The simplest approach is to link statically to libciul, as this
@@ -77,7 +77,7 @@ onload_install does not install libciul.so into system directories to
 avoid the installed version being used in place of the version you
 compiled against.
 
-For those wishing to use ef_vi in combination with Onload there should
+For those wishing to use %ef_vi in combination with Onload there should
 be no problem linking statically to libciul and dynamically to the
 other libraries to allow the Onload intercepts to take effect.  The
 ef_delegated example application does exactly this.
@@ -170,9 +170,9 @@ int ef_memreg_alloc(ef_memreg* mr, ef_driver_handle mr_dh,
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 __Figure: Allocate a Memory Region__
 
-Performance will be improved when cache lined memory is set to a use a 
-minimum 4KB or aligning the memory region on a 2MB boundary to use huge 
-pages.
+To improve performance, registered memory regions for packet buffers should be 
+aligned on (minimum) 4KB boundaries for regular pages or 2MB boundaries when using
+use huge pages.
 
 \section using_transmit Transmitting Packets
 
@@ -252,8 +252,36 @@ Data is copied into the PIO buffer with ef_pio_memcpy().
 When the PIO buffer is no longer required it should be unlinked by calling 
 ef_pio_unlink_vi(), and then freed by calling ef_pio_free().
 
+\subsection using_ctpio Cut-through PIO
+
+A complete example showing the use of CTPIO with %ef_vi is given in
+`Onload-&lt;version>/src/tests/rtt/rtt_efvi.c`.
+
+\note CTPIO bypasses the main adapter datapath, and as a result does not 
+support checksum offload. Frames sent with CTPIO are placed on the wire 
+without modification, so checksum fields must be completed in software before 
+sending.
+
+Here is the sequence of steps needed:
+
+-# When allocating a VI (ef_vi_alloc_from_pd()) set the EF_VI_TX_CTPIO flag.
+
+-# To initiate a send, form a complete Ethernet frame (including L3/L4 
+   checksums, but excluding FCS) in host memory.  Initiate the send with 
+   ef_vi_transmit_ctpio() or ef_vi_transmitv_ctpio().
+
+-# Post a fall-back descriptor using ef_vi_transmit_ctpio_fallback() or 
+   ef_vi_transmitv_ctpio_fallback().  These calls are used just like the 
+   standard DMA send calls (ef_vi_transmit() etc.), and so must be provided 
+   with a copy of the frame in registered memory.
+
+The posting of a fall-back descriptor is not on the latency critical path, 
+provided the CTPIO operation succeeds.  However, it must be posted before 
+posting any further sends on the same VI.
+
 \subsection using_tx_alternatives TX Alternatives
 
+TX alternatives is a features available on Solarflare SFN8000 series adapters. 
 To use TX alternatives for a given virtual interface, you must set the
 EF_VI_TX_ALT flag when you allocate the virtual interface. You must then
 allocate a set of TX alternatives for the virtual interface by calling
@@ -292,20 +320,20 @@ to transmit, and discard any that are no longer required:
   remains in this state, any further packets sent to it are transmitted
   immediately.
   
-- To transtition the TX alternative back to the STOP state, call
+- To transition the TX alternative back to the STOP state, call
   ef_vi_transmit_alt_stop().
 
 - To discard the packets buffered on a TX alternative, transition it to the
   DISCARD state by calling ef_vi_transmit_alt_discard().
   
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~{.c}
-int ef_vi_transmit_alt_select(struct ef_vi*, unsigned alt_id);
+int ef_vi_transmit_alt_select(struct ef_vi* vi, unsigned alt_id);
 
-int ef_vi_transmit_alt_stop(struct ef_vi*, unsigned alt_id);
+int ef_vi_transmit_alt_stop(struct ef_vi* vi, unsigned alt_id);
 
-int ef_vi_transmit_alt_go(struct ef_vi*, unsigned alt_id);
+int ef_vi_transmit_alt_go(struct ef_vi* vi, unsigned alt_id);
 
-int ef_vi_transmit_alt_discard(struct ef_vi*, unsigned alt_id);
+int ef_vi_transmit_alt_discard(struct ef_vi* vi, unsigned alt_id);
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 As packets are transmitted or discarded, events of type EF_EVENT_TYPE_TX_ALT
@@ -327,6 +355,11 @@ these events in one of the following ways:
 The batch size for polling must be at least EF_VI_EVENT_POLL_MIN_EVS. It
 should be greater than the batch size for refilling to detect when the
 receive descriptor ring is going empty.
+
+When timestamping is enabled, a number of timestamps per second are added to the
+event queue, even when no packets are being received. It is important that the 
+application regularly polls the VI event queue, to avoid an event queue overflow 
+(EF_EVENT_TYPE_OFLOW) which can result in an undetermined state for the VI. 
 
 \subsection fd_blocking Blocking on a file descriptor
 
@@ -354,12 +387,12 @@ When this function is called, you must tell it how many events you've read
 from the eventq which can be retrieved by using ef_eventq_current().  Then 
 you can simply block on the file descriptor becoming readable by using 
 select(), poll(), epoll(), etc.  When the file descriptor is returned as 
-reablable, you can then get the associated events by polling the eventq in 
+readable, you can then get the associated events by polling the eventq in 
 the normal way.  Note that at this point, you must call ef_vi_prime() 
 again (with the current value from ef_eventq_current()) before blocking on 
 the file descriptor again.
 
-The efpingpong example code has been updated to offer a simple example.
+The \ref efsink example code offers a simple example.
 
 \section using_receive Receiving packets
 
@@ -377,10 +410,10 @@ To receive packets, the basic process is:
    descriptors available to receive packets so nothing gets posted to the 
    event queue.
 
-   Posting descriptors is relatively slow. It should ideally be done in
-   batches, by a thread that is not on the critical path. A small batch size
-   means that the ring is kept more full, but a large batch size is more
-   efficient. A size of 8, 16 or 32 is probably the best compromise.
+   Posting descriptors should ideally be done in batches, by a thread that is 
+   not on the critical path. A small batch size means that the ring is kept 
+   more full, but a large batch size is more efficient. A size of 8, 16 or 32 
+   is probably the best compromise.
 
 -# Poll the event queue to see that they are now filled.
 
@@ -395,34 +428,131 @@ To receive packets, the basic process is:
    packet. The software must detect these errors and recycle the 
    associated packet buffers.
 
+The best threading to use is as follows:
+
+- One thread does a tight loop, posting descriptors and then polling the 
+  event queue.
+  
+  Note that posting descriptors is costly if it is instead done from another 
+  thread, and correctness is also hard to guarantee.
+
+- Another thread deals with the events and packets that the poll discovered.
+
 \subsection packet_data Finding the Packet Data
 
-- If you're using the ef_sfw wrapper, then RX_PKT_PTR() returns a pointer
-  to the start of the payload of the packet. (Remember that this includes
-  the headers, as %ef_vi does not do any protocol handling.)
+Use the queue ID to find the packet and its buffer. The diagram below shows 
+the layout of the buffer, and the functions and macros for accessing it:
 
-- Otherwise, you'll need to create similar functionality yourself. Use the
-  queue ID to find the packet, and ef_vi_receive_prefix_len() to find the
-  offset for the packet data.
+\image html packet_buffers_layout.png "Layout and functions for a packet buffer"
+\image rtf packet_buffers_layout.png "Layout and functions for a packet buffer"
+\image latex packet_buffers_layout.png "Layout and functions for a packet buffer"
+
+- Use ef_vi_receive_prefix_len() to find the offset for the packet data. 
+  (Remember that this includes the headers, as %ef_vi does not do any 
+  protocol handling.)
+
+- EF_EVENT_RX_BYTES() gives the number of bytes received.  
+
+- ef_vi_receive_query_layout() gives more information.  
+
+Packets that are smaller than the packet buffer size are delivered one per 
+packet buffer. An event is raised for each packet buffer that is filled:
+
+\image html packet_buffers_non-jumbo.png "A single (non-jumbo) packet"
+\image rtf packet_buffers_non-jumbo.png "A single (non-jumbo) packet"
+\image latex packet_buffers_non-jumbo.png "A single (non-jumbo) packet"
 
 \subsection using_rx_jumbo Receiving Jumbo Packets
 
 Packets of a size smaller than the interface MTU but larger than the 
 packet buffer size are delivered in multiple buffers as jumbo packets. An 
-event is raised for each packet buffer that is filled:
+event is raised for each packet buffer that is filled. For example, this is a 
+packet that requires two buffers:
+
+\image html packet_buffers_jumbo-2.png "A 2-buffer jumbo packet"
+\image rtf packet_buffers_jumbo-2.png "A 2-buffer jumbo packet"
+\image latex packet_buffers_jumbo-2.png "A 2-buffer jumbo packet"
+
+and this is a larger packet that requires _N_ buffers:
+
+\image html packet_buffers_jumbo-n.png "An N-buffer jumbo packet"
+\image rtf packet_buffers_jumbo-n.png "An N-buffer jumbo packet"
+\image latex packet_buffers_jumbo-n.png "An N-buffer jumbo packet"
 
 - The EF_EVENT_RX_CONT() macro can be used to check if this is not the 
   last part of the packet, and that the next receive (on this RX descriptor 
   ring) should also be examined as being part of this jumbo frame.
 
-- The length given in each event is the total length of the packet so far
-  (so the length in the last part of the frame is the total packet length.)
+- The EF_EVENT_RX_BYTES() macro gets the number of bytes of the packet that 
+  have been received. This is a cumulative total, so the value for the last
+  part of the frame is the total packet length.
 
 - If `EF_EVENT_RX_DISCARD_TRUNC` is set, this indicates that the packet
-  buffer has been dropped, and sothe jumbo packet has been truncated. But
+  buffer has been dropped, and so the jumbo packet has been truncated. But
   there might still be more parts of the jumbo packet that arrive after
   the drop. All packet buffers should be discarded until one is received
   with `EF_EVENT_RX_SOP` set, marking the start of a new packet.
+
+\subsection using_rx_event_merging RX Event Merging
+
+RX event merging can merge multiple events into a single 
+`EF_EVENT_TYPE_RX_MULTI` event:
+
+- There can potentially be multiple packets per event.
+
+- Events can only be merged to a single `EF_EVENT_TYPE_RX_MULTI` event when 
+  their flags are the same.
+  
+- When an `EF_EVENT_TYPE_RX_MULTI` event occurs, ef_vi_receive_unbundle() 
+  must always be used to find the individual buffers.
+
+- When the first buffer of a packet is found, ef_vi_receive_get_bytes() can 
+  then give the length of the packet:
+
+\image html packet_buffers_layout_merged.png "Layout and functions for RX event merging"
+\image rtf packet_buffers_layout_merged.png "Layout and functions for RX event merging"
+\image latex packet_buffers_layout_merged.png "Layout and functions for RX event merging"
+
+If consecutive single-buffer packets are received, they can be merged:
+
+\image html packet_buffers_non-jumbo_merged.png "RX event merging for non-jumbo packets"
+\image rtf packet_buffers_non-jumbo_merged.png "RX event merging for non-jumbo packets"
+\image latex packet_buffers_non-jumbo_merged.png "RX event merging for non-jumbo packets"
+
+For a two-buffer jumbo packet, the events have different flags, and so cannot 
+be merged:
+
+\image html packet_buffers_jumbo-2_merged.png "RX event merging for a 2-buffer jumbo packet"
+\image rtf packet_buffers_jumbo-2_merged.png "RX event merging for a 2-buffer jumbo packet"
+\image latex packet_buffers_jumbo-2_merged.png "RX event merging for a 2-buffer jumbo packet"
+
+For a larger _N_-buffer jumbo packet, the events for the middle buffers have 
+the same flags, and so can be merged:
+
+\image html packet_buffers_jumbo-n_merged.png "Event merging for an _N_-buffer jumbo packet"
+\image rtf packet_buffers_jumbo-n_merged.png "Event merging for an _N_-buffer jumbo packet"
+\image latex packet_buffers_jumbo-n_merged.png "Event merging for an _N_-buffer jumbo packet"
+
+So for jumbo packets, the following multiple events are typically raised:
+
+-# An event with `EF_EVENT_RX_MULTI_SOP` and `EF_EVENT_RX_MULTI_CONT` 
+   containing the first buffer. ef_vi_receive_get_bytes() gives the length of 
+   the whole jumbo packet.
+
+-# If there are more than two buffers, event(s) with `EF_EVENT_RX_MULTI_CONT`
+   containing the middle buffers.
+
+-# An event with `! EF_EVENT_RX_MULTI_SOP` and `! EF_EVENT_RX_MULTI_CONT` 
+   containing the final buffer. The length of the payload can be inferred
+   based on the total length of the Jumbo packet minus the lengths of 
+   previous payloads.
+
+There is example code in the following locations:
+
+- the \ref efsink example application
+
+- the handle_rx_scatter_merge() function within
+  `openonload/src/lib/transport/ip/netif_event.c`.
 
 \section using_filters Adding Filters
 
@@ -436,9 +566,9 @@ direct received packets to a given virtual interface.
 
 - By default the 'all' filters are sending everything to the kernel. They
   are equivalent to setting promiscuous mode on the NIC, and super-user
-  rights (specifically `CAP_NET_ADMIN`) are needed to use this filters.
+  rights (specifically `CAP_NET_ADMIN`) are needed to use this filter.
 
-- On 5000-series and 6000-series NICs each filter can only exist for one
+- On SFN5000 and SFN6000 series NICs each filter can only exist for one
   virtual interface, and so each packet which arrives can be forwarded
   only to a single application (unless two applications share a stack).
   Only the first application to insert a specific filter will succeed;
@@ -448,9 +578,9 @@ direct received packets to a given virtual interface.
   applications and by Onload - which typically uses only fully connected 
   and listen filters.
 
-- The 7xxx series of NICs lifts this restriction. If two applications 
-  insert the same filter, they will each be delivered a copy of the packet 
-  and remain unaware of the other.
+- The SFN7000 and SFN8000 series NICs are not subject to this restriction. 
+  If two applications insert the same filter, a copy of the packets is 
+  delivered to each application and applications remain unaware of each other.
 
 - IP filters do not match IP fragments, which are therefore received by
   the kernel stack. If this is an issue, layer 2 filters should be
@@ -539,6 +669,130 @@ int ef_vi_set_filter_del(ef_vi_set*, ef_driver_handle dh,
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 __Figure: Creating Filters__
 
+\subsection filters_variant Filters available per Firmware Variant
+
+The kernel will install a destination MAC address filter for each Solarflare interface.
+The kernel will install a broadcast MAC address filter for each Solarflare interface.
+
+A broadcast MAC address is treated like any other MAC address. Multiple applications 
+can insert the same filter and all will receive a copy of the received traffic. 
+
+As a rule, more-specific filters will capture traffic over less-specific filters.
+
+When the Solarflare adapter is configured to use the full_featured firmware variant 
+filters are applied in the following order:
+
+- MATCH_ETHER_TYPE 
+- MATCH_SRC_IP      
+- MATCH_SRC_PORT    
+- MATCH_DST_IP      
+- MATCH_DST_PORT    
+- MATCH_IP_PROTO    
+- MATCH_OUTER_VLAN  
+- MATCH_INNER_VLAN 
+- MATCH_DST_MAC
+\n\n 
+- MATCH_OUTER_VLAN
+- MATCH_INNER_VLAN  
+- MATCH_DST_MAC    
+- MATCH_OUTER_VLAN  
+- MATCH_DST_MAC
+\n\n 
+- MATCH_UNKNOWN_UCAST_DST
+- MATCH_OUTER_VLAN
+- MATCH_INNER_VLAN
+\n\n 
+- MATCH_UNKNOWN_MCAST
+- MATCH_OUTER_VLAN
+- MATCH_INNER_VLAN
+\n\n 
+- MATCH_UNKNOWN_UCAST_DST
+- MATCH_OUTER_VLAN
+\n\n 
+- MATCH_UNKNOWN_MCAST_DST
+- MATCH_OUTER_VLAN
+\n\n 
+- MATCH_UNKNOWN_UCAST_DST
+- MATCH_UNKNOWN_MCAST_DST
+
+When the Solarflare adapter is configured to use the low_latency firmware variant 
+filters are applied in the following order: 
+
+- MATCH_ETHER_TYPE
+- MATCH_SRC_IP
+- MATCH_SRC_PORT
+- MATCH_DST_IP
+- MATCH_DST_PORT
+- MATCH_IP_PROTO
+\n\n 
+- MATCH_ETHER_TYPE
+- MATCH_DST_IP
+- MATCH_DST_PORT
+- MATCH_IP_PROTO
+\n\n 
+- MATCH_DST_MAC
+- MATCH_OUTER_VLAN
+\n\n 
+- MATCH_DST_MAC
+\n\n 
+- MATCH_UNKNOWN_UCAST_DST
+- MATCH_UNKNOWN_MCAST_DST
+
+When the Solarflare adapter is configured to use the packed_stream firmware variant 
+filters are applied in the following order: 
+
+- MATCH_ETHER_TYPE
+- MATCH_DST_IP
+- MATCH_DST_PORT
+- MATCH_IP_PROTO
+\n\n 
+- MATCH_DST_MAC
+\n\n 
+- MATCH_UNKNOWN_UCAST_DST
+- MATCH_OUTER_VLAN
+\n\n 
+- MATCH_UNKNOWN_MCAST_DST
+- MATCH_OUTER_VLAN
+\n\n 
+- MATCH_UNKNOWN_UCAST_DST
+- MATCH_UNKNOWN_MCAST_DST
+
+\section using_igmp IGMP subscriptions
+
+In theory it is possible to generate IGMP join/leave messages and send them 
+via %ef_vi. For reliable operation this would mean re-implementing the whole 
+IGMP protocol. As the IGMP messages are not especially latency sensitive, 
+this would be a lot of work for minimal benefit.
+
+A common solution when using %ef_vi to receive multicast is to also create a 
+standard UDP socket and use IP_ADD_MEMBERSHIP/IP_DROP_MEMBERSHIP to control 
+the multicast groups for the interface. The kernel stack will then generate 
+and respond to the IGMP messages as normal. This UDP socket should not be 
+accelerated using Onload, which can be achieved by using 
+onload_socket_nonaccel() to create this socket.
+
+If the %ef_vi application installs filters for individual UDP ports then 
+everything will work fine. Once the VI has a UDP filter installed for the 
+multicast traffic, this filter will match the received traffic in preference 
+to the MAC multicast address filter installed by the kernel stack. 
+Consequently, the UDP socket won't see the actual traffic, but the VI will. 
+The IGMP messages will not match the %ef_vi filter, and so IGMP will still be 
+handled by the kernel stack. If the traffic rate is high, then it is best to 
+install the filter on the VI before joining the group, and to close the UDP 
+socket before removing the filter or closing the VI. This prevents the UDP 
+socket receiving lots of unwanted traffic.
+
+If the %ef_vi application installs the "multicast-all" filter for the VI, 
+then this will normally consume all multicast traffic on the interface. This 
+would potentially include IGMP messages, which could cause the subscriptions 
+to fail. In this case, an extra filter entry can be added to redirect all 
+incoming IGMP packets to the kernel stack, so that they can still be 
+processed by the kernel:
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~{.sh}
+ethtool -U <interface> flow-type ip4 l4proto 2 vlan 0 m 0xf000 action 0
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
 \section using_freeing Freeing Resources
 
 Users of %ef_vi must do the following to free resources:
@@ -600,7 +854,7 @@ Different configuration modes are available for addressing packet buffers.
   - When using a SFN5000 or SFN6000 series adapter there are 65536 entries
     in the buffer table. Each entry maps a 4KB page of memory that holds
 	two 2KB packet buffers, and so a maxiumum of 131072 packet buffers are
-	available. The kernel usues some of these, leaving about 120,000
+	available. The kernel uses some of these, leaving about 120,000
 	packet buffers available for %ef_vi.
 
   - The SFN7000 series adapters have _Large Buffer Table Support_. Each
@@ -627,14 +881,30 @@ Different configuration modes are available for addressing packet buffers.
   to access memory that is not in the application address space. For
   example, this can be used for zero-copy from the kernel buffer cache.
   any piece of memory.
+  
+  Physical Addressing Mode allows stacks to use large amounts of packet buffer 
+  memory, avoiding address translation limitations on some adapters and without 
+  the need to configure and use SR-IOV virtual functions.
 
-  - No memory protection is provided.
+  - No memory protection is provided. Physical addressing mode removes memory 
+  protection from the network adapter's access of packet buffers. Unprivileged 
+  user-level code is provided and directly handles the raw physical memory addresses
+  of packet buffers. User-level code provides physical memory addresses directly to 
+  the adapter with the ability to read or write arbitrary memory locations.
 
   - It is important to ensure that packet buffers are page aligned.
 
   An %ef_vi application can enable this mode by setting the environment
   variable `EF_VI_PD_FLAGS=phys`.
-
+  
+  The sfc_char module option must also be enabled in a file in the /etc/modprobe.d
+  directory where N is the integer group ID of the user running the %ef_vi application. 
+  Set to -1 means ALL users are permitted access.:
+  
+  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~{.c}
+    options sfc_char phys_mode_gid=<N>
+  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  
 For more information about these configuration modes, see the chapter 
 titled _Packet Buffers_ in the _Onload User Guide_ (SF-104474-CD).
 
@@ -660,11 +930,11 @@ the adapter translation is omitted.
 
 \subsection timestamping Timestamping
 
-If timestamping is enabled, then the VI must be polled regularly (even if 
-no packets are available). Failing to do so can lead to an event queue 
-overflow as the time-synchronization mechanism will not be being 
-processed. Although these events are not returned to the application, they 
-do need to be cleared from the queue.
+When timestamping is enabled, the VI must be polled regularly (even when 
+no packets are available). Timestamps consume four event queue slots per second
+and failing to poll the VI can result in event queue overflow. When there are no 
+packets to receive, stale timestamps are not returned to the application, but 
+polling ensures that they are cleared from the event queue.
 
 \subsection fill_level Minimum Fill Level
 
@@ -680,7 +950,7 @@ It's (very slightly) more efficient to refill the ring in batch sizes of
 
 Below is a simple example showing a starting framework for an %ef_vi 
 application. This is not a complete program. There is no initialization, 
-anmd much of the other required code is only indicated by comments.
+and much of the other required code is only indicated by comments.
 
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~{.c}
 static void handle_poll(ef_vi *vi)

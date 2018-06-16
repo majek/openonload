@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -27,8 +27,11 @@
 /*! \cidoxg_lib_transport_ip */
 
 #include "ip_internal.h"
+#include "l3xudp_encap.h"
 #include <ci/internal/ip_stats.h>
 #include <ci/net/sockopts.h>
+
+
 
 
 /* 
@@ -81,28 +84,24 @@ static unsigned ci_tos2priority[] = {
 
 int ci_sock_rx_bind2dev(ci_netif* ni, ci_sock_cmn* s, ci_ifid_t ifindex)
 {
-  ci_ifid_t base_ifindex;
-  ci_hwport_id_t hwport;
-  cicp_encap_t encap;
+  cicp_hwport_mask_t hwports = 0;           /* shut up gcc */
+  cicp_encap_t encap = {0,};                /* shut up gcc */
   int rc;
 
   /* Can we accelerate this interface?  If not, best to handover now. */
-  rc = cicp_llap_retrieve(CICP_HANDLE(ni), ifindex, NULL/*mtu*/, &hwport,
-                          NULL/*mac*/, &encap, &base_ifindex, NULL);
+  rc = oo_cp_find_llap(ni->cplane, ifindex, NULL/*mtu*/, NULL /*tx_hwports*/,
+                       &hwports /*rx_hwports*/, NULL/*mac*/, &encap);
   if( rc != 0 ) {
     /* non-Ethernet interface */
     return CI_SOCKET_HANDOVER;
   }
-  if( (unsigned) hwport >= CPLANE_MAX_REGISTER_INTERFACES )
+  if( hwports == 0 )
     return CI_SOCKET_HANDOVER;
-  if( __ci_hwport_to_intf_i(ni, hwport) < 0 )
-    /* ?? FIXME: We should really be checking whether *all* slaves in the
-     * bond are onloadable (for bonds).
-     */
+  if( (hwports & ~ci_netif_get_hwport_mask(ni)) != 0)
     return CI_SOCKET_HANDOVER;
 
   s->rx_bind2dev_ifindex = ifindex;
-  s->rx_bind2dev_base_ifindex = base_ifindex;
+  s->rx_bind2dev_hwports = hwports;
   s->rx_bind2dev_vlan = encap.vlan_id;
   ci_ip_cache_invalidate(&s->pkt);
   if( s->b.state == CI_TCP_STATE_UDP )
@@ -127,7 +126,7 @@ static int ci_sock_bindtodevice(ci_netif* ni, ci_sock_cmn* s,
      * rx_bind2dev_ifindex != CI_IFID_BAD.  But makes stackdump output
      * cleaner this way...
      */
-    s->rx_bind2dev_base_ifindex = 0;
+    s->rx_bind2dev_hwports = 0;
     s->rx_bind2dev_vlan = 0;
     return 0;
   }
@@ -201,6 +200,31 @@ ci_get_os_sockopt(ci_fd_t fd, int level, int optname, void *optval,
  * the switch block in ci_xxx_getsockopt() & ci_xxx_setsockopt().
  */
 
+#ifndef __KERNEL__
+static
+#endif
+int ci_ip_mtu_discover_from_sflags(int s_flags)
+{
+  switch( s_flags & (CI_SOCK_FLAG_PMTU_DO | CI_SOCK_FLAG_ALWAYS_DF) ) {
+    case CI_SOCK_FLAG_PMTU_DO | CI_SOCK_FLAG_ALWAYS_DF:
+      return IP_PMTUDISC_DO;
+    case CI_SOCK_FLAG_PMTU_DO:
+      return IP_PMTUDISC_WANT;
+    case CI_SOCK_FLAG_ALWAYS_DF:
+#ifdef IP_PMTUDISC_PROBE
+      return IP_PMTUDISC_PROBE;
+#else
+      ci_assert(0);
+      return IP_PMTUDISC_DO;
+#endif
+    case 0:
+      return IP_PMTUDISC_DONT;
+  }
+  /* Unreachanble */
+  return IP_PMTUDISC_DO;
+}
+
+#ifndef __KERNEL__
 /* Handler for common getsockopt:SOL_IP options. */
 int ci_get_sol_ip( ci_netif* ni, ci_sock_cmn* s, ci_fd_t fd,
                    int optname, void *optval, socklen_t *optlen )
@@ -222,7 +246,7 @@ int ci_get_sol_ip( ci_netif* ni, ci_sock_cmn* s, ci_fd_t fd,
     ci_assert((s->b.state & CI_TCP_STATE_TCP) ||
 	      s->b.state == CI_TCP_STATE_UDP);
 
-    u = s->pkt.ip.ip_tos;
+    u = s->cp.ip_tos;
     break;
 
   case IP_TTL:
@@ -239,7 +263,7 @@ int ci_get_sol_ip( ci_netif* ni, ci_sock_cmn* s, ci_fd_t fd,
       if( sock_raddr_be32(s) != 0 ) {
         ci_ip_cache_invalidate(&s->pkt);
         cicp_user_retrieve(ni, &s->pkt, &s->cp);
-        if( cicp_ip_cache_is_valid(CICP_HANDLE(ni), &s->pkt) ) {
+        if( oo_cp_verinfo_is_valid(ni->cplane, &s->pkt.mac_integrity) ) {
           u = s->pkt.mtu;
           break;
         }
@@ -265,25 +289,7 @@ int ci_get_sol_ip( ci_netif* ni, ci_sock_cmn* s, ci_fd_t fd,
 
   case IP_MTU_DISCOVER:
     /* gets the status of Path MTU discovery on this socket */
-    switch( s->s_flags & (CI_SOCK_FLAG_PMTU_DO | CI_SOCK_FLAG_ALWAYS_DF) ) {
-      case CI_SOCK_FLAG_PMTU_DO | CI_SOCK_FLAG_ALWAYS_DF:
-        u = IP_PMTUDISC_DO;
-        break;
-      case CI_SOCK_FLAG_PMTU_DO:
-        u = IP_PMTUDISC_WANT;
-        break;
-      case CI_SOCK_FLAG_ALWAYS_DF:
-#ifdef IP_PMTUDISC_PROBE
-        u = IP_PMTUDISC_PROBE;
-#else
-        ci_assert(0);
-        u = IP_PMTUDISC_DO;
-#endif
-        break;
-      case 0:
-        u = IP_PMTUDISC_DONT;
-        break;
-    }
+    u = ci_ip_mtu_discover_from_sflags(s->s_flags);
     break;
 
   case IP_RECVTOS:
@@ -376,6 +382,7 @@ int ci_get_sol_ip( ci_netif* ni, ci_sock_cmn* s, ci_fd_t fd,
     break;
 
 
+
   default:
     goto fail_noopt;
   }
@@ -395,7 +402,6 @@ int ci_get_sol_ip( ci_netif* ni, ci_sock_cmn* s, ci_fd_t fd,
   RET_WITH_ERRNO(ENOPROTOOPT);
 }
 
-#ifndef __KERNEL__
 #if CI_CFG_FAKE_IPV6
 /* Handler for common getsockopt:SOL_IPV6 options. */
 int ci_get_sol_ip6(ci_sock_cmn* s, ci_fd_t fd, int optname, void *optval,
@@ -596,9 +602,11 @@ int ci_get_sol_socket( ci_netif* netif, ci_sock_cmn* s,
     u = !!(s->cmsg_flags & CI_IP_CMSG_TIMESTAMPNS);
     goto u_out;
 
+#if CI_CFG_TIMESTAMPING
   case ONLOAD_SO_TIMESTAMPING:
     u = s->timestamping_flags;
     goto u_out;
+#endif
 
   case SO_REUSEPORT:
     u = !!(s->s_flags & CI_SOCK_FLAG_REUSEPORT);
@@ -686,9 +694,10 @@ int ci_set_sol_ip( ci_netif* netif, ci_sock_cmn* s,
     if( s->b.state & CI_TCP_STATE_TCP ) {
       /* Bug3172: do not allow to change 2 and 1 bits of TOS for TCP socket. */
       val &= ~3;
-      val |= s->pkt.ip.ip_tos & 3;
+      val |= s->cp.ip_tos & 3;
     }
     val = CI_MIN(val, CI_IP_MAX_TOS);
+    s->cp.ip_tos = (ci_uint8)val;
     s->pkt.ip.ip_tos = (ci_uint8)val;
     if( s->b.state == CI_TCP_STATE_UDP )
       SOCK_TO_UDP(s)->ephemeral_pkt.ip.ip_tos = (ci_uint8)val;
@@ -827,6 +836,7 @@ int ci_set_sol_ip( ci_netif* netif, ci_sock_cmn* s,
         goto fail_fault;
       }
       s->s_flags |= CI_SOCK_FLAG_TPROXY;
+      s->cp.sock_cp_flags |= OO_SCP_TPROXY;
     }
     else {
       /* If we've bound the socket we've inserted only sw filters and we
@@ -844,6 +854,7 @@ int ci_set_sol_ip( ci_netif* netif, ci_sock_cmn* s,
       }
       else {
         s->s_flags &= ~CI_SOCK_FLAG_TPROXY;
+        s->cp.sock_cp_flags &= ~OO_SCP_TPROXY;
       }
     }
     break;
@@ -894,6 +905,7 @@ int ci_set_sol_ip( ci_netif* netif, ci_sock_cmn* s,
     /* When real work is necessary, it is already done in UDP-specific
      * functions or by OS . */
     break;
+
 
 
   default:
@@ -1061,42 +1073,64 @@ int ci_set_sol_socket(ci_netif* netif, ci_sock_cmn* s,
     break;
 
   case SO_SNDBUF:
+  case SO_SNDBUFFORCE:
     /* Sets the maximum socket send buffer in bytes. */
     if( (rc = opt_not_ok(optval, optlen, int)) )
       goto fail_inval;
     v = *(int*) optval;
-    if( s->b.state & CI_TCP_STATE_TCP ) {
+
+    /* UDP case is handled in ci_udp_setsockopt_lk() */
+    ci_assert_flags(s->b.state, CI_TCP_STATE_TCP);
+
+    if( optname == SO_SNDBUF ) {
       v = CI_MIN(v, (int) NI_OPTS(netif).tcp_sndbuf_max);
-      s->so.sndbuf = CI_MAX(oo_adjust_SO_XBUF(v), (int) NI_OPTS(netif).tcp_sndbuf_min);
-      /* only recalculate sndbuf, if the socket is already connected, if not,
-       * then eff_mss is probably rubbish and we also know that the sndbuf
-       * will have to be set when the socket is promoted to established
-       */
-      if( ! (s->b.state & CI_TCP_STATE_NOT_CONNECTED) )
-        ci_tcp_set_sndbuf(netif, SOCK_TO_TCP(s));
     }
     else {
-      v = CI_MIN(v, (int) NI_OPTS(netif).udp_sndbuf_max);
-      s->so.sndbuf = CI_MAX(oo_adjust_SO_XBUF(v), (int) NI_OPTS(netif).udp_sndbuf_min);
+      int lim = CI_MAX((int)NI_OPTS(netif).tcp_sndbuf_max,
+                       netif->packets->sets_max * CI_CFG_PKT_BUF_SIZE / 2);
+      if( v > lim ) {
+        NI_LOG_ONCE(netif, RESOURCE_WARNINGS,
+                    "SO_SNDBUFFORCE: limiting user-provided value %d to %d.  "
+                    "Consider increasing of EF_MAX_PACKETS.", v, lim);
+        v = lim;
+      }
     }
+    s->so.sndbuf = CI_MAX(oo_adjust_SO_XBUF(v), (int) NI_OPTS(netif).tcp_sndbuf_min);
+    /* only recalculate sndbuf, if the socket is already connected, if not,
+     * then eff_mss is probably rubbish and we also know that the sndbuf
+     * will have to be set when the socket is promoted to established
+     */
+    if( ! (s->b.state & CI_TCP_STATE_NOT_CONNECTED) )
+      ci_tcp_set_sndbuf(netif, SOCK_TO_TCP(s));
     s->s_flags |= CI_SOCK_FLAG_SET_SNDBUF;
     break;
 
   case SO_RCVBUF:
+  case SO_RCVBUFFORCE:
     /* Sets the maximum socket receive buffer in bytes. */
     if( (rc = opt_not_ok(optval, optlen, int)) )
       goto fail_inval;
     v = *(int*) optval;
-    if( s->b.state & CI_TCP_STATE_TCP ) {
+
+    /* UDP case is handled in ci_udp_setsockopt_lk() */
+    ci_assert_flags(s->b.state, CI_TCP_STATE_TCP);
+
+    if( optname == SO_RCVBUF ) {
       v = CI_MIN(v, (int) NI_OPTS(netif).tcp_rcvbuf_max);
-      s->so.rcvbuf = CI_MAX(oo_adjust_SO_XBUF(v), (int) NI_OPTS(netif).tcp_rcvbuf_min);
-      if( ~s->b.state & CI_TCP_STATE_NOT_CONNECTED )
-        ci_tcp_set_rcvbuf(netif, SOCK_TO_TCP(s));
     }
     else {
-      v = CI_MIN(v, (int) NI_OPTS(netif).udp_rcvbuf_max);
-      s->so.rcvbuf = CI_MAX(oo_adjust_SO_XBUF(v), (int) NI_OPTS(netif).udp_rcvbuf_min);
+      int lim = CI_MAX((int)NI_OPTS(netif).tcp_rcvbuf_max,
+                       netif->packets->sets_max * CI_CFG_PKT_BUF_SIZE / 2);
+      if( v > lim ) {
+        NI_LOG_ONCE(netif, RESOURCE_WARNINGS,
+                    "SO_RCVBUFFORCE: limiting user-provided value %d to %d.  "
+                    "Consider increasing of EF_MAX_PACKETS.", v, lim);
+        v = lim;
+      }
     }
+    s->so.rcvbuf = CI_MAX(oo_adjust_SO_XBUF(v), (int) NI_OPTS(netif).tcp_rcvbuf_min);
+    if( ~s->b.state & CI_TCP_STATE_NOT_CONNECTED )
+      ci_tcp_set_rcvbuf(netif, SOCK_TO_TCP(s));
     s->s_flags |= CI_SOCK_FLAG_SET_RCVBUF;
     break;
 
@@ -1188,6 +1222,7 @@ int ci_set_sol_socket(ci_netif* netif, ci_sock_cmn* s,
     break;
   }
 
+#if CI_CFG_TIMESTAMPING
   case ONLOAD_SO_TIMESTAMPING:
     if( (rc = opt_not_ok(optval, optlen, unsigned)) )
       goto fail_inval;
@@ -1214,7 +1249,7 @@ int ci_set_sol_socket(ci_netif* netif, ci_sock_cmn* s,
                     "TX timestamps are off on the network interface "
                     "with ifindex=%d.  "
                     "Try setting EF_TX_TIMESTAMPING.",
-                    ci_netif_intf_i_to_base_ifindex(netif, intf_i)));
+                    ci_intf_i_to_ifindex(netif, intf_i)));
       }
       if( ! some_good )
         log("WARNING: Request for SOF_TIMESTAMPING_TX_HARDWARE when "
@@ -1234,7 +1269,7 @@ int ci_set_sol_socket(ci_netif* netif, ci_sock_cmn* s,
                     "RX timestamps are off on the network interface "
                     "with ifindex=%d.  "
                     "Try setting EF_RX_TIMESTAMPING.",
-                    ci_netif_intf_i_to_base_ifindex(netif, intf_i)));
+                    ci_intf_i_to_ifindex(netif, intf_i)));
       }
       if( ! some_good )
         log("WARNING: Request for SOF_TIMESTAMPING_RX_HARDWARE when "
@@ -1264,6 +1299,7 @@ int ci_set_sol_socket(ci_netif* netif, ci_sock_cmn* s,
     else
       s->cmsg_flags &= ~CI_IP_CMSG_TIMESTAMPING;
     break;
+#endif
 
 #ifdef SO_SELECT_ERR_QUEUE
   case SO_SELECT_ERR_QUEUE:
@@ -1318,19 +1354,23 @@ int ci_setsockopt_os_fail_ignore(ci_netif* ni, ci_sock_cmn* s, int err,
   if( level == SOL_SOCKET && optname == ONLOAD_SO_BUSY_POLL &&
            optlen >= sizeof(int) ) 
     return 1;
+#if CI_CFG_TIMESTAMPING
   else if( (s->b.state & CI_TCP_STATE_TCP) && level == SOL_SOCKET &&
            ( optname == SO_TIMESTAMP || optname == SO_TIMESTAMPNS ||
              optname == ONLOAD_SO_TIMESTAMPING ) &&
            optlen >= sizeof(int) )
     return 1;
+#endif
   return 0;
 }
 
 
 /* This function is the common handler for SOL_SOCKET level options that do
  * not require the stack lock to be held.  It is safe to call this function
- * with the lock held though, and this is done in the TCP case, as all options
- * on a TCP socket must be set with the stack lock held.
+ * with the lock held though, and this is done in both the TCP and UDP case.
+ * In the TCP case this is because all options on a TCP socket must be set
+ * with the stack lock held.  In the UDP case we do so because of lock
+ * ordering requirements.
  */
 int ci_set_sol_socket_nolock(ci_netif* ni, ci_sock_cmn* s, int optname,
 			     const void* optval, socklen_t optlen)

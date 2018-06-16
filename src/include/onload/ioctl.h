@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -18,23 +18,15 @@
 
 #include <ci/internal/transport_config_opt.h>
 #include <linux/version.h>
+#include <onload/ioctl_base.h>
+#include <cplane/ioctl.h>
 
 
 #define ONLOADFS_MAGIC 0xefab010d
 
-/* Worth changing this base whenever you change an ioctl in an incompatible
-** way, so we can catch the error more easily...
-*/
-# define OO_LINUX_IOC_BASE  90
-# if OO_LINUX_IOC_BASE > 254
-# error "OO_LINUX_IOC_BASE should be one byte"
-# endif
-
-# define OO_IOC_NONE(XXX)   _IO(OO_LINUX_IOC_BASE, OO_OP_##XXX)
-# define OO_IOC_R(XXX, t)   _IOR(OO_LINUX_IOC_BASE, OO_OP_##XXX, t)
-# define OO_IOC_W(XXX, t)   _IOW(OO_LINUX_IOC_BASE, OO_OP_##XXX, t)
-# define OO_IOC_RW(XXX, t)  _IOWR(OO_LINUX_IOC_BASE, OO_OP_##XXX, t)
-
+/* A fixed code for onload version check not used in past
+ * releases for any other purposes, do not modify */
+#define OO_OP_CHECK_VERSION 0xFF
 
 
 /*************************************************************************
@@ -45,7 +37,7 @@
 /* OS-independent operations enum */
 enum {
   /* Debug ops */
-  OO_OP_DBG_GET_STACK_INFO,
+  OO_OP_DBG_GET_STACK_INFO = OO_OP_CP_END,
 #define OO_IOC_DBG_GET_STACK_INFO   OO_IOC_RW(DBG_GET_STACK_INFO, \
                                               ci_netif_info_t)
   OO_OP_DBG_WAIT_STACKLIST_UPDATE,
@@ -54,16 +46,6 @@ enum {
                                           struct oo_stacklist_update)
   OO_OP_DEBUG_OP,
 #define OO_IOC_DEBUG_OP         OO_IOC_RW(DEBUG_OP, ci_debug_onload_op_t)
-
-  /* cfg; ci_cfg_ioctl_desc_t in/out */
-  OO_OP_CFG_SET,         /*< Set the config database */
-#define OO_IOC_CFG_SET          OO_IOC_RW(CFG_SET, ci_cfg_ioctl_desc_t)
-  OO_OP_CFG_UNSET,       /*< Delete config database */
-#define OO_IOC_CFG_UNSET        OO_IOC_RW(CFG_UNSET, ci_cfg_ioctl_desc_t)
-  OO_OP_CFG_GET,         /*< Get the config database */
-#define OO_IOC_CFG_GET          OO_IOC_RW(CFG_GET, ci_cfg_ioctl_desc_t)
-  OO_OP_CFG_QUERY,       /*< Get the config database */
-#define OO_IOC_CFG_QUERY        OO_IOC_RW(CFG_QUERY, ci_cfg_ioctl_desc_t)
 
   /* IPv4 Id number handling */
   OO_OP_IPID_RANGE_ALLOC,      /*< Alloc range of IPIDs; ci_int32 out */
@@ -83,6 +65,9 @@ enum {
   OO_OP_EP_INFO,   /*< Get endpoint information: TCP Helper handle and endpoint
                     identifier; ci_ep_info_t out */
 #define OO_IOC_EP_INFO          OO_IOC_R(EP_INFO, ci_ep_info_t)
+  OO_OP_VI_STATS_QUERY, /* get VI stats cf ef_vi_stats_query */
+#define OO_IOC_VI_STATS_QUERY OO_IOC_RW(VI_STATS_QUERY, ci_vi_stats_query_t)
+
   OO_OP_CLONE_FD,              /*< Clone onload device fd; int out */
 #define OO_IOC_CLONE_FD         OO_IOC_RW(CLONE_FD, ci_clone_fd_t)
   OO_OP_KILL_SELF_SIGPIPE,      /*< Send a signal to self */
@@ -151,6 +136,14 @@ enum {
 #define OO_IOC_PIPE_ATTACH          OO_IOC_RW(PIPE_ATTACH, \
                                               oo_pipe_attach_t)
 #endif
+#if CI_CFG_FD_CACHING
+  OO_OP_SOCK_DETACH,
+#define OO_IOC_SOCK_DETACH          OO_IOC_RW(SOCK_DETACH, \
+                                              oo_sock_attach_t)
+  OO_OP_SOCK_ATTACH_TO_EXISTING,
+#define OO_IOC_SOCK_ATTACH_TO_EXISTING OO_IOC_RW(SOCK_ATTACH_TO_EXISTING, \
+                                                 oo_sock_attach_t)
+#endif
 
   /* OS-specific TCP helper operations */
 
@@ -180,9 +173,6 @@ enum {
                                               oo_tcp_bind_os_sock_t)
   OO_OP_TCP_LISTEN_OS_SOCK,
 #define OO_IOC_TCP_LISTEN_OS_SOCK   OO_IOC_W(TCP_LISTEN_OS_SOCK, ci_int32)
-  OO_OP_TCP_CONNECT_OS_SOCK,
-#define OO_IOC_TCP_CONNECT_OS_SOCK  OO_IOC_W(TCP_CONNECT_OS_SOCK, \
-                                             oo_tcp_sockaddr_with_len_t)
   OO_OP_TCP_HANDOVER,
 #define OO_IOC_TCP_HANDOVER         OO_IOC_RW(TCP_HANDOVER, ci_int32)
 
@@ -245,15 +235,32 @@ enum {
                                            char[CI_LOG_MAX_LINE])
   OO_OP_OFE_GET_LAST_ERROR,
 
-  OO_OP_GET_CPU_KHZ,
-#define OO_IOC_GET_CPU_KHZ        OO_IOC_R(GET_CPU_KHZ, ci_uint32)
+  OO_OP_DSHM_REGISTER,
+#define OO_IOC_DSHM_REGISTER      OO_IOC_RW(DSHM_REGISTER, oo_dshm_register_t)
 
-  OO_OP_GET_CPLANE_FD,
-#define OO_IOC_GET_CPLANE_FD      OO_IOC_R(GET_CPLANE_FD, \
-                                           ci_fixed_descriptor_t)
+  OO_OP_DSHM_LIST,
+#define OO_IOC_DSHM_LIST          OO_IOC_RW(DSHM_LIST, oo_dshm_list_t)
 
+  OO_OP_ALLOC_ACTIVE_WILD,
+#define OO_IOC_ALLOC_ACTIVE_WILD  OO_IOC_W(ALLOC_ACTIVE_WILD, \
+                                           oo_alloc_active_wild_t)
+
+
+  OO_OP_CONTIG_END,  /* This is the last in range of contigous opcodes */
+
+  /* Here come only placeholder for operations with arbitrary codes */
+  OO_OP_FIRST_PLACEHOLDER = OO_OP_CONTIG_END,
+
+  /* And version check is a special case - arbitrary code is used.
+   * However, we leave placeholder, to reserve space in the table -
+   * we restart from OO_OP_FIRST_PLACEHOLDER (which == OO_OP_CONTIG_END)
+   * to avoid leaving gap in there. */
+  OO_OP_CHECK_VERSION_PLACEHOLDER = OO_OP_FIRST_PLACEHOLDER,
+#define OO_IOC_CHECK_VERSION   OO_IOC_W(CHECK_VERSION, \
+                                        oo_version_check_t)
   OO_OP_END  /* This had better be last! */
 };
 
+CI_BUILD_ASSERT(OO_OP_CHECK_VERSION >= OO_OP_CONTIG_END);
 
 #endif  /* __ONLOAD_IOCTL_H__ */

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -37,6 +37,9 @@
 
 struct page* ci_follow_page(ci_addr_spc_t addr_spc, caddr_t uaddr)
 {
+#ifdef p4d_page
+  p4d_t* p4d;
+#endif
   pgd_t* pgd;
   pmd_t* pmd;
   pte_t* ptep;
@@ -55,7 +58,17 @@ struct page* ci_follow_page(ci_addr_spc_t addr_spc, caddr_t uaddr)
     goto done;
   }
 
+#ifdef p4d_page
+  p4d = p4d_offset(pgd, address);
+  if( CI_UNLIKELY(p4d_none(*p4d) | p4d_bad(*p4d)) ) {
+    FPL(ci_log("follow_page: %lx p4d_none=%d p4d_bad=%d",
+	       (long)address, (int) p4d_none(*p4d), (int) p4d_bad(*p4d)));
+    goto done;
+  }
+  pud = pud_offset(p4d, address);
+#else
   pud = pud_offset(pgd, address);
+#endif
   if( CI_UNLIKELY(pud_none(*pud) | pud_bad(*pud)) ) {
     FPL(ci_log("follow_page: %lx pud_none=%d pud_bad=%d",
 	       (long)address, (int) pud_none(*pud), (int) pud_bad(*pud)));
@@ -81,7 +94,8 @@ struct page* ci_follow_page(ci_addr_spc_t addr_spc, caddr_t uaddr)
     if( ci_pte_valid(pte) )
       pg = pte_page(pte);
     else
-      FPL(ci_log("follow_page: %lx pfn=%lx not valid", (long)address, pte_pfn(pte)));
+      FPL(ci_log("follow_page: %lx pfn=%lx not valid", (long)address, 
+                 (long)pte_pfn(pte)));
     get_page(pg);
   }
   else

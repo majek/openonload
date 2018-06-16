@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -52,6 +52,16 @@
 #define CI_HAVE_FRC32
 
 #define ci_frc32(pval)  __asm__ __volatile__("rdtsc" : "=a" (*pval) : : "edx")
+
+
+#if defined(__x86_64__)
+# if __GNUC__ > 4 || (__GNUC__ >= 4 && __GNUC_MINOR__ >= 4)
+
+#define CI_HAVE_X86INTRIN
+
+#endif
+#endif
+
 
 #if defined(__x86_64__)
 ci_inline void ci_frc64(ci_uint64* pval) {

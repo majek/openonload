@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -70,7 +70,6 @@ int onload_fd_stat(int fd, struct onload_stat* stat)
 {
   citp_fdinfo* fdi;
   citp_sock_fdi* sock_epi;
-  citp_pipe_fdi* pipe_epi;
   citp_alien_fdi* alien_epi;
   int rc;
   citp_lib_context_t lib_context;
@@ -102,6 +101,7 @@ int onload_fd_stat(int fd, struct onload_stat* stat)
         rc = 1;
       }
       else {
+        citp_pipe_fdi* pipe_epi;
         pipe_epi = fdi_to_pipe_fdi(fdi);
         stat->endpoint_id = W_FMT(&pipe_epi->pipe->b);
         stat->endpoint_state = pipe_epi->pipe->b.state;
@@ -151,7 +151,29 @@ int onload_thread_set_spin(enum onload_spin_type type, int spin)
 
   if( type == ONLOAD_SPIN_ALL ) {
     for( type = ONLOAD_SPIN_ALL + 1; type < ONLOAD_SPIN_MAX; ++type )
-      onload_thread_set_spin2(type, spin);
+      if ( type != ONLOAD_SPIN_MIMIC_EF_POLL )
+        onload_thread_set_spin2(type, spin);
+  }
+  else if( type == ONLOAD_SPIN_MIMIC_EF_POLL ) {
+  /* This option is to provide an extensions API meta option with
+   * similar spin configuration to EF_POLL_USEC (as configured in
+   * citp_opts_getenv(). Any changes to how EF_POLL_USEC is
+   * interpreted needs to be reflected here
+   */
+#if CI_CFG_UDP
+    onload_thread_set_spin2(ONLOAD_SPIN_UDP_RECV, spin);
+    onload_thread_set_spin2(ONLOAD_SPIN_UDP_SEND, spin);
+#endif
+    onload_thread_set_spin2(ONLOAD_SPIN_TCP_RECV, spin);
+    onload_thread_set_spin2(ONLOAD_SPIN_TCP_SEND, spin);
+    onload_thread_set_spin2(ONLOAD_SPIN_SELECT, spin);
+    onload_thread_set_spin2(ONLOAD_SPIN_POLL, spin);
+#if CI_CFG_USERSPACE_EPOLL
+    onload_thread_set_spin2(ONLOAD_SPIN_EPOLL_WAIT, spin);
+#endif
+    onload_thread_set_spin2(ONLOAD_SPIN_PKT_WAIT, spin);
+    onload_thread_set_spin2(ONLOAD_SPIN_STACK_LOCK, spin);
+    onload_thread_set_spin2(ONLOAD_SPIN_SOCK_LOCK, spin);
   }
   else {
     onload_thread_set_spin2(type, spin);
@@ -239,10 +261,10 @@ int onload_ordered_epoll_wait(int epfd, struct epoll_event *events,
                               struct onload_ordered_epoll_event *oo_events,
                               int maxevents, int timeout)
 {
-  citp_fdinfo* fdi;
   int rc = -EINVAL;
 
-#if CI_CFG_USERSPACE_EPOLL
+#if CI_CFG_USERSPACE_EPOLL && CI_CFG_TIMESTAMPING
+  citp_fdinfo* fdi;
   citp_lib_context_t lib_context;
   citp_enter_lib(&lib_context);
 
@@ -260,6 +282,8 @@ int onload_ordered_epoll_wait(int epfd, struct epoll_event *events,
 
   citp_exit_lib(&lib_context, FALSE);
 
+#else
+  rc = -EOPNOTSUPP;
 #endif
   return rc;
 }
@@ -419,7 +443,7 @@ oo_raw_send(int fd, int hwport, const struct iovec *iov, int iovcnt)
   epi = fdi_to_sock_fdi(fdi);
   ni = epi->sock.netif;
 
-  if( hwport >= 0 && hwport < CPLANE_MAX_REGISTER_INTERFACES )
+  if( hwport >= 0 && hwport < CI_CFG_MAX_HWPORTS )
     intf_i = ci_hwport_to_intf_i(ni, hwport);
   if( intf_i < 0 )
     intf_i = epi->sock.s->pkt.intf_i;
@@ -494,3 +518,45 @@ fail:
   citp_exit_lib(&lib_context, FALSE);
   return rc;
 }
+
+
+
+int onload_socket_nonaccel(int domain, int type, int protocol)
+{
+  return ci_sys_socket(domain, type, protocol);
+}
+
+
+extern int onload_socket(int domain, int type, int protocol);
+int onload_socket_unicast_nonaccel(int domain, int type, int protocol)
+{
+  citp_lib_context_t lib_context;
+  citp_fdinfo* fdi;
+  int fd;
+
+  Log_CALL(ci_log("%s(%d, %d, %d)", __FUNCTION__, domain, type, protocol));
+
+  if( (domain == AF_INET) && (type == SOCK_DGRAM) &&
+      ((protocol == 0) || (protocol == IPPROTO_UDP))) {
+    fd = onload_socket(domain, type, protocol);
+
+    if( fd >= 0 ) {
+      citp_enter_lib(&lib_context);
+      fdi = citp_fdtable_lookup(fd);
+      if( fdi != NULL ) {
+        ci_assert_equal(citp_fdinfo_get_type(fdi), CITP_UDP_SOCKET);
+        ci_udp_set_no_unicast(&fdi_to_sock_fdi(fdi)->sock);
+        citp_fdinfo_release_ref(fdi, 0);
+      }
+
+      citp_exit_lib(&lib_context, TRUE);
+    }
+  }
+  else {
+    fd = ci_sys_socket(domain, type, protocol);
+  }
+
+  Log_CALL_RESULT(fd);
+  return fd;
+}
+

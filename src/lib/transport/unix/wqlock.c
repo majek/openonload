@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -34,6 +34,27 @@ void oo_wqlock_init(struct oo_wqlock* wql)
   pthread_cond_init(&wql->cond, NULL);
 }
 
+void oo_wqlock_work_do(struct oo_wqlock_work* work_list, void *unlock_param)
+{
+  struct oo_wqlock_work* work;
+  struct oo_wqlock_work* work_rev = NULL;
+
+  /* Reverse the list */
+  do {
+    work = work_list;
+    work_list = work->next;
+    work->next = work_rev;
+    work_rev = work;
+  } while( work_list != NULL );
+
+  do {
+    work = work_rev;
+    work_rev = work->next;
+    /* work->fn() call can free the "work" structure or spoil it in any
+     * other way, so we save work->next pointer above. */
+    work->fn(work, unlock_param);
+  } while( work_rev != NULL );
+}
 
 void oo_wqlock_lock_slow(struct oo_wqlock* wql)
 {
@@ -56,21 +77,28 @@ void oo_wqlock_lock_slow(struct oo_wqlock* wql)
 
 
 void oo_wqlock_unlock_slow(struct oo_wqlock* wql,
-                           void (*cb)(void* cb_arg, void* work),
-                           void* cb_arg)
+                           void* unlock_param)
 {
   uintptr_t v;
   while( 1 ) {
     v = wql->lock;
-    assert(v & OO_WQLOCK_LOCKED);
+    ci_assert(v & OO_WQLOCK_LOCKED);
     if( (v & OO_WQLOCK_WORK_BITS) == 0 )
       if( ci_cas_uintptr_succeed(&wql->lock, v, 0) )
         break;
-    oo_wqlock_try_drain_work(wql, cb, cb_arg);
+    oo_wqlock_try_drain_work(wql, unlock_param);
   }
   if( v & OO_WQLOCK_NEED_WAKE ) {
+    /* See bug 66816 for some details of interlocking here. */
+    /* If someone has set NEED_WAKE, we need to get the lock to ensure that
+     * he is sleeping in cond_wait(). */
     pthread_mutex_lock(&wql->mutex);
+    /* But now we can unlock for the sake of performance: unlock+broadcast
+     * is faster than broadcast+unlock. */
     pthread_mutex_unlock(&wql->mutex);
+    /* Anybody can enter critical section now, but we do not care to wake
+     * them because wql->lock have been set to 0 by us, and he can get the
+     * lock. */
     pthread_cond_broadcast(&wql->cond);
   }
 }

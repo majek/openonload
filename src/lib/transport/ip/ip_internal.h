@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -35,6 +35,7 @@
 #include <onload/ul/tcp_helper.h>
 #ifdef __KERNEL__
 # include <onload/oof_interface.h>
+# include <onload/oof_onload.h>
 #endif
 #include <onload/cplane_ops.h>
 
@@ -207,7 +208,7 @@ ci_tcp_ep_set_filters(ci_netif *        ni,
 
 #else
   if( ci_tcp_can_set_filter_in_ul(ni, SP_TO_SOCK(ni, sock_id)) )
-    rc = ci_tcp_sock_set_scalable_filter(ni, SP_TO_TCP(ni, sock_id));
+    rc = ci_tcp_sock_set_scalable_filter(ni, SP_TO_SOCK(ni, sock_id));
   else
     rc = ci_tcp_helper_ep_set_filters(ci_netif_get_driver_handle(ni), sock_id,
                                       bindto_ifindex, from_tcp_id);
@@ -222,6 +223,7 @@ ci_tcp_ep_set_filters(ci_netif *        ni,
 ci_inline int
 ci_tcp_ep_reuseport_bind(ci_fd_t fd, const char* cluster_name,
                          ci_int32 cluster_size, ci_uint32 cluster_restart_opt,
+                         ci_uint32 cluster_hot_restart_opt,
                          ci_uint32 addr_be32, ci_uint16 port_be16)
 {
   int rc;
@@ -229,8 +231,9 @@ ci_tcp_ep_reuseport_bind(ci_fd_t fd, const char* cluster_name,
   LOG_TC(ci_log("%s: %d addr_be32: %d port: %d", __FUNCTION__, fd, addr_be32,
                 port_be16));
   rc = ci_tcp_helper_ep_reuseport_bind(fd, cluster_name, cluster_size,
-                                       cluster_restart_opt, addr_be32,
-                                       port_be16);
+                                       cluster_restart_opt,
+                                       cluster_hot_restart_opt,
+                                       addr_be32, port_be16);
   LOG_TC( if(rc < 0)
             ci_log(" ---> %s (rc=%d)", __FUNCTION__, rc) );
   return rc;
@@ -309,6 +312,7 @@ ci_tcp_ep_clear_filters(ci_netif*         ni,
  *
  *--------------------------------------------------------------------*/
 
+#ifndef __ci_driver__
 ci_inline int
 ci_tcp_ep_mcast_add_del(ci_netif*         ni,
                         oo_sp             sock_id,
@@ -324,27 +328,14 @@ ci_tcp_ep_mcast_add_del(ci_netif*         ni,
                 __FUNCTION__, OO_SP_FMT(sock_id), ifindex,
                 ip_addr_str(mcast_addr)));
 
-#ifdef __ci_driver__
-  {
-    tcp_helper_endpoint_t* ep = ci_netif_get_valid_ep(ni, sock_id);
-    if( add )
-      rc = oof_socket_mcast_add(efab_tcp_driver.filter_manager,
-                                &ep->oofilter, mcast_addr, ifindex);
-    else {
-      oof_socket_mcast_del(efab_tcp_driver.filter_manager,
-                           &ep->oofilter, mcast_addr, ifindex);
-      rc = 0;
-    }
-  }
-#else
   rc = ci_tcp_helper_ep_mcast_add_del(ci_netif_get_driver_handle(ni),
                                       sock_id, mcast_addr, ifindex, add);
-#endif
 
   LOG_TC( if(rc < 0)
             ci_log(" ---> %s (rc=%d)", __FUNCTION__, rc) );
   return rc;
 }
+#endif
 
 
 /*********************************************************************
@@ -382,6 +373,7 @@ ci_tcp_ep_mcast_add_del(ci_netif*         ni,
 # define SO_REUSEPORT   15
 #endif
 
+#if CI_CFG_TIMESTAMPING
 /* The following value needs to match its counterpart
  * in kernel headers.
  */
@@ -409,6 +401,7 @@ enum {
 	ONLOAD_SOF_TIMESTAMPING_MASK =
 	( (ONLOAD_SOF_TIMESTAMPING_LAST << 1) - 1 )
 };
+#endif
 
 /* Replica of sock_extended_err - just in case we do not have ee_data in
  * the headers in use. */
@@ -491,6 +484,9 @@ extern int ci_get_sol_tcp(ci_netif* netif, ci_sock_cmn* s,
 			  int optname, void *optval,
 			  socklen_t *optlen) CI_HF;
 
+#ifdef __KERNEL__
+extern int ci_ip_mtu_discover_from_sflags(int s_flags) CI_HF;
+#else
 /*! Handler for common getsockopt:SOL_IP options. The handlers here will
  * cope with both TCP & UDP.
  * \param netif   [in] Netif context
@@ -504,6 +500,7 @@ extern int ci_get_sol_tcp(ci_netif* netif, ci_sock_cmn* s,
 extern int ci_get_sol_ip( ci_netif* netif, ci_sock_cmn* s, ci_fd_t fd,
 			  int optname, void *optval,
 			  socklen_t *optlen ) CI_HF;
+#endif
 
 #if CI_CFG_FAKE_IPV6
 /*! Handler for common getsockopt:SOL_IPV6 options. The handlers here will
@@ -756,14 +753,13 @@ extern citp_init_thread_callback init_thread_callback CI_HV;
 #define ci_ts_port_swap(seq, ts) ((seq / tcp_eff_mss(ts)) & 1)
 #endif
 
-ci_inline int ci_netif_intf_i_to_base_ifindex(ci_netif* ni, int intf_i)
+static inline int ci_intf_i_to_ifindex(ci_netif* ni, int intf_i)
 {
   ci_hwport_id_t hwport;
   ci_assert_lt((unsigned) intf_i, CI_CFG_MAX_INTERFACES);
   hwport = ni->state->intf_i_to_hwport[intf_i];
-  ci_assert_lt((unsigned) hwport, CPLANE_MAX_REGISTER_INTERFACES);
-  return cicp_fwd_hwport_to_base_ifindex(&CICP_USER_MIBS(CICP_HANDLE(ni)),
-                                         hwport);
+  ci_assert_lt((unsigned) hwport, CI_CFG_MAX_HWPORTS);
+  return oo_cp_hwport_vlan_to_ifindex(ni->cplane, hwport, 0, NULL);
 }
 
 
@@ -822,6 +818,8 @@ extern void ci_netif_set_merge_atomic_flag(ci_netif* ni);
   do { mod##mod ni->state->field; } while(0)
 #endif
 
+void oo_pkt_calc_checksums(ci_netif* ni, ci_ip_pkt_fmt* pkt,
+                           struct iovec* host_iov);
 
 #endif /* __CI_LIB_IP_INTERNAL_H__ */
 /*! \cidoxg_end */

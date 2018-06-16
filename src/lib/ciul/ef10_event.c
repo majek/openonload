@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -76,6 +76,8 @@ typedef ci_qword_t ef_vi_event;
       ++(vi)->vi_stats->name;                   \
   } while (0)
 
+#define INC_VI_STAT INC_ERROR_STAT
+
 
 /* The space occupied by a minimum sized (60 byte) packet. */
 #define EF_VI_PS_MIN_PKT_SPACE						\
@@ -89,45 +91,52 @@ typedef ci_qword_t ef_vi_event;
   (EF_VI_PS_SPACE_PER_CREDIT / EF_VI_PS_MIN_PKT_SPACE)
 
 
-ef_vi_inline void rx_discard_consumed(ef_vi* vi, unsigned q_id, unsigned rq_id,
-                                      unsigned len, unsigned flags,
-                                      const ef_vi_event* ev, ef_event* ev_out)
+ef_vi_inline unsigned discard_type(uint64_t error_bits)
 {
-  ev_out->rx_discard.type = EF_EVENT_TYPE_RX_DISCARD;
-  ev_out->rx_discard.q_id = q_id;
-  ev_out->rx_discard.rq_id = rq_id;
-  ev_out->rx_discard.len = len;
-  ev_out->rx_discard.flags = flags;
+  const uint64_t l2_errors = ( (1llu << ESF_DZ_RX_ECC_ERR_LBN) |
+                               (1llu << ESF_DZ_RX_ECRC_ERR_LBN) );
+  const uint64_t l3_errors = ( (1llu << ESF_DZ_RX_TCPUDP_CKSUM_ERR_LBN) |
+                               (1llu << ESF_DZ_RX_IPCKSUM_ERR_LBN) );
 
-  if( QWORD_GET_U(ESF_DZ_RX_ECC_ERR, *ev) |
-      QWORD_GET_U(ESF_DZ_RX_ECRC_ERR, *ev) )
-    ev_out->rx_discard.subtype = EF_EVENT_RX_DISCARD_CRC_BAD;
+  if( error_bits & l2_errors )
+    return EF_EVENT_RX_DISCARD_CRC_BAD;
+  else if( error_bits & l3_errors )
+    return EF_EVENT_RX_DISCARD_CSUM_BAD;
   else
-    /* TCPUDP_CKSUM or IPCKSUM error
-     */
-    ev_out->rx_discard.subtype = EF_EVENT_RX_DISCARD_CSUM_BAD;
+    return EF_EVENT_RX_DISCARD_INNER_CSUM_BAD;
 
-  ++vi->ep_state->rxq.removed;
+
+}
+
+
+static void no_desc_trunc(ef_vi* vi, ef_event** evs, int* evs_len, int q_label)
+{
+  /* Adapter ran out of descriptors in middle of a jumbo. */
+  ef_event* ev_out = (*evs)++;
+  --(*evs_len);
+  ev_out->rx_no_desc_trunc.type = EF_EVENT_TYPE_RX_NO_DESC_TRUNC;
+  ev_out->rx_no_desc_trunc.q_id = q_label;
+  vi->ep_state->rxq.in_jumbo = 0;
 }
 
 
 ef_vi_inline void huntington_rx_desc_consumed(ef_vi* vi, const ef_vi_event* ev,
 					      ef_event** evs, int* evs_len,
-					      int q_label, int desc_i)
+					      int q_label)
 {
   ef_vi_rxq_state* qs = &vi->ep_state->rxq;
-  ef_event* ev_out = (*evs)++;
+  unsigned desc_i = qs->removed & vi->vi_rxq.mask;
   unsigned rx_bytes;
+  uint64_t error_bits;
 
+  ef_event* ev_out = (*evs)++;
   --(*evs_len);
+  ev_out->rx.type = EF_EVENT_TYPE_RX;
   ev_out->rx.q_id = q_label;
   ev_out->rx.rq_id = vi->vi_rxq.ids[desc_i];
   vi->vi_rxq.ids[desc_i] = EF_REQUEST_ID_MASK;  /* ?? killme */
-
   rx_bytes = QWORD_GET_U(ESF_DZ_RX_BYTES, *ev);
-
-  ev_out->rx.type = EF_EVENT_TYPE_RX;
-  if( ! qs->in_jumbo ) {
+  if(likely( ! qs->in_jumbo )) {
     ev_out->rx.flags = EF_EVENT_FLAG_SOP;
     qs->bytes_acc = rx_bytes;
   }
@@ -135,36 +144,28 @@ ef_vi_inline void huntington_rx_desc_consumed(ef_vi* vi, const ef_vi_event* ev,
     ev_out->rx.flags = 0;
     qs->bytes_acc += rx_bytes;
   }
-  if( ! QWORD_GET_U(ESF_DZ_RX_CONT, *ev) )
+  if(likely( ! QWORD_GET_U(ESF_DZ_RX_CONT, *ev) )) {
     qs->in_jumbo = 0;
+  }
   else {
     ev_out->rx.flags |= EF_EVENT_FLAG_CONT;
-    ++qs->in_jumbo;
+    qs->in_jumbo = 1;
   }
   ev_out->rx.len = qs->bytes_acc;
 
-  if( QWORD_GET_U(ESF_DZ_RX_MAC_CLASS, *ev) == ESE_DZ_MAC_CLASS_MCAST) {
+  if( QWORD_GET_U(ESF_DZ_RX_MAC_CLASS, *ev) == ESE_DZ_MAC_CLASS_MCAST )
     ev_out->rx.flags |= EF_EVENT_FLAG_MULTICAST;
-  }
 
-  /* Consider rx_bytes == 0 to indicate that the abort bit
-   * should have been set but wasn't - i.e. it's a frame
-   * trunc 
-   */
-  if(likely( ! ((ev->u64[0] & vi->rx_discard_mask) || (rx_bytes == 0)) )) {
-    ++vi->ep_state->rxq.removed;
-    return;
+  error_bits = ev->u64[0] & vi->rx_discard_mask;
+  if(likely( error_bits == 0 )) {
+    ++(qs->removed);
   }
-  if( rx_bytes == 0 ) {
-    /* If this is an abort then we didn't really consume a
-     * descriptor, so don't increment removed count.
-     */
-    ev_out->rx_discard.type = EF_EVENT_TYPE_RX_NO_DESC_TRUNC;
-    return;
+  else {
+    /* NB. Other fields already set via ev_out->rx (layout is the same). */
+    ev_out->rx_discard.type = EF_EVENT_TYPE_RX_DISCARD;
+    ev_out->rx_discard.subtype = discard_type(error_bits);
+    ++(qs->removed);
   }
-
-  rx_discard_consumed(vi, ev_out->rx.q_id, ev_out->rx.rq_id, qs->bytes_acc,
-                      ev_out->rx.flags, ev, ev_out);
 }
 
 
@@ -196,154 +197,121 @@ ef_vi_inline void huntington_rx_desc_consumed(ef_vi* vi, const ef_vi_event* ev,
  */
 ef_vi_inline void huntington_rx_descs_consumed(ef_vi* vi, const ef_vi_event* ev,
                                                ef_event** evs, int* evs_len,
-                                               int q_label, int desc_i)
+                                               int q_label, unsigned n_descs)
 {
   ef_vi_rxq_state* qs = &vi->ep_state->rxq;
-  ef_event* ev_out = (*evs)++;
+  uint64_t error_bits;
 
-  EF_VI_ASSERT(vi->vi_flags & EF_VI_RX_EVENT_MERGE);
+  EF_VI_ASSERT( vi->vi_flags & EF_VI_RX_EVENT_MERGE );
 
-  --(*evs_len);
-  ev_out->rx_multi.q_id = q_label;
-  ev_out->rx_multi.desc_id = desc_i + 1;
-  ev_out->rx_multi.type = EF_EVENT_TYPE_RX_MULTI;
+  if(likely( n_descs )) {
+    ef_event* ev_out = (*evs)++;
+    --(*evs_len);
+    ev_out->rx_multi.type = EF_EVENT_TYPE_RX_MULTI;
+    ev_out->rx_multi.q_id = q_label;
+    ev_out->rx_multi.n_descs = n_descs;
+    if(likely( ! qs->in_jumbo ))
+      ev_out->rx_multi.flags = EF_EVENT_FLAG_SOP;
+    else
+      ev_out->rx_multi.flags = 0;
+    if(likely( ! QWORD_GET_U(ESF_DZ_RX_CONT, *ev) )) {
+      qs->in_jumbo = 0;
+    }
+    else {
+      ev_out->rx_multi.flags |= EF_EVENT_FLAG_CONT;
+      qs->in_jumbo = 1;
+    }
 
-  if( ! qs->in_jumbo ) {
-    ev_out->rx_multi.flags = EF_EVENT_FLAG_SOP;
+    if( QWORD_GET_U(ESF_DZ_RX_MAC_CLASS, *ev) == ESE_DZ_MAC_CLASS_MCAST)
+      ev_out->rx_multi.flags |= EF_EVENT_FLAG_MULTICAST;
+
+    error_bits = ev->u64[0] & vi->rx_discard_mask;
+    if(unlikely( error_bits != 0 )) {
+      ev_out->rx_multi_discard.type = EF_EVENT_TYPE_RX_MULTI_DISCARD;
+      ev_out->rx_multi_discard.subtype = discard_type(error_bits);
+    }
   }
   else {
-    ev_out->rx_multi.flags = 0;
+    no_desc_trunc(vi, evs, evs_len, q_label);
   }
-
-  if( ! QWORD_GET_U(ESF_DZ_RX_CONT, *ev) )
-    qs->in_jumbo = 0;
-  else {
-    ev_out->rx_multi.flags |= EF_EVENT_FLAG_CONT;
-    ++qs->in_jumbo;
-  }
-
-  if( QWORD_GET_U(ESF_DZ_RX_MAC_CLASS, *ev) == ESE_DZ_MAC_CLASS_MCAST) {
-    ev_out->rx_multi.flags |= EF_EVENT_FLAG_MULTICAST;
-  }
-
-  /* If we get a second completion for the same descriptor then this is a
-   * frame trunc.
-   */
-  if(likely( ! ((ev->u64[0] & vi->rx_discard_mask) ||
-                (desc_i == vi->ep_state->rxq.last_completed)) )) {
-    vi->ep_state->rxq.last_completed = desc_i;
-    return;
-  }
-  if( desc_i == (vi->ep_state->rxq.last_completed & vi->vi_rxq.mask) ) {
-    /* If this is an abort then we didn't really consume a
-     * descriptor, so don't increment completed or removed count.
-     */
-    EF_VI_ASSERT(QWORD_GET_U(ESF_DZ_RX_BYTES, *ev) == 0);
-    ev_out->rx_discard.type = EF_EVENT_TYPE_RX_NO_DESC_TRUNC;
-    return;
-  }
-
-  rx_discard_consumed(vi, ev_out->rx_multi.q_id,
-                      vi->vi_rxq.ids[desc_i], QWORD_GET_U(ESF_DZ_RX_BYTES, *ev),
-                      ev_out->rx_multi.flags, ev, ev_out);
-  vi->vi_rxq.ids[desc_i] = EF_REQUEST_ID_MASK;
-  ++vi->ep_state->rxq.last_completed;
-  EF_VI_ASSERT(desc_i == (vi->ep_state->rxq.last_completed & vi->vi_rxq.mask));
 }
 
 
-ef_vi_inline void ef10_packed_stream_rx_event(ef_vi* evq_vi,
-					      const ef_vi_event* ev,
-                                              ef_event** evs, int* evs_len)
+ef_vi_inline void ef10_packed_stream_rx_event(ef_vi* vi, const ef_vi_event* ev,
+                                              ef_event** evs, int* evs_len,
+                                              unsigned q_label,
+                                              unsigned short_di)
 {
-  unsigned q_label = QWORD_GET_U(ESF_DZ_RX_QLABEL, *ev);
-  unsigned short_pc = QWORD_GET_U(ESF_DZ_RX_DSC_PTR_LBITS, *ev);
-  unsigned pkt_count_range = (1 << ESF_DZ_RX_DSC_PTR_LBITS_WIDTH);
-
-  ef_vi* vi = evq_vi->vi_qs[q_label];
+  ef_vi_rxq_state* qs = &(vi->ep_state->rxq);
+  unsigned short_di_mask = (1u << ESF_DZ_RX_DSC_PTR_LBITS_WIDTH) - 1u;
+  ci_qword_t interesting_errors;
 
   ef_event* ev_out = (*evs)++;
   --(*evs_len);
   ev_out->rx_packed_stream.type = EF_EVENT_TYPE_RX_PACKED_STREAM;
   ev_out->rx_packed_stream.q_id = q_label;
-  ev_out->rx_packed_stream.n_pkts =
-    (pkt_count_range + short_pc -
-     vi->ep_state->rxq.rx_ps_pkt_count) % pkt_count_range;
   ev_out->rx_packed_stream.flags = 0;
   ev_out->rx_packed_stream.ps_flags = 0;
+  ev_out->rx_packed_stream.n_pkts =
+    (short_di - qs->last_desc_i) & short_di_mask;
+  qs->last_desc_i = short_di;
 
-  vi->ep_state->rxq.rx_ps_pkt_count = short_pc;
-
-  if (unlikely( QWORD_GET_U(ESF_DZ_RX_EV_ROTATE, *ev) )) {
-    unsigned desc_id;
-    desc_id = evq_vi->ep_state->rxq.removed & vi->vi_rxq.mask;
+  if(unlikely( QWORD_GET_U(ESF_DZ_RX_EV_ROTATE, *ev) )) {
+    unsigned desc_id = qs->removed & vi->vi_rxq.mask;
     vi->vi_rxq.ids[desc_id] = EF_REQUEST_ID_MASK;
-    ++evq_vi->ep_state->rxq.removed;
-    EF_VI_ASSERT(vi->ep_state->rxq.rx_ps_credit_avail > 0);
-    --vi->ep_state->rxq.rx_ps_credit_avail;
+    ++(qs->removed);
+    EF_VI_ASSERT( qs->rx_ps_credit_avail > 0 );
+    --(qs->rx_ps_credit_avail);
     ev_out->rx_packed_stream.flags |= EF_EVENT_FLAG_PS_NEXT_BUFFER;
   }
 
-  EF_VI_ASSERT(ev_out->rx_packed_stream.n_pkts <= 8);
+  EF_VI_ASSERT(ev_out->rx_packed_stream.n_pkts <= EF_VI_RECEIVE_BATCH);
   EF_VI_ASSERT(ev_out->rx_packed_stream.n_pkts > 0 ||
                QWORD_GET_U(ESF_DZ_RX_CONT, *ev));
 
-  if (likely( ! (ev->u64[0] & evq_vi->rx_discard_mask) ))
+  interesting_errors.u64[0] = ev->u64[0] & vi->rx_discard_mask;
+  if(likely( ! interesting_errors.u64[0] ))
     return;
 
-  if (QWORD_GET_U(ESF_DZ_RX_ECC_ERR, *ev)  |
-      QWORD_GET_U(ESF_DZ_RX_ECRC_ERR, *ev))
+  if (QWORD_GET_U(ESF_DZ_RX_ECC_ERR, interesting_errors)  |
+      QWORD_GET_U(ESF_DZ_RX_ECRC_ERR, interesting_errors))
     ev_out->rx_packed_stream.ps_flags |= EF_VI_PS_FLAG_BAD_FCS;
-  if (QWORD_GET_U(ESF_DZ_RX_TCPUDP_CKSUM_ERR, *ev))
+  if (QWORD_GET_U(ESF_DZ_RX_TCPUDP_CKSUM_ERR, interesting_errors))
     ev_out->rx_packed_stream.ps_flags |= EF_VI_PS_FLAG_BAD_L4_CSUM;
-  if (QWORD_GET_U(ESF_DZ_RX_IPCKSUM_ERR, *ev))
+  if (QWORD_GET_U(ESF_DZ_RX_IPCKSUM_ERR, interesting_errors))
     ev_out->rx_packed_stream.ps_flags |= EF_VI_PS_FLAG_BAD_L3_CSUM;
-}
-
-
-ef_vi_inline void ef10_rx_merge_event(ef_vi* evq_vi, const ef_vi_event* ev,
-				      ef_event** evs, int* evs_len)
-{
-  unsigned lbits_mask = __EFVI_MASK(ESF_DZ_RX_DSC_PTR_LBITS_WIDTH,
-                                    unsigned);
-  unsigned q_label = QWORD_GET_U(ESF_DZ_RX_QLABEL, *ev);
-  unsigned short_di, desc_i, q_mask;
-  ef_vi *vi;
-
-  vi = evq_vi->vi_qs[q_label];
-  if (likely(vi != NULL)) {
-    q_mask = vi->vi_rxq.mask;
-    short_di = QWORD_GET_U(ESF_DZ_RX_DSC_PTR_LBITS, *ev);
-    desc_i = (vi->ep_state->rxq.last_completed +
-              ((short_di - vi->ep_state->rxq.last_completed) &
-               lbits_mask) - 1) & q_mask;
-    huntington_rx_descs_consumed(vi, ev, evs, evs_len, q_label, desc_i);
-  }
-  else {
-    INC_ERROR_STAT(evq_vi, rx_ev_bad_q_label);
-  }
 }
 
 
 ef_vi_inline void ef10_rx_event(ef_vi* evq_vi, const ef_vi_event* ev,
 				ef_event** evs, int* evs_len)
 {
-  unsigned lbits_mask = __EFVI_MASK(ESF_DZ_RX_DSC_PTR_LBITS_WIDTH,
-                                    unsigned);
   unsigned q_label = QWORD_GET_U(ESF_DZ_RX_QLABEL, *ev);
-  unsigned short_di, desc_i, q_mask;
-  ef_vi *vi;
+  ef_vi* vi = evq_vi->vi_qs[q_label];
 
-  vi = evq_vi->vi_qs[q_label];
-  if (likely(vi != NULL)) {
-    q_mask = vi->vi_rxq.mask;
-    short_di = QWORD_GET_U(ESF_DZ_RX_DSC_PTR_LBITS, *ev);
-    desc_i = (vi->ep_state->rxq.removed +
-              ((short_di - vi->ep_state->rxq.removed) &
-               lbits_mask) - 1) & q_mask;
-    huntington_rx_desc_consumed(vi, ev, evs, evs_len,
-                                q_label, desc_i);
-  } else {
+  if(likely( vi != NULL )) {
+    ef_vi_rxq_state* qs = &(vi->ep_state->rxq);
+    const unsigned short_di_mask = (1u << ESF_DZ_RX_DSC_PTR_LBITS_WIDTH) - 1u;
+    unsigned short_di = QWORD_GET_U(ESF_DZ_RX_DSC_PTR_LBITS, *ev);
+    if( vi->vi_is_normal ) {
+      unsigned n_descs = (short_di - qs->removed) & short_di_mask;
+      if(likely( n_descs == 1 ))
+        huntington_rx_desc_consumed(vi, ev, evs, evs_len, q_label);
+      else if( n_descs == 0 )
+        no_desc_trunc(vi, evs, evs_len, q_label);
+      else
+        EF_VI_ASSERT( n_descs == 1 || n_descs == 2 );
+    }
+    else if( vi->vi_is_packed_stream ) {
+      ef10_packed_stream_rx_event(vi, ev, evs, evs_len, q_label, short_di);
+    }
+    else {
+      unsigned n_descs = (short_di - qs->last_desc_i) & short_di_mask;
+      qs->last_desc_i = short_di;
+      huntington_rx_descs_consumed(vi, ev, evs, evs_len, q_label, n_descs);
+    }
+  }
+  else {
     INC_ERROR_STAT(evq_vi, rx_ev_bad_q_label);
   }
 }
@@ -389,8 +357,12 @@ static inline void ef10_tx_event_ts_lo(ef_vi* evq, const ef_vi_event* ev)
 {
   ef_vi_txq_state* qs = &evq->ep_state->txq;
   EF_VI_DEBUG(EF_VI_BUG_ON(qs->ts_nsec != EF_VI_TX_TIMESTAMP_TS_NSEC_INVALID));
-  qs->ts_nsec =
-    (((uint64_t) timestamp_extract(*ev) * 1000000000UL) >> 29) << 2;
+  if( evq->ts_format == TS_FORMAT_SECONDS_QTR_NANOSECONDS )
+    qs->ts_nsec = ((uint64_t) timestamp_extract(*ev) >> 4) << 2;
+  else
+    qs->ts_nsec =
+      (((uint64_t) timestamp_extract(*ev) * 1000000000UL) >> 29) << 2;
+
   qs->ts_nsec |= evq->ep_state->evq.sync_flags;
 }
 
@@ -466,36 +438,53 @@ static void ef10_tx_event_ts_enabled(ef_vi* evq, const ef_vi_event* ev,
    * EF_EVENT_TYPE_TX_WITH_TIMESTAMP event to send to the user.
    */
   ef_event* ev_out;
-  switch( QWORD_GET_U(ESF_DZ_TX_SOFT1, *ev) ) {
+  uint32_t ev_type = QWORD_GET_U(ESF_EZ_TX_SOFT1, *ev);
+  switch( ev_type ) {
   case TX_TIMESTAMP_EVENT_TX_EV_COMPLETION:
+  case TX_TIMESTAMP_EVENT_TX_EV_CTPIO_COMPLETION:
     break;
   case TX_TIMESTAMP_EVENT_TX_EV_TSTAMP_LO:
+  case TX_TIMESTAMP_EVENT_TX_EV_CTPIO_TS_LO:
     ef10_tx_event_ts_lo(evq, ev);
     break;
   case TX_TIMESTAMP_EVENT_TX_EV_TSTAMP_HI:
+  case TX_TIMESTAMP_EVENT_TX_EV_CTPIO_TS_HI:
     ev_out = (*evs)++;
     --(*evs_len);
     ev_out->tx.type = EF_EVENT_TYPE_TX_WITH_TIMESTAMP;
+    if( ev_type == TX_TIMESTAMP_EVENT_TX_EV_CTPIO_TS_HI )
+      ev_out->tx.flags = EF_EVENT_FLAG_CTPIO;
+    else
+      ev_out->tx.flags = 0;
     ef10_tx_event_ts_hi(evq, ev, ev_out);
     ef10_tx_event_ts_rq_id(evq, ev_out);
     break;
   default:
     ef_log("%s:%d: ERROR: soft1=%x ev="CI_QWORD_FMT, __FUNCTION__,
-           __LINE__, (unsigned) QWORD_GET_U(ESF_DZ_TX_SOFT1, *ev),
+           __LINE__, (unsigned) QWORD_GET_U(ESF_EZ_TX_SOFT1, *ev),
            CI_QWORD_VAL(*ev));
     break;
   }
 }
 
 
-static inline void ef10_tx_event_completion(const ef_vi_event* ev,
+static inline void ef10_tx_event_completion(ef_vi* evq, const ef_vi_event* ev,
                                             ef_event** evs, int* evs_len)
 {
   ef_event* ev_out = (*evs)++;
+  unsigned ev_type = QWORD_GET_U(ESF_EZ_TX_SOFT1, *ev);
+
+  EF_VI_ASSERT( ev_type == TX_TIMESTAMP_EVENT_TX_EV_COMPLETION ||
+                ev_type == TX_TIMESTAMP_EVENT_TX_EV_CTPIO_COMPLETION );
+
   --(*evs_len);
   ev_out->tx.q_id = QWORD_GET_U(ESF_DZ_TX_QLABEL, *ev);
   ev_out->tx.desc_id = QWORD_GET_U(ESF_DZ_TX_DESCR_INDX, *ev) + 1;
   ev_out->tx.type = EF_EVENT_TYPE_TX;
+  if( ev_type == TX_TIMESTAMP_EVENT_TX_EV_CTPIO_COMPLETION )
+    ev_out->tx.flags = EF_EVENT_FLAG_CTPIO;
+  else
+    ev_out->tx.flags = 0;
 }
 
 
@@ -512,9 +501,10 @@ static void ef10_tx_event_alt(ef_vi* evq, const ef_vi_event* ev,
    */
   EF_VI_ASSERT( ! (evq->vi_flags & EF_VI_TX_TIMESTAMPS) );
 
-  switch( QWORD_GET_U(ESF_DZ_TX_SOFT1, *ev) ) {
+  switch( QWORD_GET_U(ESF_EZ_TX_SOFT1, *ev) ) {
   case TX_TIMESTAMP_EVENT_TX_EV_COMPLETION:
-    ef10_tx_event_completion(ev, evs, evs_len);
+  case TX_TIMESTAMP_EVENT_TX_EV_CTPIO_COMPLETION:
+    ef10_tx_event_completion(evq, ev, evs, evs_len);
     break;
   case TX_TIMESTAMP_EVENT_TX_EV_TSTAMP_LO:
     break;
@@ -542,9 +532,7 @@ ef_vi_inline void ef10_tx_event(ef_vi* evq, const ef_vi_event* ev,
     /* Transmit completion event.  Indicates how many descriptors have been
      * consumed and that DMA reads have completed.
      */
-    EF_VI_ASSERT( QWORD_GET_U(ESF_DZ_TX_SOFT1, *ev) ==
-                  TX_TIMESTAMP_EVENT_TX_EV_COMPLETION );
-    ef10_tx_event_completion(ev, evs, evs_len);
+    ef10_tx_event_completion(evq, ev, evs, evs_len);
   }
   /* It would make sense to check (evq->vi_flags & EF_VI_TX_ALT)
    * instead of tx_alt_num here, but we don't because although the VI
@@ -560,24 +548,21 @@ ef_vi_inline void ef10_tx_event(ef_vi* evq, const ef_vi_event* ev,
 		  evq->vi_flags & EF_VI_TX_TIMESTAMPS );
     if( evq->vi_flags & EF_VI_TX_TIMESTAMPS )
       ef10_tx_event_ts_enabled(evq, ev, evs, evs_len);
-    else {
-      EF_VI_ASSERT( QWORD_GET_U(ESF_DZ_TX_SOFT1, *ev) ==
-                  TX_TIMESTAMP_EVENT_TX_EV_COMPLETION );
-      ef10_tx_event_completion(ev, evs, evs_len);
-    }
+    else
+      ef10_tx_event_completion(evq, ev, evs, evs_len);
   }
 }
 
 ef_vi_inline int
-ef10_receive_get_timestamp_with_sync_flags(ef_vi* vi, const void* pkt,
-                                           struct timespec* ts_out,
-                                           unsigned* flags_out)
+ef10_ef_vi_receive_get_timestamp_with_sync_flags_from_tsync(ef_vi* vi,
+	const void* pkt, struct timespec* ts_out, unsigned* flags_out,
+	uint32_t tsync_minor, uint32_t tsync_major)
 {
-#define FLAG_NO_TIMESTAMP        0x80000000
-#define ONE_SEC                  0x8000000
-#define MAX_RX_PKT_DELAY         0xCCCCCC  /* ONE_SECOND / 10 */
-#define MAX_TIME_SYNC_DELAY      0x1999999 /* ONE_SECOND * 2 / 10 */
-#define SYNC_EVENTS_PER_SECOND   4
+  const uint32_t FLAG_NO_TIMESTAMP = 0x80000000;
+  const uint32_t ONE_SEC = 0x8000000;
+  const uint32_t MAX_RX_PKT_DELAY = 0xCCCCCC;  /* ONE_SECOND / 10 */
+  const uint32_t MAX_TIME_SYNC_DELAY = 0x1999999; /* ONE_SECOND * 2 / 10 */
+  const uint32_t SYNC_EVENTS_PER_SECOND = 4;
 
   /* sync_timestamp_major contains the number of seconds and
    * sync_timestamp_minor contains the upper bits of ns.
@@ -613,7 +598,7 @@ ef10_receive_get_timestamp_with_sync_flags(ef_vi* vi, const void* pkt,
     uint32_t pkt_minor =
       ( pkt_minor_raw + vi->rx_ts_correction) & 0x7FFFFFF;
     ts_out->tv_nsec = ((uint64_t) pkt_minor * 1000000000) >> 27;
-    diff = (pkt_minor - evqs->sync_timestamp_minor) & (ONE_SEC - 1);
+    diff = (pkt_minor - tsync_minor) & (ONE_SEC - 1);
     if (diff < (ONE_SEC / SYNC_EVENTS_PER_SECOND) +
         MAX_TIME_SYNC_DELAY) {
       /* pkt_minor taken after sync event in the
@@ -621,9 +606,9 @@ ef10_receive_get_timestamp_with_sync_flags(ef_vi* vi, const void* pkt,
        * happened, then the second boundary, and
        * then the pkt_minor.
        */
-      ts_out->tv_sec = evqs->sync_timestamp_major;
+      ts_out->tv_sec = tsync_major;
       ts_out->tv_sec +=
-        diff + evqs->sync_timestamp_minor >= ONE_SEC;
+        diff + tsync_minor >= ONE_SEC;
       *flags_out = evqs->sync_flags;
       return 0;
     } else if (diff > ONE_SEC - MAX_RX_PKT_DELAY) {
@@ -632,9 +617,9 @@ ef10_receive_get_timestamp_with_sync_flags(ef_vi* vi, const void* pkt,
        * happened, then the second boundary, and
        * then the sync event.
        */
-      ts_out->tv_sec = evqs->sync_timestamp_major;
+      ts_out->tv_sec = tsync_major;
       ts_out->tv_sec -=
-        diff + evqs->sync_timestamp_minor <= ONE_SEC;
+        diff + tsync_minor <= ONE_SEC;
       *flags_out = evqs->sync_flags;
       return 0;
     } else {
@@ -649,9 +634,112 @@ ef10_receive_get_timestamp_with_sync_flags(ef_vi* vi, const void* pkt,
   ts_out->tv_nsec = 0;
   if( (pkt_minor_raw & FLAG_NO_TIMESTAMP) != 0 )
     return -ENODATA;
-  return (evqs->sync_timestamp_major == ~0u) ? -ENOMSG : -EL2NSYNC;
+  return (tsync_major == ~0u) ? -ENOMSG : -EL2NSYNC;
 }
 
+ef_vi_inline int
+ef10_ef_vi_receive_get_timestamp_with_sync_flags_from_tsync_qns
+	(ef_vi* vi, const void* pkt, struct timespec* ts_out,
+	 unsigned* flags_out, uint32_t tsync_minor, uint32_t tsync_major)
+{
+  const uint32_t NO_TIMESTAMP = 0xFFFFFFFF;
+  /* Since M2, timestamp_minor unit is quarter nanoseconds */
+  const uint32_t ONE_SEC = 0xEE6B2800;
+  const uint32_t MAX_RX_PKT_DELAY = 0x17D78400; /* ONE_SEC / 10 */
+  const uint32_t MAX_TIME_SYNC_DELAY = 0x2FAF0800; /* ONE_SEC * 2 / 10 */
+  const uint32_t WRAP_CORRECTION = 0x1194D7FF;
+  const uint32_t SYNC_EVENTS_PER_SECOND = 4;
+
+  /* Comments in sibling function,
+   * ef10_ef_vi_receive_get_timestamp_with_sync_flags_from_tsync apply here.
+   */
+
+  ef_eventq_state* evqs = &(vi->ep_state->evq);
+  uint32_t* data = (uint32_t*) ((uint8_t*)pkt + ES_DZ_RX_PREFIX_TSTAMP_OFST);
+  uint32_t pkt_minor_raw = le32_to_cpu(*data);
+
+  if( pkt_minor_raw == NO_TIMESTAMP )
+    return -ENODATA;
+
+  if( evqs->sync_timestamp_synchronised ) {
+    uint32_t pkt_minor = pkt_minor_raw + vi->rx_ts_correction;
+    uint32_t diff;
+    int c1, c2;
+
+    /* If the packet arrived more than halfway through a nanosecond
+     * then the resulting timestamp will be more accurate if we round
+     * it up, rather than down. */
+    pkt_minor += 2;
+
+    /* See bug75412 */
+    if(unlikely( pkt_minor >= 4000000000U ))
+      pkt_minor -= 4000000000U;
+
+    ts_out->tv_nsec = pkt_minor >> 2;
+    ts_out->tv_sec = tsync_major;
+
+    diff = pkt_minor - tsync_minor;
+    if( pkt_minor < tsync_minor )
+      diff -= WRAP_CORRECTION;
+
+    /* tsync minor before pkt minor */
+    c1 = diff < (ONE_SEC / SYNC_EVENTS_PER_SECOND) + MAX_TIME_SYNC_DELAY;
+    /* pkt minor before tsync minor */
+    c2 = diff > ONE_SEC - MAX_RX_PKT_DELAY;
+
+    if(unlikely( ! (c1 | c2) ))
+      goto invalid;
+
+    /* Adjust seconds in case of wrapping. One of these will do nothing. */
+    ts_out->tv_sec += c1 & (pkt_minor < tsync_minor);
+    ts_out->tv_sec -= c2 & (tsync_minor < pkt_minor);
+
+    *flags_out = evqs->sync_flags;
+
+    return 0;
+  }
+
+invalid:
+  evqs->sync_timestamp_synchronised = 0;
+  /* Zero ts_out in case of failure to avoid returning garbage. */
+  *ts_out = (struct timespec) { 0 };
+  return (tsync_major == ~0u) ? -ENOMSG : -EL2NSYNC;
+}
+
+int ef10_receive_get_timestamp_with_sync_flags_internal
+	(ef_vi* vi, const void* pkt, struct timespec* ts_out,
+	 unsigned* flags_out, uint32_t tsync_minor, uint32_t tsync_major)
+{
+  /* This function is where TCPDirect hooks in to implement its own
+   * timestamping API; making changes hereon has the benefit of not needing
+   * any TCPDirect changes.
+   */
+  if( vi->ts_format == TS_FORMAT_SECONDS_QTR_NANOSECONDS )
+    return ef10_ef_vi_receive_get_timestamp_with_sync_flags_from_tsync_qns
+             (vi, pkt, ts_out, flags_out, tsync_minor, tsync_major);
+  else
+    return ef10_ef_vi_receive_get_timestamp_with_sync_flags_from_tsync
+             (vi, pkt, ts_out, flags_out, tsync_minor, tsync_major);
+}
+
+int
+ef10_receive_get_timestamp_with_sync_flags(ef_vi* vi, const void* pkt,
+					   struct timespec* ts_out,
+					   unsigned* flags_out)
+{
+
+  /* Divided so we can calculate timestamps for packets using older
+   * `sync_timstamp`s. Useful in finding a way around the interaction with
+   * ef_eventq_poll.
+   **/
+
+  ef_eventq_state* evqs = &(vi->ep_state->evq);
+  uint32_t tsync_minor = evqs->sync_timestamp_minor;
+  uint32_t tsync_major = evqs->sync_timestamp_major;
+
+  return ef10_receive_get_timestamp_with_sync_flags_internal
+	  (vi, pkt, ts_out, flags_out, tsync_minor, tsync_major);
+}
 
 static void
 ef10_receive_get_bytes(ef_vi* vi, const void* pkt, uint16_t* bytes_out)
@@ -720,7 +808,10 @@ static void ef10_mcdi_event(ef_vi* evq, const ef_vi_event* ev,
   switch( code ) {
   case MCDI_EVENT_CODE_PTP_TIME:
     major = QWORD_GET_U(MCDI_EVENT_PTP_TIME_MAJOR, *ev);
-    minor = QWORD_GET_U(MCDI_EVENT_PTP_TIME_MINOR_26_21, *ev) << 21;
+    if( evq->ts_format == TS_FORMAT_SECONDS_QTR_NANOSECONDS )
+      minor = QWORD_GET_U(MCDI_EVENT_PTP_TIME_MINOR_26_21, *ev) << 26;
+    else
+      minor = QWORD_GET_U(MCDI_EVENT_PTP_TIME_MINOR_26_21, *ev) << 21;
     if( evq->vi_out_flags & EF_VI_OUT_CLOCK_SYNC_STATUS )
       sync_flags =
         (QWORD_GET_U(MCDI_EVENT_PTP_TIME_NIC_CLOCK_VALID, *ev) ?
@@ -772,13 +863,9 @@ int ef10_ef_eventq_poll(ef_vi* evq, ef_event* evs, int evs_len)
 
   EF_VI_BUG_ON(evs == NULL);
 
-#ifdef __powerpc__
-  if(unlikely( EF_VI_IS_EVENT(EF_VI_EVENT_PTR(evq, -17)) ))
+  if(unlikely( EF_VI_IS_EVENT(EF_VI_EVENT_PTR(evq,
+                                   evq->ep_state->evq.evq_clear_stride - 1)) ))
     goto overflow;
-#else
-  if(unlikely( EF_VI_IS_EVENT(EF_VI_EVENT_PTR(evq, -1)) ))
-    goto overflow;
-#endif
 
  not_empty:
   /* Read the event out of the ring, then fiddle with copied version.
@@ -795,13 +882,7 @@ int ef10_ef_eventq_poll(ef_vi* evq, ef_event* evs, int evs_len)
     BUG_ON(ESF_DZ_EV_CODE_LBN < 32u);
     switch( CI_QWORD_FIELD(ev, ESF_DZ_EV_CODE) ) {
     case ESE_DZ_EV_CODE_RX_EV:
-      if( evq->vi_is_normal )
-        ef10_rx_event(evq, &ev, &evs, &evs_len);
-      else if( evq->vi_is_packed_stream )
-        ef10_packed_stream_rx_event(evq, &ev,
-                                    &evs, &evs_len);
-      else
-        ef10_rx_merge_event(evq, &ev, &evs, &evs_len);
+      ef10_rx_event(evq, &ev, &evs, &evs_len);
       break;
 
     case ESE_DZ_EV_CODE_TX_EV:
@@ -833,11 +914,7 @@ int ef10_ef_eventq_poll(ef_vi* evq, ef_event* evs, int evs_len)
 
     /* Consume event.  Must do after event checking above,
      * in case we don't want to consume it. */
-#ifdef __powerpc__
-    CI_SET_QWORD(*EF_VI_EVENT_PTR(evq, -16));
-#else
-    CI_SET_QWORD(*pev);
-#endif
+    CI_SET_QWORD(*EF_VI_EVENT_PTR(evq, evq->ep_state->evq.evq_clear_stride));
     evq->ep_state->evq.evq_ptr += sizeof(ef_vi_event);
 
     if (evs_len == 0)
@@ -921,9 +998,9 @@ ef_vi_inline int ef10_unbundle_one_packet(ef_vi* vi,
   EF_VI_ASSERT((ts_flags & ~(EF_VI_SYNC_FLAG_CLOCK_SET |
                              EF_VI_SYNC_FLAG_CLOCK_IN_SYNC)) == 0);
   pkt->ps_flags = ts_flags;
-  offset = EF_VI_ALIGN_FWD(pkt_len + ES_DZ_PS_RX_PREFIX_SIZE,
-                           (ci_uintptr_t) EF_VI_PS_ALIGNMENT) +
-    EF_VI_PS_PACKET_GAP;
+  offset = EF_VI_ALIGN_FWD(pkt_len + ES_DZ_PS_RX_PREFIX_SIZE
+                           + EF_VI_PS_PACKET_GAP,
+                           (ci_uintptr_t) EF_VI_PS_ALIGNMENT);
   pkt->ps_next_offset = (uint16_t) offset;
   return rc;
 }

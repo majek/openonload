@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -34,17 +34,24 @@ struct ci_ether_hdr_s;
 struct efx_dlfilt_cb_s;
 
 
+typedef int (*efx_dlfilter_is_onloaded_t)(void* ctx, struct net* netns,
+                                          ci_ifid_t ifindex);
+
 /*! Construct a driverlink filter object - stored in the per-nic struct.
+ * \param ctx - context passed to callbacks
+ * \param is_onloaded - callback used to identify SFC interfaces
+ *                      must be safe in soft IRQ context
  * \Return     ptr to object or NULL if failed
  */
-extern struct efx_dlfilt_cb_s* efx_dlfilter_ctor(void);
+extern struct efx_dlfilt_cb_s*
+efx_dlfilter_ctor(void* ctx, efx_dlfilter_is_onloaded_t is_onloaded);
 
 /*! Clean-up object created through efx_dlfilter_ctor() */
 extern void efx_dlfilter_dtor(struct efx_dlfilt_cb_s*);
 
 /*! Data-passing entry point. */
 extern int
-efx_dlfilter_handler(int ifindex, struct efx_dlfilt_cb_s*,
+efx_dlfilter_handler(struct net* netns, int ifindex, struct efx_dlfilt_cb_s*,
                      const struct ci_ether_hdr_s*, const void* ip_hdr, int len);
 
 

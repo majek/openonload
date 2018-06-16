@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -111,6 +111,12 @@ extern int citp_netif_alloc_and_init(ef_driver_handle*, ci_netif**) CI_HF;
 extern int citp_netif_recreate_probed(ci_fd_t caller_fd,
                                       ef_driver_handle* fd,
 				      ci_netif** out_ni) CI_HF;
+
+/* Initialize a netif reference count */
+ci_inline void citp_netif_init_ref(ci_netif* ni )
+{
+  oo_atomic_set(&ni->ref_count, 1);
+}
 
 /* Add a reference to a netif */
 ci_inline void citp_netif_add_ref( ci_netif* ni ) {

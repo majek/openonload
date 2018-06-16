@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -70,7 +70,6 @@
 
 
 #include "onload_internal.h"
-#include <cplane/exported.h>
 #include <onload/nic.h>
 #include <onload/debug.h>
 #include <net/arp.h>
@@ -80,6 +79,8 @@
 #include "../linux_resource/kernel_compat.h"
 #include <onload/tcp_driver.h> /* for CI_GLOBAL_WORKQUEUE */
 #include <onload/cplane_ops.h>
+#include <onload/cplane_prot.h>
+#include <onload/linux_onload_internal.h>
 
 
 
@@ -205,24 +206,27 @@ cicppl_ip_pkt_handover(ci_netif *netif, oo_pkt_p src_pktid)
   struct cicp_bufpool_pkt* dst_pkt;
   int dst_pktid;
   int rc;
+  struct cicppl_instance* cppl = cicppl_by_netif(netif);
 
   ci_assert(netif);
   ASSERT_VALID_PKT(netif, PKT_CHK(netif, src_pktid));
 
   /* allocate a packet to hold a copy of the ip packet passed to us */
-  CICP_BUFPOOL_LOCK(cicppl_pktpool,
-	            dst_pktid = cicppl_pktbuf_alloc(cicppl_pktpool));
+  spin_lock_bh(&cppl->lock);
+  dst_pktid = cicppl_pktbuf_alloc(cppl->pktpool);
+  spin_unlock_bh(&cppl->lock);
   if(dst_pktid < 0) {
     return -ENOBUFS;
   }
-  ci_assert(cicppl_pktbuf_is_valid_id(cicppl_pktpool, dst_pktid));
+  ci_assert(cicppl_pktbuf_is_valid_id(cppl->pktpool, dst_pktid));
 
   /* copy packet from the netif to arp table */
-  dst_pkt = cicppl_pktbuf_pkt(cicppl_pktpool, dst_pktid);
+  dst_pkt = cicppl_pktbuf_pkt(cppl->pktpool, dst_pktid);
   rc = cicppl_ip_pkt_flatten_copy(netif, src_pktid, dst_pkt);
   if (rc < 0) {
-    CICP_BUFPOOL_LOCK(cicppl_pktpool,
-        	      cicppl_pktbuf_free(cicppl_pktpool, dst_pktid));
+    spin_lock_bh(&cppl->lock);
+    cicppl_pktbuf_free(cppl->pktpool, dst_pktid);
+    spin_unlock_bh(&cppl->lock);
     return rc;
   }
 
@@ -230,6 +234,18 @@ cicppl_ip_pkt_handover(ci_netif *netif, oo_pkt_p src_pktid)
 }
 
 
+#ifndef NDEBUG
+static void
+cicppl_mac_defer_send_failed(ci_ip4_hdr *iph, ci_ip_addr_t dst, int err)
+{
+  ci_log(CODEID": IP "CI_IP_PRINTF_FORMAT"->"CI_IP_PRINTF_FORMAT
+         " %s pkt handover failed, rc %d",
+         CI_IP_PRINTF_ARGS(&iph->ip_saddr_be32),
+         CI_IP_PRINTF_ARGS(&dst),\
+         iph->ip_protocol == IPPROTO_TCP ? "TCP" : "UDP",
+         err);
+}
+#endif
 
 /**
  * Queue ARP packet request and the ip packet that triggered it.
@@ -241,9 +257,10 @@ cicppl_mac_defer_send(ci_netif *netif, int *ref_os_rc,
 		      ci_ip_addr_t ip, oo_pkt_p ip_pktid, ci_ifid_t ifindex)
 { int pendable_pktid;
   
-  OO_DEBUG_ARP(ci_log(CODEID": ni %p (ID:%d) ip "CI_IP_PRINTF_FORMAT" pkt ID %d",
+  OO_DEBUG_ARP(ci_log(CODEID": ni %p (ID:%d) ip "CI_IP_PRINTF_FORMAT
+                      " pkt ID %d ifindex %d",
                       netif, NI_ID(netif), CI_IP_PRINTF_ARGS(&ip), 
-                      OO_PP_FMT(ip_pktid)));
+                      OO_PP_FMT(ip_pktid), ifindex));
 
   ci_assert(ci_netif_is_locked(netif));
   ASSERT_VALID_PKT(netif, PKT_CHK(netif, ip_pktid));
@@ -258,25 +275,28 @@ cicppl_mac_defer_send(ci_netif *netif, int *ref_os_rc,
     pendable_pktid = cicppl_ip_pkt_handover(netif, ip_pktid);
     if (pendable_pktid < 0) {
       LOG_U(
-          ci_ip4_hdr *iph = oo_tx_ip_hdr(PKT(netif, ip_pktid));
-          ci_log(CODEID": IP "CI_IP_PRINTF_FORMAT"->"CI_IP_PRINTF_FORMAT
-                   " %s pkt handover failed, rc %d",
-                   CI_IP_PRINTF_ARGS(&iph->ip_saddr_be32),
-                   CI_IP_PRINTF_ARGS(&ip),
-	           iph->ip_protocol == IPPROTO_TCP ? "TCP" : "UDP",
-                   pendable_pktid);
+        static ci_uint32 last_dst = 0;
+        ci_ip4_hdr *iph = oo_tx_ip_hdr(PKT(netif, ip_pktid));
+        if( last_dst != ip ) {
+          cicppl_mac_defer_send_failed(iph, ip, pendable_pktid);
+          last_dst = ip;
+        }
+        else {
+          CI_LOG_LIMITED(cicppl_mac_defer_send_failed(iph, ip,
+                                                      pendable_pktid));
+        }
         );
       *ref_os_rc = pendable_pktid;
       return FALSE;
     } else
     {
-      cicp_handle_t *control_plane = CICP_HANDLE(netif);
+      struct cicppl_instance *cppl = cicppl_by_netif(netif);
       
       /* from this point onwards, pendable_pktid is an ARP buffer ID */
-      ci_assert(cicppl_pktbuf_is_valid_id(cicppl_pktpool, pendable_pktid));
+      ci_assert(cicppl_pktbuf_is_valid_id(cppl->pktpool, pendable_pktid));
 
       /* now we have a cicp_bufpool_t buffer ID we can call this: */
-      *ref_os_rc = cicpplos_pktbuf_defer_send(control_plane, ip,
+      *ref_os_rc = cicpplos_pktbuf_defer_send(cppl, ip,
 					      pendable_pktid, ifindex);
 
       return (*ref_os_rc == 0);

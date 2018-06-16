@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -111,6 +111,7 @@ ci_tcp_listenq_bucket_insert(ci_netif* ni, ci_tcp_socket_listen* tls,
 #ifdef __KERNEL__
   int i = 0;
 #endif
+  oo_p nbucket;
 
   LOG_TV(ci_log("%s([%d] level=%d "TSR_FMT")", __func__,
                 NI_ID(ni), level, TSR_ARGS(tsr)));
@@ -136,10 +137,11 @@ ci_tcp_listenq_bucket_insert(ci_netif* ni, ci_tcp_socket_listen* tls,
   if( level > CI_LISTENQ_BUCKET_MAX_DEPTH(ni) )
     return;
 
-  bucket->bucket[idx] = ci_ni_aux_alloc_bucket(ni);
-  if( OO_P_IS_NULL(bucket->bucket[idx]) )
+  nbucket = ci_ni_aux_alloc_bucket(ni);
+  if( OO_P_IS_NULL(nbucket) )
     return;
-  bucket = ci_ni_aux_p2bucket(ni, bucket->bucket[idx]);
+  bucket->bucket[idx] = nbucket;
+  bucket = ci_ni_aux_p2bucket(ni, nbucket);
   tls->n_buckets++;
 
   while( OO_P_NOT_NULL(tsr_p) ) {
@@ -363,8 +365,7 @@ void ci_tcp_listenq_remove(ci_netif* ni, ci_tcp_socket_listen* tls,
   }
 
   /* cancel timer if no more synrecv on queue */
-  if( --tls->n_listenq == 0 &&
-     (~tls->s.s_flags & CI_SOCK_FLAG_BOUND_ALIEN) )
+  if( --tls->n_listenq == 0 && ci_tcp_listen_has_timer(tls) )
     ci_ip_timer_clear(ni, &tls->listenq_tid);
 }
 
@@ -431,9 +432,16 @@ get_ts_from_cache(ci_netif *netif,
 {
   ci_tcp_state *ts = NULL;
 #if CI_CFG_FD_CACHING
-  if( ci_ni_dllist_not_empty(netif, &tls->epcache.cache) ) {
+  /* scalable passive sockets have common cache */
+  ci_socket_cache_t* cache;
+  if( (tls->s.s_flags & CI_SOCK_FLAG_SCALPASSIVE) == 0 )
+    cache = &tls->epcache;
+  else
+    cache = &netif->state->passive_scalable_cache;
+
+  if( ci_ni_dllist_not_empty(netif, &cache->cache) ) {
     /* Take the entry from the cache */
-    ci_ni_dllist_link *link = ci_ni_dllist_pop(netif, &tls->epcache.cache);
+    ci_ni_dllist_link *link = ci_ni_dllist_pop(netif, &cache->cache);
     ts = CI_CONTAINER (ci_tcp_state, epcache_link, link);
     ci_assert (ts);
     ci_ni_dllist_self_link(netif, &ts->epcache_link);
@@ -441,7 +449,8 @@ get_ts_from_cache(ci_netif *netif,
     LOG_EP(ci_log("Taking cached fd %d off cached list, (onto acceptq)",
            ts->cached_on_fd));
 
-    if( tcp_laddr_be32(ts) == tsr->l_addr ) {
+    if( tcp_laddr_be32(ts) == tsr->l_addr ||
+        ((tls->s.s_flags & ts->s.s_flags & CI_SOCK_FLAGS_SCALABLE) != 0 ) ) {
       ci_tcp_state_init(netif, ts, 1);
       /* Shouldn't have touched these bits of state */
       ci_assert(!(ts->s.b.sb_aflags & CI_SB_AFLAG_ORPHAN));
@@ -458,7 +467,7 @@ get_ts_from_cache(ci_netif *netif,
        * back on the list.
        */
       LOG_EP(ci_log("changed interface of cached EP, re-queueing"));
-      ci_ni_dllist_push_tail(netif, &tls->epcache.cache, &ts->epcache_link);
+      ci_ni_dllist_push_tail(netif, &cache->cache, &ts->epcache_link);
       ts = NULL;
       CITP_STATS_NETIF(++netif->state->stats.sockcache_miss_intmismatch);
     }
@@ -487,8 +496,9 @@ static void ci_tcp_inherit_options(ci_netif* ni, ci_sock_cmn* s,
   ts->s.so = s->so;
   ts->s.cp.so_bindtodevice = s->cp.so_bindtodevice;
   ts->s.cp.ip_ttl = s->cp.ip_ttl;
+  ts->s.cp.ip_tos = s->cp.ip_tos;
   ts->s.rx_bind2dev_ifindex = s->rx_bind2dev_ifindex;
-  ts->s.rx_bind2dev_base_ifindex = s->rx_bind2dev_base_ifindex;
+  ts->s.rx_bind2dev_hwports = s->rx_bind2dev_hwports;
   ts->s.rx_bind2dev_vlan = s->rx_bind2dev_vlan;
   ci_tcp_set_sndbuf(ni, ts);      /* eff_mss must be valid */
   ci_tcp_set_rcvbuf(ni, ts);      /* and amss, and rcv_wscl */
@@ -531,7 +541,9 @@ static void ci_tcp_inherit_options(ci_netif* ni, ci_sock_cmn* s,
                         s->pkt.ip.ip_ttl,
                         s->pkt.ip.ip_tos);
   ts->s.cmsg_flags = s->cmsg_flags;
+#if CI_CFG_TIMESTAMPING
   ts->s.timestamping_flags = s->timestamping_flags;
+#endif
 
   /* Must have set up so.sndbuf */
   ci_tcp_init_rcv_wnd(ts, ctxt);
@@ -584,7 +596,7 @@ int ci_tcp_listenq_try_promote(ci_netif* netif, ci_tcp_socket_listen* tls,
                                ci_tcp_state** ts_out)
 {
   int rc = 0;
-  
+
   ci_assert(netif);
   ci_assert(tls);
   ci_assert(tls->s.b.state == CI_TCP_LISTEN);
@@ -592,6 +604,18 @@ int ci_tcp_listenq_try_promote(ci_netif* netif, ci_tcp_socket_listen* tls,
 
   if( (int) ci_tcp_acceptq_n(tls) < tls->acceptq_max ) {
     ci_tcp_state* ts;
+    int scalable = (tls->s.s_flags & CI_SOCK_FLAG_SCALPASSIVE) != 0;
+#if CI_CFG_FD_CACHING
+    ci_socket_cache_t* cache;
+
+    /* chose cache according to scalability of listen socket */
+    if( ! scalable )
+      cache = &tls->epcache;
+    else
+      cache = &netif->state->passive_scalable_cache;
+#endif
+    /* suppress scalability of accepted socket if it is local loopback */
+    scalable &= OO_SP_IS_NULL(tsr->local_peer);
 
     /* grab a tcp_state structure that will go onto the accept queue.  We take
      * from the cache of EPs if any are available
@@ -631,6 +655,10 @@ int ci_tcp_listenq_try_promote(ci_netif* netif, ci_tcp_socket_listen* tls,
     ts->s.ofe_code_start = tls->ofe_promote;
 #endif
 
+    if( scalable ) {
+      /* scalable sockets will not get filters installed trough oof */
+      ts->s.s_flags |= CI_SOCK_FLAG_SCALPASSIVE;
+    }
     if( ! ci_tcp_is_cached(ts) ) {
       /* Need to initialise address information for use when setting filters */
       ci_tcp_set_addr_on_promote(netif, ts, tsr, tls);
@@ -649,19 +677,25 @@ int ci_tcp_listenq_try_promote(ci_netif* netif, ci_tcp_socket_listen* tls,
     }
 #if CI_CFG_FD_CACHING
     else {
-      /* Now set the s/w filter.  We leave the hw filter in place for cached
-       * EPS. This will probably not have the correct raddr and rport, but as
-       * it's sharing the listening socket's filter that's not a problem.  It
-       * will be updated if this is still around when the listener is closed.
-       */
-      rc = ci_netif_filter_insert(netif, S_SP(ts), tsr->l_addr,
-                                  sock_lport_be16(&tls->s), tsr->r_addr,
-                                  tsr->r_port, tcp_protocol(ts));
-
+      if( scalable ) {
+        ci_tcp_set_addr_on_promote(netif, ts, tsr, tls);
+        rc = ci_tcp_ep_set_filters(netif, S_SP(ts), ts->s.cp.so_bindtodevice,
+                                   S_SP(tls));
+      }
+      else if( OO_SP_IS_NULL(tsr->local_peer) ) {
+        /* Now set the s/w filter.  We leave the hw filter in place for cached
+         * EPS. This will probably not have the correct raddr and rport, but as
+         * it's sharing the listening socket's filter that's not a problem.  It
+         * will be updated if this is still around when the listener is closed.
+         */
+        rc = ci_netif_filter_insert(netif, S_SP(ts), tsr->l_addr,
+                                    sock_lport_be16(&tls->s), tsr->r_addr,
+                                    tsr->r_port, tcp_protocol(ts));
+      }
       if (rc < 0) {
         /* Bung it back on the cache list */
         LOG_EP(ci_log("Unable to create s/w filter!"));
-        ci_ni_dllist_push(netif, &tls->epcache.cache, &ts->epcache_link);
+        ci_ni_dllist_push(netif, &cache->cache, &ts->epcache_link);
         return rc;
       }
 
@@ -670,7 +704,8 @@ int ci_tcp_listenq_try_promote(ci_netif* netif, ci_tcp_socket_listen* tls,
        * cache queue with as few changes as possible if we fail to add the
        * sw filter.
        */
-      ci_tcp_set_addr_on_promote(netif, ts, tsr, tls);
+      if( ! scalable )
+        ci_tcp_set_addr_on_promote(netif, ts, tsr, tls);
 
       LOG_EP(ci_log("Cached fd %d from cached to connected", ts->cached_on_fd));
       ci_ni_dllist_push(netif, &tls->epcache_connected, &ts->epcache_link);
@@ -701,8 +736,6 @@ int ci_tcp_listenq_try_promote(ci_netif* netif, ci_tcp_socket_listen* tls,
     ts->tcpflags = 0;
     ts->tcpflags |= tsr->tcpopts.flags;
     ts->tcpflags |= CI_TCPT_FLAG_PASSIVE_OPENED;
-    if( NI_OPTS(netif).tcp_listen_replies_back )
-      ts->s.cp.so_bindtodevice = ipcache->ifindex;
     ts->outgoing_hdrs_len = sizeof(ci_ip4_hdr) + sizeof(ci_tcp_hdr);
     if( ts->tcpflags & CI_TCPT_FLAG_WSCL ) {
       ts->snd_wscl = tsr->tcpopts.wscl_shft;
@@ -712,6 +745,7 @@ int ci_tcp_listenq_try_promote(ci_netif* netif, ci_tcp_socket_listen* tls,
     }
     CI_IP_SOCK_STATS_VAL_TXWSCL( ts, ts->snd_wscl);
     CI_IP_SOCK_STATS_VAL_RXWSCL( ts, ts->rcv_wscl);
+
 
     /* Send and receive sequence numbers */
     tcp_snd_una(ts) = tcp_snd_nxt(ts) = tcp_enq_nxt(ts) = tcp_snd_up(ts) =

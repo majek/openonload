@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -172,7 +172,7 @@ static void parse_options( int argc, char** argv, struct configuration* cfg )
     { "max", required_argument, 0, 'n' },
     { 0, no_argument, 0, 0 }
   };
-  const char* optstring = "ipPn";
+  const char* optstring = "i:p:P:n:";
 
   /* Defaults */
   bzero(cfg, sizeof(struct configuration));

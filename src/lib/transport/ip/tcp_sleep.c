@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -350,16 +350,21 @@ int ci_netif_pkt_wait(ci_netif* ni, ci_sock_cmn* s, int lock_flags)
   }
   else
 #endif
-  if( ci_netif_may_poll(ni) && ci_netif_has_event(ni) )
-    if( (lock_flags & CI_SLEEP_NETIF_LOCKED) || ci_netif_trylock(ni) ) {
-      lock_flags |= CI_SLEEP_NETIF_LOCKED;
+  if( (lock_flags & CI_SLEEP_NETIF_LOCKED) || ci_netif_trylock(ni) ) {
+    lock_flags |= CI_SLEEP_NETIF_LOCKED;
+    /* ci_netif_poll() calls ci_netif_try_to_reap(), but we have to call
+     * ci_netif_try_to_reap() explicitly if there is no job for the
+     * ci_netif_poll(). */
+    if( ci_netif_may_poll(ni) && ci_netif_has_event(ni) )
       ci_netif_poll(ni);
-      if( ci_netif_pkt_tx_can_alloc_now(ni) ) {
-        if( ! (lock_flags & CI_SLEEP_NETIF_RQ) )
-          ci_netif_unlock(ni);
-        return 0;
-      }
+    else
+      ci_netif_try_to_reap(ni, 1);
+    if( ci_netif_pkt_tx_can_alloc_now(ni) ) {
+      if( ! (lock_flags & CI_SLEEP_NETIF_RQ) )
+        ci_netif_unlock(ni);
+      return 0;
     }
+  }
 
   do {
     /* The PKT_WAIT ioctl used to be able to drop the stack lock, but I've

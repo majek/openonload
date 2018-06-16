@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -74,6 +74,7 @@ typedef struct {
   ci_fd_t fp;
   int stack_id;
   int orphan_only;
+  int op;
 } dump_stack_args;
 
 /*! dump inode for a file descriptor */
@@ -83,7 +84,7 @@ oo_debug_dump_stack(void* opaque, void* buf, int buf_len)
   int rc;
   dump_stack_args* args = opaque;
   ci_debug_onload_op_t op;
-  op.what = __CI_DEBUG_OP_DUMP_STACK__;
+  op.what = args->op;
   op.u.dump_stack.stack_id = args->stack_id;
   op.u.dump_stack.orphan_only = args->orphan_only;
   CI_USER_PTR_SET(op.u.dump_stack.user_buf, buf);

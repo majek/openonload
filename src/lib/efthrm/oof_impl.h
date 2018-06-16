@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -19,7 +19,9 @@
 #include <ci/tools.h>
 #include <ci/internal/transport_config_opt.h>
 #include <onload/oof_hw_filter.h>
+#include <onload/oof_interface.h>
 
+#include "oof_tproxy_ipproto.h"
 
 #define OOF_LOCAL_PORT_TBL_SIZE      16
 #define OOF_LOCAL_PORT_TBL_MASK      (OOF_LOCAL_PORT_TBL_SIZE - 1)
@@ -60,9 +62,12 @@ struct oof_local_port_addr {
    */
   ci_dllist lpa_full_socks;
 
-  /* Number of full-match sockets sharing [lpa_filter]. */
-  int       lpa_n_full_sharers;
-
+  /* Number of full-match sockets sharing [lpa_filter].
+   * When flag OOF_LPA_REMOVED is set no hw/sw filter insertions
+   * or filter sharing is allowed. */
+  int32_t lpa_n_full_sharers;
+#define OOF_LPA_FLAG_REMOVED 0x1
+  uint32_t lpa_flags;
 };
 
 
@@ -101,7 +106,18 @@ struct oof_local_interface {
   ci_dllink li_active_ifs_link;
 
   unsigned  li_ifindex;
+};
 
+
+struct oof_local_interface_details {
+
+  ci_dllink lid_link;
+
+  ci_uint16 lid_ifindex;
+  ci_uint16 lid_flags; /* for now 0x1 is for interface up */
+  ci_uint32 lid_hwport_mask;
+  ci_uint16 lid_vlan_id;
+  ci_mac_addr_t lid_mac;
 };
 
 
@@ -118,30 +134,6 @@ struct oof_local_addr {
 };
 
 
-enum oof_cplane_update_type {
-  OOF_CU_ADDR_ADD,
-  OOF_CU_ADDR_DEL,
-  OOF_CU_UPDATE_FILTERS,
-};
-
-
-struct oof_cplane_update {
-
-  ci_dllink cu_cplane_updates_link;
-
-  enum oof_cplane_update_type cu_type;
-
-  unsigned  cu_addr;
-
-  unsigned  cu_ifindex;
-
-};
-
-
-static const ci_uint8 oof_tproxy_ipprotos[] ={IPPROTO_ICMP, IPPROTO_IGMP,
-                                              IPPROTO_UDP};
-#define OOF_TPROXY_IPPROTO_FILTER_COUNT (sizeof(oof_tproxy_ipprotos) /       \
-                                         sizeof(oof_tproxy_ipprotos[0]))
 /* Tproxy per ifindex */
 struct oof_tproxy {
   struct oo_hw_filter ft_filter; /* mac filter */
@@ -173,7 +165,7 @@ struct oof_manager {
    */
   struct mutex fm_outer_lock;
 
-  /* Protects state associated with control plane updates. */
+  /* The name is misleading - it really protects fm_hwports_* fields */
   spinlock_t   fm_cplane_updates_lock;
 
   int          fm_local_addr_n;
@@ -185,15 +177,19 @@ struct oof_manager {
 
   struct oof_local_addr* fm_local_addrs;
 
+  /* list of local_interface_details */
+  ci_dllist    fm_local_interfaces;
+
   ci_dllist    fm_mcast_laddr_socks;
 
   /* List of scalable-filter-manager structures, or "tproxies" for short. */
   ci_dllist    fm_tproxies;
-  /* In some circumstances, tproxies need to install protocol filters that are
-   * not MAC-qualified and are required for the lifetime of any tproxy and are
-   * system-global. */
-#define OOF_TPROXY_GLOBAL_FILTER_COUNT OOF_TPROXY_IPPROTO_FILTER_COUNT
-  struct oo_hw_filter fm_tproxy_global_filters[OOF_TPROXY_GLOBAL_FILTER_COUNT];
+
+  /* Track which ports we've requested tproxy global filters on.  For each
+   * filter type we need to know which hwports we have a filter installed on.
+   * We store this as a bitmask.
+   */
+  unsigned     fm_tproxy_global_filters[OOF_TPROXY_GLOBAL_FILTER_COUNT];
 
   /* This mask tracks which hwports are up.  Unicast filters are usually
    * installed on all interfaces that are up and mapped into the
@@ -202,11 +198,10 @@ struct oof_manager {
   unsigned     fm_hwports_up;
   unsigned     fm_hwports_down;
 
-  /* This mask tracks which hwports are unavailable because they are
-   * members of an unacceleratable bond.  ie. Filters should not be used
-   * with unavailable hwports because traffic arriving on them goes via the
-   * kernel stack.
+  /* This mask tracks which hwports are unavailable because of various
+   * reasons.
    */
+  unsigned     fm_hwports_avail_per_tag[OOF_HWPORT_AVAIL_TAG_NUM];
   unsigned     fm_hwports_available;
 
   /* This mask tracks which hwports are capable of multicast replication.
@@ -218,6 +213,10 @@ struct oof_manager {
    */
   unsigned     fm_hwports_vlan_filters;
 
+  /* This mask tracks which hwports have been handled by
+   * __oof_mcast_update_filters().
+   */
+  unsigned     fm_hwports_mcast_update_seen;
 
   /* New values of the above masks, staged here in order to resolve the
    * lock order requirements.
@@ -227,7 +226,7 @@ struct oof_manager {
   unsigned     fm_hwports_up_new;
   unsigned     fm_hwports_down_new;
   unsigned     fm_hwports_removed;
-  unsigned     fm_hwports_available_new;
+  unsigned     fm_hwports_avail_per_tag_new[OOF_HWPORT_AVAIL_TAG_NUM];
   unsigned     fm_hwports_mcast_replicate_capable_new;
   unsigned     fm_hwports_vlan_filters_new;
 

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -26,15 +26,27 @@
 #include <linux/netfilter.h>
 #include <linux/netfilter_arp.h>
 #include <linux/netfilter_ipv4.h>
+#include <linux/if_arp.h>
 
 #include <ci/internal/ip.h>
 #include <onload/driverlink_filter.h>
-#include <cplane/exported.h>
+
+/* For Medford 2 features. */
+#define EFX_DRIVERLINK_API_VERSION_MINOR 0
 #include <driver/linux_net/driverlink_api.h>
+
+/* When driverlink API version is updated we'll need to select a different
+ * MINOR version.  Put this here to make sure we remember.
+ */
+#if EFX_DRIVERLINK_API_VERSION != 23
+#error "EFX_DRIVERLINK_API_VERSION_MINOR needs updating"
+#endif
+
 #include <onload/linux_onload_internal.h>
 #include <onload/tcp_helper_fns.h>
 #include <onload/nic.h>
 #include <onload/oof_interface.h>
+#include <onload/oof_onload.h>
 #include <ci/efrm/efrm_client.h>
 #include "onload_internal.h"
 #include "onload_kernel_compat.h"
@@ -81,7 +93,7 @@ static inline u16 vlan_dev_vlan_id(const struct net_device *dev)
 #endif
 
 
-#if CPLANE_TEAMING
+#if CI_CFG_TEAMING
 # ifdef IFF_BONDING
 #  define NETDEV_IS_BOND_MASTER(_dev)                                   \
   ((_dev->flags & (IFF_MASTER)) && (_dev->priv_flags & IFF_BONDING))
@@ -97,30 +109,15 @@ static inline u16 vlan_dev_vlan_id(const struct net_device *dev)
 #endif
 
 
-/* Check whether device may match software filters for Onload */
+/* Check whether device may match software filters for Onload.
+ *
+ * In the ideal world, we'd like to have a fast check if the device is onloadable.
+ * In the reality, there is no fast check for a teaming device, and teaming
+ * device may be Onloadable.  So, we just check a device type.
+ */
 static inline int oo_nf_dev_match(const struct net_device *net_dev)
 {
-  if( net_dev->priv_flags & IFF_802_1Q_VLAN )
-    net_dev = vlan_dev_real_dev(net_dev);
-
-#if CPLANE_TEAMING
-  /* We should return 1 for accelerated bond or team interface.
-   * There is no easy way to check if an interface is team or not,
-   * so we just look into the cplane llap table and see if this llap is
-   * accelerated. */
-  {
-    cicp_encap_t encap;
-    ci_hwport_id_t hwport;
-
-    if( cicp_llap_retrieve(&CI_GLOBAL_CPLANE, net_dev->ifindex,
-                           NULL, &hwport, NULL, &encap, NULL, NULL) == 0 &&
-        ( hwport != CI_HWPORT_ID_BAD ||
-          (encap.type & CICP_LLAP_TYPE_CAN_ONLOAD_BAD_HWPORT) ) )
-      return 1;
-  }
-#endif
-
-  return efx_dl_netdev_is_ours(net_dev);
+  return net_dev->type == ARPHRD_ETHER;
 }
 
 /* Find packet payload (whatever comes after the Ethernet header) */
@@ -223,44 +220,6 @@ static int oo_nf_skb_get_payload(struct sk_buff* skb, void** pdata, int* plen)
 
 
 
-static unsigned int oo_netfilter_arp(NFHOOK_PARAMS)
-
-{
-  void* data;
-  int len;
-
-  if( oo_nf_dev_match(nfhook_indev) &&
-      oo_nf_skb_get_payload(nfhook_skb, &data, &len) &&
-      len >= sizeof(ci_ether_arp) ) {
-    cicppl_handle_arp_pkt(&CI_GLOBAL_CPLANE,
-                          (ci_ether_hdr*) skb_mac_header(nfhook_skb),
-                          (ci_ether_arp*) data,
-                          nfhook_indev->ifindex,
-                          nfhook_indev->flags & IFF_SLAVE);
-  }
-
-  return NF_ACCEPT;
-}
-
-
-#ifndef CONFIG_NETFILTER
-# error "OpenOnload requires that the kernel has CONFIG_NETFILTER enabled."
-#endif
-
-
-static struct nf_hook_ops oo_netfilter_arp_hook = {
-  .hook = oo_netfilter_arp,
-#ifdef EFRM_HAVE_NETFILTER_OPS_HAVE_OWNER
-  .owner = THIS_MODULE,
-#endif
-#ifdef EFX_HAVE_NFPROTO_CONSTANTS
-  .pf = NFPROTO_ARP,
-#else
-  .pf = NF_ARP,
-#endif
-  .hooknum = NF_ARP_IN,
-};
-
 static unsigned int oo_netfilter_ip(NFHOOK_PARAMS)
 {
   void* data;
@@ -268,7 +227,8 @@ static unsigned int oo_netfilter_ip(NFHOOK_PARAMS)
 
   if( oo_nf_dev_match(nfhook_indev) &&
       oo_nf_skb_get_payload(nfhook_skb, &data, &len) &&
-      efx_dlfilter_handler(nfhook_indev->ifindex, efab_tcp_driver.dlfilter,
+      efx_dlfilter_handler(dev_net(nfhook_indev), nfhook_indev->ifindex,
+                           efab_tcp_driver.dlfilter,
                            (const ci_ether_hdr*) skb_mac_header(nfhook_skb),
                            data, len) ) {
     kfree_skb(nfhook_skb);
@@ -297,25 +257,6 @@ static struct nf_hook_ops oo_netfilter_ip_hook = {
 };
 
 
-/******************************************************************************
- * cplane_add() is called in the course of the driverlink
- * handlers for the appropriate netdev events.
- *****************************************************************************/
-
-static void cplane_add(struct oo_nic* onic)
-{
-  int oo_nic_i = onic - oo_nics;
-  ci_hwport_id_t hwport = CI_HWPORT_ID(oo_nic_i);
-  cicp_encap_t encapsulation;
-
-  encapsulation.type = CICP_LLAP_TYPE_SFC;
-  encapsulation.vlan_id = 0;
-  cicp_llap_set_hwport(&CI_GLOBAL_CPLANE,
-                       efrm_client_get_ifindex(onic->efrm_client),
-                       hwport, &encapsulation);
-}
-
-
 /* This function will create an oo_nic if one hasn't already been created.
  *
  * There are two code paths whereby this function can be called multiple
@@ -339,11 +280,10 @@ static struct oo_nic *oo_netdev_may_add(const struct net_device *net_dev)
 
   if( onic != NULL ) {
     int up = net_dev->flags & IFF_UP;
-    cplane_add(onic);
     efhw_nic = efrm_client_get_nic(onic->efrm_client);
-    oof_hwport_up_down(oo_nic_hwport(onic), up,
-                       efhw_nic->devtype.arch == EFHW_ARCH_EF10 ? 1:0,
-                       efhw_nic->flags & NIC_FLAG_VLAN_FILTERS, 0);
+    oof_onload_hwport_up_down(&efab_tcp_driver, oo_nic_hwport(onic), up,
+                              efhw_nic->devtype.arch == EFHW_ARCH_EF10 ? 1:0,
+                              efhw_nic->flags & NIC_FLAG_VLAN_FILTERS ? 1:0, 0);
     if( up )
       onic->oo_nic_flags |= OO_NIC_UP;
     else
@@ -394,7 +334,7 @@ static int oo_dl_probe(struct efx_dl_device* dl_dev,
                            net_dev->ifindex));
 
       /* Notify Onload that previous device on that hwport disappeared. */
-      oof_hwport_removed(oo_nic_hwport(onic));
+      oof_onload_hwport_removed(&efab_tcp_driver, oo_nic_hwport(onic));
     }
   }
 
@@ -431,7 +371,8 @@ static void oo_dl_remove(struct efx_dl_device* dl_dev)
      * oo_netdev_going_down(), which will not have a chance to do its job
      * regarding filters.
      */
-    oof_hwport_up_down(oo_nic_hwport(onic), 0, 0, 0, 1);
+    oof_onload_hwport_up_down(&efab_tcp_driver,
+                              oo_nic_hwport(onic), 0, 0, 0, 1);
 
     /* We need to prevent simultaneous resets so that the queues that are to be
      * shut down don't get brought back up again.  We do this by disabling any
@@ -440,7 +381,7 @@ static void oo_dl_remove(struct efx_dl_device* dl_dev)
     efrm_client_disable_post_reset(onic->efrm_client);
 
     onic->oo_nic_flags |= OO_NIC_UNPLUGGED;
-    while( iterate_netifs_unlocked(&ni) == 0 )
+    while( iterate_netifs_unlocked(&ni, 0, 0) == 0 )
       tcp_helper_flush_resets(ni);
 
     /* The actual business of flushing the queues will be handled by the
@@ -476,7 +417,7 @@ static void oo_fixup_wakeup_breakage(int ifindex)
   int hwport, intf_i;
   if( (onic = oo_nic_find_ifindex(ifindex)) != NULL ) {
     hwport = onic - oo_nics;
-    while( iterate_netifs_unlocked(&ni) == 0 )
+    while( iterate_netifs_unlocked(&ni, 0, 0) == 0 )
       if( (intf_i = ni->hwport_to_intf_i[hwport]) >= 0 )
         ci_bit_clear(&ni->state->evq_primed, intf_i);
   }
@@ -496,46 +437,11 @@ static void oo_netdev_up(struct net_device* netdev)
       oo_fixup_wakeup_breakage(netdev->ifindex);
       onic->oo_nic_flags |= OO_NIC_UP;
       efhw_nic = efrm_client_get_nic(onic->efrm_client);
-      oof_hwport_up_down(oo_nic_hwport(onic), 1,
-                         efhw_nic->devtype.arch == EFHW_ARCH_EF10 ? 1:0,
-                         efhw_nic->flags & NIC_FLAG_VLAN_FILTERS, 0);
+      oof_onload_hwport_up_down(&efab_tcp_driver,oo_nic_hwport(onic), 1,
+                               efhw_nic->devtype.arch == EFHW_ARCH_EF10 ? 1:0,
+                               efhw_nic->flags & NIC_FLAG_VLAN_FILTERS ? 1:0, 0);
     }
   }
-  else if( oo_use_vlans && (netdev->priv_flags & IFF_802_1Q_VLAN) ) {
-    cicp_encap_t encap;
-
-    if( cicp_llap_get_encapsulation(&CI_GLOBAL_CPLANE, netdev->ifindex,
-                                    &encap) != 0 )
-      cicp_llap_import(&CI_GLOBAL_CPLANE, netdev->ifindex, 
-                       netdev->mtu, CICP_LLAP_TYPE_VLAN,
-                       netdev->name);
-    cicp_llap_set_vlan(&CI_GLOBAL_CPLANE, netdev->ifindex, 
-                       vlan_dev_real_dev(netdev)->ifindex,
-                       vlan_dev_vlan_id(netdev));
-  }
-#if CPLANE_TEAMING
-  else if( NETDEV_IS_BOND_MASTER(netdev) ) {
-    cicp_encap_t encap;
-
-    if( cicp_llap_get_encapsulation(&CI_GLOBAL_CPLANE, netdev->ifindex,
-                                    &encap) != 0 ) {
-      cicp_llap_import(&CI_GLOBAL_CPLANE, netdev->ifindex,
-                       netdev->mtu, CICP_LLAP_TYPE_BOND,
-                       netdev->name);
-    }
-    else {
-      OO_DEBUG_BONDING(ci_log("NETDEV_UP changing encap on %d from %x to %x",
-                              netdev->ifindex, encap.type,
-                              CICP_LLAP_TYPE_BOND));
-    }
-
-    /* To avoid deadlock, we should not call something like
-     * ci_bonding_check_mode().  */
-     cicp_llap_set_bond(&CI_GLOBAL_CPLANE, netdev->ifindex);
-  }
-  if( NETDEV_IS_BOND(netdev) )
-    ci_bonding_set_timer_period(oo_bond_poll_peak, oo_bond_peak_polls);
-#endif
 }
 
 
@@ -545,18 +451,10 @@ static void oo_netdev_going_down(struct net_device* netdev)
 
   onic = oo_nic_find_ifindex(netdev->ifindex);
   if( onic != NULL ) {
-      oof_hwport_up_down(oo_nic_hwport(onic), 0, 0, 0, 0);
-      onic->oo_nic_flags &= ~OO_NIC_UP;
+      oof_onload_hwport_up_down(&efab_tcp_driver,
+                                oo_nic_hwport(onic), 0, 0, 0, 0);
+                                onic->oo_nic_flags &= ~OO_NIC_UP;
   }
-  else {
-    /* ensure that acceleration is off */
-    cicp_llap_set_hwport(&CI_GLOBAL_CPLANE, netdev->ifindex,
-                         CI_HWPORT_ID_BAD, NULL);
-  }
-#if CPLANE_TEAMING
-    if( NETDEV_IS_BOND(netdev) )
-      ci_bonding_set_timer_period(oo_bond_poll_peak, oo_bond_peak_polls);
-#endif
 }
 
 
@@ -577,13 +475,32 @@ static int oo_netdev_event(struct notifier_block *this,
 
   case NETDEV_CHANGEMTU:
     oo_fixup_wakeup_breakage(netdev->ifindex);
-    break;
 
-#if CPLANE_TEAMING && LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,27)
-  case NETDEV_BONDING_FAILOVER:
-    ci_bonding_set_timer_period(oo_bond_poll_peak, oo_bond_peak_polls);
-    break;
+#ifdef EFRM_RTMSG_IFINFO_EXPORTED
+    /* The control plane has to know about the new MTU value.
+     * rtnetlink_event() converts most of NETDEV_* events into RTM_NEWLINK
+     * messages, but it ignores NETDEV_CHANGEMTU.
+     *
+     * For older kernels rtmsg_ifinfo() is not available, so we rely on
+     * periodic dump of the OS state in the onload_cp_server.  In many
+     * cases (such as MTU change for an SFC NIC) the RTM_NEWLINK message
+     * is delivered because of interface flags change; the only known issue
+     * is with the bond interface.  See bug 74973 for details.
+     */
+    rtmsg_ifinfo(RTM_NEWLINK, netdev, 0
+#ifdef EFRM_RTMSG_IFINFO_NEEDS_GFP_FLAGS
+                 /* linux >= 3.13 require gfp_t argument */
+                 , GFP_KERNEL
 #endif
+                 );
+#else
+    /* rtmsg_ifinfo() is exported in linux >= 3.9 and in the last
+     * RHEL6 updates.  In 4.15 it is no longer exported, but
+     * rtnetlink_event() doesn't ignore NETDEV_CHANGEMTU, so we don't
+     * need to do anything.
+     */
+#endif
+    break;
 
   default:
     break;
@@ -601,7 +518,12 @@ static struct notifier_block oo_netdev_notifier = {
 static struct efx_dl_driver oo_dl_driver = {
   .name = "onload",
 #if EFX_DRIVERLINK_API_VERSION >= 8
-  .flags = EFX_DL_DRIVER_CHECKS_FALCON_RX_USR_BUF_SIZE,
+  .flags = EFX_DL_DRIVER_CHECKS_FALCON_RX_USR_BUF_SIZE
+#if EFX_DRIVERLINK_API_VERSION > 22 || (EFX_DRIVERLINK_API_VERSION == 22 && \
+                                        EFX_DRIVERLINK_API_VERSION_MINOR > 4)
+           | EFX_DL_DRIVER_CHECKS_MEDFORD2_VI_STRIDE
+#endif
+    ,
 #endif
   .probe = oo_dl_probe,
   .remove = oo_dl_remove,
@@ -622,20 +544,18 @@ int oo_driverlink_register(void)
   if (rc != 0)
     goto fail2;
 
-  rc = nf_register_hook(&oo_netfilter_arp_hook);
-  if( rc < 0 )
-    goto fail3;
-
+#ifndef EFRM_HAVE_NF_NET_HOOK
   rc = nf_register_hook(&oo_netfilter_ip_hook);
   if( rc < 0 )
     goto fail4;
+#endif
 
   return 0;
 
- fail4:
-  nf_unregister_hook(&oo_netfilter_arp_hook);
- fail3:
-  efx_dl_unregister_driver(&oo_dl_driver);
+#ifndef EFRM_HAVE_NF_NET_HOOK
+  fail4:
+   efx_dl_unregister_driver(&oo_dl_driver);
+#endif
  fail2:
   unregister_netdevice_notifier(&oo_netdev_notifier);
  fail1:
@@ -646,10 +566,22 @@ int oo_driverlink_register(void)
 
 void oo_driverlink_unregister(void)
 {
+#ifndef EFRM_HAVE_NF_NET_HOOK
   nf_unregister_hook(&oo_netfilter_ip_hook);
-  nf_unregister_hook(&oo_netfilter_arp_hook);
+#endif
   unregister_netdevice_notifier(&oo_netdev_notifier);
   efx_dl_unregister_driver(&oo_dl_driver);
 }
+
+#ifdef EFRM_HAVE_NF_NET_HOOK
+int oo_register_nfhook(struct net *net)
+{
+  return nf_register_net_hook(net, &oo_netfilter_ip_hook);
+}
+void oo_unregister_nfhook(struct net *net)
+{
+  nf_unregister_net_hook(net, &oo_netfilter_ip_hook);
+}
+#endif
 
 /*! \cidoxg_end */

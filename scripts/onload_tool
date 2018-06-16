@@ -40,10 +40,9 @@ getmajor() {
 tryunload () {
   local mod="$1"
   if isloaded "$mod"; then
-    # rmmod is used, to avoid modprobe failure as
-    # sfc_tune was removed from all modprobe conf files
-    # in latest onload
-    if [[ "$mod" = sfc_tune || "$mod" = sfc_aoe ]]; then
+    # rmmod is used, to avoid modprobe failure as these modules are not present
+    # in modprobe conf files in latest Onload.
+    if [ "$mod" = sfc_tune -o "$mod" = sfc_aoe -o "$mod" = onload_cplane ]; then
        echo "$me: rmmod -f $mod"
        rmmod -f $mod
     else
@@ -51,6 +50,8 @@ tryunload () {
       if ! /sbin/modprobe -r "$mod"; then
         log "ERROR: modprobe -r $mod failed ($?)"
         rc=1
+        # rc is eventually returned by the script, but fail this function, too.
+        return 1
       fi
     fi
   fi
@@ -200,20 +201,47 @@ cmd_configure_container() {
 
 ######################################################################
 
+have_stacks() {
+  [ -f /proc/driver/onload/ul_stacks ] && grep -q . /proc/driver/onload/ul_stacks
+}
+
+kill_cplane() {
+  pkill -f onload_cp_server
+  local count=0
+  while [ $count -lt 5 ]; do
+    sleep 1
+    if ! pgrep -f onload_cp_server > /dev/null; then
+      return 0
+    fi
+    count=$[$count+1]
+  done
+  echo Timed out waiting for control plane to stop, trying SIGKILL...
+  pkill --signal KILL -f onload_cp_server
+  sleep 1
+  if ! pgrep -f onload_cp_server > /dev/null; then
+    return 0
+  fi
+  echo Failed to kill control plane - aborting
+  exit 1
+}
+
 do_unload() {
   rc=0
-  modusedby sfc_resource sfc_affinity &&
-    tryunload sfc_affinity
-  tryunload af_onload
-  tryunload onload || ( [ -x "$(which onload_fuser)" ] && onload_fuser -v )
-  tryunload onload_cplane
+  # onload_cp_server can take a while to die, let's do it first if no stacks present
+  have_stacks || kill_cplane
+  # Old (pre-2011) systems had inverse dependency of sfc_affinity on 
+  # sfc_resource to modern ones. To allow old versions to unload try that first
+  modusedby sfc_resource sfc_affinity && tryunload sfc_affinity
+  tryunload af_onload      # Present in historical Onload versions
+  tryunload onload || ( [ -x "$(which onload_fuser 2>/dev/null)" ] && onload_fuser -v )
+  tryunload onload_cplane  # Present in historical Onload versions.
   tryunload sfc_char
   tryunload sfc_resource
   tryunload sfc_affinity
-  tryunload sfc_tune  #Need it while upgrading from olden version of onload
+  tryunload sfc_tune       # Present in historical Onload versions.
   tryunload sfc_mtd
-  tryunload sfc_control
-  tryunload sfc_aoe
+  tryunload sfc_control    # Present in historical Onload versions.
+  tryunload sfc_aoe        # Present in historical Onload versions.
   tryunload sfc
   grep -q sfc/sfc.ko /lib/modules/$(uname -r)/modules.dep && \
       log "WARNING: sfc driver may reload due to an in-distro driver"
@@ -233,6 +261,8 @@ cmd_reload() {
   do_unload || fail "ERROR: could not unload all drivers"
   trylog /sbin/modprobe onload
   isloaded onload || fail "ERROR: onload module did not load"
+  # NB. sfc_aoe not always installed; don't want to moan...
+  /sbin/modprobe sfc_aoe >/dev/null 2>&1
   exit 0
 }
 

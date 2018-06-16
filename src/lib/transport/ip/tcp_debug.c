@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -77,14 +77,15 @@ void ci_tcp_tx_pkt_assert_valid(ci_netif* ni, ci_tcp_state* ts,
     if( i < pkt->n_buffers-1 ) 
       next_pkt = PKT_CHK(ni, next_pkt->frag_next);
   }
-  verify(len == paylen + CI_TCP_HDR_LEN(tcp) +
-         CI_IP4_IHL(oo_tx_ip_hdr(pkt)) + oo_ether_hdr_size(pkt));
+  verify(len ==
+         oo_tx_pre_l3_len(pkt) + CI_IP4_IHL(oo_tx_ip_hdr(pkt))
+         + CI_TCP_HDR_LEN(tcp) + paylen);
   verify(len == pkt->pay_len);
 
   verify(oo_offbuf_ptr(&pkt->buf) ==
-         (char*) oo_tx_ether_data(pkt) + ts->outgoing_hdrs_len + paylen);
+         (char*) oo_tx_l3_hdr(pkt) + ts->outgoing_hdrs_len + paylen);
   verify(oo_offbuf_end(&pkt->buf) ==
-         (char*) oo_tx_ether_data(pkt) + ts->outgoing_hdrs_len + ts->eff_mss);
+         (char*) oo_tx_l3_hdr(pkt) + ts->outgoing_hdrs_len + ts->eff_mss);
   verify(oo_offbuf_end(&pkt->buf) <= (char*) pkt + CI_CFG_PKT_BUF_SIZE);
 }
 
@@ -98,7 +99,6 @@ void ci_tcp_state_listen_assert_valid(ci_netif* netif,
                                       const char* file, int line)
 {
   verify(tsl->s.tx_errno == EPIPE);
-
 
 
   verify(tsl->s.rx_errno == ENOTCONN);
@@ -545,12 +545,12 @@ void ci_tcp_pkt_dump(ci_netif *ni, ci_ip_pkt_fmt* pkt, int is_recv, int dump)
         CI_TCP_HDR_FLAGS_PRI_ARG(tcp), oo_offbuf_left(buf));
     if( dump & 1 )
       ci_hex_dump(ci_log_fn, oo_ether_hdr(pkt),
-                  oo_ip_hdr(pkt)->ip_tot_len_be16 + oo_ether_hdr_size(pkt), 0);
+                  oo_pre_l3_len(pkt) + oo_ip_hdr(pkt)->ip_tot_len_be16, 0);
   }
   else {
     int i, paylen = TX_PKT_LEN(pkt) -
-      (oo_ether_hdr_size(pkt) + CI_IP4_IHL(oo_ip_hdr(pkt)) +
-       CI_TCP_HDR_LEN(tcp));
+      (oo_tx_pre_l3_len(pkt) + CI_IP4_IHL(oo_ip_hdr(pkt))
+       + CI_TCP_HDR_LEN(tcp));
 
     if( CI_IP_PKT_SEGMENTS_MAX != 6 )
       ci_log("FIXME: %s:%d", __FILE__, __LINE__);
@@ -694,10 +694,11 @@ void ci_tcp_socket_listen_dump(ci_netif* ni, ci_tcp_socket_listen* tls,
          tls->acceptq_max, ci_tcp_acceptq_n(tls), tls->acceptq_n_out);
   logger(log_arg, "%s  defer_accept=%d", pf, tls->c.tcp_defer_accept);
 #if CI_CFG_FD_CACHING
-  logger(log_arg, "%s  sockcache: n=%d sock_n=%d cache=%s pending=%s",
+  logger(log_arg, "%s  sockcache: n=%d sock_n=%d cache=%s pending=%s connected=%s",
          pf, ni->state->passive_cache_avail_stack, tls->cache_avail_sock,
          ci_ni_dllist_is_empty(ni, &tls->epcache.cache) ? "EMPTY":"yes",
-         ci_ni_dllist_is_empty(ni, &tls->epcache.pending) ? "EMPTY":"yes");
+         ci_ni_dllist_is_empty(ni, &tls->epcache.pending) ? "EMPTY":"yes",
+         ci_ni_dllist_is_empty(ni, &tls->epcache_connected) ? "EMPTY":"yes");
 #endif
 #if CI_CFG_STATS_TCP_LISTEN
   {
@@ -709,9 +710,9 @@ void ci_tcp_socket_listen_dump(ci_netif* ni, ci_tcp_socket_listen* tls,
            "%s  l_overflow=%d l_no_synrecv=%d aq_overflow=%d aq_no_sock=%d",
            pf, s->n_listenq_overflow, s->n_listenq_no_synrecv,
            s->n_acceptq_overflow, s->n_acceptq_no_sock);
-    logger(log_arg, "%s  a_loop2_closed=%d a_no_fd=%d ack_rsts=%d os=%d",
+    logger(log_arg, "%s  a_loop2_closed=%d a_no_fd=%d ack_rsts=%d os=%d rx_pkts=%d",
            pf, s->n_accept_loop2_closed, s->n_accept_no_fd,
-           s->n_acks_reset, s->n_accept_os);
+           s->n_acks_reset, s->n_accept_os, s->n_rx_pkts);
     if( NI_OPTS(ni).tcp_syncookies ) {
       logger(log_arg, "%s  syncookies: syn_recv=%d ack_recv=%d ack_answ=%d",
              pf, s->n_syncookie_syn, s->n_syncookie_ack_recv,
@@ -757,9 +758,11 @@ void ci_tcp_state_dump(ci_netif* ni, ci_tcp_state* ts,
   char buf[LINE_LEN + 1];
   int n;
 
+#if CI_CFG_TIMESTAMPING
   if( ts->s.timestamping_flags & ONLOAD_SOF_TIMESTAMPING_TX_HARDWARE )
     ci_udp_recvq_dump(ni, &ts->timestamp_q, pf, "  TX timestamping queue:",
                       logger, log_arg);
+#endif
 
   ci_tcp_socket_cmn_dump(ni, &ts->c, pf, logger, log_arg);
 
@@ -783,6 +786,8 @@ void ci_tcp_state_dump(ci_netif* ni, ci_tcp_state* ts,
   logger(log_arg, "%s  snd: cwnd=%d+%d used=%d ssthresh=%d bytes_acked=%d %s",
          pf, ts->cwnd, ts->cwnd_extra, tcp_cwnd_used(ts),
          ts->ssthresh, ts->bytes_acked, congstate_str(ts));
+  logger(log_arg, "%s  snd: timed_seq %x timed_ts %x",
+         pf, ts->timed_seq, ts->timed_ts);
   logger(log_arg, "%s  snd: sndbuf_pkts=%d "OOF_IPCACHE_STATE" "
 	 OOF_IPCACHE_DETAIL,
 	 pf, ts->so_sndbuf_pkts, OOFA_IPCACHE_STATE(ni, &ts->s.pkt),
@@ -796,9 +801,10 @@ void ci_tcp_state_dump(ci_netif* ni, ci_tcp_state* ts,
          tcp_rcv_wnd_advertised(ts), tcp_rcv_wnd_current(ts),
          ci_tcp_is_in_faststart(ts) ? " FASTSTART":"",
          ci_tcp_can_use_fast_path(ts) ? " FAST":"");
-  logger(log_arg, "%s  rcv: bytes=%d rob_pkts=%d q_pkts=%d+%d usr=%d",
-         pf, ts->rcv_added - stats.rx_isn, ts->rob.num, ts->recv1.num,
-         ts->recv2.num, tcp_rcv_usr(ts));
+  logger(log_arg, "%s  rcv: bytes=%d tot_pkts=%" PRIx64
+                  " rob_pkts=%d q_pkts=%d+%d usr=%d",
+         pf, ts->rcv_added - stats.rx_isn, stats.rx_pkts, ts->rob.num,
+         ts->recv1.num, ts->recv2.num, tcp_rcv_usr(ts));
 
   logger(log_arg,
          "%s  eff_mss=%d smss=%d amss=%d  used_bufs=%d wscl s=%d r=%d",
@@ -809,8 +815,9 @@ void ci_tcp_state_dump(ci_netif* ni, ci_tcp_state* ts,
          tcp_srtt(ts), tcp_rttvar(ts), ts->rto, ts->zwin_probes,
          ts->zwin_acks);
   logger(log_arg,
-         "%s  curr_retrans=%d total_retrans=%d dupacks=%u",
-         pf, ts->retransmits, stats.total_retrans, ts->dup_acks);
+         "%s  curr_retrans=%d total_retrans=%d dupacks=%u congrecover=%x",
+         pf, ts->retransmits, stats.total_retrans, ts->dup_acks,
+         ts->congrecover);
   logger(log_arg,
          "%s  rtos=%u frecs=%u seqerr=%u,%u ooo_pkts=%d "
          "ooo=%d", pf, stats.rtos,

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -138,6 +138,7 @@
 
 #define EF10_PF_P_CTR_AP_BAR	2
 #define EF10_VF_P_CTR_AP_BAR	0
+#define EF10_MEDFORD2_P_CTR_AP_BAR	0
 #define EF10_S_CTR_AP_BAR	0
 #define EF10_S_DEVID		0x6703
 
@@ -253,15 +254,15 @@ ef10_read_qq(volatile char __iomem *addr, uint64_t *q0, uint64_t *q1)
  *---------------------------------------------------------------------------*/
 
 /*! returns an address within a bar of the TX DMA doorbell */
-static inline uint ef10_tx_dma_page_addr(uint dmaq_idx)
+static inline uint ef10_tx_dma_page_addr(uint vi_stride, uint dmaq_idx)
 {
-    return ER_DZ_TX_DESC_UPD_REG + (dmaq_idx * ER_DZ_TX_DESC_UPD_REG_STEP);
+    return ER_DZ_TX_DESC_UPD_REG + (dmaq_idx * vi_stride);
 }
 
 /*! returns an address within a bar of the RX DMA doorbell */
-static inline uint ef10_rx_dma_page_addr(uint dmaq_idx)
+static inline uint ef10_rx_dma_page_addr(uint vi_stride, uint dmaq_idx)
 {
-    return ER_DZ_RX_DESC_UPD_REG + (dmaq_idx * ER_DZ_RX_DESC_UPD_REG_STEP);
+    return ER_DZ_RX_DESC_UPD_REG + (dmaq_idx * vi_stride);
 }
 
 /*! "page"=NIC-dependent register set size */
@@ -269,28 +270,28 @@ static inline uint ef10_rx_dma_page_addr(uint dmaq_idx)
 
 /*! returns an address within a bar of the start of the "page"
     containing the TX DMA doorbell */
-static inline int ef10_tx_dma_page_base(uint dma_idx)
+static inline int ef10_tx_dma_page_base(uint vi_stride, uint dma_idx)
 {
-	return ef10_tx_dma_page_addr(dma_idx) & ~EF10_DMA_PAGE_MASK;
+	return ef10_tx_dma_page_addr(vi_stride, dma_idx) & ~EF10_DMA_PAGE_MASK;
 }
 
 /*! returns an address within a bar of the start of the "page"
     containing the RX DMA doorbell */
-static inline int ef10_rx_dma_page_base(uint dma_idx)
+static inline int ef10_rx_dma_page_base(uint vi_stride, uint dma_idx)
 {
-	return ef10_rx_dma_page_addr(dma_idx) & ~EF10_DMA_PAGE_MASK;
+	return ef10_rx_dma_page_addr(vi_stride, dma_idx) & ~EF10_DMA_PAGE_MASK;
 }
 
 /*! returns an offset within a "page" of the TX DMA doorbell */
-static inline int ef10_tx_dma_page_offset(uint dma_idx)
+static inline int ef10_tx_dma_page_offset(uint vi_stride, uint dma_idx)
 {
-	return ef10_tx_dma_page_addr(dma_idx) & EF10_DMA_PAGE_MASK;
+	return ef10_tx_dma_page_addr(vi_stride, dma_idx) & EF10_DMA_PAGE_MASK;
 }
 
 /*! returns an offset within a "page" of the RX DMA doorbell */
-static inline int ef10_rx_dma_page_offset(uint dma_idx)
+static inline int ef10_rx_dma_page_offset(uint vi_stride, uint dma_idx)
 {
-	return ef10_rx_dma_page_addr(dma_idx) & EF10_DMA_PAGE_MASK;
+	return ef10_rx_dma_page_addr(vi_stride, dma_idx) & EF10_DMA_PAGE_MASK;
 }
 
 
