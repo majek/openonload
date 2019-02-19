@@ -386,10 +386,6 @@
 	#define VLAN_PRIO_SHIFT         13
 #endif
 
-#ifndef ACCESS_ONCE
-	#define ACCESS_ONCE(x) (*(volatile typeof(x) *)&(x))
-#endif
-
 #ifndef SIOCGHWTSTAMP
 	#define SIOCGHWTSTAMP	0x89b1
 #endif
@@ -1051,10 +1047,6 @@
 	};
 #endif
 
-#if defined(EFX_NEED_PRINT_MAC) && !defined(DECLARE_MAC_BUF)
-	#define DECLARE_MAC_BUF(var) char var[18] __attribute__((unused))
-#endif
-
 #ifdef EFX_NEED_RESOURCE_SIZE_T
 	typedef unsigned long resource_size_t;
 #endif
@@ -1091,12 +1083,6 @@
 			dma_set_coherent_mask(dev, mask);
 		return rc;
 	}
-#endif
-
-#ifdef EFX_NEED_FOR_EACH_PCI_DEV
-	#define for_each_pci_dev(d)				\
-		while ((d = pci_get_device(PCI_ANY_ID,		\
-			PCI_ANY_ID, d)) != NULL)
 #endif
 
 /*
@@ -1270,6 +1256,13 @@
 	{
 		memset(addr, 0xff, ETH_ALEN);
 	}
+#endif
+
+#ifdef EFX_NEED_ETH_RANDOM_ADDR
+/* random_ether_addr was renamed in:
+ *  0a4dd594982a ("etherdevice: Rename random_ether_addr to eth_random_addr")
+ */
+#define eth_random_addr	random_ether_addr
 #endif
 
 #ifdef EFX_NEED_MAC_PTON
@@ -1567,25 +1560,6 @@ void usleep_range(unsigned long min, unsigned long max);
 	}
 #endif
 
-#ifdef EFX_NEED_SIGNED_NLA
-	#include <net/netlink.h>
-	/* We only actually use s32 */
-	#define NLA_S32 NLA_BINARY + 3
-	static inline int nla_put_s32(struct sk_buff *skb, int attrtype,
-				      s32 value)
-	{
-		return nla_put(skb, attrtype, sizeof(s32), &value);
-	}
-#endif
-
-#ifdef EFX_HAVE_OLD_NLA64
-static inline int nla_put_u64_64bit(struct sk_buff *skb, int attrtype,
-				    u64 value, int padattr)
-{
-	return nla_put_u64(skb, attrtype, value);
-}
-#endif
-
 #ifdef EFX_NEED_SKB_VLAN_TAG_GET
 #define skb_vlan_tag_get	vlan_tx_tag_get
 #define skb_vlan_tag_present	vlan_tx_tag_present
@@ -1645,11 +1619,10 @@ static inline struct tcphdr *inner_tcp_hdr(const struct sk_buff *skb)
 #define __ETHTOOL_DECLARE_LINK_MODE_MASK(name)  unsigned long name[1]
 #endif
 
-#ifndef EFX_HAVE_ETHTOOL_LINKSETTINGS
-/* We use an array of size 1 so that legacy code using index [0] will
- * work with both this and a real link_mode_mask.
- */
-#define __ETHTOOL_DECLARE_LINK_MODE_MASK(name)  unsigned long name[1]
+#ifdef EFX_HAVE_XDP_TX
+#ifndef EFX_HAVE_XDP_FRAME_API
+#define xdp_frame	xdp_buff
+#endif
 #endif
 
 /**************************************************************************
@@ -1659,9 +1632,6 @@ static inline struct tcphdr *inner_tcp_hdr(const struct sk_buff *skb)
  **************************************************************************
  *
  */
-#if defined(EFX_NEED_PRINT_MAC)
-	char *print_mac(char *buf, const u8 *addr);
-#endif
 
 #ifdef EFX_NEED_HEX_DUMP
 	extern void
@@ -1866,14 +1836,6 @@ unsigned int cpumask_local_spread(unsigned int i, int node);
  **************************************************************************
  *
  */
-#ifdef EFX_NEED_PCI_SAVE_RESTORE_WRAPPERS
-	#define pci_save_state(_dev)					\
-		pci_save_state(_dev, (_dev)->saved_config_space)
-
-	#define pci_restore_state(_dev)					\
-		pci_restore_state(_dev, (_dev)->saved_config_space)
-#endif
-
 #ifdef EFX_NEED_WORK_API_WRAPPERS
 	#define delayed_work work_struct
 	#undef INIT_DELAYED_WORK
@@ -1952,6 +1914,9 @@ unsigned int cpumask_local_spread(unsigned int i, int node);
 	#define vlan_gro_receive(_napi, _group, _tag, _skb)	\
 		({ vlan_gro_receive(_napi, _group, _tag, _skb);	\
 		   GRO_MERGED; })
+#endif
+#if defined(EFX_USE_GRO) && !defined(EFX_HAVE_NAPI_GRO_BITMASK)
+#define gro_bitmask	gro_list
 #endif
 
 #ifdef EFX_NEED_HEX_DUMP_CONST_FIX
@@ -2374,12 +2339,6 @@ int efx_pci_vpd_find_info_keyword(const u8 *buf, unsigned int off,
 #define pci_vpd_find_info_keyword efx_pci_vpd_find_info_keyword
 
 #endif /* EFX_NEED_PCI_VPD_LRDT */
-
-#ifdef EFX_NEED_PCI_READ_VPD
-ssize_t efx_pci_read_vpd(struct pci_dev *dev, loff_t pos, size_t count, void *buf);
-#undef pci_read_vpd
-#define pci_read_vpd efx_pci_read_vpd
-#endif
 
 #if defined(EFX_HAVE_FDTABLE_PARTIAL_ACCESSORS) && !defined(EFX_HAVE_FDTABLE_FULL_ACCESSORS)
 #include <linux/fdtable.h>
@@ -2879,6 +2838,16 @@ static inline void page_frag_free(void *p)
 
 #ifndef USER_TICK_USEC
 #define USER_TICK_USEC TICK_USEC
+#endif
+
+#ifdef EFX_HAVE_NETIF_SET_XPS_QUEUE_NON_CONST
+static inline int efx_netif_set_xps_queue(struct net_device *netdev,
+					  const struct cpumask *mask, u16 index)
+{
+	/* De-constify the mask */
+	return netif_set_xps_queue(netdev, (struct cpumask*)mask, index);
+}
+#define netif_set_xps_queue efx_netif_set_xps_queue
 #endif
 
 #endif /* EFX_KERNEL_COMPAT_H */

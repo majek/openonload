@@ -61,6 +61,7 @@
 #define HWD_HUNTA   0x08
 #define HWD_MEDFA   0x10
 #define HWD_MEDF2A  0x20
+#define HWD_RHEAD   0x40
 #define HWD_INVALID 0xff
 
 /* NOTE: in the API's you can also pass in ASCII version
@@ -76,7 +77,7 @@ typedef unsigned char hwd_version_t;
    hwd_* typedefs */
 hwd_version_t hwd_get_version(hwd_version_t version);
 
-#define HWD_MAX_NORM_TABLES 6 /* norm table for each version */
+#define HWD_MAX_NORM_TABLES 7 /* norm table for each version */
 
 /************************************************************/
 #define HWD_OP_ENDIAN_SWAP 0x1

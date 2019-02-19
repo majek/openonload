@@ -27,21 +27,7 @@
 #include <linux/ctype.h>
 #include <ci/efhw/efhw_types.h>
 #include <ci/driver/efab/hardware.h>
-
-/* We depend on EFX_DL_DRIVER_CHECKS_MEDFORD2_VI_STRIDE to allow
- * loading on Medford2 so requesting minor version 5
- */
-#define EFX_DRIVERLINK_API_VERSION_MINOR 0
-
-#include <driver/linux_net/driverlink_api.h>
-
-/* When driverlink API version is updated we'll need to select a
- * different MINOR version.  Put this here to make sure we
- * remember.
- */
-#if EFX_DRIVERLINK_API_VERSION != 23
-#error "EFX_DRIVERLINK_API_VERSION_MINOR needs updating"
-#endif
+#include <ci/driver/driverlink_api.h>
 
 #include "kernel_compat.h"
 
@@ -789,10 +775,7 @@ static void dl_remove(struct efx_dl_device* dl_dev)
 
 static struct efx_dl_driver dl_driver = {
   .name   = "sfcaffinity",
-#if EFX_DRIVERLINK_API_VERSION >= 7
   .priority = EFX_DL_EV_LOW,
-#endif
-#if EFX_DRIVERLINK_API_VERSION >= 8
   /* This flag is required to for the driver to register with the net
    * driver however this driver will never receive packets so it will
    * not be doing any actual checking. */
@@ -802,7 +785,6 @@ static struct efx_dl_driver dl_driver = {
   | EFX_DL_DRIVER_CHECKS_MEDFORD2_VI_STRIDE
 #endif
   ,
-#endif
   .probe  = dl_probe,
   .remove = dl_remove,
 };

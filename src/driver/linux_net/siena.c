@@ -395,7 +395,7 @@ static int siena_probe_nvconfig(struct efx_nic *efx)
 	struct siena_nic_data *nic_data = efx->nic_data;
 	int rc;
 
-	rc = efx_mcdi_get_board_cfg(efx,
+	rc = efx_mcdi_get_board_cfg(efx, efx_port_num(efx),
 				    efx->net_dev->perm_addr,
 				    NULL, &nic_data->caps);
 
@@ -520,6 +520,7 @@ static int siena_probe_nic(struct efx_nic *efx)
 	}
 
 	efx->max_channels = efx->max_tx_channels = EFX_SIENA_MAX_CHANNELS;
+	efx->max_vis = EFX_SIENA_MAX_CHANNELS;
 	BUILD_BUG_ON(EFX_TXQ_TYPE_CSUM_OFFLOAD >= 2);
 	BUILD_BUG_ON(EFX_TXQ_TYPE_NO_OFFLOAD >= 2);
 	BUILD_BUG_ON(EFX_TXQ_TYPE_CSUM_OFFLOAD == EFX_TXQ_TYPE_NO_OFFLOAD);
@@ -903,6 +904,7 @@ static size_t siena_update_nic_stats(struct efx_nic *efx, u64 *full_stats,
 static size_t siena_update_nic_stats(struct efx_nic *efx, u64 *full_stats,
 				     struct net_device_stats *core_stats)
 #endif
+	__acquires(efx->stats_lock)
 {
 	struct siena_nic_data *nic_data = efx->nic_data;
 	u64 *stats = nic_data->stats;
@@ -1247,7 +1249,8 @@ static int siena_mtd_get_fw_subtypes(struct efx_nic *efx,
 	size_t i;
 	int rc;
 
-	rc = efx_mcdi_get_board_cfg(efx, NULL, fw_subtype_list, NULL);
+	rc = efx_mcdi_get_board_cfg(efx, efx_port_num(efx), NULL,
+				    fw_subtype_list, NULL);
 	if (rc)
 		return rc;
 

@@ -254,10 +254,6 @@ int __efx_dl_register_driver(struct efx_dl_driver *driver)
 	}
 	driver->flags |= EFX_DL_DRIVER_SUPPORTS_MINOR_VER;
 
-	if (driver->rx_packet)
-		pr_warn("Efx driverlink: %s includes rx_packet handler, but this feature is deprecated and will be removed in a future release of this driver.\n",
-			driver->name);
-
 	printk(KERN_INFO "Efx driverlink registering %s driver\n",
 		 driver->name);
 
@@ -409,36 +405,6 @@ int efx_dl_handle_event(struct efx_nic *efx, void *event, int budget)
 	}
 
 	return -EINVAL;
-}
-
-bool efx_dl_rx_packet(struct efx_nic *efx, int channel, u8 *pkt_hdr, int len)
-{
-	struct efx_dl_handle *efx_handle;
-	struct efx_dl_device *efx_dev;
-	bool discard = false;
-
-	list_for_each_entry(efx_handle, &efx->dl_device_list, port_node) {
-		efx_dev = &efx_handle->efx_dev;
-		if (efx_dev->driver->rx_packet) {
-			int rc;
-#ifdef DEBUG
-			u64 before, after, duration;
-
-			before = get_jiffies_64();
-#endif
-			rc = efx_dev->driver->rx_packet(efx_dev, channel,
-							pkt_hdr, len);
-#ifdef DEBUG
-			after = get_jiffies_64();
-			duration = after - before;
-			EFX_DL_CHECK_DURATION(duration, "rx_packet()");
-#endif
-			if (rc)
-				discard = true;
-		}
-	}
-
-	return discard;
 }
 
 u32 efx_dl_rss_flags_default(struct efx_dl_device *efx_dev)

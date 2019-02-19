@@ -1,3 +1,30 @@
+OpenOnload-201805-u1
+====================
+
+This is a minor update release to refresh the sfc net driver included
+in the Onload package and address a potentially serious bug in
+openonload-201805.  This issue is described in Known Issue
+SF-120489-KI.  It affects applications using ef_vi or TCPDirect and
+doing PIO and warming sends in multiple threads and can result in data
+corruption.  Applications using Onload are not affected as Onload
+provides sufficient locking around those operations to provide correct
+operation.
+
+Linux distribution support
+--------------------------
+
+ This package is supported on:
+ - Red Hat Enterprise Linux 6.7 - 6.9
+ - Red Hat Enterprise Linux 7.1 - 7.5
+ - SuSE Linux Enterprise Server 11 sp4
+ - SuSE Linux Enterprise Server 12 sp2 and sp3
+ - Canonical Ubuntu Server LTS 16.04, 18.04
+ - Canonical Ubuntu Server 17.10
+ - Debian 8 "Jessie"
+ - Debian 9 "Stretch"
+ - Linux kernels 3.0 - 4.16.6
+
+
 OpenOnload-201805
 =================
 

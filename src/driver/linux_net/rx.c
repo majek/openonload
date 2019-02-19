@@ -32,6 +32,7 @@
 #include <linux/udp.h>
 #include <linux/prefetch.h>
 #include <linux/moduleparam.h>
+#include <linux/hash.h>
 #include <net/ip.h>
 #include <net/tcp.h>
 #include <net/checksum.h>
@@ -49,9 +50,6 @@
 #include "workarounds.h"
 #ifdef CONFIG_SFC_TRACING
 #include <trace/events/sfc.h>
-#endif
-#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_XDP)
-#include <linux/bpf.h>
 #endif
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_XDP_TRACE)
 #include <trace/events/xdp.h>
@@ -140,8 +138,7 @@ static inline void efx_sync_rx_buffer(struct efx_nic *efx,
 
 void efx_rx_config_page_split(struct efx_nic *efx)
 {
-	efx->rx_page_buf_step = ALIGN(efx->rx_dma_len + efx->rx_ip_align,
-				      EFX_RX_BUF_ALIGNMENT);
+	efx->rx_page_buf_step = efx_rx_buffer_step(efx);
 #if !defined(EFX_NOT_UPSTREAM) || defined(EFX_RX_PAGE_SHARE)
 	efx->rx_bufs_per_page = efx->rx_buffer_order ? 1 :
 		((PAGE_SIZE - sizeof(struct efx_rx_page_state)) /
@@ -238,6 +235,9 @@ static struct page *efx_reuse_page(struct efx_rx_queue *rx_queue)
  * This will initialise a single rx_buf structure for use at the end of
  * the rx_buf array.  It assumes the input page is initialised with the
  * efx_rx_page_state metadata necessary to correctly calculate dma addresses.
+ *
+ * WARNING: The page_offset calculated here must match with the value of
+ * calculated by efx_rx_buffer_step().
  */
 static  void efx_init_rx_buffer(struct efx_rx_queue *rx_queue,
 				struct page *page,
@@ -263,11 +263,15 @@ static  void efx_init_rx_buffer(struct efx_rx_queue *rx_queue,
 	rx_buf = efx_rx_buffer(rx_queue, index);
 	rx_buf->dma_addr = dma_addr + page_offset + efx->rx_ip_align;
 	rx_buf->page = page;
-	rx_buf->page_offset = page_offset + efx->rx_ip_align;
+	rx_buf->page_offset = ALIGN(page_offset + efx->rx_ip_align,
+				    EFX_RX_BUF_ALIGNMENT);
 	rx_buf->len = efx->rx_dma_len;
 	rx_buf->flags = flags;
 	rx_buf->vlan_tci = 0;
 	++rx_queue->added_count;
+
+	EFX_WARN_ON_PARANOID(rx_buf->page_offset + rx_buf->len >
+			     PAGE_SIZE << efx->rx_buffer_order);
 }
 
 /**
@@ -850,12 +854,16 @@ static struct sk_buff *efx_rx_mk_skb(struct efx_channel *channel,
 		rx_buf->len -= hdr_len;
 
 		for (;;) {
-			skb_fill_page_desc(skb, skb_shinfo(skb)->nr_frags,
-					   rx_buf->page, rx_buf->page_offset,
-					   rx_buf->len);
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_SKB_FRAG_TRUESIZE)
+			skb_add_rx_frag(skb, skb_shinfo(skb)->nr_frags,
+					rx_buf->page, rx_buf->page_offset,
+					rx_buf->len, efx->rx_buffer_truesize);
+#else
+			skb_add_rx_frag(skb, skb_shinfo(skb)->nr_frags,
+					rx_buf->page, rx_buf->page_offset,
+					rx_buf->len);
+#endif
 			rx_buf->page = NULL;
-			skb->len += rx_buf->len;
-			skb->data_len += rx_buf->len;
 			if (skb_shinfo(skb)->nr_frags == n_frags)
 				break;
 
@@ -875,8 +883,6 @@ static struct sk_buff *efx_rx_mk_skb(struct efx_channel *channel,
 		rx_buf->page = NULL;
 		n_frags = 0;
 	}
-
-	skb->truesize += n_frags * efx->rx_buffer_truesize;
 
 	/* Move past the ethernet header */
 	skb->protocol = eth_type_trans(skb, efx->net_dev);
@@ -1053,13 +1059,14 @@ static bool efx_do_xdp(struct efx_nic *efx, struct efx_channel *channel,
 	u8 rx_prefix[EFX_MAX_RX_PREFIX_SIZE];
 	struct efx_rx_queue *rx_queue;
 	struct bpf_prog *xdp_prog;
+	struct xdp_frame *xdpf;
 	struct xdp_buff xdp;
 	u32 xdp_act;
 	s16 offset;
 	int rc;
 
 	rcu_read_lock();
-	xdp_prog = rcu_dereference(channel->xdp_prog);
+	xdp_prog = rcu_dereference(efx->xdp_prog);
 	if (!xdp_prog) {
 		rcu_read_unlock();
 		return true;
@@ -1092,6 +1099,10 @@ static bool efx_do_xdp(struct efx_nic *efx, struct efx_channel *channel,
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_XDP_HEAD)
 	xdp.data_hard_start = xdp.data - XDP_PACKET_HEADROOM;
 #endif
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_XDP_DATA_META)
+	/* No support yet for XDP metadata */
+	xdp_set_data_meta_invalid(&xdp);
+#endif
 	xdp.data_end = xdp.data + rx_buf->len;
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_XDP_RXQ_INFO)
 	xdp.rxq = &rx_queue->xdp_rxq_info;
@@ -1117,8 +1128,13 @@ static bool efx_do_xdp(struct efx_nic *efx, struct efx_channel *channel,
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_XDP_TX)
 	case XDP_TX:
 		/* Buffer ownership passes to tx on success. */
-		rc = efx_xdp_tx_buffer(efx, &xdp);
-		if (rc) {
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_XDP_FRAME_API)
+		xdpf = convert_to_xdp_frame(&xdp);
+#else
+		xdpf = &xdp;
+#endif
+		rc = efx_xdp_tx_buffers(efx, 1, &xdpf, true);
+		if (rc != 1) {
 			efx_free_rx_buffers(rx_queue, rx_buf, 1);
 			if (net_ratelimit())
 				netif_err(efx, rx_err, efx->net_dev,
@@ -1204,18 +1220,6 @@ void __efx_rx_packet(struct efx_channel *channel)
 		goto out;
 	}
 
-#ifdef EFX_NOT_UPSTREAM
-	/* Driverlink clients can request that the packet be discarded */
-	if (efx_dl_rx_packet(efx, channel->channel, eh, rx_buf->len)) {
-		struct efx_rx_queue *rx_queue;
-
-		rx_queue = efx_channel_get_rx_queue(channel);
-		efx_free_rx_buffers(rx_queue, rx_buf,
-				    channel->rx_pkt_n_frags);
-		goto out;
-	}
-#endif
-
 	if (!efx_do_xdp(efx, channel, rx_buf, &eh))
 		goto out;
 
@@ -1264,7 +1268,7 @@ void __efx_rx_packet(struct efx_channel *channel)
 #if defined(EFX_USE_KCOMPAT) && defined(EFX_WANT_DRIVER_BUSY_POLL)
 	    !efx_channel_busy_polling(channel) &&
 #endif
-	    (!efx_should_copy_rx_packet(rx_buf) || napi->gro_list))
+	    (!efx_should_copy_rx_packet(rx_buf) || napi->gro_bitmask))
 		efx_rx_packet_gro(channel, rx_buf, channel->rx_pkt_n_frags, eh);
 	else
 #endif
@@ -2080,8 +2084,10 @@ void efx_ssr(struct efx_channel *channel, struct efx_rx_buffer *rx_buf,
 			goto deliver_now;
 		th = (struct tcphdr *)(iph + 1);
 		if (conn_hash == 0)
-			conn_hash = ((__force u32)ip_fast_csum(&iph->saddr, 2) ^
-				     (__force u32)(th->source ^ th->dest));
+			/* Can't use ip_fast_csum(,2) as architecture dependent
+			 * implementations may assume min 5 for ihl
+			 */
+			conn_hash = hash_64(*((u64*)&iph->saddr), 32);
 	} else if (eh->h_proto == htons(ETH_P_IPV6)) {
 		struct ipv6hdr *iph = nh;
 		if (iph->nexthdr != NEXTHDR_TCP)
@@ -2337,11 +2343,6 @@ static void efx_filter_rfs_work(struct work_struct *data)
 				   req->spec.loc_host, ntohs(req->spec.loc_port),
 				   req->rxq_index, req->flow_id, rc, arfs_id);
 	}
-
-#if defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_SARFS)
-	/* since we have real ARFS, disable SARFS */
-	efx_sarfs_disable(efx);
-#endif
 
 	/* Release references */
 	clear_bit(slot_idx, &efx->rps_slot_map);

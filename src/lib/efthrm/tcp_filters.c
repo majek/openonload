@@ -184,7 +184,6 @@ oo_hw_filter_set_hwport(struct oo_hw_filter* oofilter, int hwport,
       spec.rss_context = rss_context;
     }
 
-#if EFX_DRIVERLINK_API_VERSION >= 15
     if( ! kernel_redirect ) {
       unsigned stack_id = cluster ?
         tcp_helper_cluster_vi_hw_stack_id(oofilter->thc, hwport) :
@@ -192,7 +191,6 @@ oo_hw_filter_set_hwport(struct oo_hw_filter* oofilter, int hwport,
       ci_assert( stack_id >= 0 );
       efx_filter_set_stack_id(&spec, stack_id);
     }
-#endif
 
     switch( oo_filter_spec->type ) {
     case OO_HW_FILTER_TYPE_MAC:

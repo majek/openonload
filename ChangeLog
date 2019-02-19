@@ -1,3 +1,11 @@
+openonload-201805-u1
+--------------------
+
+Update sfc net driver to v4.14
+
+SF-120489-KI/bug80195: Fix PIO data corruption in ef_vi or TCPDirect when writing and transmitting on different CPUs.
+
+
 openonload-201805
 -----------------
 

@@ -118,9 +118,11 @@ int ef_pio_memcpy(ef_vi* vi, const void* base, int offset, int len)
 
   /* To ensure that the resulting TLPs are aligned and have all their
    * byte-enable bits set, we must ensure that the data in the WC buffer is
-   * always contiguous. See bug49906.
+   * always contiguous.  See bug49906.  However, all previous writes to the
+   * PIO region conclude with wmb_wc(), so there's no need here for a further
+   * barrier.
    */
-  wmb_wc();
+
   memcpy_to_pio_aligned(pio->pio_io + offset, pio->pio_buffer + offset, len);
   return 0;
 }

@@ -52,7 +52,7 @@
 #include <linux/device.h>
 #include <linux/ctype.h>
 #include "linux_resource_internal.h"
-#include <driver/linux_net/driverlink_api.h>
+#include <ci/driver/driverlink_api.h>
 #include "kernel_compat.h"
 #include <ci/driver/internal.h>
 #include <ci/tools/byteorder.h>

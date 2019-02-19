@@ -139,7 +139,7 @@ static int efx_ef10_sriov_alloc_vf_vswitching(struct efx_nic *efx)
 		return -ENOMEM;
 
 	for (i = 0; i < efx->vf_count; i++) {
-		random_ether_addr(nic_data->vf[i].mac);
+		eth_random_addr(nic_data->vf[i].mac);
 		nic_data->vf[i].efx = NULL;
 		nic_data->vf[i].vlan = EFX_VF_VID_DEFAULT;
 		nic_data->vf[i].vlan_restrict = vfs_vlan_restrict;
@@ -314,16 +314,9 @@ int efx_ef10_vswitching_restore_vf(struct efx_nic *efx)
 
 	perm_addr = efx->net_dev->perm_addr;
 	if (!ether_addr_equal(perm_addr, new_addr)) {
-#if !defined(EFX_USE_KCOMPAT) || !defined(EFX_USE_PRINT_MAC)
 		netif_warn(efx, drv, efx->net_dev,
 			   "PF has changed my MAC to %pM\n",
 			   new_addr);
-#else
-		DECLARE_MAC_BUF(mac);
-		netif_warn(efx, drv, efx->net_dev,
-			   "PF has changed my MAC to %s\n",
-			   print_mac(mac, new_addr));
-#endif
 		ether_addr_copy(perm_addr, new_addr);
 		ether_addr_copy(efx->net_dev->dev_addr, new_addr);
 	}
@@ -751,7 +744,7 @@ int efx_ef10_sriov_set_vf_vlan(struct efx_nic *efx, int vf_i, u16 vlan,
 			       u8 qos)
 {
 	struct ef10_vf *vf;
-	u16 old_vlan, new_vlan;
+	u16 new_vlan;
 	int rc = 0, rc2 = 0;
 
 	vf = efx_ef10_vf_info(efx, vf_i);
@@ -826,7 +819,6 @@ int efx_ef10_sriov_set_vf_vlan(struct efx_nic *efx, int vf_i, u16 vlan,
 	}
 
 	/* Do the actual vlan change */
-	old_vlan = vf->vlan;
 	vf->vlan = new_vlan;
 
 	/* Restore everything in reverse order */

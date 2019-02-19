@@ -45,7 +45,6 @@ function generate_kompat_symbols() {
 EFX_HAVE_VLAN_NETWORK_HEADER_BUG	kver	<	2.6.27
 EFX_USE_NET_DEVICE_LAST_RX		kver	<	2.6.29
 EFX_USE_NET_DEVICE_TRANS_START		kver	<	2.6.31
-EFX_USE_PRINT_MAC			kver	<	2.6.31
 EFX_HAVE_PARAM_BOOL_INT			kver	<	2.6.31
 EFX_HAVE_MTD_TABLE			kver	<	2.6.35
 EFX_HAVE_VMALLOC_REG_DUMP_BUF		kver	>=	2.6.37
@@ -55,6 +54,7 @@ EFX_NEED_ROOT_DEVICE_REGISTER		nsymbol root_device_register	include/linux/device
 EFX_HAVE_GRO				custom
 EFX_NEED_GRO_RESULT_T			nsymbol	gro_result_t		include/linux/netdevice.h
 EFX_HAVE_NAPI_GRO_RECEIVE_GR		symbol	napi_gro_receive_gr	include/linux/netdevice.h
+EFX_HAVE_NAPI_GRO_BITMASK		member	struct_napi_struct	gro_bitmask	include/linux/netdevice.h
 EFX_NEED_HEX_DUMP			nexport	print_hex_dump		include/linux/kernel.h include/linux/printk.h lib/hexdump.c
 EFX_NEED_HEX_DUMP_CONST_FIX 		symtype	print_hex_dump		include/linux/kernel.h void(const char *, const char *, int, int, int, void *, size_t, bool)
 EFX_NEED_VZALLOC			nsymbol	vzalloc			include/linux/vmalloc.h
@@ -74,9 +74,7 @@ EFX_NEED_ALLOC_ETHERDEV_MQ		nsymbol	alloc_etherdev_mq	include/linux/etherdevice.
 EFX_NEED_NETIF_SET_REAL_NUM_TX_QUEUES	nsymbol	netif_set_real_num_tx_queues include/linux/netdevice.h
 EFX_NEED_NETIF_SET_REAL_NUM_RX_QUEUES	nsymbol	netif_set_real_num_rx_queues include/linux/netdevice.h
 EFX_NEED_PCI_CLEAR_MASTER		nsymbol	pci_clear_master	include/linux/pci.h
-EFX_NEED_PCI_SAVE_RESTORE_WRAPPERS	symtype	pci_save_state		include/linux/pci.h int(struct pci_dev *, u32 *)
 EFX_HAVE_PCI_RESET_FUNCTION		symbol	pci_reset_function	include/linux/pci.h
-EFX_NEED_PRINT_MAC			nsymbol print_mac		include/linux/if_ether.h
 EFX_NEED_RESOURCE_SIZE_T		nsymbol resource_size_t		include/linux/types.h
 EFX_NEED_RESOURCE_SIZE			nsymbol	resource_size		include/linux/ioport.h
 EFX_NEED_RTNL_TRYLOCK			nsymbol	rtnl_trylock		include/linux/rtnetlink.h
@@ -118,7 +116,6 @@ EFX_HAVE_NET_DEVICE_UC			memtype	struct_net_device	uc	include/linux/netdevice.h	
 EFX_HAVE_NET_DEVICE_UC_LIST		symbol	uc_list			include/linux/netdevice.h
 EFX_HAVE_NET_DEVICE_MC			memtype	struct_net_device	mc	include/linux/netdevice.h	struct netdev_hw_addr_list
 EFX_HAVE_OLD_SKB_CHECKSUM_HELP		symtype	skb_checksum_help	include/linux/netdevice.h int(struct sk_buff *, int)
-EFX_HAVE_OLDER_SKB_CHECKSUM_HELP	symtype	skb_checksum_help	include/linux/netdevice.h int(struct sk_buff **, int)
 EFX_HAVE_HWMON_CLASS_DEVICE		symtype	hwmon_device_register	include/linux/hwmon.h struct class_device *(struct device *)
 EFX_NEED_HWMON_T_ALARM			nsymbol	HWMON_T_ALARM		include/linux/hwmon.h
 EFX_HAVE_HWMON_READ_STRING		member	struct_hwmon_ops	read_string	include/linux/hwmon.h
@@ -170,10 +167,6 @@ EFX_HAVE_NDO_FEATURES_CHECK		member	struct_net_device_ops	ndo_features_check	inc
 EFX_HAVE_EXT_NDO_SET_FEATURES           member  struct_net_device_ops_ext ndo_set_features      include/linux/netdevice.h
 EFX_HAVE_VF_LINK_STATE			member	struct_net_device_ops	ndo_set_vf_link_state	include/linux/netdevice.h
 EFX_HAVE_NDO_SET_MULTICAST_LIST		member	struct_net_device_ops	ndo_set_multicast_list	include/linux/netdevice.h
-EFX_HAVE_NDO_SELECT_QUEUE		member	struct_net_device_ops	ndo_select_queue	include/linux/netdevice.h
-EFX_HAVE_NDO_SELECT_QUEUE_FALLBACK	memtype	struct_net_device_ops	ndo_select_queue	include/linux/netdevice.h	u16 (*)(struct net_device *, struct sk_buff *, void *, select_queue_fallback_t)
-EFX_HAVE_NDO_SELECT_QUEUE_ACCEL_PRIV	memtype	struct_net_device_ops	ndo_select_queue	include/linux/netdevice.h	u16 (*)(struct net_device *, struct sk_buff *, void *)
-EFX_HAVE_NETDEV_PICK_TX			export	__netdev_pick_tx	include/linux/netdevice.h	net/core/flow_dissector.c
 EFX_HAVE_NDO_BUSY_POLL			member	struct_net_device_ops	ndo_busy_poll	        include/linux/netdevice.h
 EFX_HAVE_NDO_GET_PHYS_PORT_ID		member	struct_net_device_ops	ndo_get_phys_port_id	include/linux/netdevice.h
 EFX_HAVE_NDO_GET_PHYS_PORT_NAME		member	struct_net_device_ops	ndo_get_phys_port_name	include/linux/netdevice.h
@@ -184,6 +177,7 @@ EFX_NEED_ETHER_ADDR_COPY		nsymbol ether_addr_copy		include/linux/etherdevice.h
 EFX_NEED_ETHER_ADDR_EQUAL		nsymbol	ether_addr_equal	include/linux/etherdevice.h
 EFX_NEED_ETH_ZERO_ADDR			nsymbol eth_zero_addr		include/linux/etherdevice.h
 EFX_NEED_ETH_BROADCAST_ADDR		nsymbol	eth_broadcast_addr	include/linux/etherdevice.h
+EFX_NEED_ETH_RANDOM_ADDR		nsymbol	eth_random_addr		include/linux/etherdevice.h
 EFX_NEED_MAC_PTON			nsymbol mac_pton		include/linux/kernel.h	include/linux/if_ether.h
 EFX_HAVE_HEX_TO_BIN			symbol hex_to_bin		include/linux/kernel.h
 EFX_NEED_IPV4_IS_MULTICAST		nsymbol	ipv4_is_multicast	include/linux/in.h
@@ -231,7 +225,6 @@ EFX_USE_IRQ_SET_AFFINITY_HINT		symbol	irq_set_affinity_hint	include/linux/interr
 EFX_HAVE_IRQ_NOTIFIERS			symbol  irq_affinity_notify	include/linux/interrupt.h
 EFX_HAVE_GSO_MAX_SEGS			member	struct_net_device	gso_max_segs		include/linux/netdevice.h
 EFX_NEED_BYTE_QUEUE_LIMITS		nsymbol	netdev_tx_sent_queue	include/linux/netdevice.h
-EFX_NEED_PCI_VPD_ATTR			nsymbol	pci_vpd			include/linux/pci.h
 EFX_NEED_SKB_CHECKSUM_NONE_ASSERT	nsymbol	skb_checksum_none_assert	include/linux/skbuff.h
 EFX_HAVE_NON_CONST_KERNEL_PARAM		symtype	param_set_uint		include/linux/moduleparam.h	int (const char *, struct kernel_param *)
 EFX_HAVE_KERNEL_PARAM_OPS		symbol kernel_param_ops		include/linux/moduleparam.h
@@ -268,8 +261,6 @@ EFX_HAVE_SKB_VLANTCI                     member    struct_sk_buff vlan_tci      
 EFX_HAVE_BUSY_POLL			file				include/net/busy_poll.h
 EFX_NEED_USLEEP_RANGE			nsymbol	usleep_range		include/linux/delay.h
 EFX_HAVE_SRIOV_GET_TOTALVFS		symbol	pci_sriov_get_totalvfs	include/linux/pci.h
-EFX_HAVE_OLD_GENL_INFO			member	struct_genl_info snd_pid	include/net/genetlink.h
-EFX_NEED_SIGNED_NLA			nsymbol	nla_put_s32		include/net/netlink.h
 EFX_NEED_SKB_VLAN_TAG_GET		nsymbol	skb_vlan_tag_get	include/linux/if_vlan.h
 EFX_HAVE_OLD___VLAN_HWACCEL_PUT_TAG	symtype	__vlan_hwaccel_put_tag	include/linux/if_vlan.h	struct sk_buff *(struct sk_buff *, u16)
 EFX_HAVE_ETHTOOL_CHANNELS		member	struct_ethtool_ops get_channels	include/linux/ethtool.h
@@ -277,16 +268,15 @@ EFX_HAVE_ETHTOOL_EXT_CHANNELS		member	struct_ethtool_ops_ext get_channels	includ
 EFX_NEED_UINTPTR_T			nsymbol	uintptr_t		include/linux/types.h
 EFX_NEED_IPV6_NFC			nsymbol	ethtool_tcpip6_spec	include/uapi/linux/ethtool.h
 EFX_HAVE_SKB_HASH			member	struct_sk_buff hash	include/linux/skbuff.h
-EFX_HAVE_OLD_NLA64			nsymbol	nla_put_u64_64bit	include/net/netlink.h
 EFX_HAVE_SKB_INNER_NETWORK_HEADER	symbol	skb_inner_network_header	include/linux/skbuff.h
 EFX_SKB_HAS_INNER_NETWORK_HEADER	member	struct_sk_buff	inner_network_header	include/linux/skbuff.h
 EFX_HAVE_SKB_INNER_TRANSPORT_HEADER	symbol	skb_inner_transport_header	include/linux/skbuff.h
 EFX_SKB_HAS_INNER_TRANSPORT_HEADER	member	struct_sk_buff	inner_transport_header	include/linux/skbuff.h
+EFX_HAVE_SKB_FRAG_TRUESIZE		symtype	skb_add_rx_frag		include/linux/skbuff.h	void (struct sk_buff *, int, struct page *, int, int, unsigned int)
 EFX_HAVE_INNER_IP_HDR			symbol	inner_ip_hdr		include/linux/ip.h
 EFX_HAVE_INNER_TCP_HDR			symbol	inner_tcp_hdr		include/linux/tcp.h
 
 # Stuff needed in code other than the linux net driver
-EFX_NEED_FOR_EACH_PCI_DEV		nsymbol for_each_pci_dev	include/linux/pci.h
 EFX_NEED_SCSI_SGLIST			nsymbol scsi_sglist		include/scsi/scsi_cmnd.h
 EFX_NEED_SG_NEXT			nsymbol sg_next			include/linux/scatterlist.h
 EFX_HAVE_NEW_KFIFO			symbol kfifo_out		include/linux/kfifo.h
@@ -298,7 +288,6 @@ EFX_HAVE_NETFILTER_INDIRECT_SKB		memtype	struct_nf_hook_ops	hook	include/linux/n
 EFX_HAVE_NFPROTO_CONSTANTS		symbol	NFPROTO_NUMPROTO	include/linux/netfilter.h
 EFX_HAVE_FDTABLE			symbol	files_fdtable		include/linux/file.h include/linux/fdtable.h
 EFX_HAVE_REMAP_PFN_RANGE		symbol	remap_pfn_range		include/linux/mm.h
-EFX_NEED_PCI_READ_VPD			nsymbol pci_read_vpd		include/linux/pci.h
 EFX_NEED_PCI_VPD_LRDT			nsymbol PCI_VPD_LRDT		include/linux/pci.h
 EFX_HAVE___REGISTER_CHRDEV		symbol __register_chrdev	include/linux/fs.h
 
@@ -328,9 +317,9 @@ EFX_HAVE_GSO_PARTIAL			symbol	SKB_GSO_PARTIAL		include/linux/skbuff.h
 EFX_HAVE_GSO_UDP_TUNNEL_CSUM		symbol	SKB_GSO_UDP_TUNNEL_CSUM	include/linux/skbuff.h
 EFX_NEED_IS_ERR_OR_NULL		nsymbol IS_ERR_OR_NULL	include/linux/err.h
 EFX_NEED_NETDEV_RSS_KEY_FILL	nsymbol	netdev_rss_key_fill	include/linux/netdevice.h
-EFX_HAVE_NETIF_SET_XPS_QUEUE    symbol  netif_set_xps_queue include/linux/netdevice.h
+EFX_HAVE_NETIF_SET_XPS_QUEUE	symbol	netif_set_xps_queue	include/linux/netdevice.h
+EFX_HAVE_NETIF_SET_XPS_QUEUE_NON_CONST	symtype	netif_set_xps_queue include/linux/netdevice.h	int (struct net_device *, struct cpumask *, u16)
 EFX_HAVE_ALLOC_PAGES_NODE	symbol	alloc_pages_node	include/linux/gfp.h
-EFX_HAVE_LINUX_LOG2_H           file                include/linux/log2.h
 EFX_HAVE_NETIF_XMIT_STOPPED	symbol	netif_xmit_stopped	include/linux/netdevice.h
 EFX_NEED_CPUMASK_LOCAL_SPREAD	nsymbol	cpumask_local_spread	include/linux/cpumask.h
 EFX_HAVE_CONST_PCI_ERR_HANDLER	memtype	struct_pci_driver err_handler	include/linux/pci.h	const struct pci_error_handlers *
@@ -354,9 +343,13 @@ EFX_HAVE_XDP_OLD	symbol	netdev_xdp	include/linux/netdevice.h
 EFX_HAVE_XDP_TRACE	file	include/trace/events/xdp.h
 EFX_HAVE_XDP_HEAD	member	struct_xdp_buff	data_hard_start	include/linux/filter.h
 EFX_HAVE_XDP_TX		symbol	XDP_TX		include/uapi/linux/bpf.h
+EFX_HAVE_XDP_TX_FLAGS	memtype	struct_net_device_ops	ndo_xdp_xmit	include/linux/netdevice.h	int (*)(struct net_device *, int, struct xdp_frame **, u32)
 EFX_HAVE_XDP_REDIR	symbol	XDP_REDIRECT	include/uapi/linux/bpf.h
 EFX_HAVE_XDP_RXQ_INFO	symbol	xdp_rxq_info	include/net/xdp.h
 EFX_HAVE_XDP_EXT	member	struct_net_device_ops_extended	ndo_xdp	include/linux/netdevice.h
+EFX_NEED_XDP_FLUSH	member	struct_net_device_ops	ndo_xdp_flush	include/linux/netdevice.h
+EFX_HAVE_XDP_PROG_ATTACHED	member	struct_netdev_bpf	prog_attached	include/linux/netdevice.h
+EFX_HAVE_XDP_PROG_ID	member	struct_netdev_bpf	prog_id	include/linux/netdevice.h
 EFX_NEED_PAGE_FRAG_FREE	nsymbol	page_frag_free	include/linux/gfp.h
 EFX_HAVE_FREE_PAGE_FRAG	symbol	__free_page_frag	include/linux/gfp.h
 EFX_NEED_VOID_SKB_PUT	nsymtype	skb_pub	include/linux/skbuff.h	void *skb_put(struct sk_buff *, unsigned int)
@@ -368,6 +361,9 @@ EFX_HAVE_NDO_EXT_CHANGE_MTU	memtype	struct_net_device_ops_extended	ndo_change_mt
 EFX_HAVE_ETHTOOL_FECPARAM	member	struct_ethtool_ops	get_fecparam	include/linux/ethtool.h
 EFX_HAVE_ETHTOOL_RXFH_CONTEXT	member	struct_ethtool_ops	get_rxfh_context	include/linux/ethtool.h
 EFX_HAVE_ETHTOOL_RXNFC_CONTEXT	member	struct_ethtool_rxnfc	rss_context	include/linux/ethtool.h
+EFX_NEED_HASH_64		nsymbol	hash_64	include/linux/hash.h
+EFX_HAVE_XDP_FRAME_API		symbol	xdp_frame	include/net/xdp.h
+EFX_HAVE_XDP_DATA_META		member	struct_xdp_buff	data_meta	include/linux/filter.h
 " | egrep -v -e '^#' -e '^$' | sed 's/[ \t][ \t]*/:/g'
 }
 

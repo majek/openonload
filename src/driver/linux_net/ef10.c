@@ -662,7 +662,8 @@ static int efx_ef10_get_mac_address_pf(struct efx_nic *efx, u8 *mac_address)
 	if (rc == -ENOSYS && efx_port_num(efx) < 2) {
 		netif_warn(efx, probe, efx->net_dev,
 			   "current firmware does not support GET_MAC_ADDRESSES; falling back to GET_BOARD_CFG\n");
-		return efx_mcdi_get_board_cfg(efx, mac_address, NULL, NULL);
+		return efx_mcdi_get_board_cfg(efx, efx_port_num(efx),
+					      mac_address, NULL, NULL);
 	}
 #endif
 	if (rc)
@@ -1064,12 +1065,13 @@ static int efx_ef10_probe(struct efx_nic *efx)
 	 * Note we have more TX queues than channels, so TX queues are the
 	 * limit on the number of channels we can have with our VIs.
 	 */
+	efx->max_vis = bar_size / efx->vi_stride;
 	efx->max_channels = efx->max_tx_channels =
 		min_t(unsigned int,
 		      EFX_MAX_CHANNELS,
 		      (bar_size /
 			(efx->vi_stride * efx->tx_queues_per_channel)));
-	if (efx->max_channels == 0) {
+	if (efx->max_vis == 0 || efx->max_channels == 0) {
 		rc = -EIO;
 		goto fail5;
 	}
@@ -1114,7 +1116,8 @@ static int efx_ef10_probe(struct efx_nic *efx)
 #if defined(EFX_NOT_UPSTREAM) && defined(CONFIG_SFC_AOE)
 	/* Get capabilities mask */
 	nic_data->caps = 0;
-	rc = efx_mcdi_get_board_cfg(efx, NULL, NULL, &nic_data->caps);
+	rc = efx_mcdi_get_board_cfg(efx, efx_port_num(efx), NULL, NULL,
+				    &nic_data->caps);
 	if (rc)
 		goto fail7;
 #endif
@@ -1232,16 +1235,23 @@ fail1:
 static int efx_ef10_probe_pf(struct efx_nic *efx)
 {
 #ifdef EFX_NOT_UPSTREAM
-	unsigned int desired_bandwidth = EFX_BW_PCIE_GEN2_X8;
+	unsigned int desired_bandwidth;
 
-	if (efx->pci_dev->device == 0x0923) {
+	switch (efx->pci_dev->device) {
+	case 0x0923:
 		/* Greenport devices can make use of 8 lanes of Gen3. */
 		desired_bandwidth = EFX_BW_PCIE_GEN3_X8;
-	} else if (efx->pci_dev->device == 0x0a03) {
-		/* Medford devices want 16 lane, even though not all have that.
+		break;
+	case 0x0a03:
+	case 0x0b03:
+		/* Medford and Medford2 devices want 16 lanes, even though
+		 * not all have that.
 		 * We suppress this optimism in efx_nic_check_pcie_link().
 		 */
 		desired_bandwidth = EFX_BW_PCIE_GEN3_X16;
+		break;
+	default:
+		desired_bandwidth = EFX_BW_PCIE_GEN2_X8;
 	}
 
 	efx_nic_check_pcie_link(efx, desired_bandwidth, NULL, NULL);
@@ -1923,7 +1933,7 @@ static int efx_ef10_dimension_resources(struct efx_nic *efx)
 		/* We didn't get the VIs to populate our channels. We could keep
 		 * what we got but then we'd have more interrupts than we need.
 		 * Instead calculate new max_channels and restart */
-		efx->max_channels = nic_data->n_allocated_vis;
+		efx->max_vis = efx->max_channels = nic_data->n_allocated_vis;
 		efx->max_tx_channels =
 			nic_data->n_allocated_vis / efx->tx_queues_per_channel;
 
@@ -2830,6 +2840,7 @@ static size_t efx_ef10_update_stats_pf(struct efx_nic *efx, u64 *full_stats,
 static size_t efx_ef10_update_stats_pf(struct efx_nic *efx, u64 *full_stats,
 				       struct net_device_stats *core_stats)
 #endif
+	__acquires(efx->stats_lock)
 {
 	int retry;
 
@@ -2923,6 +2934,7 @@ static size_t efx_ef10_update_stats_vf(struct efx_nic *efx, u64 *full_stats,
 static size_t efx_ef10_update_stats_vf(struct efx_nic *efx, u64 *full_stats,
 				       struct net_device_stats *core_stats)
 #endif
+	__acquires(efx->stats_lock)
 {
 	/* MCDI is required to update statistics, but it can't be used
 	 * here since read dev_base_lock rwlock may be held outside and
@@ -3247,7 +3259,7 @@ static irqreturn_t efx_ef10_msi_interrupt(int irq, void *dev_id)
 	netif_vdbg(efx, intr, efx->net_dev,
 		   "IRQ %d on CPU %d\n", irq, raw_smp_processor_id());
 
-	if (likely(ACCESS_ONCE(efx->irq_soft_enabled))) {
+	if (likely(READ_ONCE(efx->irq_soft_enabled))) {
 		/* Note test interrupts */
 		if (context->index == efx->irq_level)
 			efx->last_irq_cpu = raw_smp_processor_id();
@@ -3262,7 +3274,7 @@ static irqreturn_t efx_ef10_msi_interrupt(int irq, void *dev_id)
 static irqreturn_t efx_ef10_legacy_interrupt(int irq, void *dev_id)
 {
 	struct efx_nic *efx = dev_id;
-	bool soft_enabled = ACCESS_ONCE(efx->irq_soft_enabled);
+	bool soft_enabled = READ_ONCE(efx->irq_soft_enabled);
 	struct efx_channel *channel;
 	efx_dword_t reg;
 	u32 queues;
@@ -3445,7 +3457,6 @@ static int efx_ef10_tx_init(struct efx_tx_queue *tx_queue)
 	struct efx_channel *channel = tx_queue->channel;
 	struct efx_nic *efx = tx_queue->efx;
 	struct efx_ef10_nic_data *nic_data = efx->nic_data;
-	bool pacer_bypass = EFX_EF10_WORKAROUND_66678(efx);
 	bool tso_v2 = false;
 	dma_addr_t dma_addr;
 	efx_qword_t *txd;
@@ -3519,7 +3530,7 @@ static int efx_ef10_tx_init(struct efx_tx_queue *tx_queue)
 		 * enable IP header checksum offload, which is strictly
 		 * incorrect but better than breaking TSO.
 		 */
-		MCDI_POPULATE_DWORD_7(inbuf, INIT_TXQ_EXT_IN_FLAGS,
+		MCDI_POPULATE_DWORD_6(inbuf, INIT_TXQ_EXT_IN_FLAGS,
 				      INIT_TXQ_EXT_IN_FLAG_TSOV2_EN,
 						tso_v2,
 				      INIT_TXQ_EXT_IN_FLAG_IP_CSUM_DIS,
@@ -3531,9 +3542,7 @@ static int efx_ef10_tx_init(struct efx_tx_queue *tx_queue)
 				      INIT_TXQ_EXT_IN_FLAG_INNER_TCP_CSUM_EN,
 						inner_csum_offload,
 				      INIT_TXQ_EXT_IN_FLAG_TIMESTAMP,
-						tx_queue->timestamping,
-				      INIT_TXQ_EXT_IN_FLAG_PACER_BYPASS,
-						pacer_bypass);
+						tx_queue->timestamping);
 
 		rc = efx_mcdi_rpc_quiet(efx, MC_CMD_INIT_TXQ,
 					inbuf, sizeof(inbuf),
@@ -3544,11 +3553,6 @@ static int efx_ef10_tx_init(struct efx_tx_queue *tx_queue)
 			tso_v2 = false;
 			netif_warn(efx, probe, efx->net_dev,
 				   "TSOv2 context not available to segment in hardware. TCP performance may be reduced.\n");
-		} else if (rc == -EPERM && pacer_bypass) {
-			/* Unprivileged functions don't support
-			 * pacer bypass so retry without
-			 */
-			pacer_bypass = false;
 		} else if (rc) {
 			efx_mcdi_display_error(efx, MC_CMD_INIT_TXQ,
 					       MC_CMD_INIT_TXQ_EXT_IN_LEN,
@@ -3962,7 +3966,7 @@ static void efx_ef10_rx_free_indir_table(struct efx_nic *efx)
 
 	if (efx->rss_context.context_id != EFX_EF10_RSS_CONTEXT_INVALID) {
 		rc = efx_ef10_free_rss_context(efx, efx->rss_context.context_id);
-		WARN_ON(rc != 0);
+		WARN_ON(rc && rc != -ENETDOWN);
 	}
 	efx->rss_context.context_id = EFX_EF10_RSS_CONTEXT_INVALID;
 }
@@ -4804,8 +4808,9 @@ static void efx_ef10_handle_rx_abort(struct efx_rx_queue *rx_queue)
 
 	rx_desc_ptr = rx_queue->removed_count & rx_queue->ptr_mask;
 
-	efx_rx_packet(rx_queue, rx_desc_ptr, rx_queue->scatter_n,
-		      0, EFX_RX_PKT_DISCARD);
+	if (rx_queue->scatter_n)
+		efx_rx_packet(rx_queue, rx_desc_ptr, rx_queue->scatter_n,
+			      0, EFX_RX_PKT_DISCARD);
 
 	rx_queue->removed_count += rx_queue->scatter_n;
 	rx_queue->scatter_n = 0;
@@ -4922,7 +4927,7 @@ static int efx_ef10_handle_rx_event(struct efx_channel *channel,
 	bool rx_cont;
 	u16 flags = 0;
 
-	if (unlikely(ACCESS_ONCE(efx->reset_pending)))
+	if (unlikely(READ_ONCE(efx->reset_pending)))
 		return 0;
 
 	/* Basic packet information */
@@ -5090,7 +5095,7 @@ efx_ef10_handle_tx_event(struct efx_channel *channel, efx_qword_t *event)
 	unsigned int tx_ev_type;
 	u64 ts_part;
 
-	if (unlikely(ACCESS_ONCE(efx->reset_pending)))
+	if (unlikely(READ_ONCE(efx->reset_pending)))
 		return;
 
 	if (unlikely(EFX_QWORD_FIELD(*event, ESF_DZ_TX_DROP_EVENT)))
@@ -7265,8 +7270,8 @@ static void efx_ef10_filter_remove_old(struct efx_nic *efx)
 
 	down_write(&table->lock);
 	for (i = 0; i < HUNT_FILTER_TBL_ROWS; i++) {
-		if (ACCESS_ONCE(table->entry[i].spec) &
-				EFX_EF10_FILTER_FLAG_AUTO_OLD) {
+		if (READ_ONCE(table->entry[i].spec) &
+			      EFX_EF10_FILTER_FLAG_AUTO_OLD) {
 			rc = efx_ef10_filter_remove_internal(efx,
 					1U << EFX_FILTER_PRI_AUTO, i, true);
 			if (rc == -ENOENT)

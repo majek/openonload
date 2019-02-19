@@ -52,7 +52,7 @@
 #include <ci/efhw/eventq.h>
 #include <ci/efhw/checks.h>
 #include <ci/efhw/efhw_buftable.h>
-#include <driver/linux_net/driverlink_api.h>
+#include <ci/driver/driverlink_api.h>
 
 
 /*----------------------------------------------------------------------------

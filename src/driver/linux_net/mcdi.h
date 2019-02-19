@@ -28,8 +28,6 @@
 #include <linux/mutex.h>
 #include <linux/kref.h>
 
-#define MCDI_PROXY_AUTH_CLIENT_TIMEOUT (10 * HZ)
-
 /**
  * enum efx_mcdi_mode - MCDI transaction mode
  * @MCDI_MODE_POLL: poll for MCDI completion, until timeout
@@ -396,9 +394,11 @@ void efx_mcdi_sensor_event(struct efx_nic *efx, efx_qword_t *ev);
 void efx_mcdi_print_fwver(struct efx_nic *efx, char *buf, size_t len);
 int efx_mcdi_drv_attach(struct efx_nic *efx, bool driver_operating,
 			u32 fw_variant, bool *was_attached, u32 *flags);
-int efx_mcdi_get_board_cfg(struct efx_nic *efx, u8 *mac_address,
+int efx_mcdi_get_board_cfg(struct efx_nic *efx, int port_num, u8 *mac_address,
 			   u16 *fw_subtype_list, u32 *capabilities);
+int efx_mcdi_get_board_perm_mac(struct efx_nic *efx, u8 *mac_address);
 int efx_mcdi_log_ctrl(struct efx_nic *efx, bool evq, bool uart, u32 dest_evq);
+void efx_mcdi_log_puts(struct efx_nic *efx, const char *text);
 int efx_mcdi_nvram_types(struct efx_nic *efx, u32 *nvram_types_out);
 int efx_mcdi_nvram_info(struct efx_nic *efx, unsigned int type,
 			size_t *size_out, size_t *erase_size_out,
@@ -418,6 +418,8 @@ int efx_mcdi_port_reconfigure(struct efx_nic *efx);
 int efx_mcdi_port_get_number(struct efx_nic *efx);
 u32 efx_mcdi_phy_get_caps(struct efx_nic *efx);
 void efx_mcdi_process_link_change(struct efx_nic *efx, efx_qword_t *ev);
+void efx_mcdi_process_link_change_v2(struct efx_nic *efx, efx_qword_t *ev);
+void efx_mcdi_process_module_change(struct efx_nic *efx, efx_qword_t *ev);
 int efx_mcdi_set_mac(struct efx_nic *efx);
 int efx_mcdi_set_mtu(struct efx_nic *efx);
 #define EFX_MC_STATS_GENERATION_INVALID ((__force __le64)(-1))

@@ -225,8 +225,14 @@ static void efx_dequeue_buffer(struct efx_tx_queue *tx_queue,
 			   tx_queue->queue, tx_queue->read_count);
 	} else if (buffer->flags & EFX_TX_BUF_HEAP) {
 		kfree(buffer->buf);
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_XDP_TX)
 	} else if (buffer->flags & EFX_TX_BUF_XDP) {
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_XDP_FRAME_API)
+		xdp_return_frame(buffer->xdpf);
+#else
 		page_frag_free(buffer->buf);
+#endif
+#endif
 	}
 
 	buffer->len = 0;
@@ -280,7 +286,7 @@ static void efx_tx_maybe_stop_queue(struct efx_tx_queue *txq1)
 	netif_tx_stop_queue(txq1->core_txq);
 	smp_mb();
 	efx_for_each_channel_tx_queue(txq2, txq1->channel)
-		txq2->old_read_count = ACCESS_ONCE(txq2->read_count);
+		txq2->old_read_count = READ_ONCE(txq2->read_count);
 
 	fill_level = efx_channel_tx_fill_level(txq1->channel);
 	EFX_WARN_ON_ONCE_PARANOID(fill_level >= efx->txq_entries);
@@ -526,470 +532,6 @@ static inline bool efx_tx_may_pio(struct efx_channel *channel,
 	return empty;
 }
 #endif /* EFX_USE_PIO */
-
-#if defined(EFX_NOT_UPSTREAM) && defined(EFX_ENABLE_SFC_XPS)
-/* Whether to do XPS in the SFC driver, for use when kernel XPS is not enabled
- * or not configured
- */
-#if !defined(EFX_USE_KCOMPAT) || !defined(EFX_HAVE_NON_CONST_KERNEL_PARAM)
-static int sxps_warn_set(const char *val, const struct kernel_param *kp)
-#else
-static int sxps_warn_set(const char *val, struct kernel_param *kp)
-#endif
-{
-	pr_warn("SXPS is a deprecated feature and will be removed in a future release of this driver. "
-		"Use of SXPS should be replaced by kernel XPS.\n");
-	return param_set_bool(val, kp);
-}
-
-static bool sxps_enabled = false;
-#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_KERNEL_PARAM_OPS)
-static const struct kernel_param_ops sxps_enabled_ops = {
-	.set = sxps_warn_set,
-	.get = param_get_bool,
-};
-module_param_cb(sxps_enabled, &sxps_enabled_ops, &sxps_enabled, 0444);
-#else
-module_param_call(sxps_enabled, sxps_warn_set, param_get_bool,
-		  &sxps_enabled, 0444);
-#endif
-MODULE_PARM_DESC(sxps_enabled, "DEPRECATED. Whether to perform TX flow steering "
-			       "at the driver level. This or XPS is required for "
-			       "SARFS.");
-#endif
-
-#if defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_SARFS)
-/* Size of the alt arfs hash table. Must be a power of 2. The size of this table
- * dictates the maximum number of filters we can use for this feature
- */
-static unsigned int sarfs_table_size = 256;
-module_param(sarfs_table_size, uint, 0444);
-MODULE_PARM_DESC(sarfs_table_size, "Size of the SARFS hash table.");
-
-/* The maximum rate we'll do alt arfs operations in ms */
-static unsigned int sarfs_global_holdoff_ms = 10;
-module_param(sarfs_global_holdoff_ms, uint, 0444);
-MODULE_PARM_DESC(sarfs_global_holdoff_ms,
-	"Maximum rate at which SARFS operations can occur.");
-
-/* The maximum rate we'll do alt arfs operations on a single hash table entry.
- * This is designed to prevent filter flapping on hash collision */
-static const unsigned int sarfs_entry_holdoff_ms = 1000;
-
-/* The rate at which we'll sample TCP packets for new flows and CPU switches.
- * 0 = disable alt arfs. */
-#if !defined(EFX_USE_KCOMPAT) || !defined(EFX_HAVE_NON_CONST_KERNEL_PARAM)
-static int sarfs_warn_set(const char *val, const struct kernel_param *kp)
-#else
-static int sarfs_warn_set(const char *val, struct kernel_param *kp)
-#endif
-{
-	pr_warn("SARFS is a deprecated feature and will be removed in a future release of this driver. "
-		"Use of SARFS should be replaced by kernel ARFS.\n");
-	return param_set_uint(val, kp);
-}
-
-static unsigned int sarfs_sample_rate;
-#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_KERNEL_PARAM_OPS)
-static const struct kernel_param_ops sarfs_sample_rate_ops = {
-	.set = sarfs_warn_set,
-	.get = param_get_uint,
-};
-module_param_cb(sarfs_sample_rate, &sarfs_sample_rate_ops, &sarfs_sample_rate, 0444);
-#else
-module_param_call(sarfs_sample_rate, sarfs_warn_set, param_get_uint,
-		  &sarfs_sample_rate, 0444);
-#endif
-MODULE_PARM_DESC(sarfs_sample_rate,
-	"DEPRECATED. Frequency which SARFS samples packets. "
-	"0 = disable, N = sample every N packets.");
-
-/* Use destination only filters. This is the local IP and Port from the point
- * of view of the NIC */
-static bool sarfs_dest_only = false;
-module_param(sarfs_dest_only, bool, 0444);
-MODULE_PARM_DESC(sarfs_dest_only,
-	"Only insert SARFS filters that match on the destination IP and PORT");
-
-static bool efx_sarfs_keys_eq(struct efx_sarfs_key *a,
-				 struct efx_sarfs_key *b)
-{
-	return memcmp(a, b, sizeof(struct efx_sarfs_key)) == 0;
-}
-
-int efx_sarfs_init(struct efx_nic *efx)
-{
-	struct efx_sarfs_state *st = &efx->sarfs_state;
-	bool xps_available =
-#ifdef CONFIG_XPS
-		true;
-#else
-		sxps_enabled;
-#endif
-
-	/* SARFS won't work unless sharing channels between TX and RX.
-	 * It also won't work unless we have TX steering functionality.
-	 */
-	if (sarfs_sample_rate && sarfs_table_size) {
-		if (!(efx->net_dev->features & NETIF_F_NTUPLE)) {
-			netif_info(efx, drv, efx->net_dev, "notice: SARFS is "
-				   "enabled but could not be activated because "
-				   "the filters are not supported in this "
-				   "firmware variant\n");
-		} else if (efx->tx_channel_offset) {
-			netif_info(efx, drv, efx->net_dev, "notice: SARFS is "
-				   "enabled but could not be activated because "
-				   "TX and RX channels are separate\n");
-		} else if (!xps_available) {
-			netif_info(efx, drv, efx->net_dev, "notice: SARFS is "
-				   "enabled but could not be activated because "
-				   "XPS is not available\n");
-		} else {
-			EFX_WARN_ON_PARANOID(st->enabled);
-
-			st->conns = kzalloc(sarfs_table_size *
-					    sizeof(struct efx_sarfs_entry),
-					    GFP_KERNEL);
-			if (!st->conns)
-				return -ENOMEM;
-
-			st->enabled = true;
-		}
-	}
-
-	return 0;
-}
-
-void efx_sarfs_fini(struct efx_nic *efx)
-{
-	int i;
-	struct efx_sarfs_state *st = &efx->sarfs_state;
-
-	mutex_lock(&st->lock);
-	if (st->enabled)
-		for (i = 0; i < sarfs_table_size; ++i)
-			if (st->conns[i].filter_inserted)
-				efx->type->filter_remove_safe(efx,
-					EFX_FILTER_PRI_SARFS,
-					st->conns[i].filter_id);
-	kfree(st->conns);
-	st->conns = NULL;
-	st->enabled = false;
-	mutex_unlock(&st->lock);
-}
-
-static int efx_sarfs_filter_insert(struct efx_nic *efx,
-				      int rxq_id,
-				      struct efx_sarfs_key *key)
-{
-	struct efx_filter_spec spec;
-
-	efx_filter_init_rx(&spec, EFX_FILTER_PRI_SARFS,
-			   efx->rx_scatter ? EFX_FILTER_FLAG_RX_SCATTER : 0,
-			   rxq_id);
-
-	spec.ether_type = htons(ETH_P_IP);
-	spec.ip_proto = IPPROTO_TCP;
-	spec.match_flags = sarfs_dest_only ?
-		EFX_FILTER_MATCH_FLAGS_RFS_DEST_ONLY :
-		EFX_FILTER_MATCH_FLAGS_RFS;
-	spec.rem_host[0] = key->raddr;
-	spec.loc_host[0] = key->laddr;
-	spec.rem_port = key->rport;
-	spec.loc_port = key->lport;
-
-	return efx->type->filter_insert(efx, &spec, true);
-}
-
-/* Disable insertion of any new SARFS filters.
- * This doesn't cause any existing SARFS filters to be removed, but they
- * should gradually be subsumed by real ARFS filters.
- */
-void efx_sarfs_disable(struct efx_nic *efx)
-{
-	if (cmpxchg(&efx->sarfs_state.enabled, true, false) == true)
-		netif_dbg(efx, drv, efx->net_dev, "disabling SARFS\n");
-}
-
-static void efx_sarfs_insert(struct efx_nic *efx,
-			     struct efx_sarfs_entry *entry,
-			     int rxq_id,
-			     struct efx_sarfs_key *key)
-{
-	s32 filter_id;
-
-	/* if a previous filter exists with the same key, it will be
-	 * transparently replaced, so don't remove
-	 */
-	if (entry->filter_inserted && !efx_sarfs_keys_eq(&entry->key, key)) {
-		/* remove old filter */
-		int rc = efx_filter_remove_id_safe(efx, EFX_FILTER_PRI_SARFS,
-						   entry->filter_id);
-
-		if (rc != 0 && rc != -ENOENT) {
-			/* reassert entry holdoff period so we don't try to
-			 * spam remove a problem filter
-			 */
-			entry->last_modified = jiffies;
-			entry->problem = true;
-			return;
-		}
-	}
-
-	/* insert new filter */
-	filter_id = efx_sarfs_filter_insert(efx, rxq_id, key);
-	if (filter_id >= 0) {
-		entry->filter_inserted = true;
-		entry->filter_id = filter_id;
-		entry->key = *key;
-		entry->last_modified = jiffies;
-		entry->problem = false;
-		efx->sarfs_state.last_modified = jiffies;
-		entry->queue = rxq_id;
-	} else {
-		/* if a previous filter existed, it's still there.  So don't
-		 * change entry->filter_inserted
-		 */
-		/* assert entry holdoff period so we don't try to spam insert a
-		 * problem filter
-		 */
-		entry->last_modified = jiffies;
-		entry->problem = true;
-	}
-}
-
-static u32 efx_sarfs_hash(struct efx_sarfs_key *key, bool partial)
-{
-	u32 part = (__force u32)ntohs(key->lport);
-
-	if (!partial)
-		part = (__force u32)(part ^ ntohs(key->rport));
-
-	return (__force u32)(ip_fast_csum(&key->laddr, 2) ^ part);
-}
-
-static inline bool efx_sarfs_entry_in_holdoff(struct efx_sarfs_entry *entry)
-{
-	return jiffies - entry->last_modified <
-		msecs_to_jiffies(sarfs_entry_holdoff_ms);
-}
-
-static inline bool efx_sarfs_entry_needs_update(struct efx_sarfs_entry *entry,
-						struct efx_sarfs_key key,
-						int rxq_id)
-{
-	if (efx_sarfs_keys_eq(&entry->key, &key))
-		return (!entry->filter_inserted ||
-			entry->queue != rxq_id) &&
-		       !(entry->problem &&
-			 efx_sarfs_entry_in_holdoff(entry));
-
-	return !efx_sarfs_entry_in_holdoff(entry);
-}
-
-/**
- * struct efx_async_sarfs - Request to perform a SARFS update
- * @net_dev: Reference to the netdevice
- * @key: The SARFS key of the flow
- * @work: Workitem for this request
- * @channel: Index of the channel for which this request was made
- */
-struct efx_async_sarfs {
-	struct net_device *net_dev;
-	struct efx_sarfs_key key;
-	struct work_struct work;
-	int channel;
-};
-
-static void efx_sarfs_work(struct work_struct *data)
-{
-	struct efx_async_sarfs *req = container_of(data, struct efx_async_sarfs,
-						   work);
-	struct efx_nic *efx = netdev_priv(req->net_dev);
-	u32 index = efx_sarfs_hash(&req->key, sarfs_dest_only) % sarfs_table_size;
-	struct efx_sarfs_entry *entry = &efx->sarfs_state.conns[index];
-	struct efx_channel *channel = efx_get_channel(efx, req->channel);
-	int rxq_id = efx_rx_queue_index(efx_channel_get_rx_queue(channel));
-
-	mutex_lock(&efx->sarfs_state.lock);
-
-	/* recheck the global holdoff and entry now we have the lock */
-	if (jiffies - efx->sarfs_state.last_modified >=
-			msecs_to_jiffies(sarfs_global_holdoff_ms)) {
-		if (efx_sarfs_entry_needs_update(entry, req->key, rxq_id))
-			efx_sarfs_insert(efx, entry, rxq_id, &req->key);
-	}
-
-	mutex_unlock(&efx->sarfs_state.lock);
-
-	/* Release references */
-	dev_put(req->net_dev);
-	kfree(req);
-}
-
-static void efx_sarfs(struct efx_nic *efx, struct efx_tx_queue *txq,
-		      struct efx_sarfs_key key)
-{
-	u32 index = efx_sarfs_hash(&key, sarfs_dest_only) % sarfs_table_size;
-	struct efx_sarfs_entry *entry = &efx->sarfs_state.conns[index];
-	struct efx_channel *channel = efx_get_channel(efx, txq->channel->channel);
-	int rxq_id = efx_rx_queue_index(efx_channel_get_rx_queue(channel));
-	struct efx_async_sarfs *req;
-
-	/* do the check first without the mutex. this is ok because if we
-	 * get an inconsistent set of values and get a false negative we'll
-	 * miss an update but hopefully get it right at our next sample of this
-	 * flow, and if we get a false positive we'll discard it when we check
-	 * again with the mutex.
-	 */
-	if (!efx_sarfs_entry_needs_update(entry, key, rxq_id))
-		return;
-
-	req = kmalloc(sizeof(*req), GFP_ATOMIC);
-	if (!req)
-		return;
-
-	dev_hold(req->net_dev = efx->net_dev);
-	INIT_WORK(&req->work, efx_sarfs_work);
-	req->key = key;
-	req->channel = channel->channel;
-	schedule_work(&req->work);
-}
-
-/* Inspect an skb for SARFS.
- * Only inspect if we're not in our global holdoff period, only inspect TCP
- * and only if the SYN flag is set, or it's the Nth TCP packet on this channel
- */
-static void _efx_sarfs_skb(struct efx_nic *efx,
-			   struct efx_tx_queue *txq,
-			   struct sk_buff *skb)
-{
-	/* If we're still within the holdoff period of our last operation,
-	 * don't check.
-	 */
-	if (jiffies - efx->sarfs_state.last_modified <
-			msecs_to_jiffies(sarfs_global_holdoff_ms))
-		return;
-
-
-	if (skb->protocol == htons(ETH_P_IP)) {
-		struct iphdr *iphdr = ip_hdr(skb);
-
-		if (iphdr->protocol == IPPROTO_TCP) {
-			struct tcphdr *tcphdr = tcp_hdr(skb);
-			if ((++txq->sarfs_sample_count == sarfs_sample_rate) ||
-			    (tcphdr->syn)) {
-				struct efx_sarfs_key key = {
-					.laddr = iphdr->saddr,
-					.raddr = iphdr->daddr,
-					.lport = tcphdr->source,
-					.rport = tcphdr->dest
-				};
-
-				txq->sarfs_sample_count = 0;
-				efx_sarfs(efx, txq, key);
-			}
-		}
-	}
-}
-
-/* Inspect an skb for SARFS if the feature is enabled.
- * Inline version for speed in the case SARFS is disabled.
- */
-static inline void efx_sarfs_skb(struct efx_nic *efx,
-				 struct efx_tx_queue *txq,
-				 struct sk_buff *skb)
-{
-	if (efx->sarfs_state.enabled)
-		return _efx_sarfs_skb(efx, txq, skb);
-}
-#endif
-
-#if defined(EFX_NOT_UPSTREAM) && defined(EFX_ENABLE_SFC_XPS)
-/* query smp_processor_id to try to match the skb to the TX queue the user
- * space process is running on.
- */
-static int get_xps_queue(struct net_device *dev, struct sk_buff *skb)
-{
-#ifdef EFX_HAVE_SKB_GET_RX_QUEUE
-	if (skb_rx_queue_recorded(skb))
-		return skb_get_rx_queue(skb);
-#endif
-
-	if (sxps_enabled) {
-		struct efx_nic *efx = netdev_priv(dev);
-		int cpu = smp_processor_id();
-
-		EFX_WARN_ON_ONCE_PARANOID(cpu < 0);
-		EFX_WARN_ON_ONCE_PARANOID(cpu >= num_possible_cpus());
-		if (likely(efx->cpu_channel_map))
-			return efx->cpu_channel_map[cpu];
-	}
-
-	return -1;
-}
-
-static u16 efx_select_queue_int(struct net_device *dev, struct sk_buff *skb)
-{
-	int queue_index = -1;
-	/* counterintuitively, always allow out of order TCP, since this is
-	 * required to make good use of the SARFS feature.
-	 */
-	bool ooo_okay = skb->protocol == htons(ETH_P_IP) &&
-		ip_hdr(skb)->protocol == IPPROTO_TCP;
-#ifdef EFX_HAVE_SK_SET_TX_QUEUE
-	struct sock *sk = skb->sk;
-
-	queue_index = sk_tx_queue_get(sk);
-#endif
-#ifdef EFX_HAVE_SKB_OOO_OKAY
-	ooo_okay = ooo_okay || skb->ooo_okay;
-#endif
-
-	if (queue_index < 0 || queue_index >= dev->real_num_tx_queues ||
-	    ooo_okay) {
-		int new_index = get_xps_queue(dev, skb);
-
-		if (new_index < 0)
-			new_index = skb_tx_hash(dev, skb);
-
-#ifdef EFX_HAVE_SK_SET_TX_QUEUE
-		if (queue_index != new_index && sk &&
-				rcu_access_pointer(sk->sk_dst_cache))
-			sk_tx_queue_set(sk, new_index);
-#endif
-
-		queue_index = new_index;
-	}
-
-	return queue_index;
-}
-
-#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_NDO_SELECT_QUEUE_FALLBACK)
-u16 efx_select_queue(struct net_device *dev, struct sk_buff *skb,
-		     void *accel_priv __always_unused,
-		     select_queue_fallback_t fallback)
-{
-	if (!sxps_enabled)
-		return fallback(dev, skb);
-	return efx_select_queue_int(dev, skb);
-}
-#else
-#if defined(EFX_HAVE_NDO_SELECT_QUEUE_ACCEL_PRIV)
-u16 efx_select_queue(struct net_device *dev, struct sk_buff *skb,
-		     void *accel_priv __always_unused)
-#else
-u16 efx_select_queue(struct net_device *dev, struct sk_buff *skb)
-#endif
-{
-#if defined(EFX_HAVE_NETDEV_PICK_TX)
-	if (!sxps_enabled)
-		return __netdev_pick_tx(dev, skb);
-#endif
-	return efx_select_queue_int(dev, skb);
-}
-#endif
-#endif
 
 static struct efx_tx_buffer *efx_tx_map_chunk(struct efx_tx_queue *tx_queue,
 					      dma_addr_t dma_addr,
@@ -1316,10 +858,6 @@ int efx_enqueue_skb(struct efx_tx_queue *tx_queue, struct sk_buff *skb)
 			goto err;
 	}
 
-#if defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_SARFS)
-	efx_sarfs_skb(tx_queue->efx, tx_queue, skb);
-#endif
-
 	/* Update BQL */
 	netdev_tx_sent_queue(tx_queue->core_txq, skb_len);
 
@@ -1375,17 +913,24 @@ err:
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_XDP_TX)
 /* Transmit a packet from an XDP buffer
  *
- * Returns 0 on success, error code otherwise.
+ * Returns number of packets sent on success, error code otherwise.
  * Runs in NAPI context, either in our poll (for XDP TX) or a different NIC
  * (for XDP redirect).
  */
-int efx_xdp_tx_buffer(struct efx_nic *efx, struct xdp_buff *xdp)
+int efx_xdp_tx_buffers(struct efx_nic *efx, int n, struct xdp_frame **xdpfs,
+		       bool flush)
 {
 	struct efx_tx_buffer *tx_buffer;
 	struct efx_tx_queue *tx_queue;
+	struct xdp_frame *xdpf;
+#if defined(EFX_NOT_UPSTREAM)
+	unsigned int total = 0;
+#endif
 	dma_addr_t dma_addr;
 	unsigned int len;
+	int space;
 	int cpu;
+	int i;
 
 	cpu = raw_smp_processor_id();
 
@@ -1397,37 +942,60 @@ int efx_xdp_tx_buffer(struct efx_nic *efx, struct xdp_buff *xdp)
 	if (unlikely(!tx_queue))
 		return -EINVAL;
 
-	/* Check for space. We should never need multiple descriptors. */
-	if (!((tx_queue->insert_count + 1 - tx_queue->read_count) &
-	      tx_queue->ptr_mask))
-		return -ENOSPC;
+	if (n && xdpfs) {
+		/* Check for available space. We should never need multiple
+		 * descriptors per frame. */
+		space = efx->txq_entries +
+			tx_queue->read_count - tx_queue->insert_count;
+		n = min(n, space);
 
-	/* We're pretty likely to want a descriptor to do this tx. */
-	prefetchw(__efx_tx_queue_get_insert_buffer(tx_queue));
+		for (i = 0; i < n; i++) {
+			xdpf = xdpfs[i];
 
-	/* Map for DMA. */
-	len = xdp->data_end - xdp->data;
-	dma_addr = dma_map_single(&efx->pci_dev->dev, xdp->data, len,
-				  DMA_TO_DEVICE);
-	if (dma_mapping_error(&efx->pci_dev->dev, dma_addr))
-		return -EIO;
+			/* We'll want a descriptor for this tx. */
+			prefetchw(__efx_tx_queue_get_insert_buffer(tx_queue));
 
-	/*  Create descriptor and set up fields for unmapping DMA. */
-	tx_buffer = efx_tx_map_chunk(tx_queue, dma_addr, len);
-	tx_buffer->buf = xdp->data;
-	tx_buffer->flags = EFX_TX_BUF_XDP | EFX_TX_BUF_MAP_SINGLE;
-	tx_buffer->dma_offset = 0;
-	tx_buffer->unmap_len = len;
-
-	/* Pass to hardware. */
-	efx_nic_push_buffers(tx_queue);
-
-	tx_queue->tx_packets++;
-#if defined(EFX_NOT_UPSTREAM)
-	tx_queue->tx_bytes += len;
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_XDP_FRAME_API)
+			len = xdpf->len;
+#else
+			len = xdpf->data_end - xdpf->data;
 #endif
 
-	return 0;
+			/* Map for DMA. */
+			dma_addr = dma_map_single(&efx->pci_dev->dev,
+						  xdpf->data, len,
+						  DMA_TO_DEVICE);
+			if (dma_mapping_error(&efx->pci_dev->dev, dma_addr))
+				return -EIO;
+
+			/*  Create descriptor and set up for unmapping DMA. */
+			tx_buffer = efx_tx_map_chunk(tx_queue, dma_addr, len);
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_XDP_FRAME_API)
+			tx_buffer->xdpf = xdpf;
+#else
+			tx_buffer->buf = xdpf->data;
+#endif
+			tx_buffer->flags = EFX_TX_BUF_XDP |
+					   EFX_TX_BUF_MAP_SINGLE;
+			tx_buffer->dma_offset = 0;
+			tx_buffer->unmap_len = len;
+
+#if defined(EFX_NOT_UPSTREAM)
+			total += len;
+#endif
+		}
+	}
+
+	/* Pass to hardware. */
+	if (flush)
+		efx_nic_push_buffers(tx_queue);
+
+	tx_queue->tx_packets += n;
+#if defined(EFX_NOT_UPSTREAM)
+	tx_queue->tx_bytes += total;
+#endif
+
+	return n;
 }
 #endif
 
@@ -1540,7 +1108,7 @@ void efx_init_tx_queue_core_txq(struct efx_tx_queue *tx_queue)
 static void efx_xmit_done_check_empty(struct efx_tx_queue *tx_queue)
 {
 	if ((int)(tx_queue->read_count - tx_queue->old_write_count) >= 0) {
-		tx_queue->old_write_count = ACCESS_ONCE(tx_queue->write_count);
+		tx_queue->old_write_count = READ_ONCE(tx_queue->write_count);
 		if (tx_queue->read_count == tx_queue->old_write_count) {
 			smp_mb();
 			tx_queue->empty_read_count =

@@ -21,7 +21,7 @@
 #include <ci/efch/op_types.h>
 #include "char_internal.h"
 
-#include <driver/linux_net/driverlink_api.h>
+#include <ci/driver/driverlink_api.h>
 
 
 static int

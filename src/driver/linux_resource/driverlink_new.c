@@ -48,21 +48,7 @@
 
 #include "linux_resource_internal.h"
 
-/* We depend on rx_channel_count being available for
- * EFX_DRIVERLINK_API_VERSION=22, also we need vi_stride
- * and vi_shift values, so requesting minor version 5.
- */
-#define EFX_DRIVERLINK_API_VERSION_MINOR 0
-
-#include <driver/linux_net/driverlink_api.h>
-
-/* When driverlink API version is updated we'll need to select a
- * different MINOR version.  Put this here to make sure we
- * remember. 
- */
-#if EFX_DRIVERLINK_API_VERSION != 23
-#error "EFX_DRIVERLINK_API_VERSION_MINOR needs updating"
-#endif
+#include <ci/driver/driverlink_api.h>
 
 #include "efrm_internal.h"
 #include "kernel_compat.h"
@@ -101,17 +87,13 @@ efrm_dl_event(struct efx_dl_device *efx_dev, void *p_event, int budget);
 
 static struct efx_dl_driver efrm_dl_driver = {
 	.name = "resource",
-#if EFX_DRIVERLINK_API_VERSION >= 7
 	.priority = EFX_DL_EV_HIGH,
-#endif
-#if EFX_DRIVERLINK_API_VERSION >= 8
 	.flags = EFX_DL_DRIVER_CHECKS_FALCON_RX_USR_BUF_SIZE
 #if EFX_DRIVERLINK_API_VERSION > 22 || (EFX_DRIVERLINK_API_VERSION == 22 && \
                                         EFX_DRIVERLINK_API_VERSION_MINOR > 4)
 		 | EFX_DL_DRIVER_CHECKS_MEDFORD2_VI_STRIDE
 #endif
 		 ,
-#endif
 	.probe = efrm_dl_probe,
 	.remove = efrm_dl_remove,
 	.reset_suspend = efrm_dl_reset_suspend,
@@ -127,21 +109,14 @@ init_vi_resource_dimensions(struct vi_resource_dimensions *rd,
 			    const struct efx_dl_ef10_resources *ef10_res)
 {
 	if (ef10_res != NULL) {
-#if EFX_DRIVERLINK_API_VERSION >= 9
 		rd->vi_min = ef10_res->vi_min;
 		rd->vi_lim = ef10_res->vi_lim;
-#if EFX_DRIVERLINK_API_VERSION > 22 || (EFX_DRIVERLINK_API_VERSION == 22 && \
-					EFX_DRIVERLINK_API_VERSION_MINOR > 0)
-		/* Pre-driverlink-22.1 we only had access to
-		 * rss_channel_count - the number of rss channels the
-		 * net driver is using.  It now also exposes
-		 * rx_channel_count which is how many there are
-		 * available in total to use 
+		/* rss_channel_count is the number of rss channels the net
+		 * driver is using.  The net driver also exposes
+		 * rx_channel_count which is how many there are available in
+		 * total to use.
 		 */
 		rd->rss_channel_count = ef10_res->rx_channel_count;
-#else
-		rd->rss_channel_count = ef10_res->rss_channel_count;
-#endif
 		rd->vi_base = ef10_res->vi_base;
 #if EFX_DRIVERLINK_API_VERSION > 22 || (EFX_DRIVERLINK_API_VERSION == 22 && \
 					EFX_DRIVERLINK_API_VERSION_MINOR > 2)
@@ -165,10 +140,7 @@ init_vi_resource_dimensions(struct vi_resource_dimensions *rd,
 		EFRM_TRACE("Using VI range %d+(%d-%d)<<%d bar %d ws 0x%x", rd->vi_base,
 			   rd->vi_min, rd->vi_lim, rd->vi_shift,
 			   rd->mem_bar, rd->vi_stride);
-#endif
-#if EFX_DRIVERLINK_API_VERSION >= 18
 		rd->vport_id = ef10_res->vport_id;
-#endif
 	}
 	else {
 		rd->evq_timer_min = falcon_res->evq_timer_min;
@@ -186,17 +158,9 @@ init_vi_resource_dimensions(struct vi_resource_dimensions *rd,
 		EFRM_ASSERT(rd->evq_timer_lim > rd->evq_timer_min);
 		rd->evq_timer_lim--;
 		rd->non_irq_evq = rd->evq_timer_lim;
-		
-#if EFX_DRIVERLINK_API_VERSION > 22 || (EFX_DRIVERLINK_API_VERSION == 22 && \
-					EFX_DRIVERLINK_API_VERSION_MINOR > 1)
+
 		/* See comment above for EF10 equivalent code */
 		rd->rss_channel_count = falcon_res->rx_channel_count;
-#else
-		if (falcon_res->flags & EFX_DL_FALCON_HAVE_RSS_CHANNEL_COUNT)
-			rd->rss_channel_count = falcon_res->rss_channel_count;
-		else
-			rd->rss_channel_count = 1;
-#endif
 	}
 	if (sriov_res != NULL) {
 		rd->vf_vi_base = sriov_res->vi_base;
@@ -230,7 +194,6 @@ efrm_dl_probe(struct efx_dl_device *efrm_dev,
 
 	efrm_dev->priv = NULL;
 
-#if EFX_DRIVERLINK_API_VERSION >= 8
 	efx_dl_for_each_device_info_matching(dev_info, EFX_DL_FALCON_RESOURCES,
 					     struct efx_dl_falcon_resources,
 					     hdr, falcon_res) {
@@ -242,9 +205,7 @@ efrm_dl_probe(struct efx_dl_device *efrm_dev,
 			return -1;
 		}
 	}
-#endif
 
-#if EFX_DRIVERLINK_API_VERSION >= 9
 	efx_dl_search_device_info(dev_info, EFX_DL_EF10_RESOURCES,
 				  struct efx_dl_ef10_resources,
 				  hdr, ef10_res);
@@ -256,9 +217,7 @@ efrm_dl_probe(struct efx_dl_device *efrm_dev,
 		 * hash_prefix as zero
 		 */
 	}
-	else
-#endif
-	{
+	else {
 		/* Try looking for Falcon resource */
 		efx_dl_search_device_info(dev_info, EFX_DL_FALCON_RESOURCES,
 					  struct efx_dl_falcon_resources,
@@ -278,9 +237,7 @@ efrm_dl_probe(struct efx_dl_device *efrm_dev,
 			return -EINVAL;
 		}
 
-#if EFX_DRIVERLINK_API_VERSION >= 8
 		rx_usr_buf_size = falcon_res->rx_usr_buf_size;
-#endif
 
 		if (falcon_res->flags & EFX_DL_FALCON_ONLOAD_UNSUPPORTED)
 			probe_flags |= NIC_FLAG_ONLOAD_UNSUPPORTED;
@@ -366,9 +323,7 @@ static void efrm_dl_reset_suspend(struct efx_dl_device *efrm_dev)
 static void efrm_dl_reset_resume(struct efx_dl_device *efrm_dev, int ok)
 {
 	struct efhw_nic *nic = efrm_dev->priv;
-#if EFX_DRIVERLINK_API_VERSION >= 9
 	struct efrm_nic *efrm_nic = efrm_nic(nic);
-#endif
 
 	EFRM_NOTICE("%s: ok=%d", __func__, ok);
 
@@ -377,7 +332,6 @@ static void efrm_dl_reset_resume(struct efx_dl_device *efrm_dev, int ok)
 	 * them. */
 	efrm_driverlink_resume(efrm_nic);
 
-#if EFX_DRIVERLINK_API_VERSION >= 9
 	/* VI base may have changed on EF10 hardware */
 	if (nic->devtype.arch == EFHW_ARCH_EF10) {
 		struct efx_dl_ef10_resources *ef10_res = NULL;
@@ -395,14 +349,12 @@ static void efrm_dl_reset_resume(struct efx_dl_device *efrm_dev, int ok)
 				   ef10_res->vi_base);
 			nic->vi_base = ef10_res->vi_base;
 		}
-#if EFX_DRIVERLINK_API_VERSION >= 18
 		if( nic->vport_id != ef10_res->vport_id ) {
 			EFRM_TRACE("%s: vport_id changed from %d to %d\n",
 				   __FUNCTION__, nic->vport_id, 
 				   ef10_res->vport_id);
 			nic->vport_id = ef10_res->vport_id;
 		}
-#endif
 #if EFX_DRIVERLINK_API_VERSION > 22 || (EFX_DRIVERLINK_API_VERSION == 22 && \
 					EFX_DRIVERLINK_API_VERSION_MINOR > 2)
 		if( nic->vi_shift != ef10_res->vi_shift ) {
@@ -428,7 +380,6 @@ static void efrm_dl_reset_resume(struct efx_dl_device *efrm_dev, int ok)
 		}
 #endif
 	}
-#endif
 
 	/* Remove record on que initialization from before a reset
 	 * No hardware operation will be performed */
@@ -502,7 +453,7 @@ void efrm_driverlink_resume(struct efrm_nic* nic)
 
 unsigned efrm_driverlink_generation(struct efrm_nic* nic)
 {
-	return ACCESS_ONCE(nic->driverlink_generation);
+	return READ_ONCE(nic->driverlink_generation);
 }
 
 

@@ -343,10 +343,10 @@ static inline void ef10_pio_push(ef_vi* vi, ef_vi_txq_state* qs)
    */
   qs->added++;
 
-  /* Ensure earlier writes via WC complete and the descriptor is written to
-   * mem before the doorbell is sent.
+  /* Ensure that the descriptor writes and doorbell go out in order.  There is
+   * no need for wmb_wc() here as that was done after the PIO write.
    */
-  wmb_wc();
+  wmb();
   ef10_ef_vi_transmit_push(vi);
 }
 

@@ -34,7 +34,7 @@
 #    --define "build_profile <profile>"
 
 
-%define pkgversion 201805
+%define pkgversion 201805-u1
 
 %{!?kernel:  %{expand: %%define kernel %%(uname -r)}}
 %{!?target_cpu:  %{expand: %%define target_cpu %{_host_cpu}}}

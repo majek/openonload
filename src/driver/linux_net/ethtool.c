@@ -227,31 +227,6 @@ static int efx_ethtool_set_settings(struct net_device *net_dev,
 	struct efx_nic *efx = netdev_priv(net_dev);
 	int rc;
 
-
-#ifdef EFX_NOT_UPSTREAM
-	/* Older versions of ethtool have the following short-comings:
-	 *  - They don't understand 10G.
-	 *  - They have no "advertising" field to allow someone to
-	 *    control the speeds supported by a non-autoneg PHY.
-	 * Support these versions by allowing the user to use "autoneg on"
-	 * to revert the advertised capabilities to the default set, even
-	 * on a PHY that doesn't support autoneg.
-	 *
-	 * The user can override this behaviour when using "ethtool advertise"
-	 * on ethtool-6 by including ADVERTISED_Autoneg = 0x40.
-	 */
-	if (ecmd->advertising != (u32)efx->link_advertising[0]
-	    && ecmd->autoneg && !(ecmd->advertising & ADVERTISED_Autoneg)) {
-		if (ecmd->advertising ==
-		    (ADVERTISED_100baseT_Full | ADVERTISED_100baseT_Half |
-		     ADVERTISED_10baseT_Full | ADVERTISED_10baseT_Half |
-		     ADVERTISED_1000baseT_Full | ADVERTISED_1000baseT_Half))
-			ecmd->advertising = ecmd->supported;
-		if (ecmd->autoneg && !(ecmd->supported & SUPPORTED_Autoneg))
-			ecmd->autoneg = 0;
-	}
-#endif
-
 	/* GMAC does not support 1000Mbps HD */
 	if ((ethtool_cmd_speed(ecmd) == SPEED_1000) &&
 	    (ecmd->duplex != DUPLEX_FULL)) {
@@ -2150,8 +2125,8 @@ void efx_ethtool_get_channels(struct net_device *net_dev,
 	channels->tx_count = efx->n_tx_channels - channels->combined_count;
 
 	/* count up 'other' channels */
-	channels->max_other = 0;
-	channels->other_count = 0;
+	channels->max_other = efx->n_xdp_channels;
+	channels->other_count = efx->n_xdp_channels;
 	for (i = 0; i < EFX_MAX_EXTRA_CHANNELS; i++) {
 		if (!efx->extra_channel_type[i])
 			continue;

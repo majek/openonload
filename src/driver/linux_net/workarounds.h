@@ -58,7 +58,4 @@
 #define EFX_EF10_WORKAROUND_61265(efx)					\
 	((struct efx_ef10_nic_data *)efx->nic_data)->workaround_61265
 
-/* Check for safe pacer bypass */
-#define EFX_EF10_WORKAROUND_66678(efx)	0
-
 #endif /* EFX_WORKAROUNDS_H */
