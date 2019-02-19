@@ -42,14 +42,10 @@ function usage()
 
 function generate_kompat_symbols() {
     echo "
-EFX_HAVE_VLAN_NETWORK_HEADER_BUG	kver	<	2.6.27
-EFX_USE_NET_DEVICE_LAST_RX		kver	<	2.6.29
-EFX_USE_NET_DEVICE_TRANS_START		kver	<	2.6.31
-EFX_HAVE_PARAM_BOOL_INT			kver	<	2.6.31
 EFX_HAVE_MTD_TABLE			kver	<	2.6.35
 EFX_HAVE_VMALLOC_REG_DUMP_BUF		kver	>=	2.6.37
 EFX_USE_ETHTOOL_OP_GET_LINK		kver	>=	2.6.38
-EFX_HAVE_OLD_IP_FAST_CSUM		custom
+EFX_WANT_NDO_POLL_CONTROLLER		kver	<	4.19
 EFX_NEED_ROOT_DEVICE_REGISTER		nsymbol root_device_register	include/linux/device.h
 EFX_HAVE_GRO				custom
 EFX_NEED_GRO_RESULT_T			nsymbol	gro_result_t		include/linux/netdevice.h
@@ -156,7 +152,6 @@ EFX_HAVE_PCI_NUM_VF			export	pci_num_vf		include/linux/pci.h	drivers/pci/iov.c
 EFX_HAVE_SRIOV_CONFIGURE                member  struct_pci_driver       sriov_configure        include/linux/pci.h
 EFX_HAVE_PCI_DRIVER_RH                  member  struct_pci_driver_rh    sriov_configure        include/linux/pci.h
 EFX_HAVE_PHYSFN                         member  struct_pci_dev          physfn                 include/linux/pci.h
-EFX_HAVE_NET_DEVICE_OPS			symbol	net_device_ops		include/linux/netdevice.h
 EFX_HAVE_NET_DEVICE_OPS_EXTENDED	symbol	net_device_ops_extended	include/linux/netdevice.h
 EFX_HAVE_NDO_SET_VF_MAC 		member	struct_net_device_ops	ndo_set_vf_mac		include/linux/netdevice.h
 EFX_HAVE_NDO_SET_VF_VLAN_PROTO		memtype	struct_net_device_ops	ndo_set_vf_vlan		include/linux/netdevice.h	int (*)(struct net_device *, int, u16, u8, __be16)
@@ -187,6 +182,7 @@ EFX_NEED_LIST_FIRST_ENTRY		nsymbol	list_first_entry	include/linux/list.h
 EFX_NEED_TIMESPEC_ADD_NS		nsymbol	timespec_add_ns		include/linux/time.h	include/linux/time32.h
 EFX_NEED_NS_TO_TIMESPEC			nexport ns_to_timespec		include/linux/time.h	kernel/time.c
 EFX_HAVE_TIMESPEC64			symbol	timespec64		include/linux/time64.h	include/linux/time.h
+EFX_NEED_KTIME_GET_REAL_TS64		nsymbol	ktime_get_real_ts64	include/linux/timekeeping.h	include/linux/ktime.h
 EFX_HAVE_FDTABLE_FULL_ACCESSORS		symbol	__set_close_on_exec	include/linux/fdtable.h
 EFX_HAVE_FDTABLE_PARTIAL_ACCESSORS	symbol	fd_is_open		include/linux/fdtable.h
 EFX_HAVE_FDTABLE_H			file				include/linux/fdtable.h
@@ -221,7 +217,6 @@ EFX_HAVE_OLD_ETHTOOL_RXFH_INDIR		custom
 EFX_NEED_ETHTOOL_RXFH_INDIR_DEFAULT	nsymbol	ethtool_rxfh_indir_default	include/linux/ethtool.h
 EFX_NEED_IS_COMPAT_TASK			custom
 EFX_NEED_COMPAT_U64			nsymbol	compat_u64		include/asm/compat.h arch/$SRCARCH/include/asm/compat.h include/asm-$SRCARCH/compat.h
-EFX_USE_IRQ_SET_AFFINITY_HINT		symbol	irq_set_affinity_hint	include/linux/interrupt.h
 EFX_HAVE_IRQ_NOTIFIERS			symbol  irq_affinity_notify	include/linux/interrupt.h
 EFX_HAVE_GSO_MAX_SEGS			member	struct_net_device	gso_max_segs		include/linux/netdevice.h
 EFX_NEED_BYTE_QUEUE_LIMITS		nsymbol	netdev_tx_sent_queue	include/linux/netdevice.h
@@ -288,7 +283,6 @@ EFX_HAVE_NETFILTER_INDIRECT_SKB		memtype	struct_nf_hook_ops	hook	include/linux/n
 EFX_HAVE_NFPROTO_CONSTANTS		symbol	NFPROTO_NUMPROTO	include/linux/netfilter.h
 EFX_HAVE_FDTABLE			symbol	files_fdtable		include/linux/file.h include/linux/fdtable.h
 EFX_HAVE_REMAP_PFN_RANGE		symbol	remap_pfn_range		include/linux/mm.h
-EFX_NEED_PCI_VPD_LRDT			nsymbol PCI_VPD_LRDT		include/linux/pci.h
 EFX_HAVE___REGISTER_CHRDEV		symbol __register_chrdev	include/linux/fs.h
 
 EFX_NEED_PCI_ENABLE_MSIX_RANGE          nsymbol pci_enable_msix_range include/linux/pci.h
@@ -356,6 +350,7 @@ EFX_NEED_VOID_SKB_PUT	nsymtype	skb_pub	include/linux/skbuff.h	void *skb_put(stru
 EFX_HAVE_ETHTOOL_FCS	symbol	NETIF_F_RXALL	include/linux/netdev_features.h
 EFX_HAVE_ETHTOOL_LINKSETTINGS	symbol	ethtool_link_ksettings	include/linux/ethtool.h
 EFX_HAVE_LINK_MODE_25_50_100	symbol	ETHTOOL_LINK_MODE_25000baseCR_Full_BIT	include/uapi/linux/ethtool.h
+EFX_HAVE_LINK_MODE_FEC_BITS	symbol	ETHTOOL_LINK_MODE_FEC_BASER_BIT	include/uapi/linux/ethtool.h
 EFX_HAVE_NETDEV_EXT_MTU_LIMITS	member	struct_net_device_extended	max_mtu	include/linux/netdevice.h
 EFX_HAVE_NDO_EXT_CHANGE_MTU	memtype	struct_net_device_ops_extended	ndo_change_mtu	include/linux/netdevice.h	int (*)(struct net_device *, int)
 EFX_HAVE_ETHTOOL_FECPARAM	member	struct_ethtool_ops	get_fecparam	include/linux/ethtool.h
@@ -728,15 +723,6 @@ function read_define()
 
 ######################################################################
 # Implementation for more tricky types
-
-function do_EFX_HAVE_OLD_IP_FAST_CSUM()
-{
-    # ip_fast_csum takes (unsigned char*) in older kernels
-    local source="
-#include <asm/checksum.h>
-void test(const void *iph) { ip_fast_csum(iph, 20); }"
-    defer_test_compile neg "$source"
-}
 
 function do_EFX_HAVE_MTD_DIRECT_ACCESS()
 {

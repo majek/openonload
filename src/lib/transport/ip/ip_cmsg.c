@@ -301,10 +301,10 @@ void ci_ip_cmsg_recv(ci_netif* ni, ci_udp_state* us, const ci_ip_pkt_fmt *pkt,
     ip_cmsg_recv_tos(pkt, &cmsg_state);
 
   if( flags & CI_IP_CMSG_TIMESTAMPNS )
-    ip_cmsg_recv_timestampns(ni, pkt->pf.udp.rx_stamp, &cmsg_state);
+    ip_cmsg_recv_timestampns(ni, pkt->tstamp_frc, &cmsg_state);
   else /* SO_TIMESTAMP gets ignored when SO_TIMESTAMPNS one is set */
     if( flags & CI_IP_CMSG_TIMESTAMP )
-      ip_cmsg_recv_timestamp(ni, pkt->pf.udp.rx_stamp, &cmsg_state);
+      ip_cmsg_recv_timestamp(ni, pkt->tstamp_frc, &cmsg_state);
 
 #if CI_CFG_TIMESTAMPING
   if( flags & CI_IP_CMSG_TIMESTAMPING ) {
@@ -317,7 +317,7 @@ void ci_ip_cmsg_recv(ci_netif* ni, ci_udp_state* us, const ci_ip_pkt_fmt *pkt,
       rx_hw_stamp.tv_nsec = pkt->pf.udp.rx_hw_stamp.tv_nsec;
       if( ! (rx_hw_stamp.tv_nsec & CI_IP_PKT_HW_STAMP_FLAG_IN_SYNC) )
           flags &= ~ONLOAD_SOF_TIMESTAMPING_SYS_HARDWARE;
-      ip_cmsg_recv_timestamping(ni, pkt->pf.udp.rx_stamp, &rx_hw_stamp,
+      ip_cmsg_recv_timestamping(ni, pkt->tstamp_frc, &rx_hw_stamp,
                                 flags, &cmsg_state);
     }
   }

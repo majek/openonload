@@ -88,7 +88,7 @@ static int ci_udp_sys_getsockname( ci_fd_t sock, citp_socket* ep )
   union ci_sockaddr_u sa_u;
 
   ci_assert(ep);
-#if CI_CFG_FAKE_IPV6
+#if CI_CFG_FAKE_IPV6 || CI_CFG_IPV6
   ci_assert(ep->s->domain == AF_INET || ep->s->domain == AF_INET6);
 #else
   ci_assert(ep->s->domain == AF_INET);
@@ -114,19 +114,8 @@ static int ci_udp_sys_getsockname( ci_fd_t sock, citp_socket* ep )
     return -1;
   }
 
-#if CI_CFG_FAKE_IPV6
-  if( ep->s->domain == AF_INET ) {
-    ci_udp_set_laddr( ep, ci_get_ip4_addr(sa_u.sa.sa_family, &sa_u.sa), 
-                      sa_u.sin.sin_port );
-  }
-  else {
-    ci_udp_set_laddr( ep, ci_get_ip4_addr(sa_u.sa.sa_family, &sa_u.sa), 
-                      sa_u.sin6.sin6_port );
-  }
-#else
-  ci_udp_set_laddr( ep, ci_get_ip4_addr(sa_u.sa.sa_family, &sa_u.sa), 
-                    sa_u.sin.sin_port );
-#endif
+  ci_udp_set_laddr(ep, ci_get_addr(&sa_u.sa), ci_get_port(&sa_u.sa));
+
   return 0;
 }
 
@@ -225,6 +214,18 @@ int ci_udp_should_handover(citp_socket* ep, const struct sockaddr* addr,
   return 1;
 }
 
+
+#if CI_CFG_IPV6
+static int ci_udp_maybe_ipv6(ci_udp_state* us, const struct sockaddr* addr)
+{
+  if(us->s.domain == PF_INET6 && (!ci_tcp_ipv6_is_ipv4(addr) ||
+      ci_tcp_ipv6_is_addr_any(addr)))
+    return 1;
+  return 0;
+}
+#endif
+
+
 /* Conclude the EP's binding.  This function is abstracted from the
  * main bind code to allow implicit binds that occur when sendto() is
  * called on an OS socket.  [lport] and CI_SIN(addr)->sin_port do not
@@ -233,20 +234,33 @@ static int ci_udp_bind_conclude(citp_socket* ep, const struct sockaddr* addr,
                                 ci_uint16 lport )
 {
   ci_udp_state* us;
-  ci_uint32 addr_be32;
+  ci_addr_t laddr;
   int rc;
 
   CHECK_UEP(ep);
   ci_assert(addr != NULL);
 
+  us = SOCK_TO_UDP(ep->s);
+
+#if CI_CFG_IPV6
+  if( ci_udp_maybe_ipv6(us, addr) ) {
+    ci_init_ipcache_ip6_hdr(&us->s);
+    ci_udp_set_laddr(ep, ci_get_addr(addr), lport);
+
+    /* FIXME: This is a hack for IPv6 to get it working for now.
+       This should be fixed in future to provide generic code for both
+       IPv4 and IPv6. */
+    return ci_udp_set_filters(ep, SOCK_TO_UDP(ep->s));
+  }
+#endif
+
   if( ci_udp_should_handover(ep, addr, lport) )
     goto handover;
 
-  addr_be32 = ci_get_ip4_addr(ep->s->domain, addr);
+  laddr = ci_get_addr(addr);
+  ci_udp_set_laddr(ep, laddr, lport);
 
-  ci_udp_set_laddr(ep, addr_be32, lport);
-  us = SOCK_TO_UDP(ep->s);
-  if( addr_be32 != 0 && !CI_IP_IS_MULTICAST(addr_be32) )
+  if( laddr.ip4 != 0 && !CI_IP_IS_MULTICAST(laddr.ip4) )
     us->s.cp.sock_cp_flags &=~ OO_SCP_UDP_WILD;
   /* reset any rx/tx that have taken place already */
   UDP_CLR_FLAG(us, CI_UDPF_EF_SEND);
@@ -386,15 +400,12 @@ int ci_udp_bind(citp_socket* ep, ci_fd_t fd, const struct sockaddr* addr,
 }
 
 
-static void ci_udp_set_raddr(ci_udp_state* us, unsigned raddr_be32,
+static void ci_udp_set_raddr(ci_udp_state* us, ci_addr_t addr,
                              int rport_be16)
 {
   ci_ip_cache_invalidate(&us->s.pkt);
-  udp_raddr_be32(us) = raddr_be32;
-  udp_rport_be16(us) = (ci_uint16) rport_be16; 
-  us->s.pkt.dport_be16 = (ci_uint16) rport_be16;
+  ci_sock_set_raddr(&us->s, addr, rport_be16);
 }
-
 
 # define IS_DISCONNECTING(sin)  ( (sin)->sin_family == AF_UNSPEC )
 
@@ -409,7 +420,9 @@ ci_udp_disconnect(citp_socket* ep, ci_udp_state* us, ci_fd_t os_sock)
               FNS_PRI_ARGS(ep->netif, ep->s), errno));
     return rc;
   }
-  ci_udp_set_raddr(us, 0, 0);
+
+  ci_udp_set_raddr(us, addr_any, 0);
+
   /* TODO: We shouldn't really clear then set here; instead we should
    * insert wildcard filters before removing the full-match ones.  ie. The
    * reverse of what we do in connect().  But probably not worth worrying
@@ -445,7 +458,7 @@ int ci_udp_connect_conclude(citp_socket* ep, ci_fd_t fd,
                             socklen_t addrlen, ci_fd_t os_sock)
 {
   const struct sockaddr_in* serv_sin = (const struct sockaddr_in*) serv_addr;
-  ci_uint32 dst_be32;
+  ci_addr_t dst;
   ci_udp_state* us = SOCK_TO_UDP(ep->s);
   int onloadable;
   int rc = 0;
@@ -460,24 +473,41 @@ int ci_udp_connect_conclude(citp_socket* ep, ci_fd_t fd,
     rc = ci_udp_disconnect(ep, us, os_sock);
     goto out;
   }
-#if CI_CFG_FAKE_IPV6
+
+#if CI_CFG_FAKE_IPV6 && !CI_CFG_IPV6
   if( us->s.domain == PF_INET6 && !ci_tcp_ipv6_is_ipv4(serv_addr) ) {
     LOG_UC(log(FNT_FMT "HANDOVER not IPv4", FNT_PRI_ARGS(ep->netif, us)));
     goto handover;
   }
 #endif
 
-  dst_be32 = ci_get_ip4_addr(serv_sin->sin_family, serv_addr);
+#if CI_CFG_IPV6
+  if( ci_udp_maybe_ipv6(us, serv_addr) && !ipcache_is_ipv6(us->s.pkt) )
+    ci_init_ipcache_ip6_hdr(&us->s);
+#endif
+
+  dst = ci_get_addr(serv_addr);
+
   if( (rc = ci_udp_sys_getsockname(os_sock, ep)) != 0 ) {
-    LOG_E(log(FNT_FMT "ERROR: (%s:%d) sys_getsockname failed (%d)",
-              FNT_PRI_ARGS(ep->netif, us), ip_addr_str(dst_be32),
+    LOG_E(log(FNT_FMT "ERROR: (" IPX_PORT_FMT ") sys_getsockname failed (%d)",
+              FNT_PRI_ARGS(ep->netif, us), IPX_ARG(AF_IP(dst)),
               CI_BSWAP_BE16(serv_sin->sin_port), errno));
     goto out;
   }
 
   us->s.cp.sock_cp_flags &=~ OO_SCP_UDP_WILD;
-  ci_udp_set_raddr(us, dst_be32, serv_sin->sin_port);
+
+  ci_udp_set_raddr(us, dst, serv_sin->sin_port);
   cicp_user_retrieve(ep->netif, &us->s.pkt, &us->s.cp);
+
+#if CI_CFG_IPV6
+  if( ipcache_is_ipv6(us->s.pkt) ) {
+    /* FIXME: This is a hack for IPv6 to get it working for now.
+       This should be fixed in future to provide generic code for both
+       IPv4 and IPv6. */
+    return ci_udp_set_filters(ep, SOCK_TO_UDP(ep->s));
+  }
+#endif
 
   switch( us->s.pkt.status ) {
   case retrrc_success:
@@ -487,26 +517,26 @@ int ci_udp_connect_conclude(citp_socket* ep, ci_fd_t fd,
   default:
     onloadable = 0;
     if( NI_OPTS(ep->netif).udp_connect_handover ) {
-      LOG_UC(log(FNT_FMT "HANDOVER %s:%d", FNT_PRI_ARGS(ep->netif, us),
-                 ip_addr_str(dst_be32), CI_BSWAP_BE16(serv_sin->sin_port)));
+      LOG_UC(log(FNT_FMT "HANDOVER " IPX_PORT_FMT, FNT_PRI_ARGS(ep->netif, us),
+                 IPX_ARG(AF_IP(dst)), CI_BSWAP_BE16(serv_sin->sin_port)));
       goto handover;
     }
     break;
   }
 
-  if( dst_be32 == INADDR_ANY_BE32 || serv_sin->sin_port == 0 ) {
-    LOG_UC(log(FNT_FMT "%s:%d - route via OS socket",
-               FNT_PRI_ARGS(ep->netif, us), ip_addr_str(dst_be32),
+  if( dst.ip4 == INADDR_ANY_BE32 || serv_sin->sin_port == 0 ) {
+    LOG_UC(log(FNT_FMT IPX_PORT_FMT " - route via OS socket",
+               FNT_PRI_ARGS(ep->netif, us), IPX_ARG(AF_IP(dst)),
                CI_BSWAP_BE16(serv_sin->sin_port)));
     ci_udp_clr_filters(ep);
     return 0;
   }
-  if( CI_IP_IS_LOOPBACK(dst_be32) ) {
+  if( CI_IP_IS_LOOPBACK(dst.ip4) ) {
     /* After connecting via loopback it is not possible to connect anywhere
      * else.
      */
-    LOG_UC(log(FNT_FMT "HANDOVER %s:%d", FNT_PRI_ARGS(ep->netif, us),
-               ip_addr_str(dst_be32), CI_BSWAP_BE16(serv_sin->sin_port)));
+    LOG_UC(log(FNT_FMT "HANDOVER " IPX_PORT_FMT, FNT_PRI_ARGS(ep->netif, us),
+               IPX_ARG(AF_IP(dst)), CI_BSWAP_BE16(serv_sin->sin_port)));
     goto handover;
   }
 
@@ -538,8 +568,8 @@ int ci_udp_connect_conclude(citp_socket* ep, ci_fd_t fd,
        * stack.  Might be worth having a runtime option to choose whether
        * or not to handover in such cases.
        */
-      LOG_U(log(FNT_FMT "ERROR: (%s:%d) ci_udp_set_filters failed (%d)",
-                FNT_PRI_ARGS(ep->netif, us), ip_addr_str(dst_be32),
+      LOG_U(log(FNT_FMT "ERROR: (" IPX_PORT_FMT ") ci_udp_set_filters failed (%d)",
+                FNT_PRI_ARGS(ep->netif, us), IPX_ARG(AF_IP(dst)),
                 CI_BSWAP_BE16(serv_sin->sin_port), rc));
       CITP_STATS_NETIF(++ep->netif->state->stats.udp_connect_no_filter);
       goto out;
@@ -705,8 +735,8 @@ int ci_udp_getpeername(citp_socket*ep, struct sockaddr* name, socklen_t* namelen
   } else if( name == NULL || namelen == NULL ) {
     RET_WITH_ERRNO(EFAULT);
   } else {
-    ci_addr_to_user(name, namelen, ep->s->domain, 
-                    udp_rport_be16(us), udp_raddr_be32(us));
+    ci_addr_to_user(name, namelen, AF_INET, ep->s->domain, 
+                    udp_rport_be16(us), &udp_raddr_be32(us));
     return 0;
   }
 }

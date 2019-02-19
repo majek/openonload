@@ -178,8 +178,10 @@ ci_inline void ci_netif_dmaq_and_vi_for_pkt(ci_netif* ni, ci_ip_pkt_fmt* pkt,
     (pkt)->flags |= CI_PKT_FLAG_TX_PENDING;                             \
     ++(ni)->state->nic[(pkt)->intf_i].tx_dmaq_insert_seq;               \
     (ni)->state->nic[(pkt)->intf_i].tx_bytes_added+=TX_PKT_LEN(pkt);    \
-    if( oo_tcpdump_check(ni, pkt, (pkt)->intf_i) )                      \
+    if( oo_tcpdump_check(ni, pkt, (pkt)->intf_i) ) {                    \
+      ci_frc64(&((pkt)->tstamp_frc));                                   \
       oo_tcpdump_dump_pkt(ni, pkt);                                     \
+    }                                                                   \
   } while(0)
 
 

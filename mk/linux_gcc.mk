@@ -60,7 +60,21 @@ ifdef W_NO_UNUSED_RESULT
 cwarnings += -Wno-unused-result
 endif
 
+ifdef W_NO_STRING_TRUNCATION
+cwarnings += -Wno-stringop-truncation -Wno-format-truncation
+endif
+
 cxxwarnings	:= $(warnerror) -Wall -Wundef -Wpointer-arith
+
+ifdef W_IMPLICIT_FALLTHROUGH
+cwarnings += -Wimplicit-fallthrough=2
+cxxwarnings += -Wimplicit-fallthrough=5
+endif
+
+ifdef W_NO_IGNORED_ATTRIBUTES
+cwarnings += -Wno-ignored-attributes
+cxxwarnings += -Wno-ignored-attributes
+endif
 
 MMAKE_CFLAGS	+= $(MMAKE_CARCH) $(cwarnings)
 MMAKE_CXXFLAGS	+= $(MMAKE_CARCH) $(cxxwarnings)

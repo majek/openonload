@@ -45,12 +45,14 @@
 
 #include <ci/efrm/nic_table.h>
 #include <ci/driver/efab/hardware.h>
+#include <ci/driver/driverlink_api.h>
 #include <ci/efrm/vi_resource_manager.h>
 #include <ci/efrm/private.h>
 #include <ci/efrm/pd.h>
 #include <ci/efrm/buffer_table.h>
 #include <ci/efrm/vf_resource.h>
 #include <ci/efrm/vf_resource_private.h>
+#include <ci/efrm/efrm_filter.h>
 #include <ci/efhw/ef10.h>
 #include <ci/efhw/nic.h>
 #include <ci/tools/utils.h>
@@ -64,8 +66,11 @@
 
 #define OWNER_ID_ALLOC_FAIL      -1
 
+#if EFX_DRIVERLINK_API_VERSION < 25
 #define EFRM_PD_VPORT_ID_NONE    -1
-
+#else
+#define EFRM_PD_VPORT_ID_NONE    0 /* following driverlink handle */
+#endif
 
 struct efrm_pd {
 	struct efrm_resource rs;
@@ -89,11 +94,15 @@ struct efrm_pd {
 	 * mapped in should meet. */
 	int min_nic_order;
 
+#if EFX_DRIVERLINK_API_VERSION < 25
 	/* Identifies the virtual port we're using on the adapter.  This
 	 * typically comes from driverlink (via efhw_nic.vport_id) but a PD
 	 * can have its own unique vport.
 	 */
 	unsigned vport_id;
+#else
+	u16 vport_handle; /* vport handle from driverlink */
+#endif
 
 	/* stack_id required for self-traffic suppression during hw
 	 * multicast loopback */
@@ -327,8 +336,12 @@ int efrm_pd_alloc(struct efrm_pd **pd_out, struct efrm_client *client_opt,
 
 	pd->os_data = efrm_pd_os_stats_ctor(pd);
 	pd->min_nic_order = 0;
-	pd->vport_id = EFRM_PD_VPORT_ID_NONE;
 
+#if EFX_DRIVERLINK_API_VERSION < 25
+	pd->vport_id = EFRM_PD_VPORT_ID_NONE;
+#else
+	pd->vport_handle = EFRM_PD_VPORT_ID_NONE;
+#endif
 	mutex_init(&pd->remap_lock);
 	if (flags & EFRM_PD_ALLOC_FLAG_HW_LOOPBACK) {
 		if ((rc = efrm_pd_stack_id_alloc(pd)) != 0) {
@@ -365,8 +378,12 @@ void efrm_pd_free(struct efrm_pd *pd)
 
 	efrm_pd_os_stats_dtor(pd, pd->os_data);
 
-	if (pd->vport_id != EFRM_PD_VPORT_ID_NONE)
+	if (efrm_pd_has_vport(pd))
+#if EFX_DRIVERLINK_API_VERSION < 25
 		ef10_vport_free(pd->rs.rs_client->nic, pd->vport_id);
+#else
+		efrm_vport_free(pd->rs.rs_client, pd->vport_handle);
+#endif
 
 	efrm_pd_stack_id_free(pd);
 
@@ -470,6 +487,7 @@ int efrm_pd_share_dma_mapping(struct efrm_pd *pd, struct efrm_pd *pd1)
 EXPORT_SYMBOL(efrm_pd_share_dma_mapping);
 
 
+#if EFX_DRIVERLINK_API_VERSION < 25
 int
 efrm_pd_has_vport(struct efrm_pd *pd)
 {
@@ -503,6 +521,40 @@ efrm_pd_vport_alloc(struct efrm_pd *pd, int vlan_id)
 	return rc;
 }
 EXPORT_SYMBOL(efrm_pd_vport_alloc);
+
+#else
+
+int
+efrm_pd_has_vport(struct efrm_pd *pd)
+{
+	return pd->vport_handle != EFRM_PD_VPORT_ID_NONE;
+}
+EXPORT_SYMBOL(efrm_pd_has_vport);
+
+
+unsigned
+efrm_pd_get_vport_id(struct efrm_pd *pd)
+{
+	return pd->vport_handle;
+}
+EXPORT_SYMBOL(efrm_pd_get_vport_id);
+
+
+int
+efrm_pd_vport_alloc(struct efrm_pd *pd, int vlan_id)
+{
+	u16 vport_handle;
+	int rc;
+
+	if (pd->vport_handle != EFRM_PD_VPORT_ID_NONE)
+		return -EBUSY;
+	rc = efrm_vport_alloc(pd->rs.rs_client, vlan_id, &vport_handle);
+	if (rc == 0)
+		pd->vport_handle = vport_handle;
+	return rc;
+}
+EXPORT_SYMBOL(efrm_pd_vport_alloc);
+#endif
 
 /**********************************************************************/
 

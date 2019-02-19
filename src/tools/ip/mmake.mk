@@ -1,6 +1,7 @@
 APPS	:= onload_stackdump \
            onload_tcpdump.bin \
-           onload_fuser
+           onload_fuser \
+           onload_metrics_record
 
 ifdef OFE_TREE
 APPS	+= onload_fe
@@ -26,6 +27,7 @@ TARGETS	:= $(APPS:%=$(AppPattern))
 onload_stackdump:= $(patsubst %,$(AppPattern),onload_stackdump)
 onload_tcpdump.bin := $(patsubst %,$(AppPattern),onload_tcpdump.bin)
 onload_fuser	:= $(patsubst %,$(AppPattern),onload_fuser)
+onload_metrics_record	:= $(patsubst %,$(AppPattern),onload_metrics_record)
 pio_buddy_test	:= $(patsubst %,$(AppPattern),pio_buddy_test)
 ifdef OFE_TREE
 onload_fe	:= $(patsubst %,$(AppPattern),onload_fe)
@@ -63,6 +65,9 @@ $(onload_tcpdump.bin): tcpdump_bin.o libstack.o $(MMAKE_LIB_DEPS)
 	(libs="$(MMAKE_LIBS) $(MMAKE_LIBS_LIBPCAP)"; $(MMakeLinkCApp))
 
 $(onload_fuser): fuser.o $(MMAKE_LIB_DEPS)
+	(libs="$(MMAKE_LIBS)"; $(MMakeLinkCApp))
+
+$(onload_metrics_record): onload_metrics_record.o libstack.o $(MMAKE_LIB_DEPS)
 	(libs="$(MMAKE_LIBS)"; $(MMakeLinkCApp))
 
 $(pio_buddy_test): pio_buddy_test.o libstack.o $(MMAKE_LIB_DEPS)

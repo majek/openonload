@@ -195,6 +195,8 @@ OO_STAT("We came to release the lock and some sockets had deferred work onto "
         ci_uint32, unlock_slow_socket_list, count)
 OO_STAT("We came to release the lock and we needed to enable interrupts.",
         ci_uint32, unlock_slow_need_prime, count)
+OO_STAT("We primed interrupts at user level when releasing the stack lock.",
+        ci_uint32, unlock_slow_prime_ul, count)
 OO_STAT("We came to release the lock and we needed to wake some other "
         "threads up.  (e.g. data it was waiting for is now available, or to "
         "give it a chance to take the lock.)",
@@ -286,12 +288,29 @@ OO_STAT("Number of slots occupied in software-filter hash table.",
 OO_STAT("Number of retransmit timeouts, across all TCP sockets that stack "
         "has had.",
         ci_uint32, tcp_rtos, count)
+#if CI_CFG_TAIL_DROP_PROBE
+OO_STAT("Number of tail-drop probes sent from retransmit queue.",
+        ci_uint32, tail_drop_probe_retrans, count)
+OO_STAT("Number of tail-drop probes sent from send queue.",
+        ci_uint32, tail_drop_probe_sendq, count)
+OO_STAT("Number of tail-drop probes that were probably unnecessary.",
+        ci_uint32, tail_drop_probe_unnecessary, count)
+OO_STAT("Number of tail-drop probes that probably recovered loss.",
+        ci_uint32, tail_drop_probe_success, count)
+#endif
 OO_STAT("Number of times a connection has been reset while in accept queue; "
         "not yet a fully-connected socket.",
         ci_uint32, rst_recv_acceptq, count)
 OO_STAT("Number of times a connection has been reset while in the listen "
         "queue; not yet a fully-connected socket.",
         ci_uint32, rst_recv_synrecv, count)
+OO_STAT("Number of RST packets destined to a socket in SYN-RECEIVED state "
+        "that were rejected due to PAWS checking fails.",
+        ci_uint32, rst_recv_synrecv_paws_rejected, count)
+OO_STAT("Number of MacOS X style RST packets: after FIN, with the same "
+        "sequence number as that FIN.  Such packets are accepted despite "
+        "having \"unacceptable\" sequence numbers.",
+        ci_uint32, rst_recv_after_fin, count)
 OO_STAT("Number of connections reset with data still in the receive queue, "
         "waiting for the local application to consume it.",
         ci_uint32, rst_recv_has_recvq, count)
@@ -361,16 +380,23 @@ OO_STAT("We got a packet, but we didn't have a socket to match, and we do "
         "not not have permission to forward it to the kernel (see "
         "inject_kernel_gid onload module parameter).",
         ci_uint32, no_match_dropped, count)
+OO_STAT("We got a packet, but we didn't have a socket to match, but we "
+        "have a matching ACTIVE_WILD endpoint "
+        "(see EF_TCP_SHARED_LOCAL_PORTS enviroment variable).",
+        ci_uint32, no_match_in_active_wild, count)
 
 
 OO_STAT("Number of unacceptable (out of range) ACKs received.",
         ci_uint32, unacceptable_acks, count)
 OO_STAT("Socket is closing, but we are unable to send the FIN (usually this "
-        "means EF_MAX_TX_PACKETS has been reached) so we silently drop the "
-        "socket instead.  The next reply from the remote end will then go to "
-        "the kernel, which, not expecting it, will send a RST indicating the "
-        "socket is gone.",
-        ci_uint32, tcp_drop_cant_fin, count)
+        "means EF_MAX_TX_PACKETS has been reached) so we defer this FIN.",
+        ci_uint32, tcp_cant_fin, count)
+OO_STAT("We failed to send FIN at least ones, but have finally managed to "
+        "send the FIN out.",
+        ci_uint32, tcp_cant_fin_resolved, count)
+OO_STAT("We failed to send FIN many times, and finally had dropped the "
+        "connection in a way similar to retransmit timeout.",
+        ci_uint32, tcp_cant_fin_dropped, count)
 OO_STAT("Socket is in SYNRECV; and send retransmits the SYN-ACK handshake.",
         ci_uint32, synrecv_retransmits, count)
 OO_STAT("Number of sends from SYNRECV state that failed.  (Out of memory?)",
@@ -446,11 +472,18 @@ OO_STAT("Number of RX discards (frame truncated).  i.e. space was available "
         ci_uint32, rx_discard_trunc, count)
 OO_STAT("Number of RX discards (buffer ownership error).",
         ci_uint32, rx_discard_rights, count)
+OO_STAT("Number of RX discards ( bad IP options;"
+        "ie. Source routing or unknown option) ",
+        ci_uint32, rx_discard_ip_options_bad, count)
 OO_STAT("Number of RX discards (other).",
         ci_uint32, rx_discard_other, count)
 OO_STAT("Number of times we have refilled RX ring from recv() path.  This is "
         "a short-cut path used when in a low-memory situation.",
         ci_uint32, rx_refill_recv, count)
+OO_STAT("Number of RX packets detected from the future.",
+        ci_uint32, rx_future, count)
+OO_STAT("Number of RX packets detected from the future which did not complete.",
+        ci_uint32, rx_future_rollback, count)
 OO_STAT("Number of times we've tried to free packet-buffers by reaping.  "
         "Indicates that we are very close to a memory_pressure situation.",
         ci_uint32, reap_rx_limited, count)
@@ -702,3 +735,82 @@ OO_STAT("Number of times that we rejected a shared local port for any reason.",
 OO_STAT("Number of times that we rejected a shared local port because it "
         "would have resulted in a duplicate four-tuple.",
         ci_uint32, tcp_shared_local_ports_skipped_in_use, count)
+
+OO_STAT("Number of active-opened connections which require at least one "
+        "SYN retransmission.",
+        ci_uint32, tcp_syn_retrans_once, count)
+OO_STAT("Number of active-opened connections which require at least two "
+        "SYN retransmissions.",
+        ci_uint32, tcp_syn_retrans_twice, count)
+OO_STAT("Number of active-opened connections which require at least three "
+        "SYN retransmissions.",
+        ci_uint32, tcp_syn_retrans_thrice, count)
+OO_STAT("Number of SYN retransmissions.",
+        ci_uint32, tcp_syn_retrans, count)
+OO_STAT("Number of active-opened connections which failed because of "
+        "retransmit timeout.",
+        ci_uint32, tcp_connect_timedout, count)
+OO_STAT("Number of active-opened connections dropped with ETIMEDOUT error.  "
+        "In the most cases, this value is equal to tcp_connect_timedout.",
+        ci_uint32, tcp_connect_etimedout, count)
+OO_STAT("Number of active-opened connections which failed because of "
+        "ICMP packet received.",
+        ci_uint32, tcp_connect_icmp, count)
+OO_STAT("Number of active-opened connections dropped with EHOSTUNREACH error.  "
+        "In the most cases, this occurrences are also counted "
+        "in tcp_connect_icmp.",
+        ci_uint32, tcp_connect_ehostunreach, count)
+OO_STAT("Number of active-opened connections dropped with ENETUNREACH error.  "
+        "This condition can come from tcp_connect_icmp, or from route "
+        "table misconfiguration.",
+        ci_uint32, tcp_connect_enetunreach, count)
+OO_STAT("Number of active-opened connections dropped with ENETDOWN error.  "
+        "This condition can come from various misconfigurations.",
+        ci_uint32, tcp_connect_enetdown, count)
+OO_STAT("Number of active-opened connections which failed because of "
+        "RST packet received.",
+        ci_uint32, tcp_connect_refused, count)
+OO_STAT("Number of active-opened connections dropped with ECONNREFUSED error.  "
+        "In most cases, this value is equal to tcp_connect_refused.",
+        ci_uint32, tcp_connect_econnrefused, count)
+
+OO_STAT("Number of active-opened connections dropped with an error "
+        "not mentioned above.",
+        ci_uint32, tcp_connect_eother, count)
+OO_STAT("The last errno value in use when tcp_connect_eother counter "
+        "was incremented for the last time.",
+        ci_uint32, tcp_connect_eother_val, val)
+
+OO_STAT("Number of times that an active-open connection has used an initial "
+        "sequence number from the table of remembered sequence numbers.",
+        ci_uint32, tcp_seq_table_hits, val)
+OO_STAT("Number of insertions made to sequence number table.",
+        ci_uint32, tcp_seq_table_insertions, val)
+OO_STAT("Number of sequence-table entries expired by ISN clock.",
+        ci_uint32, tcp_seq_table_expiries, val)
+OO_STAT("Number of sequence-table entries purged as oldest in set.",
+        ci_uint32, tcp_seq_table_purgations, val)
+OO_STAT("Number of all steps made across entries in all insertions.",
+        ci_uint32, tcp_seq_table_steps, val)
+OO_STAT("Number of insertions with short expiry.",
+        ci_uint32, tcp_seq_table_short_expiry, val)
+OO_STAT("Number of times there was no need to create entry.",
+        ci_uint32, tcp_seq_table_avoided, val)
+
+OO_STAT("Number of times the urgent flag was ignored in received packets",
+        ci_uint32, tcp_urgent_ignore_rx, count)
+OO_STAT("Number of times the urgent flag was processed in received packets",
+        ci_uint32, tcp_urgent_process_rx, count)
+
+OO_STAT("Number of packets received that contained IP options.",
+        ci_uint32, ip_options, count)
+
+#if CI_CFG_TCPDUMP
+OO_STAT("Number of packets not captured by onload_tcpdump because the "
+        "dump ring was full.",
+        ci_uint32, tcpdump_missed, count)
+#endif
+
+OO_STAT("Lowest recorded number of free packets",
+        ci_uint32, lowest_free_pkts, val)
+

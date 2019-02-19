@@ -1065,8 +1065,8 @@ static int ci_tcp_sendmsg_enqueue(ci_netif* ni, ci_tcp_state* ts,
 }
 
 
-static void ci_tcp_tx_prequeue(ci_netif* ni, ci_tcp_state* ts,
-                               ci_ip_pkt_fmt* fill_list)
+static int/*bool*/
+ci_tcp_tx_prequeue(ci_netif* ni, ci_tcp_state* ts, ci_ip_pkt_fmt* fill_list)
 {
   ci_ip_pkt_fmt* next;
   ci_ip_pkt_fmt* pkt;
@@ -1081,31 +1081,50 @@ static void ci_tcp_tx_prequeue(ci_netif* ni, ci_tcp_state* ts,
     pkt = next;
   }
 
+  /* Put [fill_list] onto the prequeue. */
+  do {
+    oo_pkt_p next = ts->send_prequeue;
+    if( next == OO_PP_ID_INVALID )
+      return 0;
+    OO_PP_INIT(ni, pkt->next, next);
+  }
+  while( ci_cas32_fail(&ts->send_prequeue,
+                       OO_PP_ID(pkt->next), OO_PKT_ID(fill_list)) );
+
   oo_atomic_add(&ts->send_prequeue_in, n_pkts);
   ++ts->stats.tx_defer;
 
-  /* Put [fill_list] onto the prequeue. */
-  do
-    OO_PP_INIT(ni, pkt->next, ts->send_prequeue);
-  while( ci_cas32_fail(&ts->send_prequeue,
-                       OO_PP_ID(pkt->next), OO_PKT_ID(fill_list)) );
+  return 1;
 }
 
 
-static void ci_tcp_sendmsg_enqueue_prequeue(ci_netif* ni, ci_tcp_state* ts)
+void ci_tcp_sendmsg_enqueue_prequeue(ci_netif* ni, ci_tcp_state* ts,
+                                     int/*bool*/ shutdown)
 {
   ci_ip_pkt_queue* sendq = &ts->send;
   ci_ip_pkt_fmt* pkt;
   oo_pkt_p tail_pkt_id, send_list, id;
   int bytes, n_pkts = 0;
   ci_assert(ci_netif_is_locked(ni));
-  ci_assert(ts->s.tx_errno == 0);
+
+  if( ts->send_prequeue == OO_PP_ID_INVALID )
+    return;
+  if( shutdown )
+    ci_assert_nequal(ts->s.tx_errno, 0);
 
   /* Grab the contents of the prequeue atomically. */
   do {
     OO_PP_INIT(ni, id, ts->send_prequeue);
-    if( OO_PP_IS_NULL(id) )  return;
-  } while( ci_cas32_fail(&ts->send_prequeue, OO_PP_ID(id), OO_PP_ID_NULL) );
+    if( OO_PP_IS_NULL(id) && ! shutdown)
+      return;
+  } while( ci_cas32_fail(&ts->send_prequeue, OO_PP_ID(id),
+                         shutdown ? OO_PP_ID_INVALID : OO_PP_ID_NULL) );
+
+  /* Exit if nothing to send */
+  if( OO_PP_IS_NULL(id) ) {
+    ci_assert(shutdown);
+    return;
+  }
 
   /* Reverse the list. */
   send_list = OO_PP_NULL;
@@ -1225,8 +1244,8 @@ static void ci_netif_pkt_convert_ptr_list(ci_netif* ni, ci_ip_pkt_fmt* list)
 }
 
 
-void ci_tcp_tx_free_prequeue(ci_netif* ni, ci_tcp_state* ts,
-                             int netif_locked)
+static void
+ci_tcp_tx_free_prequeue(ci_netif* ni, ci_tcp_state* ts, int netif_locked)
 {
   int n_pkts;
   oo_pkt_p id;
@@ -1250,17 +1269,10 @@ void ci_tcp_sendmsg_enqueue_prequeue_deferred(ci_netif* ni, ci_tcp_state* ts)
 {
   ci_assert(ci_netif_is_locked(ni));
 
-  if( ts->s.tx_errno ) {
-    /* Ooops... an error occurred while the lock holder had the lock.  So
-    ** we shouldn't attempt to do anything, except free up the prequeue.
-    */
-    LOG_TC(log("%s: "NTS_FMT "tx_errno=%d", __FUNCTION__,
-               NTS_PRI_ARGS(ni, ts), ts->s.tx_errno));
-    ci_tcp_tx_free_prequeue(ni, ts, 1/*netif_locked*/);
-    return;
-  }
-
-  ci_tcp_sendmsg_enqueue_prequeue(ni, ts);
+  /* Even if CI_SOCK_AFLAG_NEED_SHUT_WR is set, we do not pass
+   * shutdown=TRUE here.  ci_tcp_perform_deferred_socket_work() will shut
+   * the socket down later. */
+  ci_tcp_sendmsg_enqueue_prequeue(ni, ts, 0);
 
   if( ci_tcp_sendq_not_empty(ts) ) {
     /* This is called in the context of unlocking the netif, so it is highly
@@ -1838,6 +1850,28 @@ ci_tcp_send_fill_pkts(ci_netif* ni, ci_tcp_state* ts,
   while( --n_pkts > 0 );
 }
 
+/* returns 1 if data sent, 0 otherwise */
+static int ci_tcp_send_via_prequeue(ci_netif* ni, ci_tcp_state* ts,
+                                    struct tcp_send_info* sinf)
+{
+  int queued = ci_tcp_tx_prequeue(ni, ts, sinf->fill_list);
+
+  if( ! queued ) {
+    /* ! queued means that the connection was shut down, or closed, or
+     * reset.  Whoever does it, must
+     * - set so_error (if needed) and tx_errno first,
+     * - close prequeue next.
+     */
+    ci_assert_nequal(ts->s.tx_errno, 0);
+    return 0;
+  }
+
+  ci_assert_equal(sinf->stack_locked, 0);
+  if( ci_netif_lock_or_defer_work(ni, &ts->s.b) )
+    sinf->stack_locked = 1;
+  return 1;
+}
+
 /* It is not safe to call this function while holding the netif lock */
 /*! \todo Confirm */
 int ci_tcp_sendmsg(ci_netif* ni, ci_tcp_state* ts,
@@ -1885,6 +1919,14 @@ int ci_tcp_sendmsg(ci_netif* ni, ci_tcp_state* ts,
     goto not_synchronised;
 
  is_sync:
+
+  /* We want (int)(2 * MAX_SEND_CHUNK) > 0
+   * sinf.total_unsent is `int` and must be positive, otherwise our code
+   * misbehaves.  We call `total_unsent += addition;`.  To guarantee that
+   * the result is positive we require both parts to be within
+   * MAX_SEND_CHUNK.
+   */
+#define MAX_SEND_CHUNK 0x3fffffff
   for( m = 0; m < (int)iovlen; ++m ) {
     sinf.total_unsent += CI_IOVEC_LEN(&iov[m]);
     if(CI_UNLIKELY( CI_IOVEC_BASE(&iov[m]) == NULL &&
@@ -1894,7 +1936,13 @@ int ci_tcp_sendmsg(ci_netif* ni, ci_tcp_state* ts,
       if( sinf.set_errno ) CI_SET_ERROR(sinf.rc, sinf.rc);
       return sinf.rc;
     }
+    if( CI_IOVEC_LEN(&iov[m]) > MAX_SEND_CHUNK ||
+        sinf.total_unsent > MAX_SEND_CHUNK ) {
+      sinf.total_unsent = MAX_SEND_CHUNK;
+      break;
+    }
   }
+#undef MAX_SEND_CHUNK
 
   if(CI_UNLIKELY( ! sinf.total_unsent ||
                   (flags & (MSG_OOB | ONLOAD_MSG_WARM)) ))
@@ -1920,8 +1968,10 @@ int ci_tcp_sendmsg(ci_netif* ni, ci_tcp_state* ts,
     /* This is last packet.  Set PUSH flag and MORE flag.
      * Send it if possible. */
     pkt = PKT_CHK(ni, sendq->tail);
-    if( (flags & MSG_MORE) || (ts->s.s_aflags & CI_SOCK_AFLAG_CORK) )
+    if( (flags & MSG_MORE) || (ts->s.s_aflags & CI_SOCK_AFLAG_CORK) ) {
       pkt->flags |= CI_PKT_FLAG_TX_MORE;
+      pkt->flags &=~ CI_PKT_FLAG_TX_PSH_ON_ACK;
+    }
     else {
       pkt->flags &= ~CI_PKT_FLAG_TX_MORE;
       TX_PKT_TCP(pkt)->tcp_flags |= CI_TCP_FLAG_PSH;
@@ -1979,6 +2029,7 @@ int ci_tcp_sendmsg(ci_netif* ni, ci_tcp_state* ts,
     /* Look on MSG_MORE: do not send the last packet if it is not full */
     if( (flags & MSG_MORE) || (ts->s.s_aflags & CI_SOCK_AFLAG_CORK) ) {
       sinf.pf.pkt->flags |= CI_PKT_FLAG_TX_MORE;
+      sinf.pf.pkt->flags &=~ CI_PKT_FLAG_TX_PSH_ON_ACK;
     }
 
   filled_some_pkts:
@@ -2052,24 +2103,13 @@ int ci_tcp_sendmsg(ci_netif* ni, ci_tcp_state* ts,
           sinf.fill_list->flags |= CI_PKT_FLAG_TX_PSH;
 
       /* Couldn't get the netif lock, so enqueue packets on the prequeue. */
-      ci_tcp_tx_prequeue(ni, ts, sinf.fill_list);
+      if( ! ci_tcp_send_via_prequeue(ni, ts, &sinf) ) {
+        ci_tcp_sendmsg_handle_tx_errno(ni, ts, flags, &sinf);
+        if( sinf.set_errno ) CI_SET_ERROR(sinf.rc, sinf.rc);
+        return sinf.rc;
+      }
       sinf.total_sent += sinf.fill_list_bytes;
       sinf.total_unsent -= sinf.fill_list_bytes;
-      ci_assert_equal(sinf.stack_locked, 0);
-      if( ci_netif_lock_or_defer_work(ni, &ts->s.b) ) {
-        sinf.stack_locked = 1;
-	sinf.fill_list = 0;
-	if( ts->s.tx_errno ) {
-          ci_tcp_sendmsg_handle_tx_errno(ni, ts, flags, &sinf);
-          if( sinf.set_errno ) CI_SET_ERROR(sinf.rc, sinf.rc);
-          return sinf.rc;
-        }
-	ci_tcp_sendmsg_enqueue_prequeue(ni, ts);
-	if(CI_LIKELY( ! ci_ip_queue_is_empty(sendq) )) {
-	  if( sinf.total_unsent == 0 )  ci_tcp_tx_advance_nagle(ni, ts);
-	  else  ci_tcp_tx_advance(ts, ni);
-	}
-      }
       if( sinf.total_unsent == 0 ) {
         /* Assert that there's no need to free unused packets */
         ci_assert_equal(sinf.pf.alloc_pkt, NULL);
@@ -2233,17 +2273,12 @@ int ci_tcp_zc_send(ci_netif* ni, ci_tcp_state* ts, struct onload_zc_mmsg* msg,
   ci_assert(ts->s.b.state != CI_TCP_LISTEN);
   ci_assert(msg->msg.msghdr.msg_iovlen);
 
-  if( !(ts->s.b.state & CI_TCP_STATE_SYNCHRONISED) ) {
-    msg->rc = ts->s.tx_errno ? -ts->s.tx_errno : -EPIPE;
-    return 1;
-  }
-
   sinf.rc = 0;
   sinf.stack_locked = 0;
   sinf.fill_list = 0;
   sinf.fill_list_bytes = 0;
   sinf.n_filled = 0;
-  sinf.total_sent = 0; /*< not used */
+  sinf.total_sent = 0;
   sinf.pf.alloc_pkt = NULL;
   sinf.timeout = ts->s.so.sndtimeo_msec;
 #ifndef __KERNEL__
@@ -2254,6 +2289,13 @@ int ci_tcp_zc_send(ci_netif* ni, ci_tcp_state* ts, struct onload_zc_mmsg* msg,
 #else
   sinf.tcp_send_spin = 0;
 #endif
+
+  if( !(ts->s.b.state & CI_TCP_STATE_SYNCHRONISED) &&
+      ci_tcp_sendmsg_notsynchronised(ni, ts, flags, &sinf) == -1) {
+    ci_tcp_sendmsg_handle_rc_or_tx_errno(ni, ts, flags, &sinf);
+    msg->rc = sinf.set_errno ? -sinf.rc : sinf.rc;
+    return 1;
+  }
 
   eff_mss = tcp_eff_mss(ts);
   ci_assert_le(eff_mss,
@@ -2326,12 +2368,6 @@ int ci_tcp_zc_send(ci_netif* ni, ci_tcp_state* ts, struct onload_zc_mmsg* msg,
     sinf.fill_list = pkt;
     sinf.fill_list_bytes += msg->msg.iov[j].iov_len;
 
-    /* Accumulate bytes sent for return */
-    if( j == 0 )
-      msg->rc = msg->msg.iov[j].iov_len;
-    else
-      msg->rc += msg->msg.iov[j].iov_len;
-
     ++sinf.n_filled;
     ++j;
     --sinf.sendq_credit;
@@ -2339,8 +2375,10 @@ int ci_tcp_zc_send(ci_netif* ni, ci_tcp_state* ts, struct onload_zc_mmsg* msg,
       break;
   }
 
-  if( ((flags & MSG_MORE) || (ts->s.s_aflags & CI_SOCK_AFLAG_CORK)) )
+  if( ((flags & MSG_MORE) || (ts->s.s_aflags & CI_SOCK_AFLAG_CORK)) ) {
     sinf.fill_list->flags |= CI_PKT_FLAG_TX_MORE;
+    sinf.fill_list->flags &=~ CI_PKT_FLAG_TX_PSH_ON_ACK;
+  }
 
   /* If we can grab the lock now, setup the meta-data and get sending.
    * Otherwise queue the packets for sending by the netif lock holder.
@@ -2352,6 +2390,7 @@ int ci_tcp_zc_send(ci_netif* ni, ci_tcp_state* ts, struct onload_zc_mmsg* msg,
                                           sinf.fill_list,
                                           sinf.fill_list_bytes,
                                           &ts->send);
+    sinf.total_sent += sinf.fill_list_bytes;
 
     if( (sinf.fill_list->flags & CI_PKT_FLAG_TX_MORE) )
       TX_PKT_TCP(sinf.fill_list)->tcp_flags = CI_TCP_FLAG_ACK;
@@ -2369,18 +2408,9 @@ int ci_tcp_zc_send(ci_netif* ni, ci_tcp_state* ts, struct onload_zc_mmsg* msg,
     if( !(sinf.fill_list->flags & CI_PKT_FLAG_TX_MORE) )
       sinf.fill_list->flags |= CI_PKT_FLAG_TX_PSH;
 
-    ci_tcp_tx_prequeue(ni, ts, sinf.fill_list);
-    sinf.fill_list = 0;
-
-    ci_assert_equal(sinf.stack_locked, 0);
-    if( ci_netif_lock_or_defer_work(ni, &ts->s.b) ) {
-      sinf.stack_locked = 1;
-      if( ts->s.tx_errno )
-        goto tx_errno;
-      ci_tcp_sendmsg_enqueue_prequeue(ni, ts);
-      if(CI_LIKELY( ! ci_ip_queue_is_empty(&ts->send) ))
-        ci_tcp_tx_advance_nagle(ni, ts);
-    }
+    if( ! ci_tcp_send_via_prequeue(ni, ts, &sinf) )
+      goto tx_errno;
+    sinf.total_sent += sinf.fill_list_bytes;
   }
 
   if( sinf.n_filled < msg->msg.msghdr.msg_iovlen ) {
@@ -2394,6 +2424,7 @@ int ci_tcp_zc_send(ci_netif* ni, ci_tcp_state* ts, struct onload_zc_mmsg* msg,
   }
   if( sinf.stack_locked ) 
     ci_netif_unlock(ni);
+  msg->rc = sinf.total_sent;
   return 1;
 
  send_q_full:
@@ -2407,6 +2438,7 @@ int ci_tcp_zc_send(ci_netif* ni, ci_tcp_state* ts, struct onload_zc_mmsg* msg,
       goto send_q_not_full;
   }
 
+  msg->rc = sinf.total_sent;
   if( flags & MSG_DONTWAIT ) {
     if( j == 0 )
       msg->rc = -EAGAIN;
@@ -2463,39 +2495,32 @@ int ci_tcp_zc_send(ci_netif* ni, ci_tcp_state* ts, struct onload_zc_mmsg* msg,
                                             sinf.fill_list,
                                             sinf.fill_list_bytes,
                                             &ts->send);
+      sinf.total_sent += sinf.fill_list_bytes;
       sinf.fill_list = 0;
     } 
     else {
-      if( ts->s.tx_errno )
+      if( ! ci_tcp_send_via_prequeue(ni, ts, &sinf) )
         goto tx_errno;
-
-      ci_tcp_tx_prequeue(ni, ts, sinf.fill_list);
-      sinf.fill_list = 0;
-      ci_assert_equal(sinf.stack_locked, 0);
-      if( ci_netif_lock_or_defer_work(ni, &ts->s.b) ) {
-        sinf.stack_locked = 1;
-        if( ts->s.tx_errno )
-          goto tx_errno;
-        ci_tcp_sendmsg_enqueue_prequeue(ni, ts);
-      } 
-      if(CI_LIKELY( ! ci_ip_queue_is_empty(&ts->send) ))
-        ci_tcp_tx_advance(ts, ni);
+      sinf.total_sent += sinf.fill_list_bytes;
     }
   }
 
   if( j == 0 )
     msg->rc = -EINVAL;
+  else
+    msg->rc = sinf.total_sent;
   if( sinf.stack_locked )
     ci_netif_unlock(ni);
   return 1;
 
  tx_errno:
-  /* We've potentially got stuff in the fill_list, so need to work
-   * back and undo that
+  /* Similar to ci_tcp_sendmsg_handle_tx_errno(), but
+   * - no need to free the fill_list: user owns the packets in case of
+   *   error;
+   * - there are no such thing as "unused_pkts".
    */
-  ci_tcp_sendmsg_free_fill_list(ni, ts, flags, &sinf);
-  ci_tcp_tx_free_prequeue(ni, ts, sinf.stack_locked);
-  msg->rc = -ts->s.tx_errno;
+  ci_tcp_sendmsg_handle_zero_or_tx_errno(ni, ts, flags, &sinf);
+  msg->rc = sinf.set_errno ? -sinf.rc : sinf.rc;
   if( sinf.stack_locked )
     ci_netif_unlock(ni);
   return 1;
@@ -2517,7 +2542,7 @@ static int ci_tcp_ds_get_arp(ci_netif* ni, ci_tcp_state* ts)
   if( ! ci_ip_queue_is_empty(&ts->retrans) )
     ci_tcp_retrans_one(ts, ni, PKT_CHK(ni, ts->retrans.head));
   else {
-    ci_ip_pkt_fmt* pkt = ci_netif_pkt_alloc(ni);
+    ci_ip_pkt_fmt* pkt = ci_netif_pkt_alloc(ni, 0);
     if( pkt == NULL )
       goto fail;
 
@@ -2596,10 +2621,10 @@ ci_tcp_ds_fill_headers(ci_netif* ni, ci_tcp_state* ts, unsigned flags,
   }
   ip->ip_tot_len_be16 =
       CI_BSWAP_BE16(ts->outgoing_hdrs_len + ts->eff_mss);
+  ip->ip_id_be16 = 0;
   ci_assert_equal(CI_TCP_HDR_LEN(tcp),
                   ts->outgoing_hdrs_len - sizeof(ci_tcp_hdr));
   ci_assert_equal(ip->ip_check_be16, 0);
-  ci_assert_equal(ip->ip_id_be16, 0);
   ci_assert_equal(tcp->tcp_check_be16, 0);
   ci_assert_equal(tcp->tcp_urg_ptr_be16, 0);
 
@@ -2798,6 +2823,9 @@ ci_tcp_ds_done(ci_netif* ni, ci_tcp_state* ts,
   return sinf.total_sent;
 
 send_q_full:
+  /* We can't get here easily because we check the ci_tcp_tx_send_space()
+   * in citp_tcp_ds_prepare() so testing this code path is difficult.
+   * Probably, it is possible to archieve it with MTU shrink. */
   ci_assert_equal(sinf.fill_list, NULL);
 
   if( ci_netif_may_poll(ni) && ci_netif_need_poll(ni) &&

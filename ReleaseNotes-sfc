@@ -1,6 +1,6 @@
 Solarflare 4.X Linux network driver
 ===================================
-Version:  v4.14.0.1014
+Version:  v4.15.0.1012
 
 
 Overview
@@ -16,6 +16,8 @@ adapters:
 
 - Solarflare Server Adapters:
   - Solarflare X2522 Dual Port SFP28 10/25G Adapter
+  - Solarflare X2541 Single Port QSFP28 10/25G/100G Adapter
+  - Solarflare X2542 Dual Port QSFP28 10/25G/100G Adapter
   - Solarflare SFN8522M Dual Port SFP+ Server Adapter
   - Solarflare SFN8042 Dual Port QSFP+ Server Adapter
   - Solarflare SFN8522 Dual Port SFP+ Server Adapter
@@ -40,7 +42,7 @@ adapters:
   - Solarflare SFN5812H/SFN5814H Mezzanine Adapter (for IBM BladeCenter)
   
 - Solarflare AOE Adapters:
-  - Solarflare SFA6902F SFP+ AOE Adapter
+  - Solarflare SFA7942Q QSFP+ AOE Adapter
 
 - Solarflare Performant Server Adapters:
   - Solarflare SFN5151T 10GBASE-T Server Adapter
@@ -77,7 +79,7 @@ kernel
 Installation of the driver can be confirmed by typing:
    modinfo sfc | grep version
 and checking for the line:
-   version: v4.14.0.1014
+   version: v4.15.0.1012
 
 All network interfaces available on the system can be found with:
   ifconfig -a
@@ -102,15 +104,13 @@ Linux distribution support for Solarflare Adapters
 
 This driver package is supported on:
  - RedHat Enterprise Linux		          6.7, 6.8, 6.9, 6.10
- - RedHat Enterprise Linux		          7.3, 7.4, 7.5
-   - RedHat Enterprise Linux for Realtime	  7.3, 7.4
+ - RedHat Enterprise Linux		          7.3, 7.4, 7.5, 7.6
  - SuSE Linux Enterprise Server 11                sp4
-   - SuSE Linux Enterprise RealTime Extension 11  sp4
  - SuSE Linux Enterprise Server 12                sp3
  - Canonical Ubuntu Server LTS                    14.04.5, 16.04.x, 18.04
  - Debian 8 "Jessie"                              8.10
  - Debian 9 "Stretch"                             9.4
- - Kernel.org linux kernels                       3.0 to 4.16
+ - Kernel.org linux kernels                       3.0 to 4.19
 
 
 Solarflare aims to support the current and previous major release of each
@@ -127,51 +127,44 @@ Please contact your local Solarflare support representative or email
 <support@solarflare.com>.
 
 
-Deprecation warnings
---------------------
-
-The following features are being deprecated and may not be available in future
-releases of the Solarflare linux net driver. Please check the release notes to
-see whether these features have been removed.
-
-Use of these features will currently only cause a warning message to be printed
-to the kernel console.
-
-Note that nothing has currently been changed and the full functionality remains
-in this release.
-
-SARFS:
- ~ This is a feature similar to the kernel feature ARFS (Accelerated Receive
-   Flow Steering) but implemented purely within the sfc.ko driver. All kernels
-   that this driver supports are new enough to support ARFS. Information on
-   using in-kernel ARFS is at
-   https://www.kernel.org/doc/Documentation/networking/scaling.txt or please
-   consult the Solarflare Server Adapter User's Guide [SF-103837-CD] available
-   at https://support.solarflare.com
-
-SXPS:
- ~ This is a feature similar to the kernel feature XPS (Transmit Packet
-   Steering) but implemented purely within the sfc.ko driver. All kernels that
-   this driver supports are new enough to support XPS. Information on using
-   in-kernel XPS is at
-   https://www.kernel.org/doc/Documentation/networking/scaling.txt or please
-   consult the Solarflare Server Adapter User's Guide [SF-103837-CD] available
-   at https://support.solarflare.com
-
-Proxy MCDI authorization:
- ~ This feature had been used by a proof-of-concept userland utility to vet and
-   control requests to subscribe to a multicast group from an unprivileged
-   function (e.g. a VF in a VM).
-
-Driverlink RX packet callback:
- ~ This was used for inspecting/permitting all RX packets via a driverlink
-   callback.
-
-
 Changelog
 ---------
 
-### v4.14.0.1013 -- update release for OpenOnload-201805
+### v4.15.0.1012 -- update release for OpenOnload-201811
+[General changes]
+ ~ Kernel compat fixes to support linux 4.19.
+ ~ Use irq_set_affinity_hint when backport is available in RHEL kernels.
+ ~ Calculate descriptors per SKB based off the NIC type. This can allow smaller
+   TX rings.
+
+Issue 82232:
+ ~ Previously, invalid tx ring lengths would be corrected and
+   applied when using the ethtool -G|--set-ring interface. Invalid
+   lengths will now be rejected. This also fixed an issue where the
+   uncorrected length would be reported when later using
+   ethtool -g|--show-ring.
+
+Issue 82073:
+ ~ Avoid issue if PF0 bound after PF1 when adapter has a PTP license. This has
+   been seen when using netplan on Ubuntu and could result in a panic from
+   queue_work_on() where efx_ptp_event() is also present in the stack.
+   This issue was introduced in v4.14.0.1014.
+
+Issue 77401:
+ ~ The PCI VPD is no longer used during driver load. Instead of
+   printing the part number we now show the PCI device and subsystem
+   numbers, which are registered in the public PCI ID database.
+
+### v4.14.0.1018 -- 18.2 release
+[General changes]
+ ~ Kernel compat for v4.19-rc kernels and RHEL 7.6 beta.
+
+[25/50/100G]
+ ~ Added a warning on driver load if using a 25/50/100G capable NIC
+   with a kernel that doesn't support 25/50/100. The warning text is:
+   "This NIC has link speeds that are not supported by your kernel"
+
+### v4.14.0.1014 -- update release for OpenOnload-201805
 [General changes]
  ~ Kernel compat fixes to support linux 4.18 and RHEL 6.10
  ~ Removal of obsolete kernel compat support
@@ -2082,6 +2075,40 @@ Issue 19951
 
 
 ### v3.0.5.2175 -- Update release
+
+
+Removed features
+----------------
+
+The following features were previously marked for deprecation and have now been
+removed. Please see the following descriptions for any impact and alternatives:
+
+SARFS:
+ ~ This is a feature similar to the kernel feature ARFS (Accelerated Receive
+   Flow Steering) but implemented purely within the sfc.ko driver. All kernels
+   that this driver supports are new enough to support ARFS. Information on
+   using in-kernel ARFS is at
+   https://www.kernel.org/doc/Documentation/networking/scaling.txt or please
+   consult the Solarflare Server Adapter User's Guide [SF-103837-CD] available
+   at https://support.solarflare.com
+
+SXPS:
+ ~ This is a feature similar to the kernel feature XPS (Transmit Packet
+   Steering) but implemented purely within the sfc.ko driver. All kernels that
+   this driver supports are new enough to support XPS. Information on using
+   in-kernel XPS is at
+   https://www.kernel.org/doc/Documentation/networking/scaling.txt or please
+   consult the Solarflare Server Adapter User's Guide [SF-103837-CD] available
+   at https://support.solarflare.com
+
+Proxy MCDI authorization:
+ ~ This feature had been used by a proof-of-concept userland utility to vet and
+   control requests to subscribe to a multicast group from an unprivileged
+   function (e.g. a VF in a VM).
+
+Driverlink RX packet callback:
+ ~ This was used for inspecting/permitting all RX packets via a driverlink
+   callback.
 
 
 NIC partitioning, SR-IOV and PF-IOV modes on SFN7XXX/8XXX adapters

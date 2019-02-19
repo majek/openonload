@@ -42,8 +42,8 @@ struct efx_dl_device_info;
  * is not used for binary compatibility checking, as that is done by
  * kbuild and the module loader using symbol versions.
  */
-#define EFX_DRIVERLINK_API_VERSION 24
-#define EFX_DRIVERLINK_API_VERSION_MINOR_MAX 0
+#define EFX_DRIVERLINK_API_VERSION 25
+#define EFX_DRIVERLINK_API_VERSION_MINOR_MAX 1
 
 #ifndef EFX_DRIVERLINK_API_VERSION_MINOR
 #define EFX_DRIVERLINK_API_VERSION_MINOR 0
@@ -360,7 +360,6 @@ struct efx_dl_ef10_resources {
 	unsigned int timer_quantum_ns;
 	unsigned int rss_channel_count;
 	enum efx_dl_ef10_resource_flags flags;
-	unsigned int vport_id;
 #if EFX_DRIVERLINK_API_VERSION > 22 || (EFX_DRIVERLINK_API_VERSION == 22 && EFX_DRIVERLINK_API_VERSION_MINOR > 0)
 	unsigned int rx_channel_count;
 #endif
@@ -531,14 +530,100 @@ int efx_dl_filter_redirect_rss(struct efx_dl_device *efx_dev,
 			       int filter_id, int rxq_i, u32 rss_context,
 			       int stack_id);
 
-/* See comment on efx_dl_filter_insert() about @spec->rss_context semantics */
-int efx_dl_vport_filter_insert(struct efx_dl_device *efx_dev,
-			       unsigned int vport_id,
-			       const struct efx_filter_spec *spec,
-			       u64 *filter_id_out, bool *is_exclusive_out);
-int efx_dl_vport_filter_remove(struct efx_dl_device *efx_dev,
-			       unsigned int vport_id,
-			       u64 filter_id, bool is_exclusive);
+/**
+ * efx_dl_vport_new() - allocate and configure a new vport
+ * @efx_dev: NIC on which to act
+ * @vlan: VID of VLAN to place this vport on, or %EFX_FILTER_VID_UNSPEC for none
+ * @vlan_restrict: as per corresponding flag in MCDI
+ *
+ * Returns user_id of new vport, or negative error.
+ */
+int efx_dl_vport_new(struct efx_dl_device *efx_dev, u16 vlan, bool vlan_restrict);
+/**
+ * efx_dl_vport_free() - remove an existing vport
+ * @efx_dev: NIC on which to act
+ * @port_id: user_id of vport to be removed.  Should be a value previously
+ *	returned by efx_dl_vport_new().
+ */
+int efx_dl_vport_free(struct efx_dl_device *efx_dev, u16 port_id);
+
+
+/**
+ * efx_dl_init_txq() - initialise a TXQ
+ * @efx_dev: NIC on which to act
+ * @dma_addrs: array of DMA addresses of buffer space for TX descriptors
+ * @n_dma_addrs: count of elements in @dma_addrs
+ * @vport_id: user_id of vport (returned by efx_dl_vport_new(), or 0)
+ * @stack_id: stack ID to OR into bits 23-16 of HW vport ID
+ * @owner_id: Owner ID to use if in buffer mode (zero if physical)
+ * @timestamp: flag as per MCDI
+ * @crc_mode: as per MCDI
+ * @tcp_udp_only: flag as per MCDI
+ * @tcp_csum_dis: disable TCP/UDP checksum offload
+ * @ip_csum_dis: disable IP header checksum offload
+ * @inner_tcp_csum: enable inner TCP/UDP checksum offload
+ * @inner_ip_csum: enable inner IP header checksum offload
+ * @buff_mode: flag as per MCDI
+ * @pacer_bypass: flag as per MCDI
+ * @ctpio: flag as per MCDI
+ * @ctpio_uthresh: flag as per MCDI
+ * @instance: as per MCDI
+ * @label: queue label to put in events
+ * @target_evq: the EVQ to send events to
+ * @num_entries: size of the TX ring in entries
+ *
+ * Available from API version 25.1.
+ */
+int efx_dl_init_txq(struct efx_dl_device *efx_dev, dma_addr_t *dma_addrs,
+		    int n_dma_addrs, u16 vport_id, u8 stack_id, u32 owner_id,
+		    bool timestamp, u8 crc_mode, bool tcp_udp_only,
+		    bool tcp_csum_dis, bool ip_csum_dis, bool inner_tcp_csum,
+		    bool inner_ip_csum, bool buff_mode, bool pacer_bypass,
+		    bool ctpio, bool ctpio_uthresh, u32 instance, u32 label,
+		    u32 target_evq, u32 num_entries);
+
+/**
+ * efx_dl_init_rxq() - initialise an RXQ
+ * @efx_dev: NIC on which to act
+ * @dma_addrs: array of DMA addresses of buffer space for RX descriptors
+ * @n_dma_addrs: count of elements in @dma_addrs
+ * @vport_id: user_id of vport (returned by efx_dl_vport_new(), or 0)
+ * @stack_id: stack ID to OR into bits 23-16 of HW vport ID
+ * @owner_id: Owner ID to use if in buffer mode (zero if physical)
+ * @crc_mode: as per MCDI
+ * @timestamp: flag as per MCDI
+ * @hdr_split: flag as per MCDI
+ * @buff_mode: flag as per MCDI
+ * @rx_prefix: flag as per MCDI
+ * @dma_mode: enum as per MCDI
+ * @instance: as per MCDI
+ * @label: queue label to put in events
+ * @target_evq: the EVQ to send events to
+ * @num_entries: size of the TX ring in entries
+ * @ps_buf_size: enum as per MCDI (PACKED_STREAM_BUFF_SIZE)
+ * @force_rx_merge: flag as per MCDI
+ *
+ * Available from API version 25.1.
+ */
+int efx_dl_init_rxq(struct efx_dl_device *efx_dev, dma_addr_t *dma_addrs,
+		    int n_dma_addrs, u16 vport_id, u8 stack_id, u32 owner_id,
+		    u8 crc_mode, bool timestamp, bool hdr_split, bool buff_mode,
+		    bool rx_prefix, u8 dma_mode, u32 instance, u32 label,
+		    u32 target_evq, u32 num_entries, u8 ps_buf_size,
+		    bool force_rx_merge);
+
+/**
+ * efx_dl_set_multicast_loopback_suppression() - configure multicast loopback
+ * @efx_dev: NIC on which to act
+ * @suppress: whether to suppress multicast loopback
+ * @vport_id: user_id of vport (returned by efx_dl_vport_new(), or 0)
+ * @stack_id: stack ID to OR into bits 23-16 of HW vport ID
+ *
+ * Available from API version 25.1.
+ */
+int efx_dl_set_multicast_loopback_suppression(struct efx_dl_device *efx_dev,
+					      bool suppress, u16 vport_id,
+					      u8 stack_id);
 
 
 /**

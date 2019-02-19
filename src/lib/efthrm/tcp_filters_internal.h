@@ -39,5 +39,4 @@
 #define IPPORT_FMT         IP_FMT":%d"
 #define IPPORT_ARG(ip,p)   IP_ARG(ip), FMT_PORT(p)
 
-
 #endif  /* __TCP_FILTERS_INTERNAL_H__ */

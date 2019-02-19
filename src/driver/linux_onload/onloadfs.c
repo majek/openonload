@@ -84,11 +84,7 @@ static void onload_destroy_inode(struct inode *inode)
 }
 
 
-static
-#ifdef EFRM_HAVE_D_DNAME
-const
-#endif
-struct super_operations onloadfs_ops = {
+static const struct super_operations onloadfs_ops = {
   .alloc_inode   = onload_alloc_inode,
   .destroy_inode = onload_destroy_inode,
   .statfs        = simple_statfs,
@@ -116,7 +112,6 @@ static int onloadfs_name(ci_private_t *priv, char *buffer, int buflen)
 
   if( priv->fd_type == CI_PRIV_TYPE_NETIF)
     len = snprintf(buffer, buflen, "[stack:%d]", priv->thr->id);
-#ifdef EFRM_HAVE_D_DNAME
   /* without d_dname, this is called before listen(), so
    * we have no chance to print tcpl:N:N. */
   else if( priv->fd_type == CI_PRIV_TYPE_TCP_EP && sock_id >= 0 &&
@@ -125,7 +120,6 @@ static int onloadfs_name(ci_private_t *priv, char *buffer, int buflen)
            CI_TCP_LISTEN)
     len = snprintf(buffer, buflen, "[tcpl:%d:%d]",
                    priv->thr->id, priv->sock_id);
-#endif
   else
     len = snprintf(buffer, buflen, "[%s:%d:%d]",
                    priv_type_to_str(priv->fd_type), priv->thr->id,
@@ -133,7 +127,6 @@ static int onloadfs_name(ci_private_t *priv, char *buffer, int buflen)
   buffer[buflen-1] = '\0';
   return len + 1;
 }
-#ifdef EFRM_HAVE_D_DNAME
 static char *onloadfs_dname(struct dentry *dentry, char *buffer, int buflen)
 {
   struct onload_inode *ei = container_of(dentry->d_inode,
@@ -151,38 +144,11 @@ static char *onloadfs_dname(struct dentry *dentry, char *buffer, int buflen)
   buffer += buflen - len;
   return memcpy(buffer, temp, len);
 }
-#endif
 
-#ifndef EFRM_HAVE_STRUCT_PATH
-static int onloadfs_delete_dentry(struct dentry *dentry)
-{
-#ifdef EFRM_HAVE_D_DNAME
-  /* see comments in linux/net/socket.c */
-  dentry->d_flags |= DCACHE_UNHASHED;
-  return 0;
-#else
-  return 1;
-#endif
-}
 
-#endif
-
-static
-#ifdef EFRM_HAVE_CONST_D_OP
-const
-#endif
-struct dentry_operations onloadfs_dentry_operations = {
-#ifdef EFRM_HAVE_D_DNAME
+static const struct dentry_operations onloadfs_dentry_operations = {
   .d_dname  = onloadfs_dname,
-#endif
-#ifndef EFRM_HAVE_STRUCT_PATH
-  .d_delete = onloadfs_delete_dentry,
-#endif
 };
-
-#if LINUX_VERSION_CODE == KERNEL_VERSION(2,6,37)
-#define EFRM_OLD_MOUNT_PSEUDO
-#endif
 
 #ifdef EFRM_FSTYPE_HAS_MOUNT
 static struct dentry *
@@ -190,10 +156,7 @@ onloadfs_mount(struct file_system_type *fs_type, int flags,
                const char *dev_name, void *data)
 {
   return mount_pseudo(fs_type, "onload:", &onloadfs_ops,
-#ifndef EFRM_OLD_MOUNT_PSEUDO
-                      &onloadfs_dentry_operations,
-#endif
-                      ONLOADFS_MAGIC);
+                      &onloadfs_dentry_operations, ONLOADFS_MAGIC);
 }
 #else
 static
@@ -289,21 +252,50 @@ void onloadfs_fini(void)
   kmem_cache_destroy(onload_inode_cachep);
 }
 
-#ifndef EFRM_HAVE_ALLOC_FILE
-static struct file *alloc_file(struct vfsmount *mnt, struct dentry *dentry,
-                               mode_t mode, struct file_operations *fop)
+#ifndef EFRM_HAVE_ALLOC_FILE_PSEUDO
+/* Stolen from linux-4.19.  Tab intentation is stolen.
+ * Space indented stuff is needed to work with linux<=4.18. */
+static
+struct file *alloc_file_pseudo(struct inode *inode, struct vfsmount *mnt,
+				const char *name, int flags,
+				const struct file_operations *fops)
 {
-  struct file *file = get_empty_filp();
+	struct qstr this = QSTR_INIT(name, strlen(name));
+	struct path path;
+	struct file *file;
 
-  if( file == NULL )
-    return NULL;
+#ifdef EFRM_FSTYPE_HAS_MOUNT
+	path.dentry = d_alloc_pseudo(mnt->mnt_sb, &this);
+#else
+        path.dentry = d_alloc(mnt->mnt_sb->s_root, &this);
+#endif
 
-  file->f_dentry = dentry;
-  file->f_vfsmnt = mntget(mnt);
-  file->f_mapping = dentry->d_inode->i_mapping;
-  file->f_mode = mode;
-  file->f_op = fop;
-  return file;
+	if (!path.dentry)
+		return ERR_PTR(-ENOMEM);
+
+#ifndef EFRM_FSTYPE_HAS_MOUNT
+        path.dentry->d_op = &onloadfs_dentry_operations;
+#endif
+
+        /* It is definitely unneeded for linux>=3.19,
+         * but probably needed in earlier cases. */
+        inode->i_fop = fops;
+
+	path.mnt = mntget(mnt);
+	d_instantiate(path.dentry, inode);
+        /* New alloc_file_pseudo() from linux-4.19
+         * uses flags=O_RDWR or something like this.
+         * Old alloc_file() from linux<=4.18 expects
+         * flags=FMODE_READ | FMODE_WRITE.
+         * We do not convert first to second, we always use read|write.
+         */
+        file = alloc_file(&path, FMODE_READ | FMODE_WRITE, fops);
+	if (IS_ERR(file)) {
+		ihold(inode);
+		path_put(&path);
+	}
+        file->f_flags = O_RDWR | (flags & O_NONBLOCK);
+	return file;
 }
 #endif
 
@@ -311,14 +303,6 @@ int
 onload_alloc_file(tcp_helper_resource_t *thr, oo_sp ep_id,
                   int flags, int fd_type, ci_private_t **priv_p)
 {
-  struct qstr name = { .name = "" };
-#ifdef EFRM_HAVE_STRUCT_PATH
-  struct path path;
-#define my_dentry path.dentry
-#else
-  struct dentry *dentry;
-#define my_dentry dentry
-#endif
   struct file *file;
   struct inode *inode;
   ci_private_t *priv;
@@ -351,65 +335,15 @@ onload_alloc_file(tcp_helper_resource_t *thr, oo_sp ep_id,
   priv->fd_type = fd_type;
   priv->priv_cp = NULL;
 
-#ifdef EFRM_FSTYPE_HAS_MOUNT
-#if LINUX_VERSION_CODE <= KERNEL_VERSION(2,6,37)
-  path.dentry = d_alloc(onload_mnt->mnt_sb->s_root, &name);
-  if( path.dentry != NULL )
-    path.dentry->d_op = &onloadfs_dentry_operations;
-#else
-  path.dentry = d_alloc_pseudo(onload_mnt->mnt_sb, &name);
-#endif
-#else /* EFRM_FSTYPE_HAS_MOUNT */
-#ifdef EFRM_HAVE_D_DNAME
-  my_dentry = d_alloc(onload_mnt->mnt_sb->s_root, &name);
-#else
-  {
-    char str[32];
-    name.len = onloadfs_name(&container_of(inode, struct onload_inode,
-                                           vfs_inode)->priv,
-                             str, sizeof(str));
-    name.name = str;
-    name.hash = inode->i_ino;
-    my_dentry = d_alloc(onload_mnt->mnt_sb->s_root, &name);
-  }
-#endif
-#endif /* EFRM_FSTYPE_HAS_MOUNT */
 
-  if( my_dentry == NULL ) {
+  file = alloc_file_pseudo(inode, onload_mnt, "",
+                           O_RDWR | (flags & O_NONBLOCK), fops);
+  if( IS_ERR(file) ) {
     iput(inode);
-    return -ENOMEM;
-  }
-
-#if !defined(EFRM_FSTYPE_HAS_MOUNT) || defined(EFRM_OLD_MOUNT_PSEUDO)
-  my_dentry->d_op = &onloadfs_dentry_operations;
-#if !defined(EFRM_HAVE_STRUCT_PATH) && defined(EFRM_HAVE_D_DNAME)
-  my_dentry->d_flags &= ~DCACHE_UNHASHED;
-#endif
-#endif
-  d_instantiate(my_dentry, inode);
-#ifndef EFRM_HAVE_D_DNAME
-  d_rehash(my_dentry);
-#endif
-  inode->i_fop = fops;
-
-#ifdef EFRM_HAVE_STRUCT_PATH
-  path.mnt = mntget(onload_mnt);
-  file = alloc_file(&path, FMODE_READ | FMODE_WRITE, fops);
-#else
-  file = alloc_file(onload_mnt, dentry, FMODE_READ | FMODE_WRITE, fops);
-#endif
-  if( file == NULL) {
-#ifdef EFRM_HAVE_STRUCT_PATH
-    path_put(&path);
-#else
-    dput(dentry);
-    iput(inode);
-#endif
-    return -ENFILE;
+    return PTR_ERR(file);
   }
 
   priv->_filp = file;
-  file->f_flags = O_RDWR | (flags & O_NONBLOCK);
   file->f_pos = 0;
   file->private_data = priv;
 
@@ -488,26 +422,3 @@ onloadfs_get_dev_t(ci_private_t* priv, void* arg)
   return 0;
 }
 
-/* Update the d_name of this file after handover or move. */
-void
-oo_file_moved(ci_private_t* priv)
-{
-#ifndef EFRM_HAVE_D_DNAME
-  {
-    /* tell everybody that we've changed the name.
-     * Assume the name is short (DNAME_INLINE_LEN_MIN=36). */
-    struct dentry *dentry = priv->_filp->f_dentry;
-    if( dname_external(dentry) ) {
-      /* We do not want to handle memory free/allocation,
-       * so just go out.
-       * Unlucky user gets incorrect name in /proc - it is much better
-       * than memory corruption. */
-      return;
-    }
-    d_drop(dentry);
-    dentry->d_name.len = onloadfs_name(priv, dentry->d_iname,
-                                       sizeof(dentry->d_iname));
-    d_rehash(dentry);
-  }
-#endif
-}

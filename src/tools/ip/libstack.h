@@ -85,7 +85,7 @@ typedef struct {
 
 
 /* Arguments for ops are stored here. */
-extern unsigned    arg_u[1];
+extern uint64_t    arg_u[1];
 extern const char* arg_s[2];
 
 typedef struct stack_op_s stack_op_t;

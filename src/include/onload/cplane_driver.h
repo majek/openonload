@@ -59,7 +59,6 @@ extern int oo_cp_check_version(struct ci_private_s*, void* arg);
 
 
 extern int oo_cp_get_server_pid(struct oo_cplane_handle* cp);
-extern int oo_cp_print_rsop(struct ci_private_s *priv, void *arg);
 extern int oo_cp_llap_change_notify_all(struct oo_cplane_handle* main_cp);
 extern int oo_cp_oof_sync(struct oo_cplane_handle* cp);
 

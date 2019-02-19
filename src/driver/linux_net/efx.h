@@ -31,9 +31,6 @@
 
 /* netdevice_ops */
 int efx_ioctl(struct net_device *net_dev, struct ifreq *ifr, int cmd);
-#ifdef CONFIG_NET_POLL_CONTROLLER
-void efx_netpoll(struct net_device *net_dev);
-#endif
 int efx_net_open(struct net_device *net_dev);
 int efx_net_stop(struct net_device *net_dev);
 void efx_watchdog(struct net_device *net_dev);
@@ -76,7 +73,6 @@ netdev_tx_t efx_hard_start_xmit(struct sk_buff *skb,
 int efx_enqueue_skb(struct efx_tx_queue *tx_queue, struct sk_buff *skb);
 void efx_xmit_done(struct efx_tx_queue *tx_queue, unsigned int index);
 void efx_xmit_done_single(struct efx_tx_queue *tx_queue);
-unsigned int efx_tx_max_skb_descs(struct efx_nic *efx);
 extern unsigned int efx_piobuf_size;
 extern bool separate_tx_channels;
 
@@ -102,6 +98,9 @@ static inline void efx_rx_flush_packet(struct efx_channel *channel)
 void efx_schedule_slow_fill(struct efx_rx_queue *rx_queue);
 void efx_cancel_slow_fill(struct efx_rx_queue *rx_queue);
 
+int efx_check_queue_size(struct efx_nic *efx, u32 *entries,
+			 u32 min, u32 max, bool fix);
+
 #define EFX_MAX_DMAQ_SIZE 4096UL
 #define EFX_DEFAULT_RX_DMAQ_SIZE 1024UL
 #define EFX_DEFAULT_TX_DMAQ_SIZE 1024UL
@@ -117,12 +116,9 @@ void efx_cancel_slow_fill(struct efx_rx_queue *rx_queue);
 /* Maximum number of TCP segments we support for soft-TSO */
 #define EFX_TSO_MAX_SEGS	100
 
-/* The smallest [rt]xq_entries that the driver supports.  RX minimum
- * is a bit arbitrary.  For TX, we must have space for at least 2
- * TSO skbs.
+/* The smallest rxq_entries that the driver supports. Somewhat arbitrary.
  */
 #define EFX_RXQ_MIN_ENT		16U
-#define EFX_TXQ_MIN_ENT(efx)	(2 * efx_tx_max_skb_descs(efx))
 
 /* All EF10 architecture NICs steal one bit of the DMAQ size for various
  * other purposes when counting TxQ entries, so we halve the queue size.
@@ -309,6 +305,12 @@ static inline bool efx_rss_active(struct efx_rss_context *ctx)
 	return ctx->context_id != EFX_EF10_RSS_CONTEXT_INVALID;
 }
 
+/* V-ports */
+struct efx_vport *efx_find_vport_entry(struct efx_nic *efx, u16 id);
+void efx_free_vport_entry(struct efx_vport *ctx);
+int efx_vport_add(struct efx_nic *efx, u16 vlan, bool vlan_restrict);
+int efx_vport_del(struct efx_nic *efx, u16 port_user_id);
+
 /* Channels */
 int efx_channel_dummy_op_int(struct efx_channel *channel);
 void efx_channel_dummy_op_void(struct efx_channel *channel);
@@ -320,12 +322,6 @@ int efx_reconfigure_port(struct efx_nic *efx);
 int __efx_reconfigure_port(struct efx_nic *efx);
 
 /* Ethtool support */
-#ifdef EFX_NOT_UPSTREAM
-int efx_ethtool_get_settings(struct net_device *net_dev,
-			     struct ethtool_cmd *ecmd);
-int efx_ethtool_set_settings(struct net_device *net_dev,
-			     struct ethtool_cmd *ecmd);
-#endif
 #if defined(EFX_USE_KCOMPAT) && !defined(EFX_HAVE_ETHTOOL_RESET)
 int efx_ethtool_reset(struct net_device *net_dev, u32 *flags);
 #endif
@@ -384,7 +380,6 @@ void efx_set_stats_period(struct efx_nic *efx, unsigned int period_ms);
 #ifdef EFX_NOT_UPSTREAM
 extern int efx_target_num_vis;
 #endif
-extern spinlock_t ptp_all_funcs_list_lock;
 
 void efx_stop_eventq(struct efx_channel *channel);
 void efx_start_eventq(struct efx_channel *channel);

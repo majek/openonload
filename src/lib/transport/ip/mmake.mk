@@ -7,6 +7,7 @@ LIB_SRCS	:=		\
 		netif_event.c	\
 		netif_tx.c	\
 		netif_table.c	\
+		netif_table_ip6.c	\
 		netif_pkt.c	\
 		tcp_misc.c	\
 		tcp_rx.c	\
@@ -51,6 +52,7 @@ LIB_SRCS	:=		\
 		tcp_syncookie.c	\
 		active_wild.c	\
 		l3xudp_encap.c \
+		tcp_metrics.c \
 
 ifneq ($(DRIVER),1)
 LIB_SRCS	+=		\

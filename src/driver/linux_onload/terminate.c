@@ -354,14 +354,26 @@ static void efab_exit_group(int *status_p)
   }
 }
 
-
 asmlinkage long
+#ifdef ONLOAD_SYSCALL_PTREGS
+efab_linux_trampoline_exit_group(const struct pt_regs *regs)
+#else
 efab_linux_trampoline_exit_group(int status)
+#endif
 {
+#ifdef ONLOAD_SYSCALL_PTREGS
+  int status;
+#endif
   tcp_helper_resource_t *stacks[TERMINATE_STACKS_NUM];
   ci_uint32 stacks_num = 0;
 
   efab_syscall_enter();
+#ifdef ONLOAD_SYSCALL_PTREGS
+  if( current->thread_info.status & TS_COMPAT )
+    status = regs->bx;
+  else
+    status = regs->di;
+#endif
 
   BUILD_BUG_ON(sizeof(ci_uint64) * 8 < TERMINATE_STACKS_NUM);
   stacks_num = efab_terminate_find_all_stacks(stacks, TERMINATE_STACKS_NUM);

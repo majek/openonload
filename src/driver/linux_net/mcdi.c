@@ -1836,13 +1836,14 @@ int efx_mcdi_log_ctrl(struct efx_nic *efx, bool evq, bool uart, u32 dest_evq)
 void efx_mcdi_log_puts(struct efx_nic *efx, const char *text)
 {
 	MCDI_DECLARE_BUF(inbuf, MC_CMD_PUTS_IN_LENMAX);
-	struct timespec tv;
+	struct timespec64 tv;
 	int inlen;
 
-	ktime_get_real_ts(&tv);
+	ktime_get_real_ts64(&tv);
 	inlen = snprintf(MCDI_PTR(inbuf, PUTS_IN_STRING),
 			 MC_CMD_PUTS_IN_STRING_MAXNUM,
-			 "{%ld %s}", tv.tv_sec, (text ? text : ""));
+			 "{%lld %s}", (long long int)tv.tv_sec,
+			 (text ? text : ""));
 	/* Count the NULL byte as well */
 	inlen += MC_CMD_PUTS_IN_STRING_OFST + 1;
 

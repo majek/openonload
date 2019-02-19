@@ -605,13 +605,17 @@ static int citp_ul_poll(int nfds, struct oo_ul_poll_state*__restrict__ ps)
       ps->pfds[i].revents = 0;
       continue;
     }
-    if(CI_UNLIKELY( ps->nkfds == OO_POLL_MAX_KFDS )) {
-      /* too many kernel fds */
-      ps->n_ul_ready = -1;
-      goto unlock_out;
-    }
 
-    ci_assert(ps->nkfds < OO_POLL_MAX_KFDS);
+    if( ps->nkfds == OO_POLL_KFDS_LOCAL && ps->kfds == ps->kfds_local ) {
+      ps->kfds = ci_alloc(sizeof(*ps->kfds) * (nfds - i + ps->nkfds));
+      ps->kfd_map = ci_alloc(sizeof(*ps->kfd_map) * (nfds - i + ps->nkfds));
+      if( ps->kfds == NULL || ps->kfd_map == NULL ) {
+        ps->n_ul_ready = -1;
+        goto unlock_out;
+      }
+      memcpy(ps->kfds, ps->kfds_local, sizeof(ps->kfds_local));
+      memcpy(ps->kfd_map, ps->kfd_map_local, sizeof(ps->kfd_map_local));
+    }
     ps->kfd_map[ps->nkfds] = i;
     /* ?? Could delay these two lines until we are about to do sys_poll. */
     ps->kfds[ps->nkfds].fd = fd;
@@ -662,13 +666,13 @@ int citp_ul_do_poll(struct pollfd*__restrict__ fds, nfds_t nfds,
     ps.ul_poll_spin |=
       oo_per_thread_get()->spinstate & (1 << ONLOAD_SPIN_SO_BUSY_POLL);
   }
+  ps.kfds = ps.kfds_local;
+  ps.kfd_map = ps.kfd_map_local;
 
  poll_again:
   n = citp_ul_poll(nfds, &ps);
   if(CI_UNLIKELY( n < 0 ))
     goto out_block;
-
-  ci_assert(ps.nkfds <= OO_POLL_MAX_KFDS);
 
   if( n ) {
     /* We have userlevel sockets ready.  So just need to do a non-blocking
@@ -708,8 +712,8 @@ int citp_ul_do_poll(struct pollfd*__restrict__ fds, nfds_t nfds,
           int rc;
           rc = citp_ul_pwait_spin_pre(lib_context, sigmask, &sigsaved);
           if( rc != 0 ) {
-            citp_exit_lib(lib_context, CI_FALSE);
-            return -1;
+            n = -1;
+            goto out;
           }
           sigmask_set = 1;
         }
@@ -798,6 +802,16 @@ int citp_ul_do_poll(struct pollfd*__restrict__ fds, nfds_t nfds,
   }
 
 out:
+  /* Free ps.kfd* arrays if they were allocated */
+  if( ps.kfd_map != ps.kfd_map_local ) {
+    ci_assert_nequal(ps.kfds, ps.kfds_local);
+    ci_free(ps.kfd_map);
+    ci_free(ps.kfds);
+  }
+  else {
+    ci_assert_equal(ps.kfds, ps.kfds_local);
+  }
+
   /* Exit library, and protect signals if necessary */
   if( sigmask_set ) {
     citp_ul_pwait_spin_done(lib_context, &sigsaved, &n);

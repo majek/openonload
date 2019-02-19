@@ -133,25 +133,9 @@ static stat_desc_t more_stats_fields[] = {
 #if CI_CFG_SUPPORT_STATS_COLLECTION
 
 static stat_desc_t ip_stats_fields[] = {
-#define ns(x)  stat_desc(ci_ipv4_stats_count, x, STAT_COUNT)
-  ns(in_recvs),
-  ns(in_hdr_errs),
-  ns(in_addr_errs),
-  ns(forw_dgrams),
-  ns(in_unknown_protos),
-  ns(in_discards),
-  ns(in_delivers),
-  ns(out_requests),
-  ns(out_discards),
-  ns(out_no_routes),
-  ns(reasm_timeout),
-  ns(reasm_reqds),
-  ns(reasm_oks),
-  ns(reasm_fails),
-  ns(frag_oks),
-  ns(frag_fails),
-  ns(frag_creates),
-#undef ns
+#define OO_STAT_type ci_ipv4_stats_count
+#include <ci/internal/ipv4_stats_count_def.h>
+#undef OO_STAT_type
 };
 #define N_IP_STATS_FIELDS                                       \
   (sizeof(ip_stats_fields) / sizeof(ip_stats_fields[0]))
@@ -167,12 +151,9 @@ static stat_desc_t tcp_stats_fields[] = {
 
 
 static stat_desc_t udp_stats_fields[] = {
-#define ns(x)  stat_desc(ci_udp_stats_count, x, STAT_COUNT)
-  ns(udp_in_dgrams),
-  ns(udp_no_ports),
-  ns(udp_in_errs),
-  ns(udp_out_dgrams),
-#undef ns
+#define OO_STAT_type ci_udp_stats_count
+#include <ci/internal/udp_stats_count_def.h>
+#undef OO_STAT_type
 };
 #define N_UDP_STATS_FIELDS                                      \
   (sizeof(udp_stats_fields) / sizeof(udp_stats_fields[0]))
@@ -1326,7 +1307,7 @@ static void for_each_tcp_socket(ci_netif* ni,
 ***********************************************************************
 **********************************************************************/
 
-unsigned arg_u[1];
+uint64_t arg_u[1];
 const char* arg_s[2];
 
 
@@ -1459,7 +1440,7 @@ static void stack_stats(ci_netif* ni)
   dump_stats(netif_stats_fields, N_NETIF_STATS_FIELDS, &stats, 0);
 }
 
-static void stack_describe_stats(ci_netif* ni)
+static void stack_stats_describe(ci_netif* ni)
 {
   ci_netif_stats stats = ni->state->stats;
   ci_log("-------------------- ci_netif_stats: %d ---------------------",
@@ -1490,6 +1471,15 @@ static void stack_more_stats(ci_netif* ni)
   dump_stats(more_stats_fields, N_MORE_STATS_FIELDS, &stats, 0);
 }
 
+static void stack_more_stats_describe(ci_netif* ni)
+{
+  more_stats_t stats;
+  get_more_stats(ni, &stats);
+  ci_log("-------------------- more_stats: %d -------------------------",
+         NI_ID(ni));
+  dump_stats(more_stats_fields, N_MORE_STATS_FIELDS, &stats, 1);
+}
+
 #if CI_CFG_SUPPORT_STATS_COLLECTION
 
 static void stack_ip_stats(ci_netif* ni)
@@ -1500,12 +1490,28 @@ static void stack_ip_stats(ci_netif* ni)
   dump_stats(ip_stats_fields, N_IP_STATS_FIELDS, &stats, 0);
 }
 
+static void stack_ip_stats_describe(ci_netif* ni)
+{
+  ci_ipv4_stats_count stats = ni->state->stats_snapshot.ipv4;
+  ci_log("-------------------- ci_ipv4_stats: %d ----------------------",
+         NI_ID(ni));
+  dump_stats(ip_stats_fields, N_IP_STATS_FIELDS, &stats, 1);
+}
+
 static void stack_tcp_stats(ci_netif* ni)
 {
   ci_tcp_stats_count stats = ni->state->stats_snapshot.tcp;
   ci_log("-------------------- ci_tcp_stats: %d -----------------------",
          NI_ID(ni));
   dump_stats(tcp_stats_fields, N_TCP_STATS_FIELDS, &stats, 0);
+}
+
+static void stack_tcp_stats_describe(ci_netif* ni)
+{
+  ci_tcp_stats_count stats = ni->state->stats_snapshot.tcp;
+  ci_log("-------------------- ci_tcp_stats: %d -----------------------",
+         NI_ID(ni));
+  dump_stats(tcp_stats_fields, N_TCP_STATS_FIELDS, &stats, 1);
 }
 
 static void stack_tcp_ext_stats(ci_netif* ni)
@@ -1516,12 +1522,28 @@ static void stack_tcp_ext_stats(ci_netif* ni)
   dump_stats(tcp_ext_stats_fields, N_TCP_EXT_STATS_FIELDS, &stats, 0);
 }
 
+static void stack_tcp_ext_stats_describe(ci_netif* ni)
+{
+  ci_tcp_ext_stats_count stats = ni->state->stats_snapshot.tcp_ext;
+  ci_log("-------------------- ci_tcp_ext_stats: %d -------------------",
+         NI_ID(ni));
+  dump_stats(tcp_ext_stats_fields, N_TCP_EXT_STATS_FIELDS, &stats, 1);
+}
+
 static void stack_udp_stats(ci_netif* ni)
 {
   ci_udp_stats_count stats = ni->state->stats_snapshot.udp;
   ci_log("-------------------- ci_udp_stats: %d -----------------------",
          NI_ID(ni));
   dump_stats(udp_stats_fields, N_UDP_STATS_FIELDS, &stats, 0);
+}
+
+static void stack_udp_stats_describe(ci_netif* ni)
+{
+  ci_udp_stats_count stats = ni->state->stats_snapshot.udp;
+  ci_log("-------------------- ci_udp_stats: %d -----------------------",
+         NI_ID(ni));
+  dump_stats(udp_stats_fields, N_UDP_STATS_FIELDS, &stats, 1);
 }
 
 static void stack_watch_ip_stats(ci_netif* ni)
@@ -1598,15 +1620,19 @@ static void stack_time(ci_netif* ni)
   ci_log("                  frc: %"CI_PRIx64, its->frc);
   ci_log("  ci_ip_time_frc2tick: %u", (unsigned) its->ci_ip_time_frc2tick);
   ci_log("    ci_ip_time_frc2us: %u", (unsigned) its->ci_ip_time_frc2us);
-  ci_log("   ci_ip_time_tick2ms: %f", ni->ci_ip_time_tick2ms);
+  ci_log("   ci_ip_time_frc2isn: %u", (unsigned) its->ci_ip_time_frc2isn);
+  ci_log("   ci_ip_time_tick2ms: %f", (1. * (1ull<<32)) / its->ci_ip_time_ms2tick_fxp);
+  ci_log("   ci_ip_time_ms2tick: %f (%" PRIx64 ")", its->ci_ip_time_ms2tick_fxp/(1. * (1ull<<32)),
+                                            its->ci_ip_time_ms2tick_fxp);
   ci_log("                  khz: %u", (unsigned) its->khz);
 }
 
 static void stack_time_init(ci_netif* ni)
 {
   ci_ip_timer_state* ipts = IPTIMER_STATE(ni);
-  ni->ci_ip_time_tick2ms = 
-    (double)(1u<<ipts->ci_ip_time_frc2tick)/((double)ipts->khz);
+  ipts->ci_ip_time_ms2tick_fxp =
+    (((ci_uint64)ipts->khz) << 32) /
+    (1u << ipts->ci_ip_time_frc2tick);
 }
 
 static void stack_timers(ci_netif* ni)
@@ -1646,6 +1672,12 @@ static void stack_lock(ci_netif* ni)
     ci_log("%s: already locked due to --lock option", __FUNCTION__);
   else
     libstack_netif_lock(ni);
+}
+
+static void stack_lock_flags(ci_netif* ni)
+{
+  libstack_netif_lock(ni);
+  ef_eplock_holder_set_flags(&ni->state->lock, arg_u[0]);
 }
 
 static void stack_trylock(ci_netif* ni)
@@ -1819,7 +1851,7 @@ static void stack_leak_pkts(ci_netif* ni)
   if( try_grab_stack_lock(ni, &unlock) ) {
     int i;
     for( i = 0; i < (int)arg_u[0]; ++i ) {
-      ci_ip_pkt_fmt* pkt = ci_netif_pkt_alloc(ni);
+      ci_ip_pkt_fmt* pkt = ci_netif_pkt_alloc(ni, 0);
       if( ! pkt )  break;
       if( ci_cfg_verbose )
 	ci_log("%d: leaked pkt %d", NI_ID(ni), OO_PKT_FMT(pkt));
@@ -1836,7 +1868,7 @@ static void stack_alloc_pkts(ci_netif* ni)
   int i;
   if( ! cfg_lock )  libstack_netif_lock(ni);
   for( i = 0; i < (int) arg_u[0]; ++i ) {
-    pkt = ci_netif_pkt_alloc(ni);
+    pkt = ci_netif_pkt_alloc(ni, 0);
     if( pkt == NULL ) {
       ci_log("%d: allocated %d buffers", NI_ID(ni), i);
       break;
@@ -1859,7 +1891,7 @@ static void stack_alloc_pkts_hold(ci_netif* ni)
   int i;
   if( ! cfg_lock )  libstack_netif_lock(ni);
   for( i = 0; i < (int) arg_u[0]; ++i ) {
-    pkt = ci_netif_pkt_alloc(ni);
+    pkt = ci_netif_pkt_alloc(ni, 0);
     if( pkt == NULL ) {
       ci_log("%d: allocated %d buffers", NI_ID(ni), i);
       break;
@@ -1966,7 +1998,7 @@ static void stack_alloc_nonb_pkts(ci_netif* ni)
     if( ! cfg_lock )
       libstack_netif_lock(ni);
     for( ; n < n_to_alloc; ++n ) {
-      if( (pkt = ci_netif_pkt_alloc(ni)) == NULL )
+      if( (pkt = ci_netif_pkt_alloc(ni, 0)) == NULL )
         break;
       pkt->refcount = 0;
       __ci_netif_pkt_clean(pkt);
@@ -2200,6 +2232,19 @@ static void stack_lots(ci_netif* ni)
   stack_time(ni);
 }
 
+static void stack_describe_stats(ci_netif* ni){
+  ci_log("============================================================");
+  stack_stats_describe(ni);
+  stack_more_stats_describe(ni);
+
+#if CI_CFG_SUPPORT_STATS_COLLECTION
+  stack_ip_stats_describe(ni);
+  stack_tcp_stats_describe(ni);
+  stack_tcp_ext_stats_describe(ni);
+  stack_udp_stats_describe(ni);
+#endif
+
+}
 
 static void stack_reap_list(ci_netif* ni)
 {
@@ -2234,6 +2279,54 @@ static void stack_vi_stats(ci_netif* ni)
 {
   ci_netif_dump_vi_stats(ni);
 }
+
+#if CI_CFG_PROC_DELAY
+static void proc_delay_hist(ci_netif* ni, const char* fmt)
+{
+  const unsigned unit_ns = 1 << CI_CFG_PROC_DELAY_NS_SHIFT;
+  int i, n_buckets = (sizeof(ni->state->proc_delay_hist) /
+                      sizeof(ni->state->proc_delay_hist[0]));
+  for( i = 0; i < n_buckets; ++i ) {
+    unsigned x = ((1 << (i + 1)) - 1) * unit_ns / 1000;
+    ci_log(fmt, NI_ID(ni), x, ni->state->proc_delay_hist[i]);
+  }
+}
+
+
+static void stack_proc_delay(ci_netif* ni)
+{
+  const unsigned unit_ns = 1 << CI_CFG_PROC_DELAY_NS_SHIFT;
+  ci_log("proc_delay: stack=%d,%s", NI_ID(ni), ni->state->name);
+  ci_log("  resolution=%uns", unit_ns);
+  ci_log("  max=%uns", ni->state->proc_delay_max * unit_ns);
+  ci_log("  min=-%uns", ni->state->proc_delay_min * unit_ns);
+  ci_log("  n_negative=%u", ni->state->proc_delay_negative);
+  proc_delay_hist(ni, "  hist_%2$uus=%3$u");
+}
+
+
+static void stack_proc_delay_hist(ci_netif* ni)
+{
+  ci_log("#stackid  max_delay(us)  count");
+  proc_delay_hist(ni, "%1$-8d  %2$-13u  %3$-9u");
+}
+
+
+static void stack_proc_delay_reset(ci_netif* ni)
+{
+  int i, n_buckets = (sizeof(ni->state->proc_delay_hist) /
+                      sizeof(ni->state->proc_delay_hist[0]));
+  if( ! cfg_lock )
+    libstack_netif_lock(ni);
+  ni->state->proc_delay_max = 0;
+  ni->state->proc_delay_min = 0;
+  ni->state->proc_delay_negative = 0;
+  for( i = 0; i < n_buckets; ++i )
+    ni->state->proc_delay_hist[i] = 0;
+  if( ! cfg_lock )
+    libstack_netif_unlock(ni);
+}
+#endif
 
 /**********************************************************************
 ***********************************************************************
@@ -2291,6 +2384,7 @@ static const stack_op_t stack_ops[] = {
   STACK_OP_F(clusters,         "show clusters", FL_ONCE),
   STACK_OP(qs,                 "show queues for each socket in stack"),
   STACK_OP(lock,               "lock the stack"),
+  STACK_OP_AX(lock_flags,      "lock the stack and set lock flags", "<flags>"),
   STACK_OP(trylock,            "try to lock the stack"),
   STACK_OP(unlock,             "unlock the stack"),
   STACK_OP(netif_unlock,       "unlock the netif"),
@@ -2339,6 +2433,11 @@ static const stack_op_t stack_ops[] = {
   STACK_OP(hwport_to_base_ifindex,"dump mapping between hwport and interfaces"),
   STACK_OP(vi_stats,"show per-VI interface stats. (Higher overhead, so only "
            "call occasionally)"),
+#if CI_CFG_PROC_DELAY
+  STACK_OP(proc_delay,         "dump processing delay metrics"),
+  STACK_OP(proc_delay_hist,    "dump processing delay histogram"),
+  STACK_OP(proc_delay_reset,   "reset processing delay stats"),
+#endif
 };
 #define N_STACK_OPS	(sizeof(stack_ops) / sizeof(stack_ops[0]))
 
@@ -2429,7 +2528,7 @@ static void socket_advance(ci_netif* ni, ci_tcp_state* ts) {
 }
 
 static void socket_ack(ci_netif* ni, ci_tcp_state* ts) {
-  ci_ip_pkt_fmt* pkt = ci_netif_pkt_alloc(ni);
+  ci_ip_pkt_fmt* pkt = ci_netif_pkt_alloc(ni, 0);
   if( pkt )
     ci_tcp_send_ack(ni, ts, pkt, CI_FALSE);
   else

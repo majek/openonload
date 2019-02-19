@@ -41,6 +41,8 @@
 # define huge_page_size    (16ll * 1024 * 1024)
 #elif defined(__x86_64__) || defined(__i386__)
 # define huge_page_size    (2ll * 1024 * 1024)
+#elif defined(__aarch64__)
+# define huge_page_size    (2ll * 1024 * 1024)
 #else
 # error "Please define huge_page_size"
 #endif

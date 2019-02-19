@@ -49,7 +49,7 @@ typedef struct {
 } ci_shmbuf_t;
 
 
-extern int  ci_shmbuf_alloc(ci_shmbuf_t* b, unsigned bytes);
+extern int  ci_shmbuf_alloc(ci_shmbuf_t* b, unsigned n_pages);
 extern void ci_shmbuf_free(ci_shmbuf_t* b);
 
 ci_inline unsigned ci_shmbuf_size(ci_shmbuf_t* b)

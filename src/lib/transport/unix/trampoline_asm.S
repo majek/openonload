@@ -98,9 +98,25 @@ onload_trampoline_user_fixup_32:
 
 #endif	/* __PPC__ */
 
+#if defined(__aarch64__)
+
+   .text
+   .align   3
+
+   .globl	ci_trampoline_handler_entry
+   .hidden ci_trampoline_handler_entry
+   .type	ci_trampoline_handler_entry,@function
+ci_trampoline_handler_entry:
+    stp     x29, x30, [sp, #-32]!
+    mov     x29, sp
+    str     x2,  [x29, #24]
+    bl ci_trampoline_handler
+    ldr     x2,  [x29, #24]
+    ldp     x29, x30, [sp], #32
+    br x2
+#endif
+
     /* Tell everybody that we do not need executable stack.
      * Make SELinux happy. */
     .section .note.GNU-stack
     .previous
-
-

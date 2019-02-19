@@ -246,6 +246,7 @@ enum {
                                            oo_alloc_active_wild_t)
 
 
+
   OO_OP_CONTIG_END,  /* This is the last in range of contigous opcodes */
 
   /* Here come only placeholder for operations with arbitrary codes */

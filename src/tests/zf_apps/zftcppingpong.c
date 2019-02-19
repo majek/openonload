@@ -40,6 +40,7 @@ static void usage_msg(FILE* f)
   fprintf(f, "  -s tcp payload in bytes\n");
   fprintf(f, "  -i number of iterations\n");
   fprintf(f, "  -m use multiplexer\n");
+  fprintf(f, "  -t print timestamps (only if using multiplexer)\n");
   fprintf(f, "\n");
 }
 
@@ -62,6 +63,7 @@ struct cfg {
   int itercount;
   bool ping;
   bool muxer;
+  bool timestamps;
 };
 
 
@@ -132,41 +134,84 @@ static void muxer_ping_pongs(struct zf_stack* stack, struct zft* zock)
   const int max_iov = sizeof(msg.iov) / sizeof(msg.iov[0]);
   int sends_left = cfg.itercount;
   int recvs_left = cfg.itercount;
+  size_t rx_bytes_left = cfg.size;
+  size_t ts_bytes_left = 0;
   bool zock_has_rx_data = false;
+  bool zock_has_ts_data = false;
 
   if( cfg.ping ) {
     ZF_TEST(zft_send_single(zock, send_buf, cfg.size, 0) == cfg.size);
     --sends_left;
+    ts_bytes_left = cfg.timestamps ? cfg.size : 0;
   }
 
   do {
-    size_t bytes_left = cfg.size;
-    do {
-      if( ! zock_has_rx_data ) {
-        /* zf_muxer_wait() polls the stack until one of the zockets becomes
-         * 'ready'.  Note that muxers are edge-triggered, which is why we
-         * must be careful to block only if we've drained all data from the
-         * zocket.
-         */
-        struct epoll_event ev;
-        ZF_TEST(zf_muxer_wait(muxer, &ev, 1, -1) == 1);
-        ZF_TEST(ev.events & EPOLLIN);
-      }
+    if( ! (zock_has_rx_data || zock_has_ts_data) ) {
+      /* zf_muxer_wait() polls the stack until one of the zockets becomes
+       * 'ready'.  Note that muxers are edge-triggered, which is why we
+       * must be careful to block only if we've drained all data from the
+       * zocket.
+       */
+      struct epoll_event ev;
+      ZF_TEST(zf_muxer_wait(muxer, &ev, 1, -1) == 1);
+      ZF_TEST(ev.events & (EPOLLIN | EPOLLERR));
+      zock_has_rx_data = ev.events & EPOLLIN;
+      zock_has_ts_data = ev.events & EPOLLERR;
+    }
+
+    if( zock_has_rx_data ) {
       msg.msg.iovcnt = max_iov;
       zft_zc_recv(zock, &msg.msg, 0);
       ZF_TEST(msg.msg.iovcnt == 1);
-      ZF_TEST(msg.iov[0].iov_len <= bytes_left);
-      bytes_left -= msg.iov[0].iov_len;
-      ZF_TEST(zft_zc_recv_done(zock, &msg.msg) == 1);
+      ZF_TEST(msg.iov[0].iov_len <= rx_bytes_left);
+      rx_bytes_left -= msg.iov[0].iov_len;
       zock_has_rx_data = msg.msg.pkts_left != 0;
-    } while( bytes_left );
-    --recvs_left;
 
-    if( sends_left ) {
-      ZF_TEST(zft_send_single(zock, send_buf, cfg.size, 0) == cfg.size);
-      --sends_left;
+      if( recvs_left ) {
+        if( cfg.timestamps ) {
+          struct timespec ts;
+          unsigned flags;
+          ZF_TRY(zft_pkt_get_timestamp(zock, &msg.msg, &ts, 0, &flags));
+          fprintf(stderr, "TIME RECV  %ld.%09ld bytes %lu flags %x\n",
+                  ts.tv_sec, ts.tv_nsec, msg.iov[0].iov_len, flags);
+        }
+        ZF_TEST(zft_zc_recv_done(zock, &msg.msg) == 1);
+      }
+      else {
+        ZF_TEST(zft_zc_recv_done(zock, &msg.msg) == 0);
+      }
     }
-  } while( recvs_left );
+
+    if( zock_has_ts_data ) {
+      struct zf_pkt_report report;
+      int count = 1;
+      ZF_TRY(zft_get_tx_timestamps(zock, &report, &count));
+      zock_has_ts_data = count != 0;
+
+      if( zock_has_ts_data ) {
+        ZF_TEST(count == 1);
+        ZF_TEST(report.bytes <= ts_bytes_left);
+        fprintf(stderr, "TIME SENT  %ld.%09ld bytes %u flags %x\n",
+                report.timestamp.tv_sec,
+                report.timestamp.tv_nsec,
+                report.bytes,
+                report.flags);
+        ts_bytes_left -= report.bytes;
+      }
+    }
+
+    if( rx_bytes_left == 0 && ts_bytes_left == 0 ) {
+      if( recvs_left ) {
+        --recvs_left;
+        rx_bytes_left = recvs_left ? cfg.size : 0;
+      }
+      if( sends_left ) {
+        ZF_TEST(zft_send_single(zock, send_buf, cfg.size, 0) == cfg.size);
+        --sends_left;
+        ts_bytes_left = cfg.timestamps ? cfg.size : 0;
+      }
+    }
+  } while( rx_bytes_left || ts_bytes_left );
 }
 
 
@@ -196,7 +241,7 @@ static void ponger(struct zf_stack* stack, struct zft* zock,
 int main(int argc, char* argv[])
 {
   int c;
-  while( (c = getopt(argc, argv, "s:i:m")) != -1 )
+  while( (c = getopt(argc, argv, "s:i:mt")) != -1 )
     switch( c ) {
     case 's':
       cfg.size = atoi(optarg);
@@ -207,11 +252,19 @@ int main(int argc, char* argv[])
     case 'm':
       cfg.muxer = true;
       break;
+    case 't':
+      cfg.timestamps = true;
+      break;
     case '?':
       exit(1);
     default:
       ZF_TEST(0);
     }
+
+  if( cfg.timestamps && ! cfg.muxer ) {
+    fprintf(stderr, "Timestamp reporting (-t) requires multiplexer (-m)\n");
+    usage_err();
+  }
 
   argc -= optind;
   argv += optind;
@@ -236,6 +289,11 @@ int main(int argc, char* argv[])
 
   struct zf_attr* attr;
   ZF_TRY(zf_attr_alloc(&attr));
+
+  if( cfg.timestamps ) {
+    zf_attr_set_int(attr, "rx_timestamping", 1);
+    zf_attr_set_int(attr, "tx_timestamping", 1);
+  }
 
   struct zf_stack* stack;
   ZF_TRY(zf_stack_alloc(attr, &stack));
@@ -274,7 +332,7 @@ int main(int argc, char* argv[])
   void (*ping_pongs_fn)(struct zf_stack*, struct zft*) = ping_pongs;
 
   if( cfg.muxer ) {
-    struct epoll_event event = { .events = EPOLLIN };
+    struct epoll_event event = { .events = EPOLLIN | EPOLLERR };
     ZF_TRY(zf_muxer_alloc(stack, &muxer));
     ZF_TRY(zf_muxer_add(muxer, zft_to_waitable(zock), &event));
     ping_pongs_fn = muxer_ping_pongs;

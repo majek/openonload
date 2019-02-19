@@ -160,6 +160,7 @@ int cicppl_ip_pkt_flatten_copy(ci_netif* ni, oo_pkt_p src_pktid,
 
   if( oo_tcpdump_check(ni, pkt, OO_INTF_I_SEND_VIA_OS) ) {
     pkt->intf_i = OO_INTF_I_SEND_VIA_OS;
+    ci_frc64(&(pkt->tstamp_frc));
     memset(oo_ether_dhost(pkt), 0, 2 * ETH_ALEN);
     oo_tcpdump_dump_pkt(ni, pkt);
   }

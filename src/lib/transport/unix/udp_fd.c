@@ -185,38 +185,48 @@ static int citp_udp_bind(citp_fdinfo* fdinfo, const struct sockaddr* sa,
 
   ci_udp_handle_force_reuseport(fdinfo->fd, ep, sa, sa_len);
 
-  /* multicast sockets do not do clustering */
-  if( (s->s_flags & CI_SOCK_FLAG_REUSEPORT) != 0 &&
-      CI_SOCK_NOT_BOUND(s) &&
-      ! CI_IP_IS_MULTICAST(ci_get_ip4_addr(s->domain, sa)) ) {
-    if( (rc = ci_udp_reuseport_bind(ep, fdinfo->fd, sa, sa_len)) == 0 ) {
-      /* The socket has moved so need to reprobe the fd.  This will also
-       * map the the new stack into user space of the executing process.
-       */
-      fdinfo = citp_reprobe_moved(fdinfo,
-                                  CI_FALSE/* ! from_fast_lookup */,
-                                  CI_FALSE/* ! fdip_is_busy */);
-      /* We want to prefault the packets for the new clustered stack.  This
-       * is only needed if we successfully reprobed a valid fd.  This might
-       * not happen if the fd has been closed or re-used under our feet.
-       *
-       * This doesn't properly verify that what we've reprobed is really
-       * the same thing as we had before.  Fixing this properly is covered
-       * by bug77888.
-       */
-      if( fdinfo && fdinfo->protocol == &citp_udp_protocol_impl ) {
-        epi = fdi_to_sock_fdi(fdinfo);
-        ep = &epi->sock;
-        UDP_SET_FLAG(SOCK_TO_UDP(ep->s), CI_UDPF_FILTERED);
-        ci_netif_cluster_prefault(ep->netif);
+
+#if CI_CFG_IPV6
+  /* FIXME: This is a hack for IPv6 to get it working for now.
+     This should be fixed in future to provide generic code for both
+     IPv4 and IPv6. */
+  if( ep->s->domain != PF_INET6 ||
+     (ci_tcp_ipv6_is_ipv4(sa) && !ci_tcp_ipv6_is_addr_any(sa)) )
+#endif
+  {
+    /* multicast sockets do not do clustering */
+    if( (s->s_flags & CI_SOCK_FLAG_REUSEPORT) != 0 &&
+        CI_SOCK_NOT_BOUND(s) &&
+        ! CI_IP_IS_MULTICAST(ci_get_ip4_addr(s->domain, sa)) ) {
+      if( (rc = ci_udp_reuseport_bind(ep, fdinfo->fd, sa, sa_len)) == 0 ) {
+        /* The socket has moved so need to reprobe the fd.  This will also
+         * map the the new stack into user space of the executing process.
+         */
+        fdinfo = citp_reprobe_moved(fdinfo,
+                                    CI_FALSE/* ! from_fast_lookup */,
+                                    CI_FALSE/* ! fdip_is_busy */);
+        /* We want to prefault the packets for the new clustered stack.  This
+         * is only needed if we successfully reprobed a valid fd.  This might
+         * not happen if the fd has been closed or re-used under our feet.
+         *
+         * This doesn't properly verify that what we've reprobed is really
+         * the same thing as we had before.  Fixing this properly is covered
+         * by bug77888.
+         */
+        if( fdinfo && fdinfo->protocol == &citp_udp_protocol_impl ) {
+          epi = fdi_to_sock_fdi(fdinfo);
+          ep = &epi->sock;
+          UDP_SET_FLAG(SOCK_TO_UDP(ep->s), CI_UDPF_FILTERED);
+          ci_netif_cluster_prefault(ep->netif);
+        }
+        else {
+          CI_SET_ERROR(rc, EBADF);
+          goto done;
+        }
       }
       else {
-        CI_SET_ERROR(rc, EBADF);
         goto done;
       }
-    }
-    else {
-      goto done;
     }
   }
 
@@ -631,6 +641,26 @@ static int citp_udp_zc_recv(citp_fdinfo* fdi, struct onload_zc_recv_args* args)
 }
 
 
+static int citp_udp_zc_recv_filter(citp_fdinfo* fdi,
+                                   onload_zc_recv_filter_callback filter,
+                                   void* cb_arg, int flags)
+{
+#if CI_CFG_ZC_RECV_FILTER
+  citp_sock_fdi* epi = fdi_to_sock_fdi(fdi);
+  ci_udp_state* us = SOCK_TO_UDP(epi->sock.s);
+
+  /* flags not yet used */
+  ci_assert_equal(flags, 0);
+
+  us->recv_q_filter = (ci_uintptr_t)filter;
+  us->recv_q_filter_arg = (ci_uintptr_t)cb_arg;
+  return 0;
+#else
+  return -ENOSYS;
+#endif
+}
+
+
 static int citp_udp_recvmsg_kernel(citp_fdinfo* fdi, struct msghdr* msg, 
                                    int flags)
 {
@@ -740,6 +770,7 @@ citp_protocol_impl citp_udp_protocol_impl = {
 #endif
     .zc_send     = citp_udp_zc_send,
     .zc_recv     = citp_udp_zc_recv,
+    .zc_recv_filter = citp_udp_zc_recv_filter,
     .recvmsg_kernel = citp_udp_recvmsg_kernel,
     .tmpl_alloc     = citp_udp_tmpl_alloc,
     .tmpl_update    = citp_udp_tmpl_update,

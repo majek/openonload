@@ -35,6 +35,10 @@ typedef struct ci_active_wild_s         ci_active_wild;
 typedef ci_uint32  ci_iptime_t;
 
 
+typedef ci_uint32  oo_metrics_tstamp;  /* timestamp (metric ticks) */
+typedef ci_uint32  oo_metrics_intvl;   /* interval (metric ticks) */
+
+
 /* Fixed width type equivalent of struct timeval */
 struct oo_timeval {
   ci_int32 tv_sec;

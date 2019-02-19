@@ -14,14 +14,20 @@
 */
 
 /* Changes to the CI_CFG_* options needed to support the L3XUDP and
- * related features 
+ * related features with diagnostics
  */
 
-#ifndef __CI_INTERNAL_TRANSPORT_CONFIG_OPT_EXTRA_H__
-#define __CI_INTERNAL_TRANSPORT_CONFIG_OPT_EXTRA_H__
+#ifndef __CI_INTERNAL_TRANSPORT_CONFIG_OPT_L3XUDP_H__
+#define __CI_INTERNAL_TRANSPORT_CONFIG_OPT_L3XUDP_H__
+
+/* This build profile is based on the 'l3xudp-nodiag' profile
+ */
+#include <ci/internal/transport_config_opt_l3xudp-nodiag.h>
 
 
+/* Turn on TCP metrics */
+#undef CI_CFG_TCP_METRICS
+#define CI_CFG_TCP_METRICS 1
 
 
-
-#endif /* __CI_INTERNAL_TRANSPORT_CONFIG_OPT_EXTRA_H__ */
+#endif /* __CI_INTERNAL_TRANSPORT_CONFIG_OPT_L3XUDP_H__ */

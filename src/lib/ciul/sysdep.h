@@ -51,7 +51,7 @@
 #include "bitfield.h"
 
 
-#if defined(__x86_64__) || defined(__i386__)
+#if defined(__x86_64__) || defined(__i386__) || defined(__aarch64__)
 # define EF_VI_CACHE_LINE_SIZE       64
 # define EF_VI_WRITE_BUFFER_SIZE     64
 #elif defined(__PPC__)

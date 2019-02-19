@@ -16,9 +16,6 @@ Licence.
 The Etherfabric API and library (ef_vi) are licensed under the GNU
 Lesser General Public License version 2.1.
 
-The Jansson library is licensed under a BSD-style license.  Please see
-openonload/src/tools/jansson-2.7/LICENSE
-
 This package includes software derived from lwIP.  Please see
 lwIP-LICENSE.
 

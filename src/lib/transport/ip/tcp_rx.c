@@ -93,7 +93,7 @@ ci_ip_pkt_fmt* __ci_netif_pkt_rx_to_tx(ci_netif* ni, ci_ip_pkt_fmt* pkt,
              ni->packets->set[new_bufset_id].n_free > 0 )
       pkt = ci_netif_pkt_get(ni, new_bufset_id);
     else
-      pkt = ci_netif_pkt_alloc_slow(ni, 0, 1);
+      pkt = ci_netif_pkt_alloc_slow(ni, CI_PKT_ALLOC_USE_NONB);
     if( pkt == NULL ) {
       LOG_U(ci_log("%s: can't allocate reply packet", caller));
       CITP_STATS_NETIF_INC(ni, poll_no_pkt);
@@ -104,8 +104,12 @@ ci_ip_pkt_fmt* __ci_netif_pkt_rx_to_tx(ci_netif* ni, ci_ip_pkt_fmt* pkt,
 }
 
 
-ci_inline void ci_tcp_rx_update_state_on_add(ci_tcp_state* ts, int recvd)
+ci_inline void ci_tcp_rx_update_state_on_add(ci_netif* ni, ci_tcp_state* ts,
+                                             int recvd)
 {
+  /* Update metrics before rcv_added. */
+  ci_tcp_metrics_on_rx(ni, ts);
+
   /* Ensure packet has been enqueued onto async receive queue. */
   ci_wmb();
   /* Only then make data available to receive path. */
@@ -125,6 +129,7 @@ void ci_tcp_rx_reap_rxq_bufs(ci_netif* netif, ci_tcp_state* ts)
   ** pointer.
   */
   ci_ip_pkt_queue* rxq = &ts->recv1;
+  int n = 0;
 
   ci_assert(ci_netif_is_locked(netif));
 
@@ -133,9 +138,13 @@ void ci_tcp_rx_reap_rxq_bufs(ci_netif* netif, ci_tcp_state* ts)
     oo_pkt_p next = pkt->next;
 
     ci_netif_pkt_release_rx_1ref(netif, pkt);
-    --rxq->num;
+    ++n;
     rxq->head = next;
   }
+  if( n == 0 )
+    return;
+  ci_tcp_rx_buf_adjust(netif, ts, rxq, -n);
+  rxq->num -= n;
 }
 
 void ci_tcp_rx_reap_rxq_last_buf(ci_netif* netif, ci_tcp_state* ts)
@@ -149,6 +158,7 @@ void ci_tcp_rx_reap_rxq_last_buf(ci_netif* netif, ci_tcp_state* ts)
   if( oo_offbuf_is_empty(&pkt->buf) ) {
     ts->recv1_extract = ts->recv1.head = pkt->next;
     ci_netif_pkt_release_rx_1ref(netif, pkt);
+    ci_tcp_rx_buf_adjust(netif, ts, &ts->recv1, -1);
     --ts->recv1.num;
   }
 }
@@ -175,7 +185,7 @@ static void ci_tcp_rx_enqueue_packet(ci_netif *netif, ci_tcp_state *ts,
   /* Barrier ensures concurring thread is able to read metadata
    * of pkt buffers pointed to by recv1_extract. */
   ci_wmb();
-  __ci_ip_queue_enqueue(netif, rxq, pkt);
+  __ci_tcp_rx_queue_enqueue(netif, ts, rxq, pkt);
 
   if( rxq == &ts->recv1 ) {
     if( OO_PP_IS_NULL(prevhead) ) {
@@ -189,7 +199,7 @@ static void ci_tcp_rx_enqueue_packet(ci_netif *netif, ci_tcp_state *ts,
     ci_tcp_rx_reap_rxq_bufs(netif, ts);
   }
 
-  ci_tcp_rx_update_state_on_add(ts, bytes);
+  ci_tcp_rx_update_state_on_add(netif, ts, bytes);
 }
 
 
@@ -201,7 +211,7 @@ static void ci_tcp_rx_enqueue_packet(ci_netif *netif, ci_tcp_state *ts,
 
 
 /* A version of ci_tcp_rx_enqueue_packet that handles a chain of packets
-** from another queue.
+** from another recv queue.
 */
 static void ci_tcp_rx_enqueue_chain(ci_netif *netif, ci_tcp_state *ts,
                                     ci_ip_pkt_queue *from,
@@ -258,6 +268,7 @@ static void ci_tcp_rx_enqueue_chain(ci_netif *netif, ci_tcp_state *ts,
 
   tcp_rcv_nxt(ts) = last->pf.tcp_rx.end_seq;
 
+  /* move between two rx queues */
   ci_ip_queue_move(netif, from, rxq, last, num);
 
   if( rxq == &ts->recv1 ) {
@@ -268,7 +279,7 @@ static void ci_tcp_rx_enqueue_chain(ci_netif *netif, ci_tcp_state *ts,
     ci_tcp_rx_reap_rxq_bufs(netif, ts);
   }
 
-  ci_tcp_rx_update_state_on_add(ts, bytes);
+  ci_tcp_rx_update_state_on_add(netif, ts, bytes);
 }
 
 
@@ -326,7 +337,31 @@ static void ci_tcp_send_sig_urg(ci_netif* netif, ci_tcp_state *ts)
 
 
 
-/*! process an incoming TCP packet which has the urgent pointer set */
+/*! process an incoming TCP packet which has the urgent pointer set.
+ *
+ * By default we aim to handle urgent data in a manner compatible with linux.
+ * That means that we treat the urgent pointer as referring to a single byte
+ * of out-of-band data.
+ *
+ * We store both the byte of OOB data, and flags relating to its state as
+ * tcp_urg_data(ts), and the sequence number of the OOB byte as tcp_rcv_up(ts).
+ * The flags stored with the OOB byte indicate its current validity.
+ *
+ * When we receive a segment containing the OOB byte we switch to the recv2
+ * queue, and stick with this until the app has read beyond the point of the
+ * OOB byte.  Once we switch back to recv1 the OOB byte can no longer be
+ * read.
+ *
+ * When the urgent byte has been read (directly from the urgent data) then
+ * the urgent state will be cleared by ci_tcp_recvmsg_urg().
+ *
+ * Once we receive a new urgent pointer any old urgent state is lost.  That
+ * means that if an old urgent byte is still present in the recvq then it
+ * will be returned via a normal recv (even if it's already been read via
+ * MSG_OOB).  Onload is not entirely consistent with linux here, but I don't
+ * judge it worthwhile to try and exactly emulate the linux behaviour
+ * (see bug81108).
+ */
 static void ci_tcp_urg_pkt_process(ci_tcp_state *ts, ci_netif *netif,
                                    ciip_tcp_rx_pkt *rxp)
 {
@@ -335,12 +370,51 @@ static void ci_tcp_urg_pkt_process(ci_tcp_state *ts, ci_netif *netif,
   /*! 1 = RFC compliance, 0 = BSD compliance */
   int urg_ptr_adj = NI_OPTS(netif).urg_rfc;
   int urg_ptr_offset = CI_BSWAP_BE16(tcp->tcp_urg_ptr_be16) + urg_ptr_adj;
-
-  ci_uint32 rcv_up = rxp->seq + urg_ptr_offset - 1;
+  ci_uint32 rcv_up;
   unsigned lastseq = SEQ_SUB(pkt->pf.tcp_rx.end_seq,
                              (tcp->tcp_flags & CI_TCP_FLAG_SYN) ? 2 : 1);
 
+  /* If we already have urgent data we should be using recv2 */
+  ci_assert_impl(tcp_urg_data(ts) & CI_TCP_URG_IS_HERE,
+                 TS_QUEUE_RX(ts) == &ts->recv2);
+
+  /* If we're already expecting urgent data we should have a valid urg ptr */
+  ci_assert_impl(tcp_urg_data(ts) & CI_TCP_URG_COMING,
+                 tcp_urg_data(ts) & CI_TCP_URG_PTR_VALID);
+
+  /* If new urgent data is coming, it replaces old urgent data, so we can't
+   * have urgent data both coming and here.
+   */
+  ci_assert_nequal(tcp_urg_data(ts) & (CI_TCP_URG_COMING | CI_TCP_URG_IS_HERE),
+                   CI_TCP_URG_COMING | CI_TCP_URG_IS_HERE);
+
   ci_assert(ci_netif_is_locked(netif));
+
+  if( NI_OPTS(netif).urg_mode == EF_TCP_URG_MODE_IGNORE ) {
+    CITP_STATS_NETIF_INC(netif, tcp_urgent_ignore_rx);
+    return;
+  }
+  else
+    CITP_STATS_NETIF_INC(netif, tcp_urgent_process_rx);
+
+  /* If the urgent flag was set, then the urgent pointer in this segment is
+   * probably valid and we should use it.  Otherwise we use the stored value.
+   */
+  if( tcp->tcp_flags & CI_TCP_FLAG_URG ) {
+    /* If the urgent flag is set, but the ptr value is 0 then treat this as
+     * though the urgent flag was not set, as long as we already have a valid
+     * urgent pointer.  We do this because if the actual urgent data is in
+     * this segment then we need to process it here and it's what linux does.
+     */
+    if( (urg_ptr_offset == 0) && (tcp_urg_data(ts) & CI_TCP_URG_COMING) )
+      rcv_up = tcp_rcv_up(ts);
+    else
+      rcv_up = rxp->seq + urg_ptr_offset - 1;
+  }
+  else {
+    ci_assert_flags(tcp_urg_data(ts), CI_TCP_URG_PTR_VALID);
+    rcv_up = tcp_rcv_up(ts);
+  }
 
   if( SEQ_LT(rcv_up, tcp_rcv_nxt(ts)) ) {
     /* rcv urg ptr falls to the left of the left edge of the rcv wnd */
@@ -357,11 +431,13 @@ static void ci_tcp_urg_pkt_process(ci_tcp_state *ts, ci_netif *netif,
     /* This is either a duplicate notification, or a new one. */
   }
 
+  /* This urgent pointer looks valid, update our stored value */
+  tcp_rcv_up(ts) = rcv_up;
+
   /* We're in urgent mode.  If we haven't already done so, we need to
   ** tell the app by sending it a signal.
   */
   if( !(tcp_urg_data(ts) & CI_TCP_URG_COMING) ) {
-    tcp_rcv_up(ts) = rcv_up;
     ci_tcp_send_sig_urg(netif, ts);
     tcp_urg_data(ts) |= CI_TCP_URG_COMING | CI_TCP_URG_PTR_VALID;
   }
@@ -370,11 +446,9 @@ static void ci_tcp_urg_pkt_process(ci_tcp_state *ts, ci_netif *netif,
     /* the urgent byte is within this packet */
     ci_octet* payload = (ci_octet*) CI_TCP_PAYLOAD(tcp);
 
-    
     /* copy the urgent byte from the packet and store it tcp state */
     tcp_urg_data(ts) &=~ (CI_TCP_URG_DATA_MASK | CI_TCP_URG_COMING);
     tcp_urg_data(ts) |= CI_TCP_URG_IS_HERE | payload[urg_ptr_offset - 1];
-    
     
     /* Switch to the second RX queue.  NB. If we are already using recv2,
     ** then we could shift all data from recv2 to recv1 here, because
@@ -614,16 +688,22 @@ ci_inline void ci_tcp_opencwnd(ci_netif *ni, ci_tcp_state* ts)
     unsigned cwnd_inc;
     LOG_TV(log(LPF "%d OPENCWND: SS eff_mss=%u bytes_acked=%u cwnd=%u",
                S_FMT(ts), tcp_eff_mss(ts), ts->bytes_acked, ts->cwnd));
-    if( ! CI_CFG_CONG_AVOID_CONSERVATIVE_SLOW_START && ts->stats.rtos == 0 )
+#if CI_CFG_CONG_AVOID_SLOW_START_MODE == 2
+    cwnd_inc = CI_MIN(ts->ssthresh - ts->cwnd, ts->bytes_acked);
+    ts->cwnd += cwnd_inc;
+    ts->bytes_acked -= cwnd_inc;
+#else
+    if( CI_CFG_CONG_AVOID_SLOW_START_MODE == 0 && ts->stats.rtos == 0 )
       /* RFC3465 sec 2.2: May only increase cwnd by more than mss if we've
-       * never had any RTOs on this connection.
-       */
+      * never had any RTOs on this connection.
+      */
       cwnd_inc = tcp_eff_mss(ts) * CI_CFG_CONG_AVOID_RFC3465_L_VALUE;
     else
       cwnd_inc = tcp_eff_mss(ts);
     cwnd_inc = CI_MIN(cwnd_inc, ts->bytes_acked);
     ts->cwnd += cwnd_inc;
     ts->bytes_acked = 0;
+#endif
   }
 
   LOG_TV(log(LPF "%d OPENCWND: end cwnd=%u", S_FMT(ts), ts->cwnd));
@@ -634,24 +714,75 @@ ci_inline void ci_tcp_opencwnd(ci_netif *ni, ci_tcp_state* ts)
 }
 
 
-void ci_tcp_enter_fast_recovery(ci_netif* ni, ci_tcp_state* ts)
+static void ci_tcp_reset_cwnd_on_loss(ci_netif* ni, ci_tcp_state* ts)
 {
-  ci_assert(ts->dup_acks >= ts->dup_thresh);
+  ts->ssthresh = ci_tcp_losswnd(ts);
+  ts->cwnd = ts->ssthresh + ci_tcp_base_dupack_thresh(ts) * tcp_eff_mss(ts);
+  ts->cwnd = CI_MAX(ts->cwnd, NI_OPTS(ni).loss_min_cwnd);
+  ts->cwnd = CI_MAX(ts->cwnd, NI_OPTS(ni).min_cwnd);
+  ci_assert(ts->cwnd >= tcp_eff_mss(ts));
+}
+
+
+/* Enters fast recovery if we've received enough dupacks.  Returns non-zero
+ * iff we enter fast recovery. */
+int /*bool*/ ci_tcp_maybe_enter_fast_recovery(ci_netif* ni, ci_tcp_state* ts)
+{
+  ci_uint32 dup_thresh = ci_tcp_base_dupack_thresh(ts);
+  ci_ip_pkt_fmt *pkt;
+
+  if( ts->dup_acks == 0 ) {
+    return 0;
+  }
+  else if( ts->dup_acks >= dup_thresh ) {
+    /* Standard case: we've received a number of dupacks that takes us to the
+     * static threshold for entering fast recovery. */
+  }
+  else if( NI_OPTS(ni).tcp_early_retransmit &&
+           ts->dup_acks >= ts->retrans.num - 1 ) {
+    /* We haven't received enough dupacks to enter fast recovery according to
+     * the classic scheme, but we have reached the early retransmit (RFC 5827)
+     * threshold of (inflight - 1) dupacks.  There are some further conditions
+     * that we need to satisfy, though. */
+    LOG_TL(log(LNT_FMT "Checking early retransmit at dups=%d "TCP_SND_FMT,
+               LNT_PRI_ARGS(ni, ts), ts->dup_acks, TCP_SND_PRI_ARG(ts)));
+
+    /* If we've got new segments queued up and we have sufficient window to
+     * send them, we should use limited transmit instead of early retransmit.
+     */
+    if( ci_ip_queue_not_empty(&ts->send) ) {
+      LOG_TL(log(LNT_FMT "Have unsent; use limited transmit if window is open",
+                 LNT_PRI_ARGS(ni, ts)));
+      pkt = PKT_CHK(ni, ts->send.head);
+      if( SEQ_LE(pkt->pf.tcp_tx.end_seq, ts->snd_max) )
+        return 0;
+      LOG_TL(log(LNT_FMT "Insufficient window for limited transmit; continue "
+                 "with ER", LNT_PRI_ARGS(ni, ts)));
+    }
+
+    /* If we're using SACK, there must be precisely one un-SACKed segment in
+     * flight.  This is what the RFC says, but (TODO) we might wish to consider
+     * whether it would be better instead to allow a single un-SACKed _block_.
+     */
+    if( ts->tcpflags & CI_TCPT_FLAG_SACK &&
+        ci_tcp_unsacked_segments_in_flight(ni, ts) != 1 ) {
+      LOG_TL(log(LNT_FMT "unsacked != 1", LNT_PRI_ARGS(ni, ts)));
+      return 0;
+    }
+  }
+  else {
+    /* Not enough dupacks to enter fast recovery. */
+    return 0;
+  }
 
   if( ci_ip_queue_is_empty(&ts->retrans) ) {
     LOG_U(log(LNT_FMT "%d DUPACKs, but no data to retransmit!",
               LNT_PRI_ARGS(ni, ts), ts->dup_acks));
-    return;
+    return 0;
   }
 
   ++ts->stats.fast_recovers;
-
-  ts->ssthresh = ci_tcp_losswnd(ts);
-  ts->cwnd = ts->ssthresh + (ci_uint32) ts->dup_thresh * tcp_eff_mss(ts);
-  ts->cwnd = CI_MAX(ts->cwnd, NI_OPTS(ni).loss_min_cwnd);
-  ts->cwnd = CI_MAX(ts->cwnd, NI_OPTS(ni).min_cwnd);
-
-  ci_assert(ts->cwnd >= tcp_eff_mss(ts));
+  ci_tcp_reset_cwnd_on_loss(ni, ts);
 
   ts->congrecover = tcp_snd_nxt(ts);
   ci_tcp_retrans_init_ptrs(ni, ts, &ts->congrecover);
@@ -675,6 +806,7 @@ void ci_tcp_enter_fast_recovery(ci_netif* ni, ci_tcp_state* ts)
 
   /* ?? Before or after retransmits?  Not sure. */
   ci_tcp_clear_rtt_timing(ts);
+  /* Fast recovery => no TLP timer, force RTO */
   ci_tcp_rto_restart(ni, ts);
 
   CI_IP_SOCK_STATS_INC_DUPACKFREC( ts );
@@ -682,8 +814,19 @@ void ci_tcp_enter_fast_recovery(ci_netif* ni, ci_tcp_state* ts)
     CI_TCP_EXT_STATS_INC_TCP_SACK_RECOVERY( ni );
   else
     CI_TCP_EXT_STATS_INC_TCP_RENO_RECOVERY( ni );
+
+  return 1;
 }
 
+
+static void ci_tcp_cwnd_extra_update(ci_netif* netif, ci_tcp_state* ts)
+{
+  unsigned fack;
+  int retrans_data;
+  ci_tcp_get_fack(netif, ts, &fack, &retrans_data);
+  ts->cwnd_extra = SEQ_SUB(fack, tcp_snd_una(ts)) - retrans_data;
+  ts->cwnd_extra = CI_MAX(ts->cwnd_extra, 0);
+}
 
 /*
 ** Called when a duplicate acknowledgement found
@@ -691,10 +834,24 @@ void ci_tcp_enter_fast_recovery(ci_netif* ni, ci_tcp_state* ts)
 static void ci_tcp_rx_dupack(ci_tcp_state* ts, ci_netif* netif,
                              ciip_tcp_rx_pkt* rxp)
 {
-  ci_assert(rxp->pkt->pf.tcp_rx.pay_len == 0);
   ci_assert(SEQ_EQ(tcp_snd_una(ts), rxp->ack));
 
-  ts->dup_acks++;
+#if CI_CFG_TAIL_DROP_PROBE
+  if(CI_UNLIKELY( (ts->tcpflags & CI_TCPT_FLAG_TAIL_DROP_MARKED) &&
+                  SEQ_EQ(rxp->ack, ts->taildrop_mark) )) {
+    /* This dupack acknowledges the probe.  There was another ack before,
+     * so it must have acknowledged the original.  Therefore no loss
+     * indicated (unless SACK says otherwise).
+     */
+    CITP_STATS_NETIF(++netif->state->stats.tail_drop_probe_unnecessary);
+    ts->tcpflags &=~ CI_TCPT_FLAG_TAIL_DROP_MARKED;
+    if( ! (rxp->flags & CI_TCP_SACKED) )
+      return;
+  }
+#endif
+
+  ++(ts->dup_acks);
+
   LOG_TL(log(LNT_FMT "DUPACK dups=%d "TCP_SND_FMT,
              LNT_PRI_ARGS(netif, ts), ts->dup_acks, TCP_SND_PRI_ARG(ts));
          log(LNT_FMT "  %s cwnd=%i crecover=%08x now-rto_to=%u rto=%u",
@@ -703,25 +860,53 @@ static void ci_tcp_rx_dupack(ci_tcp_state* ts, ci_netif* netif,
              ts->rto));
   CI_IP_SOCK_STATS_INC_DUPACK( ts );
 
+  /* Limited Transmit, RFC 3042: if we receive a dupack with new SACK
+   * information but we haven't quite received enough dupacks for fast recovery
+   * (RFC says exactly two, but that assumes that the fast recovery threshold
+   * is fixed at three), then allow sends a little way beyond the end of the
+   * congestion window.  Inform the TX path, which will be called in the
+   * post-poll loop, if we meet the necessary conditions. */
+  if( NI_OPTS(netif).tcp_early_retransmit &&
+      ts->dup_acks == ci_tcp_base_dupack_thresh(ts) - 1 &&
+      (! (ts->tcpflags & CI_TCPT_FLAG_SACK) || rxp->flags & CI_TCP_SACKED) )
+    ts->tcpflags |= CI_TCPT_FLAG_LIMITED_TRANSMIT;
+
   if( (ts->congstate == CI_TCP_CONG_OPEN)
       | (ts->congstate == CI_TCP_CONG_NOTIFIED) ) {
     /* Goto fast recovery if we've received enough dupacks. */
-    if( ts->dup_acks >= ts->dup_thresh )
-      ci_tcp_enter_fast_recovery(netif, ts);
+    ci_tcp_maybe_enter_fast_recovery(netif, ts);
   }
-  else if( ts->congstate == CI_TCP_CONG_FAST_RECOV &&
-           !(ts->tcpflags & CI_TCPT_FLAG_SACK) ) {
-    /* RFC3465 - ABC - makes no mention of what to do in this situation.
-    ** So therefore stick with what RFC2581 p7 tells us: Inflate window
-    ** since packet left network.  This will inflate by too much if the
-    ** segment that left wasn't full.  We would try to fix this by
-    ** guessing which segment it was, but I don't think it's worth it.
-    */
-    ts->cwnd += tcp_eff_mss(ts);
-    CI_IP_SOCK_STATS_INC_DUPACKCONGFREC( ts );
-  }
-  else if( ts->congstate != CI_TCP_CONG_COOLING )
+  else if( ts->congstate == CI_TCP_CONG_FAST_RECOV ) {
+    if( !(ts->tcpflags & CI_TCPT_FLAG_SACK) ) {
+      /* RFC3465 - ABC - makes no mention of what to do in this situation.
+      ** So therefore stick with what RFC2581 p7 tells us: Inflate window
+      ** since packet left network.  This will inflate by too much if the
+      ** segment that left wasn't full.  We would try to fix this by
+      ** guessing which segment it was, but I don't think it's worth it.
+      */
+      ts->cwnd += tcp_eff_mss(ts);
+      CI_IP_SOCK_STATS_INC_DUPACKCONGFREC( ts );
+    }
+    /* else sack might have advanced the window */
     ci_tcp_retrans_recover(netif, ts, 0);
+  }
+  else if( (ts->congstate & CI_TCP_CONG_COOLING) &&
+           (rxp->flags & CI_TCP_SACKED) ) {
+    /* We're in COOLING, so no need to retransmit, but want to continue
+    ** adjusting congestion window for packets that have left the network
+    ** ci_tcp_rx_sack_process() processed SACK information, which
+    ** will now be used to compute fack.
+    **/
+    ci_tcp_cwnd_extra_update(netif, ts);
+  }
+  else {
+    /* Note: there is nothing to send here in CONG_RTO* states as dupack
+     * does not advance cwnd */
+    /* FIXME: consider
+     *  NewReno rfc6582 p4.1 (or at least ci_tcp_maybe_enter_fast_recovery() )
+     *  F-RTO rfc5682 p2.1 3b
+     */
+  }
 
   ci_assert(ts->cwnd >= tcp_eff_mss(ts));
 }
@@ -743,51 +928,59 @@ static void ci_tcp_try_cwndrecover(ci_tcp_state* ts, ci_netif* netif,
              LNT_PRI_ARGS(netif, ts), congstate_str(ts),
              tcp_snd_una(ts), ts->cwnd, ts->ssthresh, ts->congrecover));
 
-  if( (ts->congstate & CI_TCP_CONG_FAST_RECOV) &&
-      !(ts->tcpflags & CI_TCPT_FLAG_SACK) ) {
-    if( SEQ_LT(tcp_snd_una(ts), ts->congrecover) )
-      /* NewReno rfc2582.  Partial ACK, so retransmit the packet at the
-      ** head of the retransmit queue.
-      */
-      ci_tcp_retrans_one(ts, netif, PKT_CHK(netif, rtq->head));
-    else
-      ci_tcp_recovered(netif, ts);
-    return;
-  }
-  else if( ts->congstate == CI_TCP_CONG_RTO ) {
+  if( ts->congstate & CI_TCP_CONG_RTO ) {
     /* The RTO is backed-off when it fires.  Now that we've had some data
     ** ACKed we reset it to a sensible value.
     */
     ts->rto = tcp_srtt(ts) + ts->sv;
     ci_tcp_rto_bound(netif, ts);
-    if( ! ci_ip_queue_is_empty(rtq) )
-      ci_tcp_rto_restart(netif, ts);
-
-    ts->congstate = CI_TCP_CONG_RTO_RECOV;
-    /* And continue with recovery (below)... */
+    if( ts->congstate == (CI_TCP_CONG_COOLING | CI_TCP_CONG_RTO) )
+      ts->congstate = CI_TCP_CONG_COOLING;
   }
-  else if( ts->congstate == CI_TCP_CONG_COOLING ) {
-    if( SEQ_LE(ts->congrecover, tcp_snd_una(ts)) )
-      ci_tcp_recovered(netif, ts);
-    else {
+
+  if( SEQ_LE(ts->congrecover, tcp_snd_una(ts)) ) {
+    ci_tcp_recovered(netif, ts);
+    return;
+  }
+
+  switch( ts->congstate ) {
+    case CI_TCP_CONG_FAST_RECOV:
+      if( !(ts->tcpflags & CI_TCPT_FLAG_SACK) ) {
+        /* NewReno rfc2582.  Partial ACK, so retransmit the packet at the
+        ** head of the retransmit queue.
+        */
+        ci_tcp_retrans_one(ts, netif, PKT_CHK(netif, rtq->head));
+        return;
+      }
+      break;
+
+    case CI_TCP_CONG_RTO:
+      ci_assert(! ci_ip_queue_is_empty(rtq));
+      ci_tcp_rto_restart(netif, ts);
+      ts->congstate = CI_TCP_CONG_RTO_RECOV;
+      /* fall through to RTO_RECOV */
+
+    case CI_TCP_CONG_RTO_RECOV:
+      break; /* Just proceed below to ci_tcp_retrans_recover() */
+
+    case CI_TCP_CONG_COOLING:
       /* We're waiting until we reach congrecover before going back to
       ** OPEN.  In the meantime, keep maintaining [cwnd_extra].
       */
-      unsigned fack;
-      int retrans_data;
-      ci_tcp_get_fack(netif, ts, &fack, &retrans_data);
-      ts->cwnd_extra = SEQ_SUB(fack, tcp_snd_una(ts)) - retrans_data;
-      ts->cwnd_extra = CI_MAX(ts->cwnd_extra, 0);
-    }
-    return;
+      ci_tcp_cwnd_extra_update(netif, ts);
+      return;
   }
 
   ci_tcp_retrans_recover(netif, ts, 0);
 }
 
 
-static void ci_tcp_rx_sack_process_block(ci_netif* ni, ci_tcp_state* ts,
-                                         unsigned start, unsigned end)
+/* Marks packets in the retransmit queue as having been SACKed.  Returns non-
+ * zero if and only if the block allowed us to mark an entire packet, not
+ * previously SACKed, as having now been SACKed. */
+static int /*bool*/
+ci_tcp_rx_sack_process_block(ci_netif* ni, ci_tcp_state* ts, unsigned start,
+                             unsigned end)
 {
   ci_ip_pkt_queue* rtq = &ts->retrans;
   ci_ip_pkt_fmt* start_block;
@@ -853,7 +1046,7 @@ static void ci_tcp_rx_sack_process_block(ci_netif* ni, ci_tcp_state* ts,
       LOG_TV(log(LNT_FMT "SACK %08x-%08x partial of last %08x-%08x",
          LNT_PRI_ARGS(ni, ts), start, end, start_pkt->pf.tcp_tx.start_seq,
          start_pkt->pf.tcp_tx.end_seq));
-      return;
+      return 0;
     }
     start_pkt_prev = start_pkt;
     start_pkt = PKT_CHK(ni, start_pkt->next);
@@ -879,7 +1072,7 @@ static void ci_tcp_rx_sack_process_block(ci_netif* ni, ci_tcp_state* ts,
                LNT_PRI_ARGS(ni, ts), start, end,
                start_block->pf.tcp_tx.start_seq,
                start_block_end->pf.tcp_tx.end_seq));
-    return;
+    return 0;
   }
 
   /* When marching through the SACKed packets we'll need to update their
@@ -904,7 +1097,7 @@ static void ci_tcp_rx_sack_process_block(ci_netif* ni, ci_tcp_state* ts,
     LOG_TV(log(LNT_FMT "SACK %08x-%08x within pkt %08x-%08x",
                LNT_PRI_ARGS(ni, ts), start, end,
                start_pkt->pf.tcp_tx.start_seq, start_pkt->pf.tcp_tx.end_seq));
-    return;
+    return 0;
   }
 
   /* Double check that packets we've chosen are wholly covered by [start,
@@ -960,6 +1153,11 @@ static void ci_tcp_rx_sack_process_block(ci_netif* ni, ci_tcp_state* ts,
   }
   pkt->pf.tcp_tx.block_end = next_pp;
   pkt->flags |= CI_PKT_FLAG_RTQ_SACKED;
+
+  /* We took early exits from this function when this SACK block was contained
+   * within an earlier one, so we know that we have recorded new SACK
+   * information. */
+  return 1;
 }
 
 
@@ -996,6 +1194,14 @@ ci_inline int ci_tcp_rx_dsack_check(ci_netif* ni, ci_tcp_state* ts,
     }
   }
 
+#if CI_CFG_TAIL_DROP_PROBE
+  if( rc && (ts->tcpflags & CI_TCPT_FLAG_TAIL_DROP_MARKED) &&
+      SEQ_GE(rxp->ack, ts->taildrop_mark)) {
+    /* Both original packet and our retransmission arrived.  No loss. */
+    CITP_STATS_NETIF(++ni->state->stats.tail_drop_probe_unnecessary);
+    ts->tcpflags &=~ CI_TCPT_FLAG_TAIL_DROP_MARKED;
+  }
+#endif
   return rc;
 }
 
@@ -1059,8 +1265,8 @@ static void ci_tcp_rx_sack_process(ci_netif* netif, ci_tcp_state* ts,
     */
     if( ! (/*1*/SEQ_LE(start, rxp->ack) | /*2*/SEQ_LT(tcp_snd_nxt(ts), end) |
            /*3*/SEQ_LE(end, start)) ) {
-      ci_tcp_rx_sack_process_block(netif, ts, start, end);
-      sacked = 1;
+      if( ci_tcp_rx_sack_process_block(netif, ts, start, end) )
+        sacked = 1;
     }
     else {
       /* Bad SACK block: sender is not behaving.  Prev code would clear the
@@ -1100,8 +1306,16 @@ static void ci_tcp_rx_free_acked_bufs(ci_netif* netif, ci_tcp_state* ts,
     ci_ip_pkt_fmt* p = PKT_CHK(netif, rtq->head);
 
     if( SEQ_LT(rxp->ack, p->pf.tcp_tx.end_seq) ) {
-      /* restart the RTO timer as new data acknowledged */
-      ci_tcp_rto_restart(netif, ts);
+      /* New data acknowledged: restart RTO/TLP timer. */
+      if( ci_tcp_taildrop_probe_enabled(netif, ts) ) {
+        ts->tcpflags |= CI_TCPT_FLAG_TAIL_DROP_TIMING;
+        ci_tcp_rto_clear(netif, ts);
+        ci_tcp_rto_set_with_timeout(netif, ts,
+                                    ci_tcp_taildrop_timeout(netif, ts));
+      }
+      else {
+        ci_tcp_rto_restart(netif, ts);
+      }
       break;
     }
     LOG_TV(log(LNT_FMT "ACKED id=%d seq=%08x-%08x ["CI_TCP_FLAGS_FMT"]"
@@ -1128,9 +1342,14 @@ static void ci_tcp_rx_free_acked_bufs(ci_netif* netif, ci_tcp_state* ts,
     }
 
     if( ci_ip_queue_is_empty(rtq) ) {
-      /* all data acknowledged: clear RTO timer */
-      ci_tcp_rto_clear(netif, ts);
-      ci_tcp_kalive_restart(netif, ts, ci_tcp_kalive_idle_get(ts));
+      /* We should not use ci_tcp_retransq_is_empty() instead of
+       * ci_ip_queue_is_empty(rtq) above, to break out of the loop
+       * when FIN_PENDING is set but rtq is empty. */
+      if( CI_LIKELY(! (ts->tcpflags & CI_TCPT_FLAG_FIN_PENDING)) ) {
+        /* all data acknowledged: clear RTO timer */
+        ci_tcp_rto_clear(netif, ts);
+        ci_tcp_kalive_restart(netif, ts, ci_tcp_kalive_idle_get(ts));
+      }
       break;
     }
   }
@@ -1144,8 +1363,10 @@ static void ci_tcp_rx_free_acked_bufs(ci_netif* netif, ci_tcp_state* ts,
   }
 
  done:
-  ci_assert(!ci_ip_queue_is_empty(rtq) || SEQ_EQ(rxp->ack, tcp_snd_nxt(ts)) ||
-            ts->snd_delegated != 0);
+  ci_assert( !ci_ip_queue_is_empty(rtq) ||
+             SEQ_EQ(rxp->ack, tcp_snd_nxt(ts)) ||
+             ts->snd_delegated != 0 ||
+             (ts->tcpflags & CI_TCPT_FLAG_FIN_PENDING) );
   tcp_snd_una(ts) = rxp->ack;
 
   /* Wake up TX if necessary */
@@ -1298,26 +1519,16 @@ static void ci_tcp_rx_handle_ack(ci_tcp_state* ts, ci_netif* netif,
      * If it only passes 1-3, should count in stats and reset dup_ack counter
      * If it only passes 1, should reset dup_ack counter
      *
-     * We also test for it being a likely window probe: i.e. if the rx
-     * window is < eff_mss, the other end is likely to probe us.  I'm
-     * not convinced this is the correct thing to do as window probes are
-     * (should be?) 1 byte.  We also test for it being a DSACK.
+     * In the modern era we note that new SACK info also indicates that a
+     * packet has left the network (ie. gives the same hint as a dupack).
      */
-
-    if( SEQ_EQ(pkt->pf.tcp_rx.end_seq, rxp->seq) &&
-        ! snd_max_different ) {
-      if( ! (rxp->flags & CI_TCP_DSACK)
-          && pkt->pf.tcp_rx.window >= tcp_eff_mss(ts)
-          && !ci_ip_queue_is_empty(&ts->retrans) )
-        ci_tcp_rx_dupack(ts, netif, rxp);
-      else
-        /* should reset dup_ack */
-        ts->dup_acks = 0;
-    }
-    else{
-      /* should reset dup_ack */
+    int is_dupack = ( SEQ_EQ(pkt->pf.tcp_rx.end_seq, rxp->seq) &&
+                      ! snd_max_different                       );
+    if( ci_ip_queue_is_empty(&ts->retrans) ||
+        (! is_dupack && ! (rxp->flags & CI_TCP_SACKED)) )
       ts->dup_acks = 0;
-    }
+    else
+      ci_tcp_rx_dupack(ts, netif, rxp);
   }
 
   if( SEQ_SUB(ts->snd_max, rxp->ack) < tcp_eff_mss(ts) &&
@@ -1343,6 +1554,24 @@ static void ci_tcp_rx_handle_ack(ci_tcp_state* ts, ci_netif* netif,
     CI_IP_SOCK_STATS_INC_ZWIN(ts);
   }
 
+#if CI_CFG_TAIL_DROP_PROBE
+  if( (ts->tcpflags & CI_TCPT_FLAG_TAIL_DROP_MARKED) &&
+      SEQ_GT(rxp->ack, ts->taildrop_mark) ) {
+    /* We didn't get a dupack for the probe, so therefore either the probe
+     * or the original was lost.  Linux reduces cwnd and changes congestion
+     * state to CWR.
+     */
+    CITP_STATS_NETIF(++netif->state->stats.tail_drop_probe_success);
+    ts->tcpflags &=~ CI_TCPT_FLAG_TAIL_DROP_MARKED;
+    if( ts->congstate == CI_TCP_CONG_OPEN ||
+        ts->congstate == CI_TCP_CONG_NOTIFIED )
+      /* We've detected loss, so reduce cwnd.  But the loss detected has
+       * already been recovered, so don't enter recovery.
+       */
+      ci_tcp_reset_cwnd_on_loss(netif, ts);
+  }
+#endif
+
   /* Clear keepalive counter -- it is important to clear this counter up on
    * every ACK for our keepalive request. */
   ci_tcp_kalive_reset(netif, ts);
@@ -1358,7 +1587,7 @@ static void ci_tcp_rx_process_fin(ci_netif* netif, ci_tcp_state* ts)
 
   if( ! ci_ip_queue_is_empty(&ts->rob) ) {
     LOG_U(log(LNTS_FMT "non-empty ROB after FIN", LNTS_PRI_ARGS(netif, ts)));
-    ci_ip_queue_drop(netif, &ts->rob);
+    ci_tcp_rx_queue_drop(netif, ts, &ts->rob);
   }
 
   /* TODO does the dropping of packets from the ROB above require us
@@ -1371,17 +1600,22 @@ static void ci_tcp_rx_process_fin(ci_netif* netif, ci_tcp_state* ts)
   } else if( ts->s.b.state == CI_TCP_FIN_WAIT1 ) {
     if( SEQ_EQ(tcp_snd_una(ts), tcp_enq_nxt(ts)) ) {
       ci_assert(ci_tcp_sendq_is_empty(ts));
-      ci_assert(ci_ip_queue_is_empty(&ts->retrans));
+      ci_assert(ci_tcp_retransq_is_empty(ts));
       ci_netif_timewait_enter(netif, ts);
       ci_tcp_set_slow_state(netif, ts, CI_TCP_TIME_WAIT);
     }
-    else
+    else {
       ci_tcp_set_slow_state(netif, ts, CI_TCP_CLOSING);
+      /* peer is going to TIME_WAIT state despite us doing the same,
+       * ISN for next connection need to be recorded */
+      ci_tcp_prev_seq_remember(netif, ts);
+    }
   }
   else {
     ci_assert(ts->s.b.state == CI_TCP_FIN_WAIT2);
     ci_assert(ci_tcp_sendq_is_empty(ts));
-    ci_assert(ci_ip_queue_is_empty(&ts->retrans));
+    ci_assert(ci_tcp_retransq_is_empty(ts));
+    ci_assert_equal(ts->send_prequeue, -2);
 
     ci_netif_timewait_enter(netif, ts);
     ci_tcp_set_slow_state(netif, ts, CI_TCP_TIME_WAIT);
@@ -1474,7 +1708,7 @@ static int ci_tcp_rx_deliver_rob(ci_netif* netif, ci_tcp_state* ts)
            * after arriving new segment which glued two blocks. */
     }
 
-    ci_ip_queue_dequeue(netif, rob, pkt);
+    ci_tcp_rx_queue_dequeue(netif, ts, rob, pkt);
     if( OO_PP_EQ(id, end_block_id) )
       end_block_id = OO_PP_NULL;
     ci_netif_pkt_release_rx(netif, pkt);
@@ -1570,7 +1804,7 @@ static int ci_tcp_rx_deliver_rob(ci_netif* netif, ci_tcp_state* ts)
         }
       }
     }
-    ci_ip_queue_dequeue(netif, rob, pkt);
+    ci_tcp_rx_queue_dequeue(netif, ts, rob, pkt);
     /* Deal with any data that was also in the pkt with a FIN */
     if( pkt->pf.tcp_rx.end_seq - seq != 1 ) {
       ci_tcp_rx_enqueue_packet(netif, ts, pkt);
@@ -1710,6 +1944,7 @@ static void ci_tcp_rx_glue_rob(ci_netif* netif, ci_tcp_state* ts,
         next_id = tmp->next;
         ci_netif_pkt_release_rx(netif, tmp);
         PKT_TCP_RX_ROB(pkt)->num--;
+        ci_tcp_rx_buf_adjust(netif, ts, &ts->rob, -1);
         ts->rob.num--;
       }
       PKT_CHK(netif, last_id)->next = next_id;
@@ -1730,6 +1965,7 @@ static void ci_tcp_rx_glue_rob(ci_netif* netif, ci_tcp_state* ts,
         next_id = tmp->next;
         ci_netif_pkt_release_rx(netif, tmp);
         PKT_TCP_RX_ROB(pkt)->num--;
+        ci_tcp_rx_buf_adjust(netif, ts, &ts->rob, -1);
         ts->rob.num--;
       }
     }
@@ -1886,7 +2122,7 @@ static int ci_tcp_rx_enqueue_ooo(ci_netif* netif, ci_tcp_state* ts,
   PKT_TCP_RX_ROB(pkt)->end_block = OO_PKT_P(pkt);
   PKT_TCP_RX_ROB(pkt)->end_block_seq = pkt->pf.tcp_rx.end_seq;
   PKT_TCP_RX_ROB(pkt)->num = 1;
-
+  ci_tcp_rx_buf_adjust(netif, ts, rob, 1);
   rob->num++;
 
   if( OO_PP_IS_NULL(block_id) )
@@ -1964,15 +2200,28 @@ static void handle_rx_listen_rst(ci_netif* ni, ci_tcp_socket_listen* tls,
                                                  tsr->amss, tsr->rcv_wscl);
     if( SEQ_LE(tsr->rcv_nxt, rxp->seq) &&
         SEQ_LT(rxp->seq, tsr->rcv_nxt + tsr_rcv_wnd) ) {
-      ci_tcp_listenq_remove(ni, tls, tsr);
-      ci_tcp_synrecv_free(ni, tsr);
-      CITP_STATS_NETIF_INC(ni, rst_recv_synrecv);
-      LOG_TC(log(LPF "%d SYNRECV %s:%d->%s:%d RST",
-                 S_FMT(tls),
-                 ip_addr_str(ip->ip_saddr_be32),
-                 (int) CI_BSWAP_BE16(tcp->tcp_source_be16),
-                 ip_addr_str(ip->ip_daddr_be32),
-                 (int) CI_BSWAP_BE16(tcp->tcp_dest_be16)));
+      if( (tsr->tcpopts.flags & CI_TCPT_FLAG_TSO) &&
+          (rxp->flags & CI_TCPT_FLAG_TSO) &&
+          ci_tcp_paws_check(ni, rxp->timestamp,
+                            tsr->timest, tsr->tspeer) ) {
+        LOG_U(log(LPF "%d SYNRECV %s:%d->%s:%d RST PAWS failed", S_FMT(tls),
+                  ip_addr_str(ip->ip_saddr_be32),
+                  (int) CI_BSWAP_BE16(tcp->tcp_source_be16),
+                  ip_addr_str(ip->ip_daddr_be32),
+                  (int) CI_BSWAP_BE16(tcp->tcp_dest_be16)));
+        CITP_STATS_NETIF_INC(ni, rst_recv_synrecv_paws_rejected);
+      }
+      else {
+        ci_tcp_listenq_remove(ni, tls, tsr);
+        ci_tcp_synrecv_free(ni, tsr);
+        CITP_STATS_NETIF_INC(ni, rst_recv_synrecv);
+        LOG_TC(log(LPF "%d SYNRECV %s:%d->%s:%d RST",
+                  S_FMT(tls),
+                  ip_addr_str(ip->ip_saddr_be32),
+                  (int) CI_BSWAP_BE16(tcp->tcp_source_be16),
+                  ip_addr_str(ip->ip_daddr_be32),
+                  (int) CI_BSWAP_BE16(tcp->tcp_dest_be16)));
+      }
     }
     else {
       LOG_U(log(LPF "%d SYNRECV %s:%d->%s:%d RST unacceptable", S_FMT(tls),
@@ -2042,6 +2291,7 @@ static void handle_rx_rst(ci_tcp_state* ts, ci_netif* netif,
         SEQ_LE(tcp_snd_una(ts), rxp->ack) &&
         SEQ_LE(rxp->ack, tcp_snd_nxt(ts)) ) {
       LOG_TC(log(LPF "%d SYN-SENT->CLOSED (RESET)", S_FMT(ts)));
+      CITP_STATS_NETIF(++netif->state->stats.tcp_connect_refused);
       ci_tcp_drop(netif, ts, ECONNREFUSED);
     }
     else
@@ -2061,7 +2311,16 @@ static void handle_rx_rst(ci_tcp_state* ts, ci_netif* netif,
   if( ci_tcp_seq_probably_unacceptable(tcp_rcv_nxt(ts),
                                        tcp_rcv_wnd_right_edge_sent(ts),
                                        rxp->seq, rxp->seq) ) {
-    goto unacceptable_rst;
+    /* Accept RST for rcv_nxt - 1 after a FIN.
+     * Same as Linux.
+     */
+    if( ! (ts->s.b.state & CI_TCP_STATE_RECVD_FIN) ||
+        ts->s.b.state == CI_TCP_TIME_WAIT ||
+        tcp_rcv_nxt(ts) - 1 != rxp->seq )
+      goto unacceptable_rst;
+#if CI_CFG_STATS_NETIF
+    CITP_STATS_NETIF_INC(netif, rst_recv_after_fin);
+#endif
   }
 
 #if CI_CFG_STATS_NETIF
@@ -2089,6 +2348,14 @@ static void handle_rx_rst(ci_tcp_state* ts, ci_netif* netif,
     ci_tcp_drop(netif, ts, EPIPE);
     goto freepkt_out;
   case CI_TCP_TIME_WAIT:
+    /* Good sequence number, good paws => possible TIME-WAIT assassination.
+     */
+    if( NI_OPTS(netif).time_wait_assassinate &&
+        ( ! (ts->tcpflags & rxp->flags & CI_TCPT_FLAG_TSO) ||
+          ci_tcp_paws_check(netif, rxp->timestamp, ts->tspaws, ts->tsrecent)
+        ) ) {
+      ci_tcp_drop(netif, ts, 0);
+    }
   case CI_TCP_CLOSED:
     goto unacceptable_rst;
   default:
@@ -2183,21 +2450,6 @@ static void handle_rx_synrecv_ack(ci_netif* netif, ci_tcp_socket_listen* tls,
   /* RST handled elsewhere; see handle_rx_rst. */
   ci_assert(~tcp->tcp_flags & CI_TCP_FLAG_RST);
 
-  /* check paws */
-  if( tsr->tcpopts.flags & CI_TCPT_FLAG_TSO ) {
-    if( (~rxp->flags & CI_TCPT_FLAG_TSO) ||
-        ci_tcp_paws_check(netif, rxp->timestamp,
-                          tsr->timest, tsr->tspeer) ) {
-      LOG_U(log(LNT_FMT "SYNRECV PAWS failed pkt=%08x-%08x "
-                "rcv=%08x-%08x", LNT_PRI_ARGS(netif, tls),
-                rxp->seq, pkt->pf.tcp_rx.end_seq,
-                tsr->rcv_nxt, tsr->rcv_nxt + tsr_rcv_wnd));
-      goto retransmit_synack;
-    }
-    /* update latest packet timestamp */
-    tsr->tspeer = rxp->timestamp;
-  }
-
   /* check it is an ACK */
   if( ~tcp->tcp_flags & CI_TCP_FLAG_ACK ) {
     LOG_U(log(LNT_FMT "SYNRECV non ACK",
@@ -2215,6 +2467,20 @@ static void handle_rx_synrecv_ack(ci_netif* netif, ci_tcp_socket_listen* tls,
     goto reset_out;
   }
 
+
+  /* check paws */
+  if( tsr->tcpopts.flags & CI_TCPT_FLAG_TSO &&
+      rxp->flags & CI_TCPT_FLAG_TSO ) {
+    if( ci_tcp_paws_check(netif, rxp->timestamp, tsr->timest, tsr->tspeer) ) {
+      LOG_U(log(LNT_FMT "SYNRECV PAWS failed pkt=%08x-%08x "
+                "rcv=%08x-%08x", LNT_PRI_ARGS(netif, tls),
+                rxp->seq, pkt->pf.tcp_rx.end_seq,
+                tsr->rcv_nxt, tsr->rcv_nxt + tsr_rcv_wnd));
+      goto retransmit_synack;
+    }
+    /* update latest packet timestamp */
+    tsr->tspeer = rxp->timestamp;
+  }
 
   /* ACK is for our SYNACK so promote the socket */
   tsr->retries |= CI_FLAG_TSR_RETRIES_ACKED;
@@ -2235,7 +2501,7 @@ static void handle_rx_synrecv_ack(ci_netif* netif, ci_tcp_socket_listen* tls,
     pkt->pf.tcp_rx.pay_len += CI_TCP_HDR_LEN(tcp) - ts->incoming_tcp_hdr_len;
     /* handle_rx_slow does not see that new data was ACKed, because
      * retransmit queue if empty. */
-    if( ts->tcpflags & CI_TCPT_FLAG_TSO )
+    if( ts->tcpflags & rxp->flags & CI_TCPT_FLAG_TSO )
       ci_tcp_update_rtt(netif, ts,
                         ci_tcp_time_now(netif) - rxp->timestamp_echo);
     else if( ~ts->tcpflags & CI_TCPT_FLAG_SYNCOOKIE )
@@ -2319,12 +2585,13 @@ static void handle_rx_listen(ci_netif* netif, ci_tcp_socket_listen* tls,
     ci_netif_pkt_release_rx(netif, pkt);
     return;
   }
+
+  if (!already_parsed)  ci_tcp_parse_options(netif, rxp, NULL);
+
   if( CI_UNLIKELY(tcp->tcp_flags & CI_TCP_FLAG_RST) ) {
     handle_rx_listen_rst(netif, tls, rxp);
     return;
   }
-
-  if (!already_parsed)  ci_tcp_parse_options(netif, rxp, NULL);
 
   /* RST handled elsewhere; we shouldn't see it here. */
   ci_assert(~tcp->tcp_flags & CI_TCP_FLAG_RST);
@@ -2417,7 +2684,7 @@ static void handle_rx_listen(ci_netif* netif, ci_tcp_socket_listen* tls,
   case retrrc_localroute:
     if( pkt->intf_i == OO_INTF_I_LOOPBACK ) {
       ipcache.flags |= CI_IP_CACHE_IS_LOCALROUTE;
-      ipcache.ip_saddr_be32 = ipcache.ip.ip_saddr_be32 = ip->ip_daddr_be32;
+      ipcache.ip_saddr.ip4 = ipcache.ip.ip_saddr_be32 = ip->ip_daddr_be32;
       break;
     }
     /* fall through */
@@ -2444,10 +2711,7 @@ static void handle_rx_listen(ci_netif* netif, ci_tcp_socket_listen* tls,
     ci_tcp_state_synrecv* tsr;
     ci_tcp_syncookie_ack(netif, tls, rxp, &tsr);
     if( tsr != NULL ) {
-      tsr->amss = ipcache.mtu - sizeof(ci_tcp_hdr) - sizeof(ci_ip4_hdr);
-#if CI_CFG_LIMIT_AMSS
-      tsr->amss = ci_tcp_limit_mss(tsr->amss, netif, __FUNCTION__);
-#endif
+      tsr->amss = ci_tcp_amss(netif, &tls->c, ipcache.mtu, __func__);
       handle_rx_synrecv_ack(netif, tls, tsr, rxp, &ipcache);
       return;
     }
@@ -2564,6 +2828,9 @@ static void handle_rx_listen(ci_netif* netif, ci_tcp_socket_listen* tls,
                                               CI_TCP_AUX_TYPE_SYNRECV));
     tsr->bucket_link = OO_P_NULL;
     tsr->hash = rxp->hash;
+#if CI_CFG_TCP_METRICS
+    tsr->tstamp = oo_metrics_stack_now(netif);
+#endif
   }
 
   /* parse the SYN options */
@@ -2623,7 +2890,9 @@ static void handle_rx_listen(ci_netif* netif, ci_tcp_socket_listen* tls,
   if( do_syncookie )
     ci_tcp_syncookie_syn(netif, tls, tsr);
   else {
-    tsr->snd_isn = ci_tcp_initial_seqno(netif);
+    tsr->snd_isn = ci_tcp_initial_seqno(netif, tsr->l_addr,
+                                        tcp_lport_be16(tls), tsr->r_addr,
+                                        tsr->r_port);
 
     /* Insert synrecv into the listen queue. */
     ci_tcp_listenq_insert(netif, tls, tsr);
@@ -2804,12 +3073,10 @@ static void handle_rx_syn_sent(ci_netif* netif, ci_tcp_state* ts,
   */
 
   /* Segments containing FINs should be dropped, since we cannot verify the
-  ** sequence number (rfc793 p75). */
-  if( tcp->tcp_flags & CI_TCP_FLAG_FIN ) {
-    LOG_U(log(LPF "%d SYN-SENT got segment with FIN (ignored)",
-              S_FMT(ts)));
-    goto free_out;
-  }
+  ** sequence number (rfc793 p75). But we don't check FIN flag here since we
+  ** have to send RST for stray FIN-ACK to ensure that the old peer moves its
+  ** socket from FIN-WAIT1 or LAST-ACK forward in timely manner.
+  */
 
   /*
   ** Following rfc793 p66
@@ -2906,7 +3173,7 @@ set_isn:
     ci_tcp_tx_advance(ts, netif);
   }
   else if ( OO_SP_NOT_NULL(ts->local_peer) ) {
-    ci_tcp_send_ack_loopback(netif, ts, CI_FALSE);
+    ci_tcp_send_ack_loopback(netif, ts);
     ci_netif_pkt_release_rx(netif, pkt);
   }
   else {
@@ -2964,16 +3231,21 @@ static void handle_rx_last_ack_or_closing(ci_tcp_state* ts, ci_netif* netif,
   /* RST handled elsewhere; we shouldn't see it here. */
   ci_assert(~rxp->tcp->tcp_flags & CI_TCP_FLAG_RST);
 
+  if( rxp->tcp->tcp_flags & CI_TCP_FLAG_SYN ) {
 #ifndef NDEBUG
-  if( rxp->tcp->tcp_flags & CI_TCP_FLAG_SYN )
     LOG_U(log(LPF "%d %s saw SYN!", S_FMT(ts), state_str(ts)));
 #endif
+    pkt = ci_netif_pkt_rx_to_tx(netif, pkt);
+    if( pkt != NULL )
+      ci_tcp_send_ack(netif, ts, pkt, CI_FALSE);
+    return;
+  }
 
   /* If our txq is empty, then our FIN has been ACKed, and we can go home. */
 
   if( SEQ_EQ(tcp_snd_una(ts), tcp_enq_nxt(ts)) ) {
     ci_assert(ci_tcp_sendq_is_empty(ts));
-    ci_assert(ci_ip_queue_is_empty(&ts->retrans));
+    ci_assert(ci_tcp_retransq_is_empty(ts));
 
     /* This packet must be the one that ACKed our FIN (or we would have
     ** closed before).
@@ -3012,7 +3284,7 @@ static void handle_rx_last_ack_or_closing(ci_tcp_state* ts, ci_netif* netif,
       ts->s.tx_errno = EPIPE;
       ts->s.rx_errno |= CI_SHUT_RD;
       ci_assert(ci_tcp_sendq_is_empty(ts));
-      ci_assert(ci_ip_queue_is_empty(&ts->retrans));
+      ci_assert(ci_tcp_retransq_is_empty(ts));
       ci_assert(ci_ip_queue_is_empty(&ts->rob));
       ci_netif_timewait_enter(netif, ts);
       ci_tcp_set_slow_state(netif, ts, next_state);
@@ -3043,9 +3315,7 @@ static void handle_rx_last_ack_or_closing(ci_tcp_state* ts, ci_netif* netif,
 
 ci_inline void handle_rx_fin_wait_1(ci_tcp_state* ts, ci_netif* netif)
 {
-  if( ci_tcp_sendq_is_empty(ts) &&
-      ci_ip_queue_is_empty(&ts->retrans) ) {
-
+  if( ci_tcp_sendq_is_empty(ts) && ci_tcp_retransq_is_empty(ts) ) {
     LOG_TC(log(LPF "%d FIN-WAIT1->FIN-WAIT2", S_FMT(ts)));
     ci_tcp_set_slow_state(netif, ts, CI_TCP_FIN_WAIT2);
     ci_tcp_wake(netif, ts, CI_SB_FLAG_WAKE_TX);
@@ -3066,6 +3336,9 @@ static int handle_rx_minor_states(ci_tcp_state* ts, ci_netif* netif,
 {
   ci_ip_pkt_fmt* pkt = rxp->pkt;
   ci_tcp_hdr* tcp = rxp->tcp;
+
+  if( CI_UNLIKELY( ts->tcpflags & CI_TCPT_FLAG_FIN_PENDING ) )
+    ci_tcp_resend_fin(ts, netif);
 
   switch( ts->s.b.state ) {
   case CI_TCP_SYN_SENT:
@@ -3100,41 +3373,45 @@ static int handle_rx_minor_states(ci_tcp_state* ts, ci_netif* netif,
           ((ts->tcpflags & rxp->flags & CI_TCPT_FLAG_TSO) &&
            TIME_GE(rxp->timestamp, ts->tsrecent)) ){
         int filter_id;
+        ci_sock_cmn* s;
         LOG_TV(
             if (!SEQ_LT(tcp_rcv_nxt(ts), rxp->seq))
               log(LPF "old SYN seq number accepted using timestamp %x >= %x",
                   rxp->timestamp, ts->tsrecent);
             );
 
-        /* There is an attempt to reopen a connection in TIME WAIT */
-        /* Remove this connection from TIME WAIT, lookup listening
-           socket, and pass to that for processing */
-
-        LOG_TV(log(LPF "SYN in TIME WAIT state, recycling connection"));
-        ci_netif_timeout_leave(netif, ts);
+        /* There is an attempt to reopen a connection in TIME WAIT.
+           First, lookup and verify there is a listen socket, then
+           remove this connection from TIME WAIT, and
+           pass to listen socket for processing */
 
         filter_id = ci_netif_listener_lookup(netif,
                                              oo_ip_hdr(pkt)->ip_daddr_be32,
                                              tcp->tcp_dest_be16);
-
-        if( filter_id >= 0 ) {
-          ci_tcp_socket_listen* tls;
-          tls = SP_TO_TCP_LISTEN(netif,
-                         CI_NETIF_FILTER_ID_TO_SOCK_ID(netif, filter_id));
-          ci_assert(tls->s.b.state == CI_TCP_LISTEN);
-          /* handle_rx_listen() expects pf.tcp_rx.pay_len to not be munged,
-           * so undo the change we have made
-           */
-          pkt->pf.tcp_rx.pay_len += CI_TCP_HDR_LEN(tcp);
-          handle_rx_listen(netif, tls, rxp, 1);
-          break;
-        }
-        else
+        if( filter_id < 0 ) {
           LOG_U(log(LPF "no matching listener for SYN in TIME_WAIT"));
+          goto reopen_failed;
+        }
+        s = SP_TO_SOCK(netif, CI_NETIF_FILTER_ID_TO_SOCK_ID(netif, filter_id));
+        if( s->b.state != CI_TCP_LISTEN ) {
+          LOG_U(log(LPF "non-listener targeted by SYN in TIME_WAIT"));
+          goto reopen_failed;
+        }
+
+        LOG_TV(log(LPF "SYN in TIME WAIT state, recycling connection"));
+        ci_netif_timeout_leave(netif, ts);
+
+        /* handle_rx_listen() expects pf.tcp_rx.pay_len to not be munged,
+         * so undo the change we have made
+         */
+        pkt->pf.tcp_rx.pay_len += CI_TCP_HDR_LEN(tcp);
+        handle_rx_listen(netif, SOCK_TO_TCP_LISTEN(s), rxp, 1);
+        break;
       }
       else
         LOG_U(log(LPF "SYN in TIME_WAIT has old SEQ - staying in TIME_WAIT"));
     }
+ reopen_failed:
     /* Not normal, do nothing! (rfc793 p23)  That being said, pure ACKs can be
      * generated by the peer if we retransmitted our FIN, so don't complain
      * about those. */
@@ -3387,6 +3664,7 @@ static void handle_rx_slow(ci_tcp_state* ts, ci_netif* netif,
 {
   ci_ip_pkt_fmt* pkt = rxp->pkt;
   ci_tcp_hdr* tcp = rxp->tcp;
+  int do_update_wnd = CI_TRUE;
 
   CI_IP_SOCK_STATS_INC_RXSLOW( ts );
   ci_assert(ts->s.b.state != CI_TCP_LISTEN);
@@ -3432,8 +3710,9 @@ static void handle_rx_slow(ci_tcp_state* ts, ci_netif* netif,
     if( ci_tcp_paws_check(netif, rxp->timestamp,
                           ts->tspaws, ts->tsrecent) )
       goto unacceptable_paws;
-    ci_tcp_tso_update(netif, ts, rxp->seq,
-                      pkt->pf.tcp_rx.end_seq, rxp->timestamp);
+    /* We defer updating our peer timestamp until after we've validated
+     * the ack, as we want to avoid pulling timestamps from packets that
+     * we reject. */
   }
   else if( CI_UNLIKELY(ts->tcpflags & CI_TCPT_FLAG_TSO) ) {
     /* with no TSO we are unable to perform checks and can
@@ -3508,7 +3787,7 @@ static void handle_rx_slow(ci_tcp_state* ts, ci_netif* netif,
 
         if( ci_tcp_sendq_is_empty(ts) &&
             (ts->s.s_flags & CI_SOCK_FLAG_LINGER) &&
-            ci_ip_queue_is_empty(&ts->retrans) )
+            ci_tcp_retransq_is_empty(ts) )
           /* Need this to wake thread in ci_tcp_ul_close(). */
           ci_tcp_wake(netif, ts, CI_SB_FLAG_WAKE_TX);
       }
@@ -3517,59 +3796,19 @@ static void handle_rx_slow(ci_tcp_state* ts, ci_netif* netif,
       ci_tcp_kalive_reset(netif, ts);
   }
 
-#if CI_CFG_TAIL_DROP_PROBE
-  {
-    ci_ip_pkt_queue *rtq = &ts->retrans;
-
-    if(ts->taildrop_state == CI_TCP_TAIL_DROP_PROBED){
-      ci_assert(NI_OPTS(netif).tail_drop_probe);
-
-      if(ci_ip_queue_not_empty(rtq)){
-        ci_ip_pkt_fmt *rtq_tail = PKT_CHK(netif, rtq->tail);
-        unsigned rtq_tail_seq = CI_BSWAP_BE32(TX_PKT_TCP(rtq_tail)->tcp_seq_be32);
-
-        LOG_TV(log("Received reply to tail drop probe, mark==tail %d (%08x), sack %d, dsack %d, tail sacked %d",
-                  SEQ_LE(rtq_tail_seq, ts->taildrop_mark),
-                  rtq_tail_seq,
-                  rxp->flags & CI_TCP_SACKED,
-                  rxp->flags & CI_TCP_DSACK,
-                  rtq_tail->flags & CI_PKT_FLAG_RTQ_SACKED));
-        if(SEQ_LE(rtq_tail_seq, ts->taildrop_mark)
-           && (rxp->flags & CI_TCPT_FLAG_SACK)
-           && (rtq_tail->flags & CI_PKT_FLAG_RTQ_SACKED)){
-          /* Respond to dropped tail */
-          ts->dup_acks = ts->dup_thresh;
-          ci_tcp_enter_fast_recovery(netif, ts);
-          ts->taildrop_state = CI_TCP_TAIL_DROP_ACTIVE;
-        } else{
-          /* failed test on mark or SACK */
-          ts->taildrop_state = CI_TCP_TAIL_DROP_ACTIVE;
-        }
-      }
-      else{
-        /* empty retrans queue */
-        ts->taildrop_state = CI_TCP_TAIL_DROP_ACTIVE;
-      }
-    }else if (ts->taildrop_state == CI_TCP_TAIL_DROP_PRIMED){
-      ci_assert(NI_OPTS(netif).tail_drop_probe);
-
-      /* received a packet in the primed state, postpone or cancel the probe */
-      if(ci_ip_queue_not_empty(rtq))
-        ci_tcp_taildrop_restart(netif, ts);
-      else{
-        ci_tcp_taildrop_clear(netif, ts);
-        ts->taildrop_state = CI_TCP_TAIL_DROP_ACTIVE;
-      }
-    }
-  }
-#endif
-
  not_unacceptable_ack:
+  /* Update our peer timestamp now that we know we have a valid ack */
+  if( ts->tcpflags & rxp->flags & CI_TCPT_FLAG_TSO &&
+      SEQ_GE(rxp->ack, tcp_snd_una(ts)) ) {
+    ci_tcp_tso_update(netif, ts, rxp->seq,
+                      pkt->pf.tcp_rx.end_seq, rxp->timestamp);
+  }
 
   if( CI_LIKELY(ts->s.b.state & CI_TCP_STATE_ACCEPT_DATA) ) {
 
     /* If it's windows don't process URG until reordering done */
-    if( CI_UNLIKELY(tcp->tcp_flags & CI_TCP_FLAG_URG))
+    if( CI_UNLIKELY((tcp->tcp_flags & CI_TCP_FLAG_URG) ||
+                    (tcp_urg_data(ts) & CI_TCP_URG_COMING)) )
       ci_tcp_urg_pkt_process(ts, netif, rxp);
 
     if( CI_UNLIKELY(tcp->tcp_flags & CI_TCP_FLAG_SYN) ) {
@@ -3586,7 +3825,11 @@ static void handle_rx_slow(ci_tcp_state* ts, ci_netif* netif,
       */
       LOG_TC(log(LNTS_FMT "SYN (duplicate?) ignored "TCP_RX_FMT,
                  LNTS_PRI_ARGS(netif,ts), TCP_RX_ARGS(pkt, ts)));
+      /* [rxp->seq] is used by the RX path, but there are other places, notably
+       * in ci_tcp_rx_deliver_rob(), where we re-read the sequence number from
+       * the TCP header, so we need to update both. */
       ++rxp->seq;
+      tcp->tcp_seq_be32 = CI_BSWAP_BE32(rxp->seq);
       tcp->tcp_flags &=~ CI_TCP_FLAG_SYN;
     }
 
@@ -3615,16 +3858,27 @@ static void handle_rx_slow(ci_tcp_state* ts, ci_netif* netif,
 
       /* We do not accept data beyond our window (since it makes window
       ** management painful).
+      ** However, we accept an out-of-window FIN in case that all of the
+      ** payload is in-window.  This is to improve interoperability with
+      ** protocol violators (Windows OS e.g. 2k12R2).
       */
-      if( SEQ_LT(tcp_rcv_wnd_right_edge_sent(ts), pkt->pf.tcp_rx.end_seq) ) {
+      if( SEQ_LT(tcp_rcv_wnd_right_edge_sent(ts) +
+                  ((tcp->tcp_flags & CI_TCP_FLAG_FIN) ? 1 : 0),
+                 pkt->pf.tcp_rx.end_seq) ) {
+        int n;
+        if( CI_UNLIKELY(tcp->tcp_flags & CI_TCP_FLAG_FIN) ) {
+          tcp->tcp_flags &=~ CI_TCP_FLAG_FIN;
+          pkt->pf.tcp_rx.end_seq--;
+        }
         /* This segment extends beyond the right-edge that we've
         ** advertised.  We do not accept such data at the moment, since it
         ** makes window management painful.  So we bodge the packet to
         ** pretend that data wasn't there.
         */
-        int n=SEQ_SUB(pkt->pf.tcp_rx.end_seq,tcp_rcv_wnd_right_edge_sent(ts));
-        LOG_U(log(LPF "%d %s EXCEEDS WIN by %d " TCP_RX_FMT,
-                  S_FMT(ts), state_str(ts), n, TCP_RX_ARGS(pkt, ts)));
+        n = SEQ_SUB(pkt->pf.tcp_rx.end_seq,tcp_rcv_wnd_right_edge_sent(ts));
+        LOG_U(log(LPF "%d %s EXCEEDS WIN by %d " TCP_RX_FMT " flags %x",
+                  S_FMT(ts), state_str(ts), n, TCP_RX_ARGS(pkt, ts),
+                  tcp->tcp_flags));
         ci_assert( OO_SP_IS_NULL(ts->local_peer) );
         pkt->pf.tcp_rx.end_seq -= n;
         pkt->pf.tcp_rx.pay_len -= n;
@@ -3632,7 +3886,7 @@ static void handle_rx_slow(ci_tcp_state* ts, ci_netif* netif,
           /* There's nothing left that overlaps our window. */
           pkt = ci_netif_pkt_rx_to_tx(netif, pkt);
           if( pkt != NULL )
-            ci_tcp_send_ack(netif, ts, pkt, CI_FALSE);
+            ci_tcp_send_ack_rx(netif, ts, pkt, CI_FALSE, CI_FALSE);
           return;
         }
       }
@@ -3660,6 +3914,7 @@ static void handle_rx_slow(ci_tcp_state* ts, ci_netif* netif,
           /* looks like a packet with data and a FIN */
           /* check that there is some in order payload, once FIN is
              discounted, before delivering */
+          do_update_wnd = CI_FALSE;
           if(SEQ_LT(tcp_rcv_nxt(ts), pkt->pf.tcp_rx.end_seq-1)){
             ci_tcp_rx_deliver_to_recvq(ts, netif, rxp);
             /* ci_tcp_rx_deliver_to_recvq() could have changed the state if
@@ -3688,13 +3943,14 @@ static void handle_rx_slow(ci_tcp_state* ts, ci_netif* netif,
         if( ci_tcp_rx_enqueue_ooo(netif, ts, rxp) ) {
           CITP_TCP_FASTSTART(ts->faststart_acks =
                                NI_OPTS(netif).tcp_faststart_loss);
+          do_update_wnd = CI_FALSE;
           if( ts->acks_pending ) {
             /* We have a delayed-ack in hand.  We are entitled to send this
             ** as well as forcing an ack for the new segment.  Should speed
             ** fast recovery...
             */
-            ci_ip_pkt_fmt* ackpkt = ci_netif_pkt_alloc(netif);
-            if( ackpkt )  ci_tcp_send_ack(netif, ts, ackpkt, CI_FALSE);
+            ci_ip_pkt_fmt* ackpkt = ci_netif_pkt_alloc(netif, 0);
+            if( ackpkt ) ci_tcp_send_ack(netif, ts, ackpkt, CI_FALSE);
           }
           TCP_FORCE_ACK(ts);
         }
@@ -3714,8 +3970,10 @@ static void handle_rx_slow(ci_tcp_state* ts, ci_netif* netif,
         ci_netif_pkt_release_rx(netif, pkt);
         TCP_FORCE_ACK(ts);
       }
-      else if( ci_tcp_rx_enqueue_ooo(netif, ts, rxp) )
-          TCP_FORCE_ACK(ts);
+      else if( ci_tcp_rx_enqueue_ooo(netif, ts, rxp) ) {
+        do_update_wnd = CI_FALSE;
+        TCP_FORCE_ACK(ts);
+      }
     }
     else {
       /* only a pure ACK should get here (or could be a duplicate SYN
@@ -3730,8 +3988,8 @@ static void handle_rx_slow(ci_tcp_state* ts, ci_netif* netif,
       ** piggy-back this ACK onto a segment with payload, since then it
       ** can't be interpreted as a dupack.
       */
-      pkt = ci_netif_pkt_alloc(netif);
-      if( pkt )  ci_tcp_send_ack(netif, ts, pkt, CI_FALSE);
+      pkt = ci_netif_pkt_alloc(netif, 0);
+      if( pkt )  ci_tcp_send_ack_rx(netif, ts, pkt, CI_FALSE, do_update_wnd);
     }
 
     /* May need to advance TX or send ACK. */
@@ -3895,11 +4153,6 @@ static void handle_no_match(ci_netif* ni, ciip_tcp_rx_pkt* rxp)
   int reset = 1; /* We send a TCP reset unless we have a good reason
                         not to. See RFC793 p36 */
 
-  if( ci_netif_pkt_pass_to_kernel(ni, pkt) ) {
-    CITP_STATS_NETIF_INC(ni, no_match_pass_to_kernel_tcp);
-    return;
-  }
-
   if( oo_tcpdump_check_no_match(ni, pkt, pkt->intf_i) ) {
     /* note: metada of the packet might get overwritten below on reply
      * with RST. Nonetheless, payload is left intact and
@@ -3966,7 +4219,7 @@ static void handle_no_match(ci_netif* ni, ciip_tcp_rx_pkt* rxp)
 }
 
 
-static int ci_tcp_rx_deliver_to_conn(ci_sock_cmn* s, void* opaque_arg)
+int ci_tcp_rx_deliver_to_conn(ci_sock_cmn* s, void* opaque_arg)
 {
   ciip_tcp_rx_pkt* rxp = opaque_arg;
   ci_tcp_state* ts = SOCK_TO_TCP(s);
@@ -4159,11 +4412,17 @@ static int ci_tcp_rx_deliver_to_listen(ci_sock_cmn* s, void* opaque_arg)
   }
 #endif
 
-  if( s->b.state != CI_TCP_STATE_ACTIVE_WILD ) {
-    handle_rx_listen(rxp->ni, SOCK_TO_TCP_LISTEN(s), rxp, 0);
+  if( s->b.state == CI_TCP_STATE_ACTIVE_WILD ) {
+    /* do not inject into kernel, but handle inside Onload */
+    handle_no_match(rxp->ni, rxp);
+    CITP_STATS_NETIF_INC(rxp->ni, no_match_in_active_wild);
     rxp->pkt = NULL;
-    CITP_STATS_TCP_LISTEN(++SOCK_TO_TCP_LISTEN(s)->stats.n_rx_pkts);
+    return 1;
   }
+
+  handle_rx_listen(rxp->ni, SOCK_TO_TCP_LISTEN(s), rxp, 0);
+  rxp->pkt = NULL;
+  CITP_STATS_TCP_LISTEN(++SOCK_TO_TCP_LISTEN(s)->stats.n_rx_pkts);
   return 1;  /* finished -- don't deliver to any other socket */
 }
 
@@ -4196,7 +4455,6 @@ void ci_tcp_handle_rx(ci_netif* netif, struct ci_netif_poll_state* ps,
   rxp.tcp = tcp;
   ci_assert_gt(pkt->pay_len, ip_paylen);
   pkt->pf.tcp_rx.pay_len = ip_paylen;
-  pkt->pf.tcp_rx.rx_stamp = IPTIMER_STATE(netif)->frc;
 
   rxp.seq = CI_BSWAP_BE32(tcp->tcp_seq_be32);
   rxp.ack = CI_BSWAP_BE32(tcp->tcp_ack_be32);
@@ -4286,6 +4544,11 @@ void ci_tcp_handle_rx(ci_netif* netif, struct ci_netif_poll_state* ps,
                                  ci_tcp_rx_deliver_to_listen, &rxp, NULL);
   if(CI_LIKELY( rxp.pkt == NULL ))
     return;
+
+  if( ci_netif_pkt_pass_to_kernel(netif, pkt) ) {
+    CITP_STATS_NETIF_INC(netif, no_match_pass_to_kernel_tcp);
+    return;
+  }
 
   handle_no_match(netif, &rxp);
   return;

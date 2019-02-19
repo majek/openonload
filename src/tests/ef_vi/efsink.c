@@ -474,7 +474,7 @@ static void* monitor_fn(void* arg)
 }
 
 
-static void usage(void)
+static __attribute__ ((__noreturn__)) void usage(void)
 {
   fprintf(stderr, "usage:\n");
   fprintf(stderr, "  efsink [options] <interface> [<filter-spec>...]\n");

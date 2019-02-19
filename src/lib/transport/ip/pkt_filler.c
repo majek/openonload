@@ -82,7 +82,6 @@ int oo_pkt_fill(ci_netif* ni, ci_sock_cmn* s, int* p_netif_locked,
   int n;
   int rc;
 
-  ci_assert_le(bytes_to_copy, ci_iovec_ptr_bytes_count(piov));
   ci_assert_ge((int) (pf->buf_end - pf->buf_start), 0);
   ci_assert(pf->buf_start >= PKT_START(pf->last_pkt));
   ci_assert(pf->buf_start <= pf->buf_end);

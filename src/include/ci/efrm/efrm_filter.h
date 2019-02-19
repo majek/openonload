@@ -90,8 +90,19 @@ int efrm_rss_context_alloc(struct efrm_client*, u32 vport_id,
 			   const u8 *key, u32 efrm_rss_mode,
 			   int num_qs,
 			   u32 *rss_context_out);
+
+extern int
+efrm_rss_context_update(struct efrm_client*, u32 rss_context, const u32 *indir,
+			const u8 *key, u32 efrm_rss_mode);
+
 extern int efrm_rss_context_free(struct efrm_client*,
 				 u32 rss_context_id);
+
+/* vport available with EFX_DRIVERLINK_API_VERSION >= 25 */
+extern int
+efrm_vport_alloc(struct efrm_client* client, u16 vlan_id, u16 *vport_handle_out);
+extern int
+efrm_vport_free(struct efrm_client* client, u16 vport_handle);
 
 extern void efrm_filter_shutdown(void);
 extern void efrm_filter_init(void);

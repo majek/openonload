@@ -353,6 +353,7 @@ enum {
  * @must_realloc_vis: Flag: VIs have yet to be reallocated after MC reboot
  * @must_restore_rss_contexts: Flag: RSS contexts have yet to be restored after
  *	MC reboot
+ * @must_restore_vports: Flag: V-ports have yet to be restored after MC reboot
  * @must_restore_filters: Flag: filters have yet to be restored after MC reboot
  * @n_piobufs: Number of PIO buffers allocated to this function
  * @wc_membase: Base address of write-combining mapping of the memory BAR
@@ -378,7 +379,6 @@ enum {
  *	%MC_CMD_GET_CAPABILITIES response)
  * @datapath_caps2: Further capabilities of datapath firmware (FLAGS2 field of
  *	%MC_CMD_GET_CAPABILITIES_V2 response)
- * @vport_id: The function's vport ID, only relevant for PFs
  * @must_probe_vswitching: Flag: vswitching has yet to be setup after MC reboot
  * @pf_index: The number for this PF, or the parent PF if this is a VF
 #ifdef CONFIG_SFC_SRIOV
@@ -387,10 +387,11 @@ enum {
  * @vport_mac: The MAC address on the vport, only for PFs; VFs will be zero
  * @vlan_list: List of VLANs added over the interface. Serialised by vlan_lock.
  * @vlan_lock: Lock to serialize access to vlan_list.
+ * @udp_tunnel_work: workitem for pushing UDP tunnel ports to the MC
  * @udp_tunnels: UDP tunnel port numbers and types.
- * @udp_tunnels_dirty: flag indicating a reboot occurred while pushing
- *	@udp_tunnels to hardware and thus the push must be re-done.
- * @udp_tunnels_lock: Serialises writes to @udp_tunnels and @udp_tunnels_dirty.
+ * @udp_tunnels_busy: Indicates whether efx_ef10_set_udp_tnl_ports() is
+ *	currently running.
+ * @udp_tunnels_lock: Serialises writes to @udp_tunnels and @udp_tunnels_busy.
  */
 struct efx_ef10_nic_data {
 	struct efx_nic *efx;
@@ -402,6 +403,7 @@ struct efx_ef10_nic_data {
 	unsigned int n_allocated_vis;
 	bool must_realloc_vis;
 	bool must_restore_rss_contexts;
+	bool must_restore_vports;
 	bool must_restore_filters;
 	unsigned int n_piobufs;
 	void __iomem *wc_membase, *pio_write_base;
@@ -421,7 +423,6 @@ struct efx_ef10_nic_data {
 	bool must_check_datapath_caps;
 	u32 datapath_caps;
 	u32 datapath_caps2;
-	unsigned int vport_id;
 	bool must_probe_vswitching;
 	unsigned int pf_index;
 	unsigned int vf_index;
@@ -435,9 +436,10 @@ struct efx_ef10_nic_data {
 	u8 vport_mac[ETH_ALEN];
 	struct list_head vlan_list;
 	struct mutex vlan_lock;
+	struct work_struct udp_tunnel_work;
 	struct efx_udp_tunnel udp_tunnels[16];
-	bool udp_tunnels_dirty;
-	struct mutex udp_tunnels_lock;
+	bool udp_tunnels_busy;
+	spinlock_t udp_tunnels_lock;
 	u64 licensed_features;
 };
 
@@ -670,6 +672,7 @@ void efx_farch_tx_write(struct efx_tx_queue *tx_queue);
 void efx_farch_notify_tx_desc(struct efx_tx_queue *tx_queue);
 unsigned int efx_farch_tx_limit_len(struct efx_tx_queue *tx_queue,
 				    dma_addr_t dma_addr, unsigned int len);
+unsigned int efx_farch_tx_max_skb_descs(struct efx_nic *efx);
 int efx_farch_rx_probe(struct efx_rx_queue *rx_queue);
 int efx_farch_rx_init(struct efx_rx_queue *rx_queue);
 void efx_farch_rx_fini(struct efx_rx_queue *rx_queue);

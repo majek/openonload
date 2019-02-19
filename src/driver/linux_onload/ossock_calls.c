@@ -38,6 +38,21 @@
 
 #include "onload_kernel_compat.h"
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,17,0)
+#define OO_SOCK_OPS_GETNAME(sock, addr, peer) \
+  sock->ops->getname(sock, addr, peer)
+#else
+static inline int OO_SOCK_OPS_GETNAME(struct socket* sock,
+                                      struct sockaddr* addr, int peer)
+{
+  int addrlen, rc;
+  rc = sock->ops->getname(sock, addr, &addrlen, peer);
+  if( rc < 0 )
+    return rc;
+  return addrlen;
+}
+#endif
+  
 
 static void efab_ep_handover_setup(ci_private_t* priv, int* in_epoll_p)
 {
@@ -57,7 +72,6 @@ static void efab_ep_handover_setup(ci_private_t* priv, int* in_epoll_p)
   priv->fd_type = CI_PRIV_TYPE_PASSTHROUGH_EP;
   priv->_filp->f_op = &linux_tcp_helper_fops_passthrough;
   ci_wmb();
-  oo_file_moved(priv);
 
   /* Second, update the shared state: */
   ci_bit_set(&w->waitable.sb_aflags, CI_SB_AFLAG_MOVED_AWAY_BIT);
@@ -750,7 +764,7 @@ int efab_tcp_helper_bind_os_sock_common(struct socket* sock,
      * (which might be different to asked for if asked for 0)
      * This is the getsockname, as mentioned in description above
      */
-    rc = sock->ops->getname(sock, addr, &addrlen, 0);
+    OO_SOCK_OPS_GETNAME(sock, addr, 0);
 
     *out_port = ((struct sockaddr_in*)addr)->sin_port;
   }
@@ -767,20 +781,28 @@ void efab_free_ephemeral_port(struct efab_ephemeral_port_keeper* keeper)
 }
 
 
+/* Reserve a port by creating a TCP socket and binding it.  The idea in
+ * principle here is that we're allocating an ephemeral ports for use in
+ * backing an active wild, hence the "ephemeral" in the name of the function,
+ * but sometimes we will prefer to use an explicit port, so when [lport_be16]
+ * is non-zero we will bind to that port, and "ephemeral" becomes something of
+ * a misnomer. */
 int
-efab_alloc_ephemeral_port(ci_uint32 laddr_be32,
+efab_alloc_ephemeral_port(ci_uint32 laddr_be32, ci_uint16 lport_be16,
                           struct efab_ephemeral_port_keeper** keeper_out)
 {
   struct efab_ephemeral_port_keeper* keeper;
   struct sockaddr_in addr = {
     .sin_family      = AF_INET,
     .sin_addr.s_addr = laddr_be32,
+    .sin_port        = lport_be16,
   };
   int rc;
 
   keeper = kmalloc(sizeof(*keeper), GFP_KERNEL);
   keeper->laddr_be32 = laddr_be32;
   keeper->next = NULL;
+  keeper->global_next = NULL;
 
   rc = sock_create(AF_INET, SOCK_STREAM, 0, &keeper->sock);
   if( rc != 0 ) {
@@ -1021,8 +1043,8 @@ efab_tcp_helper_os_sock_accept(ci_private_t* priv, void *arg)
     char address[sizeof(struct sockaddr_in6)];
     int len, ulen;
 
-    rc = newsock->ops->getname(newsock, (struct sockaddr *)address, &len, 2);
-    if( rc != 0 )
+    len = OO_SOCK_OPS_GETNAME(newsock, (struct sockaddr *)address, 2);
+    if( len < 0 )
       return -ECONNABORTED;
     rc = get_user(ulen, (int *)CI_USER_PTR_GET(op->addrlen));
     if( rc != 0 )

@@ -363,7 +363,7 @@ static int install_filters(void)
 }
 
 
-static void usage(void)
+static __attribute__ ((__noreturn__)) void usage(void)
 {
   fprintf(stderr, "usage:\n");
   fprintf(stderr, "  efrss <num-threads> <intf>\n");

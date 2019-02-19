@@ -381,6 +381,7 @@ generic_rx_wait(ef_vi* vi)
         ++(tx_alt.complete_id);
         break;
       case EF_EVENT_TYPE_RX_MULTI:
+      case EF_EVENT_TYPE_RX_MULTI_DISCARD:
         n_rx = ef_vi_receive_unbundle(vi, &(evs[i]), rx_ids);
         TEST(n_rx == 1);
         ++i;
@@ -541,7 +542,7 @@ static const test_t* do_init(int ifindex)
 }
 
 
-static void usage(void)
+static CI_NORETURN usage(void)
 {
   fprintf(stderr, "\nusage:\n");
   fprintf(stderr, "  eflatency [options] <ping|pong> <interface>\n");

@@ -1,0 +1,290 @@
+#!/usr/bin/env python
+######################################################################
+# Desciption: Script to control metrics gathering and processing.
+#     Author: David Riddoch <driddoch@solarflare.com>
+######################################################################
+
+import sys, os
+
+
+usage_text = """
+  %prog record OUTPUT-FILE [STACK-ID|STACK-NAME]...
+  %prog read INPUT-FILE
+  %prog table INPUT-FILE TYPE=field@field@...
+"""
+
+
+class objectview(object):
+    def __init__(self, d):
+        self.__dict__ = d
+
+
+class Record(objectview):
+    def __init__(self, d):
+        super(Record, self).__init__(d)
+
+
+def s_dot_us_to_usecs(s_dot_us):
+    s, us = s_dot_us.split('.')
+    assert len(us) == 6
+    return long(s) * 1000000 + long(us)
+
+
+def usecs_to_s_dot_us(usecs):
+    return "%d.%06d" % (usecs / 1000000, usecs % 1000000)
+
+
+rec_types = {
+    'TO':dict(add_fields=['reltime']),
+    'TR':dict(add_fields=['time', 'reltime', 'latency_us']),
+}
+
+# Fields that are cumulative from request to request.
+cumulative_fields = ['rx_bytes', 'tx_bytes', 'app_us', 'tx_us', 'idle_us',
+                     'rx_us', 'retrans']
+
+
+def parse(lines, comment_handler=None):
+    def parse_val(val):
+        """Convert fields to integers if it looks like they are."""
+        try:
+            return int(val)
+        except:
+            return val
+
+    for line in lines:
+        words = line.split()
+        if not words:
+            continue
+
+        if words[0][0] == '#':
+            # Header lines look like "#RECTYPE fieldname1 fieldname2..."
+            rec_type = words[0][1:]
+            if rec_type not in rec_types:
+                if comment_handler:
+                    comment_handler(line)
+                continue
+            rec_types[rec_type]['fields'] = ['type'] + words[1:]
+            continue
+
+        # Non-header lines look like "RECTYPE field1 field2..."
+        rec_type = words[0]
+        if rec_type not in rec_types:
+            sys.stderr.write("ERROR: bad input: %s\n" % repr(words))
+            sys.exit(1)
+        words = [parse_val(w) for w in words]
+        rec = Record(dict(zip(rec_types[rec_type]['fields'], words)))
+
+        yield rec
+
+
+def format_rec(rec, field_map):
+    fields = field_map[rec.type]
+    # eval() here allows fields to be arbitrary expressions.
+    return ' '.join([str(eval(f, rec.__dict__)) for f in fields])
+
+
+def write_headers(dest, field_map):
+    for type in field_map:
+        fields = field_map[type]
+        fields = [(type if f=='type' else f) for f in fields]
+        dest.write('#' + ' '.join(fields) + '\n')
+
+
+def write_records(dest, recs, field_map):
+    for rec in recs:
+        if rec.type in field_map:
+            dest.write(format_rec(rec, field_map) + '\n')
+
+
+def default_output_field_map():
+    t = [(type, rec_types[type]['fields'] + rec_types[type]['add_fields'])
+         for type in rec_types]
+    return dict(t)
+
+
+def group_by_connection(recs):
+    """Form list of connections and records."""
+
+    connections = dict()
+    records = []
+
+    for rec in recs:
+        rec.conn_id = (rec.s_id, rec.c_id)
+        if rec.type == 'TO':
+            rec.requests = []
+            connections[rec.conn_id] = rec
+        elif rec.type == 'TR':
+            conn = connections[rec.conn_id]
+            rec.connection = conn
+            conn.requests.append(rec)
+        records.append(rec)
+
+    connections = connections.values()
+    connections.sort(key=lambda c: s_dot_us_to_usecs(c.time))
+    return records, connections
+
+
+def normalise(connections):
+    """Convert cumulative fields to per-request."""
+    for conn in connections:
+        for id, req in reversed(list(enumerate(conn.requests))):
+            if id == 0:
+                break
+            prev_req = conn.requests[id - 1]
+            for f in cumulative_fields:
+                val = getattr(req, f) - getattr(prev_req, f)
+                if val < 0:
+                    sys.stderr.write("ERROR: records probably normalised twice")
+                    sys.exit(1)
+                setattr(req, f, val)
+
+
+def calc_times(connections):
+    """Compute various timestamp fields and return earliest timestamp."""
+
+    for conn in connections:
+        conn.time_us = s_dot_us_to_usecs(conn.time)
+    start_of_day_us = min((c.time_us for c in connections))
+
+    for conn in connections:
+        conn.reltime_us = conn.time_us - start_of_day_us
+        conn.reltime = usecs_to_s_dot_us(conn.reltime_us)
+        usecs = conn.time_us + conn.open_us
+        for req in conn.requests:
+            if req.cl:
+                usecs += req.app_us
+                latency_us = req.tx_us + req.idle_us + req.rx_us
+            else:
+                usecs += req.idle_us
+                latency_us = req.rx_us + req.app_us + req.tx_us
+            req.time_us = usecs
+            req.time = usecs_to_s_dot_us(req.time_us)
+            req.reltime_us = req.time_us - start_of_day_us
+            req.reltime = usecs_to_s_dot_us(req.reltime_us)
+            req.latency_us = latency_us
+            usecs = req.time_us + latency_us
+
+    return start_of_day_us
+
+
+def load_raw(file_or_filename, comment_handler=None):
+    if type(file_or_filename) is str:
+        if file_or_filename == '-':
+            src = sys.stdin
+        else:
+            src = open(file_or_filename)
+    else:
+        src = file_or_filename
+
+    recs_g = parse(src, comment_handler=comment_handler)
+    recs, connections = group_by_connection(recs_g)
+    normalise(connections)
+    calc_times(connections)
+
+    # Records are often not in time order (timestamps are start of
+    # transaction but emitted after end, and records may be gathered from
+    # multiple stacks).
+    recs.sort(key=lambda r: r.reltime_us)
+
+    return recs, connections
+
+
+def mk_filter(filter_expr):
+    def filter_fn(rec):
+        try:
+            return eval(filter_expr, rec.__dict__)
+        except:
+            return False
+    return filter_fn
+
+
+def filter_records(recs, filter_expr):
+    if not filter_expr:
+        return recs
+    def filter_fn(rec):
+        try:
+            return eval(filter_expr, rec.__dict__)
+        except:
+            return False
+    return [rec for rec in recs if filter_fn(rec)]
+
+
+def cmd_read(args, options):
+    dest = sys.stdout
+    if len(args) == 1:
+        src = args[0]
+    else:
+        usage_err("Expected: read INPUT-FILE")
+
+    recs, connections = load_raw(src, comment_handler=dest.write)
+    recs = filter_records(recs, options.filter)
+
+    if 1:
+        field_map = default_output_field_map()
+        write_headers(dest, field_map)
+        write_records(dest, recs, field_map)
+    else:
+        # Output records grouped by connection.
+        write_headers(rec_types, dest)
+        for c in connections:
+            dest.write(format_rec(c) + '\n')
+            for rec in c.requests:
+                dest.write(format_rec(rec) + '\n')
+
+
+def cmd_table(args, options):
+    if len(args) < 2:
+        usage_err("Expected: table INPUT-FILE TYPE=field@field@...")
+
+    dest = sys.stdout
+    src = args[0]
+    maps = args[1:]
+    recs, connections = load_raw(args[0], comment_handler=sys.stdout.write)
+    recs = filter_records(recs, options.filter)
+    field_map = dict()
+    for m in maps:
+        type, fields = m.split('=', 1)
+        field_map[type] = fields.split('@')
+    write_headers(dest, field_map)
+    write_records(dest, recs, field_map)
+
+
+def cmd_record(args, options):
+    if len(args) < 1:
+        usage_err("Expected: record OUTPUT-FILE")
+    dest = args[0]
+    if dest == '-':
+        cmd = "onload_metrics_record %s" % ' '.join(args[1:])
+    else:
+        cmd = "onload_metrics_record >'%s' %s" % (args[0], ' '.join(args[1:]))
+
+    return os.system(cmd)
+
+
+def main(args):
+    import optparse
+    op = optparse.OptionParser(usage=usage_text)
+    op.disable_interspersed_args()
+    op.add_option("-f", "--filter", help="Filter expression")
+
+    global usage_err
+    usage_err = op.error
+
+    options, args = op.parse_args(args=args)
+
+    if not args:
+        usage_err("Expected: COMMAND [ARGS...]")
+
+    command = args[0]
+    command_args = args[1:]
+    command_fn = globals().get("cmd_%s" % command)
+    if not command_fn:
+        usage_err("Unknown command: %s" % command)
+    return command_fn(command_args, options)
+
+
+if __name__ == "__main__":
+    status = main(sys.argv[1:])
+    if status is not None:
+        sys.exit(status)

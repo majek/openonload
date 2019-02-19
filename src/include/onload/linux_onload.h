@@ -159,6 +159,7 @@ asmlinkage int efab_linux_sys_sigaction(int signum,
                                         const struct sigaction *act,
                                         struct sigaction *oact);
 #ifdef CONFIG_COMPAT
+/* ARM64 TODO */
 
 /* XXX: PPC_HACK: asm/ia32 is intel specific and not present on ppc.
    The function also seems to be intel specific. */

@@ -384,6 +384,28 @@ int ci_tcp_helper_close_no_trampoline(int fd) {
       return -1;
     }
   }
+#elif defined(__aarch64__)
+  {
+    register long r8 asm ("x8");
+    register long r0 asm ("x0");
+
+    r8 = call_num;
+    r0 = fd;
+
+    __asm__ __volatile__("svc 0\n"
+                         "ci_tcp_helper_close_no_trampoline_retaddr:\n\t"
+                         ".global ci_tcp_helper_close_no_trampoline_retaddr\n\t"
+                         ".hidden ci_tcp_helper_close_no_trampoline_retaddr\n\t"
+                         :"=r"(r0)
+                         :"r"(r8), "r"(r0));
+    res = r0;
+
+    if (CI_UNLIKELY(res < 0)) {
+      errno = -res;
+      return -1;
+    }
+  }
+  res = 0;
 #else
 #error "Unsupported close system call"
 #endif
@@ -532,3 +554,5 @@ int ci_tcp_helper_alloc_active_wild(ci_netif *ni, ci_uint32 laddr_be32)
   return oo_resource_op(ci_netif_get_driver_handle(ni),
                         OO_IOC_ALLOC_ACTIVE_WILD, &aaw);
 }
+
+

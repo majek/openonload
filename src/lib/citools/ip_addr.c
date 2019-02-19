@@ -26,6 +26,7 @@
  
 /*! \cidoxg_lib_citools */
  
+#include <ci/tools.h>
 #include "citools_internal.h"
 
 

@@ -112,6 +112,9 @@ extern int oo_cp_get_acceleratable_ifindices(struct oo_cplane_handle*,
                                              int max_count);
 #endif
 
+extern ci_ifid_t
+oo_cp_get_hwport_ifindex(struct oo_cplane_handle* cp, ci_hwport_id_t hwport);
+
 extern int
 oo_cp_get_hwport_properties(struct oo_cplane_handle*, ci_hwport_id_t hwport,
                             ci_uint8* out_mib_flags,
@@ -465,9 +468,23 @@ ci_inline int cicp_layer34_hash(struct cicp_hash_state *hs, int num_slaves)
   }
 }
 
+static inline int
+oo_cp_hwport_hash(cicp_llap_type_t encap, struct cicp_hash_state* hs,
+                  int slaves)
+{
+  /* There should be exactly one hash mode selected */
+  ci_assert(CI_IS_POW2(encap & CICP_LLAP_TYPE_USES_HASH));
+
+  if( encap & CICP_LLAP_TYPE_XMIT_HASH_LAYER34 )
+    return cicp_layer34_hash(hs, slaves);
+  else if( encap & CICP_LLAP_TYPE_XMIT_HASH_LAYER23 )
+    return cicp_layer23_hash(hs, slaves);
+  else
+    return cicp_layer2_hash(hs, slaves);
+}
+
 static inline ci_hwport_id_t
-oo_cp_hwport_bond_get(struct oo_cplane_handle* cp, ci_ifid_t ifindex, 
-                      cicp_encap_t* encap, cicp_hwport_mask_t hwports,
+oo_cp_hwport_bond_get(cicp_llap_type_t encap, cicp_hwport_mask_t hwports,
                       struct cicp_hash_state* hs)
 {
   ci_hwport_id_t hwport[sizeof(cicp_hwport_mask_t) * 8];
@@ -481,14 +498,7 @@ oo_cp_hwport_bond_get(struct oo_cplane_handle* cp, ci_ifid_t ifindex,
   for( i = 0; hwports != 0 ; hwports &= (hwports-1), i++ )
     hwport[i] = cp_hwport_mask_first(hwports);
 
-  if( encap->type & CICP_LLAP_TYPE_XMIT_HASH_LAYER34 )
-    return hwport[cicp_layer34_hash(hs, i)];
-  else if( encap->type & CICP_LLAP_TYPE_XMIT_HASH_LAYER23 )
-    return hwport[cicp_layer23_hash(hs, i)];
-  else {
-    ci_assert_flags(encap->type, CICP_LLAP_TYPE_XMIT_HASH_LAYER2);
-    return hwport[cicp_layer2_hash(hs, i)];
-  }
+  return hwport[oo_cp_hwport_hash(encap, hs, i)];
 }
 
 #ifdef __cplusplus

@@ -120,6 +120,11 @@ int efch_capabilities_op(struct efch_capabilities_in* in,
   case EF_VI_CAP_PACKED_STREAM:
     get_from_nic_flags(nic, NIC_FLAG_PACKED_STREAM, out);
     break;
+
+  case EF_VI_CAP_RX_FORCE_EVENT_MERGING:
+    get_from_nic_flags(nic, NIC_FLAG_RX_FORCE_EVENT_MERGING, out);
+    break;
+
   case EF_VI_CAP_PACKED_STREAM_BUFFER_SIZES:
     /* ef_vi only presents a subset of the supported buffer sizes, based on
      * whether NIC_FLAG_VAR_PACKED_STREAM is set.
@@ -293,6 +298,12 @@ int efch_capabilities_op(struct efch_capabilities_in* in,
     get_from_nic_flags(nic, NIC_FLAG_TX_ALTERNATIVES, out);
     if( out->support_rc == 0 )
       out->val = nic->tx_alts_cp_bufs;
+    break;
+
+  case EF_VI_CAP_TX_ALTERNATIVES_CP_BUFFER_SIZE:
+    get_from_nic_flags(nic, NIC_FLAG_TX_ALTERNATIVES, out);
+    if( out->support_rc == 0 )
+      out->val = nic->tx_alts_cp_buf_size;
     break;
 
   case EF_VI_CAP_RX_FW_VARIANT:

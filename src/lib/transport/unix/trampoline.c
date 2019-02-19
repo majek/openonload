@@ -151,12 +151,13 @@ citp_init_trampoline(ci_fd_t fd)
 #endif
   }
 #else
-  /* x86, x86_64 - no toc or user fixup, function pointers mean what they say */
+  /* x86, x86_64, aarch64 - no toc or user fixup, function pointers mean what they say */
   CI_USER_PTR_SET (args.trampoline_entry, ci_trampoline_handler_entry);  
   CI_USER_PTR_SET (args.trampoline_toc,   NULL);
   CI_USER_PTR_SET (args.trampoline_user_fixup, NULL );
 #endif
-  
+
+
   args.max_signum = NSIG;
   CI_USER_PTR_SET(args.signal_handler_postpone, citp_signal_intercept);
   for( i = 0; i <= OO_SIGHANGLER_DFL_MAX; i++ )

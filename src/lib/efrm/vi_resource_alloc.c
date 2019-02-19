@@ -230,16 +230,6 @@ static int efrm_vi_rm_alloc_instance(struct efrm_pd *pd,
 	unsigned vi_props;
 	int channel;
 
-	if (vi_attr->vi_set != NULL)
-		return efrm_vi_set_alloc_instance(virs, vi_attr->vi_set,
-						  vi_attr->vi_set_instance);
-
-#ifdef CONFIG_SFC_RESOURCE_VF
-	vf = efrm_pd_get_vf(pd);
-	if (vf != NULL)
-		return efrm_vf_vi_alloc(vf, &virs->allocation);
-#endif
-
 	efrm_nic = efrm_nic(efrm_pd_to_resource(pd)->rs_client->nic);
 	channel = vi_attr->channel;
 	if (vi_attr->interrupt_core >= 0) {
@@ -256,6 +246,16 @@ static int efrm_vi_rm_alloc_instance(struct efrm_pd *pd,
 		}
 	}
 	virs->net_drv_wakeup_channel = channel;
+
+	if (vi_attr->vi_set != NULL)
+		return efrm_vi_set_alloc_instance(virs, vi_attr->vi_set,
+						  vi_attr->vi_set_instance);
+
+#ifdef CONFIG_SFC_RESOURCE_VF
+	vf = efrm_pd_get_vf(pd);
+	if (vf != NULL)
+		return efrm_vf_vi_alloc(vf, &virs->allocation);
+#endif
 
 	if (vi_attr->with_interrupt)
 		vi_props = vi_with_interrupt;
@@ -531,6 +531,9 @@ efrm_vi_rm_init_dmaq(struct efrm_vi *virs, enum efhw_q_type queue_type,
 	struct efrm_nic* efrm_nic;
 	int instance, evq_instance = -1, interrupting, wakeup_evq;
 	unsigned flags = virs->flags;
+	unsigned vport_id;
+
+	vport_id = efrm_pd_get_vport_id(virs->pd);
 
 	efrm_nic = efrm_nic(nic);
 
@@ -556,7 +559,7 @@ efrm_vi_rm_init_dmaq(struct efrm_vi *virs, enum efhw_q_type queue_type,
 			 efrm_bt_allocation_base(&q->bt_alloc),
 			 q->dma_addrs,
 			 (1 << q->page_order) * EFHW_NIC_PAGES_IN_OS_PAGE,
-			 efrm_pd_get_vport_id(virs->pd),
+			 vport_id,
 			 efrm_pd_stack_id_get(virs->pd), flags);
 		break;
 	case EFHW_RXQ:
@@ -568,7 +571,7 @@ efrm_vi_rm_init_dmaq(struct efrm_vi *virs, enum efhw_q_type queue_type,
                         efrm_bt_allocation_base(&q->bt_alloc),
                         q->dma_addrs,
                         (1 << q->page_order) * EFHW_NIC_PAGES_IN_OS_PAGE,
-                        efrm_pd_get_vport_id(virs->pd),
+                        vport_id,
                         efrm_pd_stack_id_get(virs->pd), virs->ps_buf_size,
                         flags);
                 if( rc >= 0 ) {

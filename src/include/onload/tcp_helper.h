@@ -72,7 +72,13 @@ struct tcp_helper_nic {
  * The reference owned by the port_keeper is to be freed last after all the
  * endpoints are destroyed. */
 struct efab_ephemeral_port_keeper {
+   /* Instances of this structure live, in the general case, on two linked
+    * lists simultaneously.  One, linked by [next], is specific to a single IP
+    * address (where that IP address will be INADDR_ANY when shared local ports
+    * are not per-IP), and the other, linked by [global_next], is common to all
+    * IP addresses. */
    struct efab_ephemeral_port_keeper* next;
+   struct efab_ephemeral_port_keeper* global_next;
    struct socket* sock;
    struct file* os_file;
    uint32_t laddr_be32;
@@ -82,7 +88,13 @@ struct efab_ephemeral_port_keeper {
 /* List-head for a list of efab_ephemeral_port_keeper structures. */
 struct efab_ephemeral_port_head {
   struct efab_ephemeral_port_keeper* head;
+  struct efab_ephemeral_port_keeper** tail_next_ptr;
+  /* Pointer into the list of all (i.e. not just for this IP) local ports
+   * indicating the point up to which it has been consumed by this local IP in
+   * our attempts to use ports already allocated for other IPs. */
+  struct efab_ephemeral_port_keeper* global_consumed;
   uint32_t laddr_be32;
+  uint32_t port_count;
 };
 
 struct tcp_helper_resource_s;
@@ -255,13 +267,6 @@ typedef struct tcp_helper_resource_s {
   atomic_t                 timer_running;
   /*! timer - periodic poll */
   struct delayed_work      timer;
-
-#  if HZ < 100
-#   error FIXME: Not able to cope with low HZ at the moment.
-#  endif
-  /* Periodic timer fires roughly 100 times per sec. */
-# define CI_TCP_HELPER_PERIODIC_BASE_T  ((unsigned long)(HZ*9/100))
-# define CI_TCP_HELPER_PERIODIC_FLOAT_T ((unsigned long)(HZ*1/100))
 
 
 #endif  /* __KERNEL__ */

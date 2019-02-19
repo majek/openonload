@@ -626,7 +626,7 @@ static int oo_pipe_more_buffers(ci_netif* ni, struct oo_pipe* p, int requested,
       pkt = oo_pipe_pkt_list_pop(ni, pkts);
     else
 #endif
-      pkt = ci_netif_pkt_alloc(ni);
+      pkt = ci_netif_pkt_alloc(ni, 0);
     if( ! pkt ) {
       LOG_NV(ci_log("Failed to alloc pipe packet buffer"));
       break;
@@ -785,7 +785,7 @@ static int oo_pipe_grab_pipe_buffers(ci_netif* ni,
   if( ! count )
     return buf_num;
   for( count = CI_MIN(pipe_buf_space, count); count; --count ) {
-    ci_ip_pkt_fmt* pkt = ci_netif_pkt_alloc(ni);
+    ci_ip_pkt_fmt* pkt = ci_netif_pkt_alloc(ni, 0);
     if( ! pkt ) {
       LOG_NV(ci_log("Failed to alloc pipe packet buffer"));
       break;
@@ -1171,10 +1171,12 @@ ci_inline int oo_pipe_zc_read_iov_cb(void* zc_read_iov_ctx,
       /* lets calculate needed iovec size */
       int iov_len = i + oo_pipe_list_ptr_move(ni, p, &pkt2, &size2, NULL) + 1;
       niov = realloc(iov == ctx->iov_on_stack ? NULL : iov,
-                     sizeof(*iov) * OO_PIPE_ZC_READ_IOV_IOV_LEN);
+                     sizeof(*iov) * iov_len);
       if( niov == NULL )
         break; /* we can pass a lot of buffers anyway */
-      memcpy(niov, iov, sizeof(*iov) * iov_len);
+      if( iov == ctx->iov_on_stack )
+        memcpy(niov, iov, sizeof(*iov) * i);
+      /* else realloc copies data */
       iov = niov;
       ctx->iov = niov;
     }

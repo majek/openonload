@@ -40,7 +40,7 @@
 #endif
 #include "onload_kernel_compat.h"
 #include <onload/cplane_driver.h>
-
+#include "oof_impl.h"
 
 int
 efab_ioctl_get_ep(ci_private_t* priv, oo_sp sockp,
@@ -322,7 +322,9 @@ efab_tcp_helper_detach_file(tcp_helper_endpoint_t* ep,
   ci_assert_flags(wo->waitable.sb_aflags, CI_SB_AFLAG_IN_CACHE);
   ci_assert_nflags(wo->waitable.sb_aflags, CI_SB_AFLAG_ORPHAN);
 
+#ifdef EFRM_DO_NAMESPACES
   ci_assert_nequal(pid, task_pid_nr_ns(current, ci_netif_get_pidns(&trs->netif)));
+#endif
   ci_assert_ge(fd, 0);
 
   rcu_read_lock();
@@ -495,6 +497,7 @@ efab_tcp_helper_tcp_accept_sock_attach(ci_private_t* priv, void *arg)
   int rc;
   int flags;
   int sock_type = op->type;
+  int aflags_saved;
 
   OO_DEBUG_TCPH(ci_log("%s: ep_id=%d", __FUNCTION__, op->ep_id));
   if( trs == NULL ) {
@@ -511,6 +514,9 @@ efab_tcp_helper_tcp_accept_sock_attach(ci_private_t* priv, void *arg)
   ep = ci_trs_get_valid_ep(trs, op->ep_id);
   wo = SP_TO_WAITABLE_OBJ(&trs->netif, ep->id);
   ci_assert(wo->waitable.state & CI_TCP_STATE_TCP);
+
+  aflags_saved = wo->waitable.sb_aflags &
+                 (CI_SB_AFLAG_ORPHAN | CI_SB_AFLAG_TCP_IN_ACCEPTQ);
 
   /* clear NONBLOCK/CLOEXEC flag as these will be set according to
    * sock_type in efab_tcp_helper_sock_attach_common() */
@@ -553,8 +559,7 @@ efab_tcp_helper_tcp_accept_sock_attach(ci_private_t* priv, void *arg)
    * Note: we can lose O_NONBLOCK and O_CLOEXEC - they will be reapplied on
    * another attempt.
    */
-  ci_atomic32_or(&wo-> waitable.sb_aflags,
-                 CI_SB_AFLAG_ORPHAN | CI_SB_AFLAG_TCP_IN_ACCEPTQ);
+  ci_atomic32_or(&wo->waitable.sb_aflags, aflags_saved);
   return rc;
 }
 
@@ -1395,6 +1400,9 @@ static int efab_tcp_helper_alloc_active_wild_rsop(ci_private_t *priv,
   return -ENOBUFS;
 }
 
+
+
+
 /* "Donation" shared memory ioctls. */
 
 static int oo_dshm_register_rsop(ci_private_t *priv, void *arg)
@@ -1442,19 +1450,65 @@ static int oo_cplane_ipmod(ci_private_t *priv, void *arg)
 {
   struct oo_op_cplane_ipmod* op = arg;
   int rc = cp_acquire_from_priv_if_server(priv, NULL);
+  const int af = op->address_family;
+  const int mib_id = op->mib_id;
+  const cicp_rowid_t row_id = op->row_id;
+  cicp_rowid_t rowid_max;
+  struct cp_mibs *mib;
+  ci_addr_t net_ip;
+  ci_ifid_t ifindex;
+
   if( rc < 0 )
     return rc;
 
-  if( op->net_ip == 0 )
+#if CI_CFG_IPV6
+  if( af != AF_INET && af != AF_INET6 )
+#else
+  if( af != AF_INET )
+#endif
     return -EINVAL;
 
-  if( op->add )
-    oof_onload_on_cplane_ipadd(op->net_ip, op->ifindex,
-                               priv->priv_cp->cp_netns, &efab_tcp_driver);
-  else
-    oof_onload_on_cplane_ipdel(op->net_ip, op->ifindex,
-                               priv->priv_cp->cp_netns, &efab_tcp_driver);
+  if( mib_id < 0 || mib_id > 1)
+    return -EINVAL;
 
+  mib = &priv->priv_cp->mib[mib_id];
+
+#if CI_CFG_IPV6
+  rowid_max = (af == AF_INET) ? mib->dim->ipif_max : mib->dim->ip6if_max;
+#else
+  rowid_max = mib->dim->ipif_max;
+#endif
+
+  if( row_id < 0 || row_id >= rowid_max )
+    return -EINVAL;
+
+#if CI_CFG_IPV6
+  if( af == AF_INET6 ) {
+    cicp_ip6if_row_t ip6if = mib->ip6if[row_id];
+
+    if (!memcmp(ip6if.net_ip6, addr_any.ip6, sizeof(addr_any.ip6)))
+      return -EINVAL;
+
+    memcpy(net_ip.ip6, ip6if.net_ip6, sizeof(net_ip.ip6));
+    ifindex = ip6if.ifindex;
+  } else
+#endif
+  {
+    cicp_ipif_row_t ipif = mib->ipif[row_id];
+
+    if( ipif.net_ip == 0 )
+      return -EINVAL;
+
+    net_ip = CI_ADDR_FROM_IP4(ipif.net_ip);
+    ifindex = ipif.ifindex;
+  }
+
+  if( op->add )
+    oof_onload_on_cplane_ipadd(af, net_ip, ifindex, priv->priv_cp->cp_netns,
+                               &efab_tcp_driver);
+  else
+    oof_onload_on_cplane_ipdel(af, net_ip, ifindex, priv->priv_cp->cp_netns,
+                               &efab_tcp_driver);
   return 0;
 }
 
@@ -1530,7 +1584,6 @@ oo_operations_table_t oo_operations[] = {
   op(OO_IOC_OOF_CP_IP_MOD,     oo_cplane_ipmod),
   op(OO_IOC_OOF_CP_LLAP_MOD,   oo_cplane_llapmod),
   op(OO_IOC_OOF_CP_LLAP_UPDATE_FILTERS, oo_cplane_llap_update_filters),
-  op(OO_IOC_CP_PRINT,          oo_cp_print_rsop),
   op(OO_IOC_CP_NOTIFY_LLAP_MONITORS,   oo_cp_notify_llap_monitors_rsop),
 
   /* include/onload/ioctl.h: */
@@ -1619,6 +1672,7 @@ oo_operations_table_t oo_operations[] = {
   op(OO_IOC_DSHM_LIST,     oo_dshm_list_rsop),
 
   op(OO_IOC_ALLOC_ACTIVE_WILD, efab_tcp_helper_alloc_active_wild_rsop),
+
 
 /* Here come non contigous operations only, their position need to match
  * index accoriding to their placeholder */

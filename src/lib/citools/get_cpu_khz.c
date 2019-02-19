@@ -35,7 +35,33 @@ unsigned ci_cpu_khz;
 
 
 
-# if defined(__i386__) || defined(__x86_64__)
+/* Throughout the code is the assumption that the value returned by ci_frc64()
+ * has the same frequency as the cpu.  However, on aarch64 the only timer we
+ * have available for this purpose actually runs at a fixed 20MHz.  That means
+ * that although the value returned from this function on arm isn't really
+ * the cpu frequency, it is really the value that is desired, which is the
+ * ci_frc64() frequency.
+ *
+ * Revision history contains an implementation for aarch64 that actually does
+ * calculate the cpu frequency.
+ */
+# if defined(__i386__) || defined(__x86_64__) || defined(__aarch64__)
+
+# if defined(__aarch64__)
+
+/*
+ * No CPU frequency is reported in /proc/cpuinfo for ARM64,
+ * but this function is never actually called, because
+ * ci_measure_cpu_khz should always succeed, as it's calculating
+ * a stable timer value.
+ */
+ci_inline int try_get_hz(const char* line, unsigned* cpu_khz_out)
+{
+  ci_assert(0);
+  return 0;
+}
+
+#else
 
 ci_inline int try_get_hz(const char* line, unsigned* cpu_khz_out)
 {
@@ -46,6 +72,8 @@ ci_inline int try_get_hz(const char* line, unsigned* cpu_khz_out)
   *cpu_khz_out = (unsigned) (f * 1000.0);
   return 1;
 }
+
+#endif
 
 /* The following routine has been obtained sfnettest code */
 static int ci_measure_cpu_khz(unsigned* cpu_khz)

@@ -2,12 +2,12 @@ Linux dellr620b.uk.level5networks.com 3.10.0-229.el7.x86_64 #1 SMP Thu Jan 29 18
 \S
 Kernel \r on an \m
 
-gcc (GCC) 4.8.3 20140911 (Red Hat 4.8.3-9)
-Copyright (C) 2013 Free Software Foundation, Inc.
+gcc (GCC) 4.8.5 20150623 (Red Hat 4.8.5-28)
+Copyright (C) 2015 Free Software Foundation, Inc.
 This is free software; see the source for copying conditions.  There is NO
 warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 
-cc (GCC) 7.1.1 20170526 (Red Hat 7.1.1-2)
+cc (GCC) 7.3.1 20180303 (Red Hat 7.3.1-5)
 Copyright (C) 2017 Free Software Foundation, Inc.
 This is free software; see the source for copying conditions.  There is NO
 warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
@@ -16,12 +16,12 @@ Linux dellr620b.uk.level5networks.com 3.10.0-229.el7.x86_64 #1 SMP Thu Jan 29 18
 \S
 Kernel \r on an \m
 
-gcc (GCC) 4.8.3 20140911 (Red Hat 4.8.3-9)
-Copyright (C) 2013 Free Software Foundation, Inc.
+gcc (GCC) 4.8.5 20150623 (Red Hat 4.8.5-28)
+Copyright (C) 2015 Free Software Foundation, Inc.
 This is free software; see the source for copying conditions.  There is NO
 warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 
-cc (GCC) 7.1.1 20170526 (Red Hat 7.1.1-2)
+cc (GCC) 7.3.1 20180303 (Red Hat 7.3.1-5)
 Copyright (C) 2017 Free Software Foundation, Inc.
 This is free software; see the source for copying conditions.  There is NO
 warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.

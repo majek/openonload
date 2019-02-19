@@ -430,7 +430,7 @@ static int ef_filter_del(ef_driver_handle dh, int resource_id,
     op.id = efch_make_resource_id(resource_id);
     op.u.pt_sniff.enable = 0;
   }
-  if( filter_cookie->filter_type == EF_FILTER_TX_PORT_SNIFF ) {
+  else if( filter_cookie->filter_type == EF_FILTER_TX_PORT_SNIFF ) {
     op.op = CI_RSOP_TX_PT_SNIFF;
     op.id = efch_make_resource_id(resource_id);
     op.u.tx_pt_sniff.enable = 0;

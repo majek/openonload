@@ -182,7 +182,11 @@ int efhw_device_type_init(struct efhw_device_type *dt,
 void efhw_nic_init(struct efhw_nic *nic, unsigned flags, unsigned options,
 		   struct efhw_device_type *dev_type, unsigned map_min,
 		   unsigned map_max, unsigned vi_base, unsigned vi_shift,
-		   unsigned mem_bar, unsigned vi_stride, unsigned vport_id)
+		   unsigned mem_bar, unsigned vi_stride
+#if EFX_DRIVERLINK_API_VERSION < 25
+		   , unsigned vport_id
+#endif
+		  )
 {
 	nic->devtype = *dev_type;
 	nic->flags = flags;
@@ -260,7 +264,9 @@ void efhw_nic_init(struct efhw_nic *nic, unsigned flags, unsigned options,
 		nic->efhw_func = &ef10_char_functional_units;
 		nic->vi_base = vi_base;
 		nic->vi_shift = vi_shift;
+#if EFX_DRIVERLINK_API_VERSION < 25
 		nic->vport_id = vport_id;
+#endif
 		nic->vi_stride = vi_stride;
 		break;
 	default:

@@ -116,35 +116,6 @@ do_top_level () {
     REMOTEBUILDFLAG=0
   fi
 
-  # Current jansson build does not build 32 bits library on 64 bits
-  # system so we disallow building on 32 bits all together.
-  if [ -n "$BUILD_ORM" ]; then
-    #Allow user to override by setting BUILD_ORM in their environment
-    BUILDORM=$BUILD_ORM
-  else
-    case "$PLATFORM" in
-      gnu_x86_64) BUILDORM=1;;
-      gnu_ppc64) BUILDORM=1;;
-      *) BUILDORM=0;;
-    esac
-    if [ $BUILDORM -eq 1 ] ; then
-      libtool=$(check_binary_presence libtool)
-      if [ $libtool -eq 0 ] ; then
-        BUILDORM=0
-      else
-        autoconf=$(check_binary_presence autoconf)
-        if [ $autoconf -eq 0 ] ; then
-          BUILDORM=0
-        else
-          automake=$(check_binary_presence automake)
-          if [ $automake -eq 0 ] ; then
-            BUILDORM=0
-          fi
-        fi
-      fi
-    fi
-  fi
-
   cat <<-EOF >config.mk
 	PLATFORM := $PLATFORM
 	BUILDPATH := $BUILDPATH
@@ -156,8 +127,10 @@ do_top_level () {
 	TOPPATH := $TOPPATH
 	BUILDENV := $($mmaketool --distribution)-$(gcc -dumpmachine)
 	BUILDHOST := $BUILDHOST
-	BUILDORM := $BUILDORM
 	W_NO_UNUSED_RESULT := $W_NO_UNUSED_RESULT
+	W_NO_STRING_TRUNCATION := $W_NO_STRING_TRUNCATION
+	W_IMPLICIT_FALLTHROUGH := $W_IMPLICIT_FALLTHROUGH
+	W_NO_IGNORED_ATTRIBUTES := $W_NO_IGNORED_ATTRIBUTES
 	$nt
 	$kpath
 EOF
@@ -526,6 +499,20 @@ vpath_mode="VPATH_ENABLED := $VPATH_ENABLED"
 # of unused values returned by functions e.g. in logging code.
 if [ -n "$($mmaketool --distrib_is_ubuntu)" ] ; then
   W_NO_UNUSED_RESULT="1"
+  if [ "$($mmaketool --gcc_major_version)" -ge 6 ] ; then
+    W_NO_IGNORED_ATTRIBUTES="1"
+  fi
+fi
+
+# Disable stringop-truncation and format-truncation warnings for gcc-8.
+# It is exactly why we use all the strncpy and snprintf calls - to truncate
+# output and avoid memory corruption.
+if [ "$($mmaketool --gcc_major_version)" -ge 8 ] ; then
+  W_NO_STRING_TRUNCATION="1"
+fi
+
+if [ "$($mmaketool --gcc_major_version)" -ge 7 ] ; then
+  W_IMPLICIT_FALLTHROUGH="1"
 fi
 
 [ -z "$SRCPATH" ] && SRCPATH=$("$mmaketool" --toppath)/src

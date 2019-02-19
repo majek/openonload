@@ -1,3 +1,6 @@
+% SF: Based on the default Latex header for doxygen 1.8.13.
+% SF: Solarflare changes have comments starting "SF:"
+
 \documentclass[twoside]{book}
 
 % Packages required by doxygen
@@ -15,7 +18,7 @@
 \usepackage[nointegrals]{wasysym}
 \usepackage[table]{xcolor}
 
-% Packages required by Solarflare
+% SF: Packages required by Solarflare
 \usepackage[yyyymmdd,hhmmss]{datetime}
 \usepackage{setspace}
 
@@ -26,6 +29,7 @@
 \usepackage{amssymb}
 \usepackage{sectsty}
 \renewcommand{\familydefault}{\sfdefault}
+% SF: Use bold fonts for sections/labels, instead of bold condensed
 \allsectionsfont{%
   \fontseries{b}\selectfont%
   \color{darkgray}%
@@ -36,7 +40,7 @@
 }
 \newcommand{\+}{\discretionary{\mbox{\scriptsize$\hookleftarrow$}}{}{}}
 
-% Corporate color
+% SF: Define corporate color
 \definecolor{pms300c}{cmyk}{1.0,0.42,0.0,0.0}
 
 % Page & text layout
@@ -48,6 +52,7 @@
   left=2.5cm,%
   right=2.5cm%
 }
+% SF: Add raggedbottom
 \raggedbottom
 \tolerance=750
 \hfuzz=15pt
@@ -68,7 +73,7 @@
 }
 \makeatother
 
-% Doxygen <1.8.9: force graphics to fit on page even if no size given
+% SF: Doxygen <1.8.9: force graphics to fit on page even if no size given
 \makeatletter
 \def\CappedWidth{%
   \ifdim\Gin@nat@width>\textwidth%
@@ -90,13 +95,14 @@
 % Headers & footers
 \usepackage{fancyhdr}
 
-%\addtolength{\headheight}{1cm}
-%\addtolength{\textheight}{-1cm}
+% SF: Add default headheight back to textheight...
 \addtolength{\textheight}{\headheight}
-\addtolength{\textheight}{-1.35cm}
+% SF: ...then define and remove new headheight 
 \setlength{\headheight}{1.35cm}
+\addtolength{\textheight}{-\headheight}
 
 \pagestyle{fancyplain}
+% SF: Change setup for headers, footers and rules
 \fancyhead[LE,RO]{\includegraphics[height=1.2cm]{sf_logo}}
 \fancyhead[CE,CO]{}
 \fancyhead[RE,LO]{$projectname\vspace{0.2\baselineskip}\linebreak\nouppercase\leftmark}
@@ -113,6 +119,7 @@
   \markright{\thesection\ #1}%
 }
 
+% SF: Add a plain page style
 \fancypagestyle{plain}{%
 \renewcommand{\headrulewidth}{0.25pt}
 \renewcommand{\footrulewidth}{0.25pt}}
@@ -131,6 +138,7 @@
 \else
   \usepackage[ps2pdf,pagebackref=true]{hyperref}
 \fi
+% SF: Change link coloring
 \hypersetup{%
   colorlinks=true,%
   linkcolor=pms300c,%
@@ -146,20 +154,21 @@
 \usepackage{caption}
 \captionsetup{labelsep=space,justification=centering,font={bf},singlelinecheck=off,skip=4pt,position=top}
 
-
 %===== C O N T E N T S =====
 
 \begin{document}
 
+% SF: Set bookmarks=true
 \hypersetup{pageanchor=false,
              bookmarks=true,
              bookmarksnumbered=true,
              pdfencoding=unicode
             }
 
+% SF: Start roman page numbering with title page as "i"
 \pagenumbering{roman}
 
-% Titlepage
+% SF: Change the titlepage
 \begin{titlepage}
 \includegraphics{sf_logo}
 \vspace*{4cm}
@@ -175,7 +184,7 @@
 \end{titlepage}
 \clearemptydoublepage
 
-% Disclaimer
+% SF: Add standard corporate disclaimer
 {\large\bfseries $projectname}\par
 Copyright © \the\year{} SOLARFLARE Communications, Inc. All rights reserved.\par
 \input disclaimer.tex\par

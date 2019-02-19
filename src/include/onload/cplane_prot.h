@@ -54,7 +54,7 @@
  *  See the definition of cicppl_pktbuf_pend_send 
  */
 extern int /*rc*/
-cicpplos_pktbuf_defer_send(struct cicppl_instance *cppl, 
+cicpplos_pktbuf_defer_send(struct oo_cplane_handle* cp,
 			   ci_ip_addr_t ip, int buf_pktid, ci_ifid_t ifindex);
 
 /*----------------------------------------------------------------------------

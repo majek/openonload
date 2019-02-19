@@ -106,8 +106,8 @@ ci_inline void ci_udp_recvmsg_fill_msghdr(ci_netif* ni, ci_msghdr* msg,
         pkt = PKT_CHK_NNL(ni, pkt->frag_next);
       ip = oo_ip_hdr_const(pkt);
       udp = (const ci_udp_hdr*) ((char*) ip + CI_IP4_IHL(ip));
-      ci_addr_to_user(CI_SA(msg->msg_name), &msg->msg_namelen,
-                      s->domain, udp->udp_source_be16, ip->ip_saddr_be32);
+      ci_addr_to_user(CI_SA(msg->msg_name), &msg->msg_namelen, AF_INET,
+                      s->domain, udp->udp_source_be16, &ip->ip_saddr_be32);
     }
   }
 #endif
@@ -289,6 +289,47 @@ static void ci_udp_pkt_to_zc_msg(ci_netif* ni, ci_ip_pkt_fmt* pkt,
   } while( 1 );
   zc_msg->msghdr.msg_iovlen = i;
 }
+
+# if CI_CFG_ZC_RECV_FILTER
+static void ci_udp_filter_kernel_pkt(ci_netif* ni, ci_udp_state* us,
+                                     struct msghdr* msg, int *bytes)
+{
+  enum onload_zc_callback_rc rc;
+  struct onload_zc_msg zc_msg;
+  struct onload_zc_iovec zc_iovec[CI_UDP_ZC_IOVEC_MAX];
+  unsigned cb_flags = 0;
+  int i = 0, bytes_remaining = *bytes;
+
+  if( msg->msg_iovlen > CI_UDP_ZC_IOVEC_MAX ) {
+    LOG_U(log("%s: too many fragments (%d), passing packet unfiltered",
+              __FUNCTION__, (int)msg->msg_iovlen));
+    return;
+  }
+
+  zc_msg.iov = zc_iovec;
+  zc_msg.msghdr = *msg;
+  zc_msg.msghdr.msg_iov = NULL;
+
+  ci_assert_gt(msg->msg_iovlen, 0);
+
+  do {
+    zc_msg.iov[i].iov_base = msg->msg_iov[i].iov_base;
+    zc_msg.iov[i].iov_len = msg->msg_iov[i].iov_len > bytes_remaining ?
+      bytes_remaining : msg->msg_iov[i].iov_len;
+    zc_msg.iov[i].buf = ONLOAD_ZC_HANDLE_NONZC;
+    zc_msg.iov[i].iov_flags = 0;
+    bytes_remaining -= zc_msg.iov[i].iov_len;
+  } while(++i < msg->msg_iovlen && bytes_remaining);
+
+  zc_msg.msghdr.msg_iovlen = i;
+
+  rc = (*(onload_zc_recv_filter_callback)((ci_uintptr_t)us->recv_q_filter))
+    (&zc_msg, (void *)((ci_uintptr_t)us->recv_q_filter_arg), cb_flags);
+
+  ci_assert_equal(rc, ONLOAD_ZC_CONTINUE);
+  (void)rc;
+}
+# endif
 #endif /* __KERNEL__ */
 
 
@@ -313,7 +354,7 @@ static int ci_udp_recvmsg_get(ci_udp_recv_info* rinf, ci_iovec_ptr* piov)
       msg->msg_controllen = 0;
   }
 #endif
-  us->stamp = pkt->pf.udp.rx_stamp;
+  us->stamp = pkt->tstamp_frc;
 
   rc = oo_copy_pkt_to_iovec_no_adv(ni, pkt, piov, pkt->pf.udp.pay_len);
 
@@ -323,8 +364,35 @@ static int ci_udp_recvmsg_get(ci_udp_recv_info* rinf, ci_iovec_ptr* piov)
       rinf->msg_flags |= LOCAL_MSG_TRUNC;
 #endif
     ci_udp_recvmsg_fill_msghdr(ni, msg, pkt, &us->s);
-    if( ! (rinf->flags & MSG_PEEK) )
+    if( ! (rinf->flags & MSG_PEEK) ) {
+#ifndef __KERNEL__
+# if CI_CFG_ZC_RECV_FILTER
+      if( us->recv_q_filter ) {
+        struct onload_zc_msg zc_msg;
+        struct onload_zc_iovec zc_iovec[CI_UDP_ZC_IOVEC_MAX];
+        unsigned cb_flags;
+        int filterrc;
+
+        zc_msg.iov = zc_iovec;
+        zc_msg.msghdr.msg_controllen = 0;
+        zc_msg.msghdr.msg_flags = 0;
+
+        ci_udp_pkt_to_zc_msg(ni, pkt, &zc_msg);
+
+        cb_flags = CI_IP_IS_MULTICAST(oo_ip_hdr(pkt)->ip_daddr_be32) ?
+          ONLOAD_ZC_MSG_SHARED : 0;
+        filterrc =
+          (*(onload_zc_recv_filter_callback)((ci_uintptr_t)us->recv_q_filter))
+            (&zc_msg, (void *)((ci_uintptr_t)us->recv_q_filter_arg), cb_flags);
+
+        ci_assert_equal(filterrc, ONLOAD_ZC_CONTINUE);
+        (void)filterrc;
+      }
+# endif
+#endif
+
       ci_udp_recv_q_deliver(ni, &us->recv_q, pkt);
+    }
     us->udpflags |= CI_UDPF_LAST_RECV_ON;
   }
 
@@ -437,6 +505,14 @@ static int ci_udp_recvmsg_try_os(ci_udp_recv_info *rinf, int* prc)
   if( rc >= 0 )
     rinf->msg_flags = rinf->msg->msg_flags;
 #endif
+
+#ifndef __KERNEL__
+# if CI_CFG_ZC_RECV_FILTER
+  if( us->recv_q_filter && rc == 1 && *prc >= 0)
+    ci_udp_filter_kernel_pkt(rinf->a->ni, us, rinf->msg, prc);
+# endif
+#endif
+
   return rc;
 }
 
@@ -457,6 +533,11 @@ static int ci_udp_recvmsg_socklocked_slowpath(ci_udp_recv_info* rinf,
   ci_assert_equal(rinf->flags, 0);
 #endif
 
+  if( rinf->msg->msg_iovlen > 0 && rinf->msg->msg_iov == NULL ) {
+    CI_SET_ERROR(rc, EFAULT);
+    return rc;
+  }
+
 #ifndef __KERNEL__
   if( rinf->flags & MSG_ERRQUEUE_CHK ) {
 #if CI_CFG_TIMESTAMPING
@@ -469,12 +550,14 @@ static int ci_udp_recvmsg_socklocked_slowpath(ci_udp_recv_info* rinf,
         struct oo_sock_extended_err ee;
         struct sockaddr_in          offender;
       } errhdr;
+      int do_data = ( rinf->msg->msg_iovlen > 0 );
 
       cmsg_state.msg = rinf->msg;
       cmsg_state.cm = rinf->msg->msg_control;
       cmsg_state.cmsg_bytes_used = 0;
       cmsg_state.p_msg_flags = &rinf->msg_flags;
-      ci_iovec_ptr_init_nz(piov, rinf->msg->msg_iov, rinf->msg->msg_iovlen);
+      if( do_data )
+        ci_iovec_ptr_init_nz(piov, rinf->msg->msg_iov, rinf->msg->msg_iovlen);
       memset(ts, 0, sizeof(ts));
 
       if( us->s.timestamping_flags & ONLOAD_SOF_TIMESTAMPING_RAW_HARDWARE ) {
@@ -488,10 +571,18 @@ static int ci_udp_recvmsg_socklocked_slowpath(ci_udp_recv_info* rinf,
       }
       ci_put_cmsg(&cmsg_state, SOL_SOCKET, ONLOAD_SCM_TIMESTAMPING,
                   sizeof(ts), &ts);
-      if( us->s.timestamping_flags & ONLOAD_SOF_TIMESTAMPING_OPT_TSONLY )
+      if( us->s.timestamping_flags & ONLOAD_SOF_TIMESTAMPING_OPT_TSONLY ) {
         rc = SLOWPATH_RET_ZERO;
-      else
+      }
+      else if( do_data ) {
         rc = ci_udp_timestamp_q_pkt_to_iovec(ni, pkt, piov);
+        if( rc < pkt->buf_len )
+          rinf->msg_flags |= LOCAL_MSG_TRUNC;
+      }
+      else {
+        rinf->msg_flags |= LOCAL_MSG_TRUNC;
+        rc = SLOWPATH_RET_ZERO;
+      }
 
       memset(&errhdr, 0, sizeof(errhdr));
       errhdr.ee.ee_errno = ENOMSG;
@@ -520,16 +611,12 @@ static int ci_udp_recvmsg_socklocked_slowpath(ci_udp_recv_info* rinf,
     }
     else {
       rinf->msg_flags = rinf->msg->msg_flags;
-      return rc;
+      return rc == 0 ? SLOWPATH_RET_ZERO : rc;
     }
   }
 #endif
   if( (rc = ci_get_so_error(&us->s)) != 0 ) {
     CI_SET_ERROR(rc, rc);
-    return rc;
-  }
-  if( rinf->msg->msg_iovlen > 0 && rinf->msg->msg_iov == NULL ) {
-    CI_SET_ERROR(rc, EFAULT);
     return rc;
   }
 #if MSG_OOB_CHK
@@ -546,9 +633,8 @@ static int ci_udp_recvmsg_socklocked_slowpath(ci_udp_recv_info* rinf,
   }
 #endif
   if( rinf->msg->msg_iovlen == 0 ) {
-    /* We have a difference in behaviour from the Linux stack here.  When
-    ** msg_iovlen is 0 Linux 2.4.21-15.EL does not set MSG_TRUNC when a
-    ** datagram has non-zero length.  We do. */
+    /* We initialise piov and will ask OS or Onload for data.  They both
+     * will probably set MSG_TRUNC. */
     CI_IOVEC_LEN(&piov->io) = piov->iovlen = 0;
     return SLOWPATH_RET_IOVLEN_INITED;
   }
@@ -1004,7 +1090,7 @@ static int ci_udp_zc_recv_from_os(ci_netif* ni, ci_udp_state* us,
      */
     ci_netif_lock(ni);
     while( us->zc_kernel_datagram_count < ZC_BUFFERS_FOR_64K_DATAGRAM ) {
-      pkt = ci_netif_pkt_alloc(ni);
+      pkt = ci_netif_pkt_alloc(ni, 0);
       if( !pkt ) {
         ci_netif_unlock(ni);
         return -ENOBUFS;
@@ -1160,6 +1246,10 @@ int ci_udp_zc_recv(ci_udp_iomsg_args* a, struct onload_zc_recv_args* args)
   if(CI_UNLIKELY( rc != 0 ))
     return rc;
 
+#if CI_CFG_ZC_RECV_FILTER
+  ci_assert(!us->recv_q_filter);
+#endif
+
   if( CI_UNLIKELY(us->s.so_error) ) {
     if( (rc = ci_get_so_error(&us->s)) != 0 )
       return -rc;
@@ -1195,7 +1285,7 @@ int ci_udp_zc_recv(ci_udp_iomsg_args* a, struct onload_zc_recv_args* args)
 
       ci_udp_pkt_to_zc_msg(ni, pkt, &args->msg);
 
-      us->stamp = pkt->pf.udp.rx_stamp;
+      us->stamp = pkt->tstamp_frc;
       us->udpflags |= CI_UDPF_LAST_RECV_ON;
     
       cb_flags = CI_IP_IS_MULTICAST(oo_ip_hdr(pkt)->ip_daddr_be32) ? 

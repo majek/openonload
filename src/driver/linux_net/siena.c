@@ -1380,6 +1380,7 @@ const struct efx_nic_type siena_a0_nic_type = {
 	.tx_write = efx_farch_tx_write,
 	.tx_notify = efx_farch_notify_tx_desc,
 	.tx_limit_len = efx_farch_tx_limit_len,
+	.tx_max_skb_descs = efx_farch_tx_max_skb_descs,
 	.rx_push_rss_config = siena_rx_push_rss_config,
 	.rx_pull_rss_config = siena_rx_pull_rss_config,
 	.rx_probe = efx_farch_rx_probe,
@@ -1414,8 +1415,6 @@ const struct efx_nic_type siena_a0_nic_type = {
 	.filter_redirect = efx_farch_filter_redirect,
 	.filter_block_kernel = efx_farch_filter_block_kernel,
 	.filter_unblock_kernel = efx_farch_filter_unblock_kernel,
-	.vport_filter_insert = efx_farch_vport_filter_insert,
-	.vport_filter_remove = efx_farch_vport_filter_remove,
 #endif
 #ifdef CONFIG_SFC_MTD
 	.mtd_probe = siena_mtd_probe,

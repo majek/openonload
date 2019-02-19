@@ -246,6 +246,18 @@ static int citp_closedfd_recvmsg_kernel(citp_fdinfo* fdi, struct msghdr *msg,
 }
 
 
+static int citp_closedfd_zc_recv_filter(citp_fdinfo* fdi,
+                                        onload_zc_recv_filter_callback filter,
+                                        void* cb_arg, int flags)
+{
+#if CI_CFG_ZC_RECV_FILTER
+  return -EBADF;
+#else
+  return -ENOSYS;
+#endif
+}
+
+
 #if CI_CFG_FD_CACHING
 static int citp_closedfd_cache(citp_fdinfo* fdi)
 {
@@ -288,6 +300,7 @@ citp_protocol_impl citp_closed_protocol_impl = {
 #endif
     .zc_send     = citp_closedfd_zc_send,
     .zc_recv     = citp_closedfd_zc_recv,
+    .zc_recv_filter = citp_closedfd_zc_recv_filter,
     .recvmsg_kernel = citp_closedfd_recvmsg_kernel,
 #if CI_CFG_FD_CACHING
     .cache       = citp_closedfd_cache,

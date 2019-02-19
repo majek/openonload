@@ -33,12 +33,12 @@
    - in child, call citp_netif_child_vfork_hook
    - restore what need to be restored
    - jump to the saved return address (not doing a normal function return)
-   
+
    The details are platform-dependent and are documented below
 */
-        
+
 #if defined(__i386__)
-      
+
 	/* x86 calling convention: args pushed on stack in reverse order */
 
 	.text
@@ -62,7 +62,7 @@ onload_vfork:
 	addl $_GLOBAL_OFFSET_TABLE_+[.-1b], %ebx
 	call onload___vfork_is_vfork@PLT
 	test %eax, %eax
-	jz 1f        
+	jz 1f
 	popl %eax                   /* EAX is now caller's EBX */
 /* Saving caller's EBX */
 	movl onload___vfork_ebx@GOT(%ebx), %edx
@@ -76,7 +76,7 @@ onload_vfork:
 	call *(%eax)
 /* Need to preserve the returned value of system vfork */
 /* across calling the hooks */
-	push %eax                   
+	push %eax
 	testl %eax, %eax
 	jz 2f
 	call citp_netif_parent_vfork_hook
@@ -115,10 +115,10 @@ onload_vfork:
 
 /* x86_64 has direct support for IP-relative addressing, */
 /* hence no special support for PIC, only need to save the return adddress */
-	call onload___vfork_is_vfork@PLT	
+	call onload___vfork_is_vfork@PLT
 	testl %eax, %eax
 	jz 1f
-	popq %rdi                   /* RDI == return address (RDI is volatile, so may be freely used) */    
+	popq %rdi                   /* RDI == return address (RDI is volatile, so may be freely used) */
 /* Saving the return address */
 	movq onload___vfork_rtaddr@GOTPCREL(%rip), %rsi
 	movq %rdi, (%rsi)
@@ -155,11 +155,11 @@ onload_vfork:
    .section ".opd","aw";
    .globl onload_vfork;
    .align 3;
-onload_vfork: .quad .onload_vfork, .TOC.@tocbase, 0; 
+onload_vfork: .quad .onload_vfork, .TOC.@tocbase, 0;
    .previous
 /* The main caveat for PPC64 is that function pointer are not just code pointers, */
 /* they hold PIC-related data as well */
-        
+
 .onload_vfork:
 	mflr %r0
 /* R2 is GOT pointer */
@@ -169,9 +169,9 @@ onload_vfork: .quad .onload_vfork, .TOC.@tocbase, 0;
 	std %r0, 0(%r6)
 	ld %r6, onload___vfork_r31@got(%r2)
 	std %r31, 0(%r6)
-	bl .onload___vfork_is_vfork 
+	bl .onload___vfork_is_vfork
 	nop
- 	cmpdi %r3,0	
+ 	cmpdi %r3,0
 	beq .Lfork
 /* Calling system vfork through pointer */
 	ld    %r6,ci_sys_vfork@got(%r2)
@@ -231,13 +231,13 @@ vfork = onload_vfork
 onload_vfork:
         addis    %r2, %r12, (.TOC. - onload_vfork)@ha
         addi  %r2, %r2, (.TOC. - onload_vfork)@l
-.localentry onload_vfork,. - onload_vfork 
+.localentry onload_vfork,. - onload_vfork
         mflr %r0
         ld %r6, onload___vfork_rtaddr@got(%r2)
         std %r0, 0(%r6)
         ld %r6, onload___vfork_r31@got(%r2)
         std %r31, 0(%r6)
-        bl .onload___vfork_is_vfork 
+        bl .onload___vfork_is_vfork
         nop
         cmpdi %r3,0
         beq .Lfork
@@ -283,7 +283,7 @@ vfork = onload_vfork
     .type onload_vfork,@function
 
 /* On PPC32, unlike PPC64, function pointers are plain code pointers */
-        
+
 onload_vfork:
      mflr %r0
 /* Determining our GOT address (the same principle as with i386) */
@@ -336,11 +336,53 @@ onload_vfork:
 vfork = onload_vfork
 
 #endif /* __PPC64__ */
+#if defined(__aarch64__)
+/* AArch64 code is always position-independent,
+   so it poses the least trouble
+ */
 
+    .text
+    .align 3
+    .globl onload_vfork
+    .type onload_vfork,@function
+
+onload_vfork:
+/* AArch64 has direct support for IP-relative addressing, */
+/* hence no special support for PIC, only need to save the return adddress */
+     adr x16, onload___vfork_rtaddr
+     str x30, [x16]
+     bl onload___vfork_is_vfork
+     cmp w0, #0
+     b.eq 1f
+/* Calling system vfork() */
+     ldr x0, ci_sys_vfork
+     blr x0
+/* Preserving the return value of vfork() across calling hooks */
+     adr x16, onload__vfork_retval
+     str x0, [x16]
+     cmp w0, #0
+	 b.eq 2f
+	 bl citp_netif_parent_vfork_hook
+	 b 3f
+2:
+	 bl citp_netif_child_vfork_hook
+3:
+/* Restore everything */
+     ldr x0, onload__vfork_retval
+	 ldr x30, onload___vfork_rtaddr
+/* Jump to the returned address */
+	 ret
+1:
+   ldr x30, onload___vfork_rtaddr
+	 b onload___vfork_as_fork
+
+.globl vfork
+vfork = onload_vfork
+
+#endif
 
 
     /* Tell everybody that we do not need executable stack.
      * Make SELinux happy. */
     .section .note.GNU-stack
     .previous
-

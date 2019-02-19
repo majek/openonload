@@ -53,7 +53,7 @@
 #ifndef __CI_EFRM_VI_RESOURCE_H__
 #define __CI_EFRM_VI_RESOURCE_H__
 
-#include <ci/efhw/efhw_types.h>
+#include <ci/efhw/nic.h>
 #include <ci/efrm/resource.h>
 #include <ci/efrm/debug.h>
 

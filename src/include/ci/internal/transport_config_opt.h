@@ -114,6 +114,15 @@
 /* Use userland epoll_* functions. (env. var. EF_UL_EPOLL, off by default) */
 #define CI_CFG_USERSPACE_EPOLL          1
 
+/* Whether to hook the syscall function from libc. Currently supported only
+ * on x86-64 to simplify the implementation.
+ */
+#ifdef __x86_64__
+#define CI_CFG_USERSPACE_SYSCALL        1
+#else
+#define CI_CFG_USERSPACE_SYSCALL        0
+#endif
+
 #if CI_CFG_USERSPACE_EPOLL
 
 /* Maximum number of onload stacks handled by single epoll object.
@@ -316,10 +325,10 @@
 ** Defaults for non-Linux and for broken Linux.
 ** Normally, we hope to get these values from OS. 
 */
-#define CI_CFG_UDP_SNDBUF_DEFAULT		65535
-#define CI_CFG_UDP_RCVBUF_DEFAULT		65535
-#define CI_CFG_UDP_SNDBUF_MAX		131071
-#define CI_CFG_UDP_RCVBUF_MAX		131071
+#define CI_CFG_UDP_SNDBUF_DEFAULT		212992
+#define CI_CFG_UDP_RCVBUF_DEFAULT		212992
+#define CI_CFG_UDP_SNDBUF_MAX		212992
+#define CI_CFG_UDP_RCVBUF_MAX		212992
 
 /*
 **These values are chosen to match the Linux definition of 
@@ -342,12 +351,12 @@
 
 /* TCP sndbuf */
 #define CI_CFG_TCP_SNDBUF_MIN	        CI_SOCK_MIN_SNDBUF
-# define CI_CFG_TCP_SNDBUF_DEFAULT	65535
+#define CI_CFG_TCP_SNDBUF_DEFAULT	16384
 #define CI_CFG_TCP_SNDBUF_MAX		4194304
 
 #define CI_CFG_TCP_RCVBUF_MIN           CI_SOCK_MIN_RCVBUF
 
-# define CI_CFG_TCP_RCVBUF_DEFAULT	65535
+#define CI_CFG_TCP_RCVBUF_DEFAULT	87380
 #define CI_CFG_TCP_RCVBUF_MAX		6291456
 
 /* These configuration "options" describe whether the host O/S normally
@@ -451,15 +460,18 @@
 
 /* 
  * Define how aggressive we should be in opening the congestion window
- * during slow start.  Define to non-zero to get RFC2581 behaviour
- * (1MSS increase for each received ACK) or zero to get RFC3465
- * behaviour (at most 2MSS increase for each received ACK).  See
- * Section 2.2 and 2.3 of RFC3465 for discussion of this.
+ * during slow start.
+ * 0: RFC3465 behaviour (at most 2MSS increase for each received ACK)
+ * 1: RFC2581 behaviour (1MSS increase for each received ACK)
+ * 2: Linux kernel behaviour since 9f9843a751d0a (2013-10-31) (pure
+ *    exponential increase for ACKed bytes)
+ * See Section 2.2 and 2.3 of RFC3465 for discussion of this, and the
+ * implementation of tcp_slow_start() in the kernel
  */
-#define CI_CFG_CONG_AVOID_CONSERVATIVE_SLOW_START 0
+#define CI_CFG_CONG_AVOID_SLOW_START_MODE 2
 
 /* 
- * When CI_CFG_CONG_AVOID_CONSERVATIVE_SLOW_START is zero, and so
+ * When CI_CFG_CONG_AVOID_SLOW_START_MODE is zero, and so
  * RFC3465 behaviour is selected, this supplies the value for "L" from
  * that RFC.  It should be between 1 and 2 to comply
  */ 
@@ -488,7 +500,7 @@
 
 /* If a tail drop is suspected, try to probe it with a retransmission.
 */
-#define CI_CFG_TAIL_DROP_PROBE 0
+#define CI_CFG_TAIL_DROP_PROBE 1
 
 /* Dump users of TCP and UDP sockets to a log file. */
 #define CI_CFG_LOG_SOCKET_USERS         0
@@ -534,6 +546,9 @@
 #define CI_CFG_SPIN_STATS 1
 #endif
 
+/* Enable IPv6 support */
+#define CI_CFG_IPV6 0
+
 /*
  * install broadcast hardware filters for UDP
  * - not needed currently as all such sockets get passed to OS
@@ -544,6 +559,15 @@
  * overhead when packets are large, but wastes memory when they aren't.
  */
 #define CI_CFG_PKT_BUF_SIZE             2048
+
+/* Size of socket shared state buffer.  Must be 1024 or 2048.  Larger
+ * value is needed if you enable too many CI_CFG_* options, such as
+ * CI_CFG_TCP_SOCK_STATS. */
+#if CI_CFG_IPV6
+#define CI_CFG_EP_BUF_SIZE              2048
+#else
+#define CI_CFG_EP_BUF_SIZE              1024
+#endif
 
 /* Allow WaitFor[Single,Multiple]Object to spin polling netifs before
  * blocking.
@@ -571,6 +595,9 @@
 /* Enable support for sendmmsg(). */
 #define CI_CFG_SENDMMSG          1
 
+/* Enable inspection of packets before delivery */
+#define CI_CFG_ZC_RECV_FILTER    1
+
 /* HACK: Limit the advertised MSS for TCP because our TCP path does not
  * currently cope with frames that don't fit in a single packet buffer.
  * This define really exists just to make it easy to find and remove this
@@ -590,7 +617,7 @@
 #define CI_CFG_TCPDUMP 1
 
 #if CI_CFG_TCPDUMP
-/* Dump queue length, should be 2^x, x <= 8 */
+/* Dump queue length, should be 2^x, x <= 16 */
 #define CI_CFG_DUMPQUEUE_LEN 128
 #endif /* CI_CFG_TCPDUMP */
 
@@ -620,6 +647,17 @@
 #error "Incorrect CI_CFG_PKT_BUF_SIZE value"
 #endif
 
+#define PKTS_PER_SET    (1u << CI_CFG_PKTS_PER_SET_S)
+#define PKTS_PER_SET_M  (PKTS_PER_SET - 1u)
+
+/* When all packet sets have less than this number of packets available to
+ * use, we'll allocate more packet sets */
+#define CI_CFG_PKT_SET_LOW_WATER  (PKTS_PER_SET / 2)
+/* A packet set with this number of available packets is considered as good
+ * as a completely-unused set.  It allows for packet set reuse when there
+ * are a few long-living TCP connections which use 1-10 packets from each
+ * set. */
+#define CI_CFG_PKT_SET_HIGH_WATER (PKTS_PER_SET - PKTS_PER_SET / 32)
 
 #if CI_CFG_PKTS_AS_HUGE_PAGES
 /* Maximum number of packet sets; each packet set is 2Mib (huge page)
@@ -662,6 +700,18 @@
 
 /* Do we need SO_TIMESTAMPING, WODA, ...? */
 #define CI_CFG_TIMESTAMPING 1
+
+/* Enable gathering various performance metrics. */
+#define CI_CFG_TCP_METRICS              0
+#define CI_CFG_METRICS_RING_SIZE        256  /* must be 2^x */
+
+/* Set to 1 to enable measuring the delta between packets being
+ * received by the NIC and processed by the stack.
+ */
+#define CI_CFG_PROC_DELAY               0
+#define CI_CFG_PROC_DELAY_BUCKETS       20
+#define CI_CFG_PROC_DELAY_NS_SHIFT      10
+
 
 /* Include "extra" transport_config_opt to allow build-time profiles */
 #include TRANSPORT_CONFIG_OPT_HDR

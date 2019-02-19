@@ -402,6 +402,7 @@ struct pci_dev;
 #define NIC_FLAG_TX_ALTERNATIVES 0x8000000000LL
 #define NIC_FLAG_EVQ_V2 0x10000000000LL
 #define NIC_FLAG_TX_CTPIO 0x20000000000LL
+#define NIC_FLAG_RX_FORCE_EVENT_MERGING 0x40000000000LL
 
 
 /*! */
@@ -511,7 +512,7 @@ struct efhw_nic {
 	/* Port ID to use when talking to firmware to match net
 	 * driver's configuration of vswitches etc. 
 	 */
-	unsigned vport_id;
+	unsigned vport_id; /* not used in EFX_DRIVERLINK_API_VERSION >= 25 */
 
 	/* Size of PIO buffer */
 	unsigned pio_size;
@@ -522,6 +523,8 @@ struct efhw_nic {
 	uint8_t tx_alts_vfifos;
 	/* Number of common pool buffers for TX alternatives*/
 	uint16_t tx_alts_cp_bufs;
+	/* Size of common pool buffers for TX alternatives */
+	uint16_t tx_alts_cp_buf_size;
 
         /* RX datapath firmware variant */
         uint16_t rx_variant;

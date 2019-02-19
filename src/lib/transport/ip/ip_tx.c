@@ -64,6 +64,17 @@ void ci_ip_send_pkt_lookup(ci_netif* ni,
   cicp_user_retrieve(ni, ipcache, &sock_cp);
 }
 
+
+void ci_ip_send_pkt_defer(ci_netif *ni, cicpos_retrieve_rc_t retrieve_rc,
+                          ci_uerr_t *ref_os_rc, ci_ip_pkt_fmt* pkt,
+                          const ci_ip_cached_hdrs *ipcache)
+{
+
+  cicp_user_defer_send(ni, retrieve_rc, ref_os_rc, OO_PKT_P(pkt),
+                       ipcache->ifindex, ipcache->nexthop.ip4);
+}
+
+
 int ci_ip_send_pkt_send(ci_netif* ni, ci_ip_pkt_fmt* pkt,
                         const ci_ip_cached_hdrs* ipcache)
 {
@@ -76,8 +87,7 @@ int ci_ip_send_pkt_send(ci_netif* ni, ci_ip_pkt_fmt* pkt,
     ci_netif_send(ni, pkt);
     return 0;
   case retrrc_nomac:
-    cicp_user_defer_send(ni, retrrc_nomac, &os_rc, OO_PKT_P(pkt),
-                         ipcache->ifindex, ipcache->nexthop);
+    ci_ip_send_pkt_defer(ni, retrrc_nomac, &os_rc, pkt, ipcache);
     return 0;
   case retrrc_noroute:
     return -EHOSTUNREACH;
@@ -86,7 +96,7 @@ int ci_ip_send_pkt_send(ci_netif* ni, ci_ip_pkt_fmt* pkt,
   case retrrc_localroute:
     if( ipcache->flags & CI_IP_CACHE_IS_LOCALROUTE )
         ci_assert(0);
-    /*passthrough*/
+    /* fall through */
   default:
     if( ipcache->status < 0 )
       return ipcache->status;
@@ -154,8 +164,7 @@ void ci_ip_send_tcp_slow(ci_netif* ni, ci_tcp_state* ts, ci_ip_pkt_fmt* pkt)
     ++ts->stats.tx_nomac_defer;
     /* Fall through. */
   case retrrc_alienroute:
-    cicp_user_defer_send(ni, ts->s.pkt.status, &rc, OO_PKT_P(pkt),
-                         ts->s.pkt.ifindex, ts->s.pkt.nexthop);
+    ci_ip_send_pkt_defer(ni, ts->s.pkt.status, &rc, pkt, &ts->s.pkt);
     return;
   case retrrc_noroute:
     rc = -EHOSTUNREACH;

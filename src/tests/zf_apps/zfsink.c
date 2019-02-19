@@ -189,6 +189,7 @@ int main(int argc, char* argv[])
       break;
     case 'r':
       cfg_rx_timestamping = 1;
+      break;
     case 'q':
       cfg_quiet = true;
       break;
@@ -234,6 +235,12 @@ int main(int argc, char* argv[])
   else
     ZF_TRY(zfur_addr_bind(ur, ai_local->ai_addr, ai_local->ai_addrlen,
                           NULL, 0, 0));
+
+  /* If no local port was specified, report which one was assigned */
+  if( ! strchr(argv[0], ':') ) {
+    fprintf(stderr, "No port provided, listening on %s:%d\n", argv[0],
+            ntohs(((struct sockaddr_in*)ai_local->ai_addr)->sin_port));
+  }
 
   /* Initialise the multiplexer if we're going to use one. */
   struct epoll_event event = { .events = EPOLLIN, .data = { .ptr = ur } };

@@ -158,7 +158,7 @@
 # define _ci_check(exp, file, line)                             \
   do {                                                          \
     if (CI_UNLIKELY(!(exp)))                                    \
-      ci_warn(("ci_check(%s)"_CI_ASSERT_FMT, #exp,              \
+      ci_warn(("ci_check(%s)" _CI_ASSERT_FMT, #exp,              \
                (file), (line)));                                \
   } while (0)
 
@@ -170,7 +170,7 @@
 # define _ci_assert(exp, file, line)                            \
   do {                                                          \
     if (CI_UNLIKELY(!(exp)))                                    \
-      ci_fail(("ci_assert(%s)"_CI_ASSERT_FMT, #exp,		\
+      ci_fail(("ci_assert(%s)" _CI_ASSERT_FMT, #exp,		\
                (file), (line)));                                \
   } while (0)
 
@@ -191,7 +191,7 @@
 # define _ci_verify(exp, file, line)                            \
   do {                                                          \
     if (CI_UNLIKELY(!(exp)))                                    \
-      ci_fail(("ci_verify(%s)"_CI_ASSERT_FMT, #exp,             \
+      ci_fail(("ci_verify(%s)" _CI_ASSERT_FMT, #exp,             \
                (file), (line)));                                \
   } while (0)
 

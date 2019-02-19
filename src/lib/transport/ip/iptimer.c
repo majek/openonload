@@ -83,19 +83,12 @@ void (*ci_ip_timer_debug_fn)(ci_netif*, int, int) = ci_ip_timer_debug;
 #define WHEEL0_MASK         (WHEEL1_MASK + \
                             (CI_IPTIME_BUCKETMASK << (CI_IPTIME_BUCKETBITS*1)))
 
-
-#ifndef __KERNEL__
-
-void ci_ip_timer_state_init_ul(ci_netif *ni)
-{
-  ci_ip_timer_state* ipts = IPTIMER_STATE(ni);
-
-  ni->ci_ip_time_tick2ms = 
-    (double)(1u<<ipts->ci_ip_time_frc2tick)/((double)ipts->khz);
-}
-
-#endif
-
+/* "now + IPTIME_INFINITY" is detected to be "after now", and probably "after"
+ * any reasonable event. */
+#define IPTIME_INFINITY ((1U << 31) - 1)
+/* If time difference is larger than this, then we probably see the sort of
+ * infinity above */
+#define IPTIME_INFINITY_LOW (1U << 30)
 
 #ifdef __KERNEL__ 
 
@@ -139,13 +132,39 @@ void ci_ip_timer_state_init(ci_netif* netif, unsigned cpu_khz)
 {
   ci_ip_timer_state* ipts = IPTIMER_STATE(netif);
   int i;
+  int us2isn;
 
   /* initialise the cycle to tick constants */
   ipts->khz = cpu_khz;
   ipts->ci_ip_time_frc2tick = shift_for_gran(CI_IP_TIME_APP_GRANULARITY, ipts->khz);
   ipts->ci_ip_time_frc2us = shift_for_gran(1, ipts->khz);
+
+  /* The Linux kernel ticks the initial sequence number that it would use for
+   * a given tuple every 64 ns.  Onload does the same, when using
+   * EF_TCP_ISN_MODE=clocked. However in EF_TCP_ISN_MODE=clocked+cache our use
+   * of the clock-driven ISN is slightly different, though, as we remember
+   * old sequence numbers in the case where the clock-driven ISN is not known
+   * to be safe.  As such, we don't need it to tick so fast, and so we let it
+   * tick at most every 256 ns.  This means that it takes more than eight
+   * minutes to wrap by half, while four minutes is our assumed maximum
+   * peer-MSL.  This in practice reduces the cases in which we have to
+   * remember old sequence numbers. */
+  us2isn = NI_OPTS(netif).tcp_isn_mode != 0 ? 2 : 4;
+  ipts->ci_ip_time_frc2isn = ipts->ci_ip_time_frc2us > us2isn ?
+                             ipts->ci_ip_time_frc2us - us2isn : 0;
+
   ci_ip_time_initial_sync(ipts);
   ipts->sched_ticks = ci_ip_time_now(netif);
+  ipts->closest_timer = ipts->sched_ticks + IPTIME_INFINITY;
+
+  /* To convert ms to ticks we will use fixed point arithmetic
+   * Calculate conversion factor, which is expected to be in range <0.5,1]
+   * */
+  ipts->ci_ip_time_ms2tick_fxp =
+    (((ci_uint64)ipts->khz) << 32) /
+    (1u << ipts->ci_ip_time_frc2tick);
+  ci_assert_gt(ipts->ci_ip_time_ms2tick_fxp, 1ull<<31);
+  ci_assert_le(ipts->ci_ip_time_ms2tick_fxp, 1ull<<32);
 
   /* set module specific time constants dependent on frc2tick */
   ci_tcp_timer_init(netif);
@@ -173,6 +192,9 @@ void __ci_ip_timer_set(ci_netif *netif, ci_ip_timer *ts, ci_iptime_t t)
   ci_assert(TIME_GT(t, stime));
   /* this is absolute time */
   ts->time = t;
+
+  if( TIME_LT(t, IPTIMER_STATE(netif)->closest_timer) )
+    IPTIMER_STATE(netif)->closest_timer = t;
 
   /* Previous error in this code was to choose wheel based on time delta 
    * before timer fires (ts->time - stime). This is bogus as the timer wheels
@@ -214,12 +236,13 @@ void __ci_ip_timer_set(ci_netif *netif, ci_ip_timer *ts, ci_iptime_t t)
 /* take the bucket corresponding to time t in the given wheel and 
 ** reinsert them back into the wheel (i.e. into wheelno -1)
 */
-static void ci_ip_timer_cascadewheel(ci_netif* netif, int wheelno, 
+static int ci_ip_timer_cascadewheel(ci_netif* netif, int wheelno,
 				     ci_iptime_t stime)
 {
   ci_ip_timer* ts;
   ci_ni_dllist_t* bucket;
   oo_p curid, buckid;
+  int changed = 0;
 
   ci_assert(wheelno > 0 && wheelno < CI_IPTIME_WHEELS);
   /* check time is on the boundary expected by the wheel number passed in */
@@ -261,6 +284,7 @@ static void ci_ip_timer_cascadewheel(ci_netif* netif, int wheelno,
 
     /* insert ts into wheel below */
     bucket = BUCKET(netif, wheelno-1, ts->time);
+    changed = 1;
 
     /* append onto the correct bucket 
     **
@@ -271,6 +295,7 @@ static void ci_ip_timer_cascadewheel(ci_netif* netif, int wheelno,
     ci_ni_dllist_push_tail(netif, bucket, &ts->link);
     ci_assert(ci_ip_timer_is_link_valid(netif, ts));
   }
+  return changed;
 }
 
 /* unpick the ci_ip_timer structure to actually do the callback */ 
@@ -308,11 +333,6 @@ static void ci_ip_timer_docallback(ci_netif *netif, ci_ip_timer* ts)
   case CI_IP_TIMER_PMTU_DISCOVER:
     ci_pmtu_timeout_pmtu(netif, SP_TO_TCP(netif, ts->param1));
     break;
-#if CI_CFG_TAIL_DROP_PROBE
-  case CI_IP_TIMER_TCP_TAIL_DROP:
-    ci_tcp_timeout_taildrop(netif, SP_TO_TCP(netif, ts->param1));
-    break;
-#endif
 #if CI_CFG_TCP_SOCK_STATS
   case CI_IP_TIMER_TCP_STATS:
 	ci_tcp_stats_action(netif, SP_TO_TCP(netif, ts->param1), 
@@ -345,6 +365,7 @@ void ci_ip_timer_poll(ci_netif *netif) {
   ci_ip_timer* ts;
   ci_iptime_t rtime;
   ci_ni_dllist_link* link;
+  int changed = 0;
 
   /* The caller is expected to ensure that the current time is sufficiently
   ** up-to-date.
@@ -372,7 +393,7 @@ void ci_ip_timer_poll(ci_netif *netif) {
 	}
 	ci_ip_timer_cascadewheel(netif, 2, *stime);
       }
-      ci_ip_timer_cascadewheel(netif, 1, *stime);
+      changed = ci_ip_timer_cascadewheel(netif, 1, *stime);
     }
 
 
@@ -412,6 +433,26 @@ void ci_ip_timer_poll(ci_netif *netif) {
   
   ci_assert( ci_ni_dllist_is_valid(netif, &ipts->fire_list.l) );
   ci_assert( ci_ni_dllist_is_empty(netif, &ipts->fire_list));
+
+  /* What is our next timer?
+   * Let's update if our previous "closest" timer have already been
+   * handled, or if the previous estimation was "infinity". */
+  if( TIME_GE(ipts->sched_ticks, ipts->closest_timer) ||
+      (changed &&
+       ipts->closest_timer - ipts->sched_ticks > IPTIME_INFINITY_LOW) ) {
+    /* we peek into the first wheel only */
+    ci_iptime_t base = ipts->sched_ticks & WHEEL0_MASK;
+    ci_iptime_t b = ipts->sched_ticks - base;
+    for( b++ ; b < CI_IPTIME_BUCKETS; b++ ) {
+      if( !ci_ni_dllist_is_empty(netif, &ipts->warray[b]) ) {
+        ipts->closest_timer = base + b;
+        return;
+      }
+    }
+
+    /* We do not know the next timer.  Set it to a sort of infinity. */
+    ipts->closest_timer = ipts->sched_ticks + IPTIME_INFINITY;
+  }
 }
 
 
@@ -490,14 +531,11 @@ void ci_ip_timer_state_assert_valid(ci_netif* ni, const char* file, int line)
 #endif
 
 #ifdef DUMP_TIMER_SUPPORT 
-static char *
-ci_ip_timer_dump(ci_ip_timer* ts)
+static const char* ci_ip_timer_dump(const ci_ip_timer* ts)
 {
-  char * timer_name;
-  static char unknown_timer[20];
+  const char* timer_name;
 
-  switch (ts->fn) {
-
+  switch( ts->fn ) {
     #undef MAKECASE
     #define MAKECASE(id, name) case id: timer_name = name; break;
 
@@ -513,18 +551,14 @@ ci_ip_timer_dump(ci_ip_timer* ts)
     MAKECASE(CI_IP_TIMER_TCP_STATS,     "tcp-stats")
     MAKECASE(CI_IP_TIMER_NETIF_STATS,   "ni-stats")
 #endif
-#if CI_CFG_TAIL_DROP_PROBE
-    MAKECASE(CI_IP_TIMER_TCP_TAIL_DROP, "taildrop")
-#endif
 #if CI_CFG_IP_TIMER_DEBUG
     MAKECASE(CI_IP_TIMER_DEBUG_HOOK,     "debug")
 #endif
-    default:
-        sprintf(unknown_timer, "unk=%d", ts->fn);
-        timer_name = unknown_timer;
-        break;
+  default:
+    timer_name = "BAD";
+    break;
     #undef MAKECASE
-  }  
+  }
   return timer_name;
 }
 

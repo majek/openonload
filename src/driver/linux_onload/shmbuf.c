@@ -30,14 +30,14 @@
 #include <onload/debug.h>
 #include <onload/shmbuf.h>
 
-int ci_shmbuf_alloc(ci_shmbuf_t* b, unsigned bytes)
+int ci_shmbuf_alloc(ci_shmbuf_t* b, unsigned n_pages)
 {
   unsigned i;
 
   ci_assert(b);
   
-  b->n_pages = CI_ROUND_UP(bytes, CI_PAGE_SIZE) >> CI_PAGE_SHIFT;
-  b->pages = ci_alloc(b->n_pages * sizeof(b->pages[0]));
+  b->n_pages = n_pages;
+  b->pages = vmalloc(b->n_pages * sizeof(b->pages[0]));
   if( b->pages == 0 )  return -ENOMEM;
 
   for( i = 0; i < b->n_pages; ++i )  efhw_page_mark_invalid(&b->pages[i]);
@@ -57,7 +57,7 @@ void ci_shmbuf_free(ci_shmbuf_t* b)
     if( efhw_page_is_valid(&b->pages[i]) )
       efhw_page_free(&b->pages[i]);
 
-  ci_free(b->pages);
+  vfree(b->pages);
 }
 
 

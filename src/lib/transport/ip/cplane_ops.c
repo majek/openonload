@@ -146,12 +146,11 @@ cicp_user_bond_hash_get_hwport(ci_netif* ni, ci_ip_cached_hdrs* ipcache,
     hs.flags = CICP_HASH_STATE_FLAGS_IS_IP;
   memcpy(&hs.dst_mac, ci_ip_cache_ether_dhost(ipcache), ETH_ALEN);
   memcpy(&hs.src_mac, ci_ip_cache_ether_shost(ipcache), ETH_ALEN);
-  hs.src_addr_be32 = ipcache->ip_saddr_be32;
+  hs.src_addr_be32 = ipcache->ip_saddr.ip4;
   hs.dst_addr_be32 = daddr_be32;
   hs.src_port_be16 = src_port_be16;
   hs.dst_port_be16 = ipcache->dport_be16;
-  ipcache->hwport = oo_cp_hwport_bond_get(ni->cplane, ipcache->ifindex,
-                                          &ipcache->encap, hwports, &hs);
+  ipcache->hwport = oo_cp_hwport_bond_get(ipcache->encap.type, hwports, &hs);
   return ! ci_ip_cache_is_onloadable(ni, ipcache);
 }
 #endif
@@ -180,7 +179,7 @@ cicp_kernel_resolve(ci_netif* ni, struct cp_fwd_key* key,
 
   rc = ip_route_output_key(ni->cplane->cp_netns, &rt, &fl);
   if( rc < 0 ) {
-    data->type = CICP_ROUTE_ALIEN;
+    data->ifindex = CI_IFID_BAD;
     return;
   }
   data->src = fl.fl4_src;
@@ -199,7 +198,7 @@ cicp_kernel_resolve(ci_netif* ni, struct cp_fwd_key* key,
 
   rt = ip_route_output_key(ni->cplane->cp_netns, &fl4);
   if( IS_ERR(rt) ) {
-    data->type = CICP_ROUTE_ALIEN;
+    data->ifindex = CI_IFID_BAD;
     return;
   }
   data->src = fl4.saddr;
@@ -236,10 +235,8 @@ cicp_kernel_resolve(ci_netif* ni, struct cp_fwd_key* key,
 
   ip_rt_put(rt);
 
-  if( data->ifindex == 1 ) {
-    data->type = CICP_ROUTE_LOCAL;
+  if( data->ifindex == CI_IFID_LOOP )
     return;
-  }
 
   /* We've got the route.  Let's look into llap table to find out the
    * network interface details. */
@@ -248,9 +245,7 @@ cicp_kernel_resolve(ci_netif* ni, struct cp_fwd_key* key,
                        &data->hwports, &rx_hwports, &data->src_mac, &data->encap);
 
   if( rc < 0 || rx_hwports == 0 )
-    data->type = CICP_ROUTE_ALIEN;
-  else
-    data->type = CICP_ROUTE_NORMAL;
+    data->ifindex = CI_IFID_BAD;
 }
 #endif
 
@@ -274,7 +269,7 @@ static int cicp_user_resolve(ci_netif* ni, cicp_verinfo_t* verinfo,
   ci_assert(key->flag & CP_FWD_KEY_REQ_WAIT);
 #endif
   if( rc < 0 )
-    data->type = CICP_ROUTE_ALIEN;
+    data->ifindex = CI_IFID_BAD;
   return rc;
 }
 
@@ -348,14 +343,18 @@ cicp_user_retrieve(ci_netif*                    ni,
     rc = cicp_user_resolve(ni, &ipcache->mac_integrity, &key, &data);
   }
 
-  switch( data.type ) {
-    case CICP_ROUTE_LOCAL:
+  switch( data.ifindex ) {
+    case CI_IFID_LOOP:
       ipcache->status = retrrc_localroute;
       ipcache->encap.type = CICP_LLAP_TYPE_NONE;
       ipcache->ether_offset = 4;
       ipcache->intf_i = OO_INTF_I_LOOPBACK;
       return;
-    case CICP_ROUTE_NORMAL:
+    case CI_IFID_BAD:
+      ipcache->status = retrrc_alienroute;
+      ipcache->intf_i = -1;
+      return;
+    default:
     {
       cicp_hwport_mask_t hwports = 0;
       /* Can we accelerate interface in this stack ? */
@@ -366,14 +365,12 @@ cicp_user_retrieve(ci_netif*                    ni,
       rc = oo_cp_find_llap(ni->cplane, data.ifindex, NULL/*mtu*/,
                            NULL /*tx_hwports*/, &hwports /*rx_hwports*/,
                            NULL/*mac*/, NULL /*encap*/);
-      if( rc == 0 && (hwports & ~(ci_netif_get_hwport_mask(ni))) == 0 )
-        break;
-      /* FALL through to alien path */
+      if( rc != 0 || (hwports & ~(ci_netif_get_hwport_mask(ni))) ) {
+        ipcache->status = retrrc_alienroute;
+        ipcache->intf_i = -1;
+      }
+      break;
     }
-    case CICP_ROUTE_ALIEN:
-      ipcache->status = retrrc_alienroute;
-      ipcache->intf_i = -1;
-      return;
   }
 
   ipcache->encap = data.encap;
@@ -391,9 +388,9 @@ cicp_user_retrieve(ci_netif*                    ni,
     ipcache->hwport = cp_hwport_mask_first(data.hwports);
 
   ipcache->mtu = data.mtu;
-  ipcache->ip_saddr_be32 = key.src == INADDR_ANY ? data.src : key.src;
+  ipcache->ip_saddr.ip4 = key.src == INADDR_ANY ? data.src : key.src;
   ipcache->ifindex = data.ifindex;
-  ipcache->nexthop = data.next_hop;
+  ipcache->nexthop.ip4 = data.next_hop;
   if( ! ci_ip_cache_is_onloadable(ni, ipcache)) {
     ipcache->status = retrrc_alienroute;
     ipcache->intf_i = -1;
@@ -427,7 +424,7 @@ cicp_ip_cache_update_from(ci_netif* ni, ci_ip_cached_hdrs* ipcache,
   ci_assert_equal(ipcache->dport_be16, from_ipcache->dport_be16);
 
   ipcache->mac_integrity = from_ipcache->mac_integrity;
-  ipcache->ip_saddr_be32 = from_ipcache->ip_saddr_be32;
+  ipcache->ip_saddr = from_ipcache->ip_saddr;
   ipcache->ip.ip_ttl = from_ipcache->ip.ip_ttl;
   ipcache->status = from_ipcache->status;
   ipcache->flags = from_ipcache->flags;

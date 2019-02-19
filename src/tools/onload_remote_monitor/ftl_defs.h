@@ -56,6 +56,12 @@
 #define ON_CI_CFG_TCP_SOCK_STATS IGNORE
 #endif
 
+#if CI_CFG_ZC_RECV_FILTER
+#define ON_CI_CFG_ZC_RECV_FILTER DO
+#else
+#define ON_CI_CFG_ZC_RECV_FILTER IGNORE
+#endif
+
 #if CI_CFG_FD_CACHING
 #define ON_CI_CFG_FD_CACHING DO
 #else
@@ -184,6 +190,12 @@
 #define ON_CI_CFG_TIMESTAMPING DO
 #else
 #define ON_CI_CFG_TIMESTAMPING IGNORE
+#endif
+
+#if CI_CFG_PROC_DELAY
+#define ON_CI_CFG_PROC_DELAY DO
+#else
+#define ON_CI_CFG_PROC_DELAY IGNORE
 #endif
 
 #define ON_CI_CFG_L3XUDP IGNORE
@@ -331,6 +343,7 @@
   FTL_TFIELD_INT(ctx, ci_iptime_t, tconst_paws_idle, ORM_OUTPUT_STACK)   \
   FTL_TFIELD_INT(ctx, ci_iptime_t, tconst_2msl_time, ORM_OUTPUT_STACK)   \
   FTL_TFIELD_INT(ctx, ci_iptime_t, tconst_fin_timeout, ORM_OUTPUT_STACK) \
+  FTL_TFIELD_INT(ctx, ci_iptime_t, tconst_peer2msl_time, ORM_OUTPUT_STACK) \
   FTL_TFIELD_INT(ctx, \
                  ci_iptime_t, tconst_pmtu_discover_slow, ORM_OUTPUT_STACK)                \
   FTL_TFIELD_INT(ctx, \
@@ -371,6 +384,7 @@
     FTL_TFIELD_INT(ctx, ci_uint64, frc, ORM_OUTPUT_STACK)                    \
     FTL_TFIELD_INT(ctx, ci_uint32, ci_ip_time_frc2tick, ORM_OUTPUT_STACK)    \
     FTL_TFIELD_INT(ctx, ci_uint32, ci_ip_time_frc2us, ORM_OUTPUT_STACK)      \
+    FTL_TFIELD_INT(ctx, ci_uint32, ci_ip_time_frc2isn, ORM_OUTPUT_STACK)     \
     FTL_TFIELD_INT(ctx, ci_uint32, khz, ORM_OUTPUT_STACK)                    \
     FTL_TFIELD_STRUCT(ctx, ci_ni_dllist_t, fire_list, ORM_OUTPUT_EXTRA)      \
     FTL_TFIELD_ARRAYOFSTRUCT(ctx, \
@@ -595,6 +609,7 @@
   FTL_TFIELD_INT(ctx, ci_int32, mem_pressure_pkt_pool, ORM_OUTPUT_STACK)  \
   FTL_TFIELD_INT(ctx, ci_int32, mem_pressure_pkt_pool_n, ORM_OUTPUT_STACK) \
   FTL_TFIELD_INT(ctx, ci_int32, n_async_pkts, ORM_OUTPUT_STACK)           \
+  FTL_TFIELD_INT(ctx, ci_int32, reserved_pktbufs, ORM_OUTPUT_STACK)       \
   FTL_TFIELD_INT(ctx, ci_uint64, nonb_pkt_pool, ORM_OUTPUT_STACK)         \
   FTL_TFIELD_STRUCT(ctx, ci_netif_ipid_cb_t, ipid, ORM_OUTPUT_EXTRA) \
   FTL_TFIELD_INT(ctx, ci_uint32, vi_ofs, ORM_OUTPUT_STACK)                \
@@ -670,8 +685,8 @@
                           CI_CFG_DUMPQUEUE_LEN, ORM_OUTPUT_EXTRA)                      \
     FTL_TFIELD_ARRAYOFINT(ctx, ci_uint8, dump_intf,     \
                           OO_INTF_I_NUM, ORM_OUTPUT_STACK)                                \
-    FTL_TFIELD_INT(ctx, ci_uint8, dump_read_i, ORM_OUTPUT_STACK)          \
-    FTL_TFIELD_INT(ctx, ci_uint8, dump_write_i, ORM_OUTPUT_STACK)         \
+    FTL_TFIELD_INT(ctx, ci_uint16, dump_read_i, ORM_OUTPUT_STACK)         \
+    FTL_TFIELD_INT(ctx, ci_uint16, dump_write_i, ORM_OUTPUT_STACK)        \
   ) \
   FTL_TFIELD_STRUCT(ctx, ef_vi_stats, vi_stats, ORM_OUTPUT_STACK) \
   ON_CI_CFG_SEPARATE_UDP_RXQ(                                           \
@@ -695,6 +710,17 @@
   FTL_TFIELD_INT(ctx, ci_uint32, kernel_packets_pending, ORM_OUTPUT_STACK) \
   FTL_TFIELD_INT(ctx, ci_uint64, kernel_packets_last_forwarded, ORM_OUTPUT_STACK) \
   FTL_TFIELD_INT(ctx, ci_uint64, kernel_packets_cycles, ORM_OUTPUT_STACK) \
+  ON_CI_CFG_PROC_DELAY(                                                   \
+    FTL_TFIELD_INT(ctx, ci_uint64, sync_frc, ORM_OUTPUT_STACK)            \
+    FTL_TFIELD_INT(ctx, ci_uint64, sync_cost, ORM_OUTPUT_STACK)           \
+    FTL_TFIELD_INT(ctx, ci_int64,  max_frc_diff, ORM_OUTPUT_STACK)        \
+    FTL_TFIELD_INT(ctx, ci_uint64, sync_ns, ORM_OUTPUT_STACK)             \
+    FTL_TFIELD_INT(ctx, ci_uint32, proc_delay_max, ORM_OUTPUT_STACK)      \
+    FTL_TFIELD_INT(ctx, ci_uint32, proc_delay_min, ORM_OUTPUT_STACK)      \
+    FTL_TFIELD_ARRAYOFINT(ctx, ci_uint32, proc_delay_hist,                \
+                          CI_CFG_PROC_DELAY_BUCKETS, ORM_OUTPUT_STACK)    \
+    FTL_TFIELD_INT(ctx, ci_uint32, proc_delay_negative, ORM_OUTPUT_STACK) \
+  )                                                                       \
   FTL_TSTRUCT_END(ctx)
 
 
@@ -800,11 +826,11 @@
     FTL_TSTRUCT_BEGIN(ctx, ci_ip_cached_hdrs, )                               \
     FTL_TFIELD_STRUCT(ctx, cicp_verinfo_t,             \
 		      mac_integrity, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))					      \
-    FTL_TFIELD_IPADDR(ctx, ip_saddr_be32, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS)) \
+    FTL_TFIELD_IPXADDR(ctx, ip_saddr, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS)) \
     FTL_TFIELD_PORT(ctx, dport_be16, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS)) \
     FTL_TFIELD_INT(ctx, ci_int8, status, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))       \
     FTL_TFIELD_INT(ctx, ci_uint8, flags, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))       \
-    FTL_TFIELD_IPADDR(ctx, nexthop, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))             \
+    FTL_TFIELD_IPXADDR(ctx, nexthop, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS)) \
     FTL_TFIELD_INT(ctx, ci_mtu_t, mtu, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))                     \
     FTL_TFIELD_INT(ctx, ci_ifid_t, ifindex, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))                \
     FTL_TFIELD_INT(ctx, cicp_encap_t, encap, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))                \
@@ -992,6 +1018,10 @@ typedef struct oo_tcp_socket_stats oo_tcp_socket_stats;
   FTL_TFIELD_STRUCT(ctx, ci_sock_cmn, s, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))                  \
   FTL_TFIELD_STRUCT(ctx, ci_ip_cached_hdrs, ephemeral_pkt, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS)) \
   FTL_TFIELD_INT(ctx, ci_uint32, udpflags, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))                \
+  ON_CI_CFG_ZC_RECV_FILTER( \
+    FTL_TFIELD_INT(ctx, ci_uint64, recv_q_filter, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))         \
+    FTL_TFIELD_INT(ctx, ci_uint64, recv_q_filter_arg, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))     \
+  ) \
   FTL_TFIELD_STRUCT(ctx, ci_udp_recv_q, recv_q, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))           \
   ON_CI_CFG_TIMESTAMPING( \
     FTL_TFIELD_STRUCT(ctx, ci_udp_recv_q, timestamp_q, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))    \
@@ -1141,12 +1171,10 @@ typedef struct oo_tcp_socket_stats oo_tcp_socket_stats;
     FTL_TFIELD_INT(ctx, ci_uint32, ssthresh, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))                    \
     FTL_TFIELD_INT(ctx, ci_uint32, bytes_acked, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))                 \
     FTL_TFIELD_INT(ctx, ci_uint8, dup_acks, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))                    \
-    FTL_TFIELD_INT(ctx, ci_uint8, dup_thresh, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))                  \
     ON_CI_CFG_TCP_FASTSTART(                                                  \
       FTL_TFIELD_INT(ctx, ci_uint32, faststart_acks, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))            \
     )                                                                         \
     ON_CI_CFG_TAIL_DROP_PROBE(                                                \
-      FTL_TFIELD_INT(ctx, ci_uint32, taildrop_state, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))            \
       FTL_TFIELD_INT(ctx, ci_uint32, taildrop_mark, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))             \
     )                                                                         \
     FTL_TFIELD_INT(ctx, ci_iptime_t, t_prev_recv_payload, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS)) \
@@ -1180,9 +1208,6 @@ typedef struct oo_tcp_socket_stats oo_tcp_socket_stats;
     FTL_TFIELD_STRUCT(ctx, ci_ip_timer, kalive_tid, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))             \
     ON_CI_CFG_TCP_SOCK_STATS(                                                 \
       FTL_TFIELD_STRUCT(ctx, ci_ip_timer, stats_tid, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))            \
-    )                                                                         \
-    ON_CI_CFG_TAIL_DROP_PROBE(                                                \
-      FTL_TFIELD_STRUCT(ctx, ci_ip_timer, taildrop_tid, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))         \
     )                                                                         \
     FTL_TFIELD_STRUCT(ctx, ci_ip_timer, cork_tid, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))               \
     ON_CI_CFG_TCP_SOCK_STATS(                                                 \
@@ -1220,6 +1245,8 @@ typedef struct oo_tcp_socket_stats oo_tcp_socket_stats;
 		   n_acceptq_overflow, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))					      \
     FTL_TFIELD_INT(ctx, ci_uint32,                \
 		   n_acceptq_no_sock, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))					      \
+    FTL_TFIELD_INT(ctx, ci_uint32,                \
+		   n_acceptq_no_pkts, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))					      \
     FTL_TFIELD_INT(ctx, ci_uint32,                \
 		   n_accept_loop2_closed, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))				      \
     FTL_TFIELD_INT(ctx, ci_uint32,                \

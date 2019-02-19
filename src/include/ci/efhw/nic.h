@@ -56,6 +56,7 @@
 
 #include <ci/efhw/efhw_types.h>
 #include <ci/efhw/public.h>
+#include <ci/driver/driverlink_api.h>
 
 
 /* Convert PCI info to device type.  Returns false when device is not
@@ -69,8 +70,11 @@ extern int efhw_device_type_init(struct efhw_device_type *dt,
 extern void efhw_nic_init(struct efhw_nic *nic, unsigned flags,
 			  unsigned options, struct efhw_device_type *dev_type,
 			  unsigned map_min, unsigned map_max, unsigned vi_base,
-			  unsigned vi_shift, unsigned mem_bar, unsigned vi_stride,
-			  unsigned vport_id);
+			  unsigned vi_shift, unsigned mem_bar, unsigned vi_stride
+#if EFX_DRIVERLINK_API_VERSION < 25
+			  , unsigned vport_id
+#endif
+			  );
 
 /*! Destruct NIC resources */
 extern void efhw_nic_dtor(struct efhw_nic *nic);
@@ -83,5 +87,10 @@ extern struct efx_dl_device* efhw_nic_acquire_dl_device(struct efhw_nic*);
 extern void efhw_nic_release_dl_device(struct efhw_nic*, struct efx_dl_device*);
 extern void efhw_nic_flush_dl(struct efhw_nic*);
 
+static inline uint8_t efhw_vi_nic_flags(const struct efhw_nic* nic)
+{
+	return (nic->flags & NIC_FLAG_BUG35388_WORKAROUND) ?
+	       EFHW_VI_NIC_BUG35388_WORKAROUND : 0;
+}
 
 #endif /* __CI_EFHW_NIC_H__ */

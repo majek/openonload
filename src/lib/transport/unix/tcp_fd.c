@@ -398,6 +398,19 @@ static void citp_tcp_close(citp_fdinfo* fdinfo)
 static void citp_tcp_dtor(citp_fdinfo* fdinfo, int fdt_locked)
 {
   citp_sock_fdi* epi = fdi_to_sock_fdi(fdinfo);
+#if CI_CFG_FD_CACHING
+  if( ! (epi->sock.s->b.sb_aflags & CI_SB_AFLAG_IN_CACHE) ) {
+    /* The fdtable code have already closed the fd; we have to ensure that
+     * UL netif structure knows about this.  Normal close() is already
+     * handled in the fd caching code, but there are a lot of ways to close
+     * a socket in abnormal way: handover, onload_move_fd, dup2/dup3.
+     * 
+     * We can insert this line in tcp_handover() at all, but here is just
+     * one place for all the cases mentioned above.
+     */
+    SC_TO_EPS(epi->sock.netif, epi->sock.s)->fd = CI_FD_BAD;
+  }
+#endif
   citp_netif_release_ref(epi->sock.netif, fdt_locked);
 }
 
@@ -580,8 +593,8 @@ static int citp_tcp_accept_complete(ci_netif* ni,
   CITP_STATS_NETIF(++ni->state->stats.ul_accepts);
 
   if( sa ) {
-    ci_addr_to_user(sa, p_sa_len, ts->s.domain, 
-                    TS_TCP(ts)->tcp_dest_be16, ts->s.pkt.ip.ip_daddr_be32);
+    ci_addr_to_user(sa, p_sa_len, AF_INET, ts->s.domain, 
+                    TS_TCP(ts)->tcp_dest_be16, &ts->s.pkt.ip.ip_daddr_be32);
   }
 
   Log_VSS(ci_log(LPF "%d ACCEPTING %d %s:%u rcv=%08x-%08x snd=%08x-%08x-%08x "
@@ -1673,8 +1686,10 @@ static int citp_tcp_recv(citp_fdinfo* fdinfo, struct msghdr* msg, int flags)
             CI_SOCKCALL_FLAGS_PRI_ARG(flags)));
 
   if( epi->sock.s->b.state != CI_TCP_LISTEN ) {
-    if (msg->msg_iovlen == 0 || msg->msg_iov == NULL) {
+    if( (msg->msg_iovlen == 0 || msg->msg_iov == NULL) &&
+        ! (flags & MSG_ERRQUEUE) ) {
       msg->msg_flags = 0;
+      msg->msg_controllen = 0;
       return 0;
     }
     ci_tcp_recvmsg_args_init(&a, epi->sock.netif, SOCK_TO_TCP(epi->sock.s),
@@ -1988,6 +2003,17 @@ static int citp_tcp_recvmsg_kernel(citp_fdinfo* fdi, struct msghdr *msg,
 }
 
 
+static int citp_tcp_zc_recv_filter(citp_fdinfo* fdi,
+                                   onload_zc_recv_filter_callback filter,
+                                   void* cb_arg, int flags)
+{
+#if CI_CFG_ZC_RECV_FILTER
+  return -EOPNOTSUPP;
+#else
+  return -ENOSYS;
+#endif
+}
+
 int citp_tcp_tmpl_alloc(citp_fdinfo* fdi, const struct iovec* initial_msg,
                         int mlen, struct oo_msg_template** omt_pp,
                         unsigned flags)
@@ -2141,7 +2167,8 @@ citp_tcp_ds_prepare(citp_fdinfo* fdi, int size, unsigned flags,
 
   /* Calculate the windows */
   out->mss = tcp_eff_mss(ts);
-  out->send_wnd = SEQ_SUB(ts->snd_max, tcp_snd_nxt(ts));
+  out->send_wnd = CI_MIN(SEQ_SUB(ts->snd_max, tcp_snd_nxt(ts)),
+                         ci_tcp_tx_send_space(ni, ts) * tcp_eff_mss(ts));
   out->cong_wnd = ts->cwnd + ts->cwnd_extra - ci_tcp_inflight(ts);
   out->user_size = size;
   if( out->cong_wnd < out->mss ) {
@@ -2248,6 +2275,7 @@ citp_protocol_impl citp_tcp_protocol_impl = {
 #endif
     .zc_send            = citp_tcp_zc_send,
     .zc_recv            = citp_tcp_zc_recv,
+    .zc_recv_filter     = citp_tcp_zc_recv_filter,
     .recvmsg_kernel     = citp_tcp_recvmsg_kernel,
     .tmpl_alloc         = citp_tcp_tmpl_alloc,
     .tmpl_update        = citp_tcp_tmpl_update,

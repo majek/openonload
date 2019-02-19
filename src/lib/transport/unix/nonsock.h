@@ -84,6 +84,10 @@ extern
 int citp_nonsock_recvmsg_kernel(citp_fdinfo* fdi, struct msghdr *msg,
                                 int flags);
 extern
+int citp_nonsock_zc_recv_filter(citp_fdinfo* fdi,
+                                onload_zc_recv_filter_callback filter,
+                                void* cb_arg, int flags);
+extern
 int citp_nonsock_tmpl_alloc(citp_fdinfo* fdi, const struct iovec* initial_msg,
                             int mlen, struct oo_msg_template** omt_pp,
                             unsigned flags);

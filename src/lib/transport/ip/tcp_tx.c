@@ -231,7 +231,7 @@ static void ci_ip_send_tcp_list_loopback(ci_netif* ni, ci_tcp_state* ts,
     /* Normally, the packet contains ACK and window size.
      * Loopback in-packet ACK value is ignored - deliver it now! */
     if( SEQ_LE(ts->ack_trigger, ts->rcv_delivered) )
-      ci_tcp_send_ack_loopback(ni, ts, CI_FALSE);
+      ci_tcp_send_ack_loopback(ni, ts);
     if( !ni->state->in_poll )
       ci_netif_poll(ni);
   }
@@ -778,7 +778,7 @@ int ci_tcp_synrecv_send(ci_netif* netif, ci_tcp_socket_listen* tls,
               (ipcache->status == retrrc_localroute &&
                (ipcache->flags & CI_IP_CACHE_IS_LOCALROUTE)));
     ci_assert_equal(ipcache->ip.ip_daddr_be32, tsr->r_addr);
-    ci_assert_equal(ipcache->ip_saddr_be32, tsr->l_addr);
+    ci_assert_equal(ipcache->ip_saddr.ip4, tsr->l_addr);
     ci_assert_equal(ipcache->dport_be16, tsr->r_port);
   }
 
@@ -837,10 +837,7 @@ int ci_tcp_synrecv_send(ci_netif* netif, ci_tcp_socket_listen* tls,
       (ipcache->status == retrrc_success ||
        ipcache->status == retrrc_nomac ||
        OO_SP_NOT_NULL(tsr->local_peer)) ) {
-    tsr->amss = ipcache->mtu - sizeof(ci_tcp_hdr) - sizeof(ci_ip4_hdr);
-#if CI_CFG_LIMIT_AMSS
-    tsr->amss = ci_tcp_limit_mss(tsr->amss, netif, __FUNCTION__);
-#endif
+    tsr->amss = ci_tcp_amss(netif, &tls->c, ipcache->mtu, __func__);
     optlen += ci_tcp_tx_insert_syn_options(netif, tsr->amss,
                                            tsr->tcpopts.flags,
                                            tsr->rcv_wscl, &opt);
@@ -927,7 +924,11 @@ int ci_tcp_retrans_one(ci_tcp_state* ts, ci_netif* netif, ci_ip_pkt_fmt* pkt)
   ci_tcp_tx_set_urg_ptr(ts, netif, tcp);
 
   /* Update window (with silly window avoidance). */
-  ci_tcp_calc_rcv_wnd(ts, "retrans_one");
+  if( ts->s.b.state != CI_TCP_SYN_SENT )
+    ci_tcp_calc_rcv_wnd(ts, "retrans_one");
+  if( SEQ_EQ(pkt->pf.tcp_tx.start_seq, ts->timed_seq) )
+    ci_tcp_clear_rtt_timing(ts);    /* Per RFC6298/3, RTT estimation is
+                                       ambiguous if retransmits happened. */
 
   /* Finish-off the TCP header (using latest ack and window). */
   tcp->tcp_ack_be32 = CI_BSWAP_BE32(tcp_rcv_nxt(ts));
@@ -974,6 +975,34 @@ int ci_tcp_retrans_one(ci_tcp_state* ts, ci_netif* netif, ci_ip_pkt_fmt* pkt)
 }
 
 
+/* Counts the number of segments in the retransmit queue that have not been
+ * SACKed.  TODO: it might be beneficial to keep track of the number of
+ * un-SACKed segments/blocks, and so avoid having to walk the list here in
+ * order to count them. */
+int ci_tcp_unsacked_segments_in_flight(ci_netif* ni, ci_tcp_state* ts)
+{
+  int unsacked = 0;
+  oo_pkt_p pp;
+  ci_ip_pkt_fmt *pkt;
+
+  ci_assert(ts->tcpflags & CI_TCPT_FLAG_SACK);
+
+  pp = ts->retrans.head;
+  while( OO_PP_NOT_NULL(pp) ) {
+    pkt = PKT_CHK(ni, pp);
+    if( pkt->flags & CI_PKT_FLAG_RTQ_SACKED )
+      pkt = PKT_CHK(ni, pkt->pf.tcp_tx.block_end);
+    else
+      ++unsacked;
+    pp = pkt->next;
+  }
+
+  LOG_TL(log(LNT_FMT "unsacked=%d", LNT_PRI_ARGS(ni, ts), unsacked));
+
+  return unsacked;
+}
+
+
 /* Retransmit packets starting at [ts->retrans_ptr].  The number of packets
 ** to transmit is limited by [seq_limit], which places a limit on the
 ** number of bytes of sequence space that may be injected into the network.
@@ -988,12 +1017,12 @@ int ci_tcp_retrans_one(ci_tcp_state* ts, ci_netif* netif, ci_ip_pkt_fmt* pkt)
 ** Currently packets are taken contiguously from the retransmit queue.  In
 ** future we should not retransmit packets that have been SACKed.
 */
-static int ci_tcp_retrans(ci_netif* ni, ci_tcp_state* ts, int seq_limit,
-                          int before_sacked_only, int* seq_used)
+int ci_tcp_retrans(ci_netif* ni, ci_tcp_state* ts, int seq_limit,
+                   int before_sacked_only, int* seq_used)
 {
   ci_ip_pkt_fmt* pkt;
   int at_start_of_block = 0;
-  int seq = 0;
+  int seq_space, is_fin;
 
   /* Mustn't call this when there's nothing to send. */
   ci_assert(OO_PP_NOT_NULL(ts->retrans_ptr));
@@ -1017,7 +1046,9 @@ static int ci_tcp_retrans(ci_netif* ni, ci_tcp_state* ts, int seq_limit,
 
     if( at_start_of_block )  ci_tcp_retrans_coalesce_block(ni, ts, pkt);
 
-    if( PKT_TCP_TX_SEQ_SPACE(pkt) > tcp_eff_mss(ts) ) {
+    seq_space = PKT_TCP_TX_SEQ_SPACE(pkt);
+    is_fin = (TX_PKT_TCP(pkt)->tcp_flags & CI_TCP_FLAG_FIN) ? 1 : 0;
+    if( seq_space - is_fin > tcp_eff_mss(ts) ) {
       /* This can happen if [eff_mss] changes.  We clear out sack info
       ** first because splitting will damage the sack data-structure.
       */
@@ -1026,8 +1057,6 @@ static int ci_tcp_retrans(ci_netif* ni, ci_tcp_state* ts, int seq_limit,
         /* Unlucky.  Never mind...try again later. */
         return 0;
     }
-
-    seq = SEQ_SUB(pkt->pf.tcp_tx.end_seq, pkt->pf.tcp_tx.start_seq);
 
     /* If [before_sacked_only], then we should stop if we're beyond the
     ** last SACK block.
@@ -1047,7 +1076,7 @@ static int ci_tcp_retrans(ci_netif* ni, ci_tcp_state* ts, int seq_limit,
 #endif
 
     /* Do we have sufficient congestion window? */
-    if( seq > seq_limit )  return 0;
+    if( seq_space > seq_limit )  return 0;
 
     if( ci_tcp_retrans_one(ts, ni, pkt) ) {
       /* Do not retransmit packet if it is in NIC TX. */
@@ -1055,8 +1084,8 @@ static int ci_tcp_retrans(ci_netif* ni, ci_tcp_state* ts, int seq_limit,
     }
 
     pkt->flags |= CI_PKT_FLAG_RTQ_RETRANS;
-    *seq_used += seq;
-    seq_limit -= seq;
+    *seq_used += seq_space;
+    seq_limit -= seq_space;
     ts->retrans_seq = pkt->pf.tcp_tx.end_seq;
     ts->retrans_ptr = pkt->next;
     if( OO_PP_IS_NULL(ts->retrans_ptr) )  break;
@@ -1077,11 +1106,16 @@ void ci_tcp_retrans_recover(ci_netif* ni, ci_tcp_state* ts,
   int retrans_data;
   unsigned fack;
 
-  /* We're in recovery.  Check pointers point where they should. */
-  ci_assert((ts->congstate == CI_TCP_CONG_RTO) ||
-            (ts->congstate == CI_TCP_CONG_RTO_RECOV) ||
+  /* We're in recovery.
+   * The function is called on arrival of non-old ACK (CONG_FAST_RECOV), or
+   * new ACK (CONG_RTO_RECOV).
+   * If the state originally was CONG_RTO the ACK must have been
+   * processed already by ci_tcp_try_cwndrecover() and congstate progressed
+   * to CONG_RTO_RECOV. */
+  ci_assert((ts->congstate == CI_TCP_CONG_RTO_RECOV) ||
             (ts->congstate == CI_TCP_CONG_FAST_RECOV &&
              (ts->tcpflags & CI_TCPT_FLAG_SACK)));
+  /* Check pointers point where they should. */
   ci_assert(SEQ_LE(ts->congrecover, tcp_snd_nxt(ts)));
 
   if( SEQ_LE(ts->congrecover, tcp_snd_una(ts)) ) {
@@ -1159,151 +1193,174 @@ void ci_tcp_retrans_recover(ci_netif* ni, ci_tcp_state* ts,
 
   ci_assert(SEQ_LT(tcp_snd_una(ts), ts->congrecover));
 
-  if( rc )  ts->congstate = CI_TCP_CONG_COOLING;
+  if( rc != 0 )
+    ts->congstate = CI_TCP_CONG_COOLING;
 }
 
 
+/* Called to handle packets with MSG_MORE.  Return true if packet should
+ * not be transmitted yet.
+ */
+static int ci_tcp_tx_handle_cork(ci_netif* ni, ci_tcp_state* ts,
+                                 ci_ip_pkt_fmt* pkt)
+{
+  /* Last packet in send queue, and app has indicated there is more to come
+   * (via TCP_CORK or MSG_MORE).
+   *
+   * Note that we can delay even a full segment here.  This is intended, as
+   * otherwise we'd have to set the PSH flag, which seems undesirable as
+   * the application has told us there is more to come.  (Note that
+   * regardless of frame size we'll push a delayed frame out on receipt of
+   * next ACK or after CORK timeout).  We differ from Linux in this, but I
+   * think our behaviour is better as we treat all frame sizes consistently.
+   */
+  ci_assert(! (ts->tcpflags & CI_TCPT_FLAG_MSG_WARM));
+  if( ts->s.tx_errno || (pkt->flags & CI_PKT_FLAG_TX_PSH_ON_ACK) ) {
+    /* Push this frame out now. */
+    TX_PKT_TCP(pkt)->tcp_flags |= CI_TCP_FLAG_PSH;
+    return 0;
+  }
+  else {
+    /* Don't send yet, but ensure packet will be sent eventually.  If there
+     * are packets in-flight, rely on the ACK, else set the CORK timer.
+     */
+    if( ! ci_tcp_inflight(ts) ) {
+      /* Timeout is double the delack timeout (50ms).  Gives about the
+       * right timeout once granularity of periodic timer is taken into
+       * account.
+       */
+      ci_iptime_t timeout;
+      timeout = ci_tcp_time_now(ni) + (NI_CONF(ni).tconst_delack << 1);
+      ci_ip_timer_clear(ni, &ts->cork_tid);
+      ci_ip_timer_set(ni, &ts->cork_tid, timeout);
+    }
+    /* Next time do not block transmission. */
+    pkt->flags |= CI_PKT_FLAG_TX_PSH_ON_ACK;
+    return 1;
+  }
+}
 
 
-#include "ci/internal/ip.h"
+static void ci_tcp_tx_advance_too_long(ci_netif* ni, ci_tcp_state* ts,
+                                       ci_ip_pkt_fmt* pkt)
+{
+  const ci_tcp_hdr* tcp = TX_PKT_TCP(pkt);
+  int pay_len = PKT_TCP_TX_SEQ_SPACE(pkt);
+  pay_len -= (tcp->tcp_flags & CI_TCP_FLAG_SYN) ? 1 : 0;
+  pay_len -= (tcp->tcp_flags & CI_TCP_FLAG_FIN) ? 1 : 0;
+  if( pay_len > tcp_eff_mss(ts) ) {
+    ci_assert(! (ts->tcpflags & CI_TCPT_FLAG_MSG_WARM));
+    ci_tcp_tx_split(ni, ts, &ts->send, pkt, tcp_eff_mss(ts), 1);
+  }
+}
+
+
 void ci_tcp_tx_advance(ci_tcp_state* ts, ci_netif* ni)
 {
-  ci_ip_pkt_queue* sendq = &ts->send;
-  ci_ip_pkt_fmt *pkt, *last_pkt = 0;
-  ci_tcp_hdr* tcp;
-  ci_ip4_hdr* ip;
-  unsigned cwnd_right_edge;
-  int paylen, sent_num = 0;
-  oo_pkt_p id;
+  unsigned cwnd_right_edge, right_edge;
+  ci_uint32* p_stop_cntr;
 
   ci_assert(ci_netif_is_locked(ni));
-  ci_assert(ci_ip_queue_not_empty(sendq));
-  ci_assert(OO_PP_NOT_NULL(sendq->head));
+  ci_assert(ci_ip_queue_not_empty(&ts->send));
+  ci_assert(OO_PP_NOT_NULL(ts->send.head));
 
   LOG_TV(ci_log("%s: "NTS_FMT "sendq.num=%d inflight=%d", __FUNCTION__,
-                NTS_PRI_ARGS(ni, ts), sendq->num, ci_tcp_inflight(ts)));
+                NTS_PRI_ARGS(ni, ts), ts->send.num, ci_tcp_inflight(ts)));
 
   if( CI_UNLIKELY(ts->tcpflags & CI_TCPT_FLAG_NO_TX_ADVANCE) )
     return;
 
+  ci_tcp_metrics_on_tx(ni, ts);
+
   ci_tcp_tx_cwv_idle(ni, ts);
 
-#if CI_CFG_BURST_CONTROL
-# if CI_CFG_CONG_AVOID_NOTIFIED
-  if( ts->congstate != CI_TCP_CONG_OPEN &&
-      (!ts->burst_window) && NI_OPTS(ni).burst_control_limit )
-# else
-  if( (!ts->burst_window) && NI_OPTS(ni).burst_control_limit )
-# endif
-    ts->burst_window = ci_tcp_inflight(ts) +
-      NI_OPTS(ni).burst_control_limit * tcp_eff_mss(ts);
-#endif
-
-  if( OO_SP_NOT_NULL(ts->local_peer) )
+  if( OO_SP_NOT_NULL(ts->local_peer) ) {
     cwnd_right_edge = ts->snd_max;
-  else
+    ci_assert_nflags(ts->tcpflags, CI_TCPT_FLAG_LIMITED_TRANSMIT);
+  }
+  else {
     cwnd_right_edge = ts->snd_nxt + ts->cwnd + ts->cwnd_extra
       - ci_tcp_inflight(ts);
+    /* Limited Transmit, RFC 3042: if the RX path has identified that we've met
+     * the conditions for Limited Transmit, allow sending up to two segments
+     * beyond the end of the congestion window.
+     *     FIXME: It would be nice to avoid this branch.  One possibility would
+     * be to adjust [cwnd_extra] instead of setting a flag, but currently that
+     * is not compatible with other uses of that field, and would trip
+     * assertions. */
+    if( ts->tcpflags & CI_TCPT_FLAG_LIMITED_TRANSMIT ) {
+      cwnd_right_edge += tcp_eff_mss(ts) << 1;
+      ts->tcpflags &= ~CI_TCPT_FLAG_LIMITED_TRANSMIT;
+    }
+  }
 
-  id = sendq->head;
+  p_stop_cntr = &ts->stats.tx_stop_cwnd;
+  right_edge = cwnd_right_edge;
+
+#if CI_CFG_BURST_CONTROL
+  if( NI_OPTS(ni).burst_control_limit ) {
+    if( ts->burst_window == 0 )
+      if( ! CI_CFG_CONG_AVOID_NOTIFIED || ts->congstate != CI_TCP_CONG_OPEN )
+        ts->burst_window = ci_tcp_inflight(ts) +
+          NI_OPTS(ni).burst_control_limit * tcp_eff_mss(ts);
+    if( ts->burst_window ) {
+      unsigned burst_right_edge =
+        tcp_snd_nxt(ts) + ts->burst_window - ci_tcp_inflight(ts);
+      if( SEQ_LT(burst_right_edge, right_edge) ) {
+        p_stop_cntr = &ts->stats.tx_stop_burst;
+        right_edge = burst_right_edge;
+      }
+    }
+  }
+#endif
+
+  ci_tcp_tx_advance_to(ni, ts, right_edge, p_stop_cntr);
+}
+
+
+void ci_tcp_tx_advance_to(ci_netif* ni, ci_tcp_state* ts,
+                          unsigned right_edge, ci_uint32* p_stop_cntr)
+{
+  ci_ip_pkt_queue* sendq = &ts->send;
+  ci_ip_pkt_fmt* last_pkt = NULL;
+  oo_pkt_p id = sendq->head;
+  int sent_num = 0;
+
   while( 1 ) {
-    pkt = PKT_CHK(ni, id);
-    ip = oo_tx_ip_hdr(pkt);
+    ci_ip_pkt_fmt* pkt = PKT_CHK(ni, id);
+    ci_ip4_hdr* ip = oo_tx_ip_hdr(pkt);
+    ci_tcp_hdr* tcp = TX_PKT_TCP(pkt);
 
-    /* This packet better have the right sequence number! */
-    ci_assert(SEQ_EQ(pkt->pf.tcp_tx.start_seq, tcp_snd_nxt(ts)));
-
-    tcp = TX_PKT_TCP(pkt);
-    paylen = PKT_TCP_TX_SEQ_SPACE(pkt);
-    if(CI_UNLIKELY( paylen > tcp_eff_mss(ts) )) {
-      ci_assert(! (ts->tcpflags & CI_TCPT_FLAG_MSG_WARM));
-      ci_tcp_tx_split(ni, ts, sendq, pkt, tcp_eff_mss(ts), 1);
-      /* If the split fails, tough luck; we push the packet out as-is
-       * anyway.  We'll have another go at splitting it if we have to
-       * retransmit.
+    if(CI_UNLIKELY( PKT_TCP_TX_SEQ_SPACE(pkt) > tcp_eff_mss(ts) ))
+      /* Likely MSS has changed (or FIN added to MSS segment).  If we're
+       * unable to split then we go ahead and push out the over-length
+       * frame anyway.
        */
-      paylen = PKT_TCP_TX_SEQ_SPACE(pkt);
-    }
-
-    /* Check seq space and length are consistent. */
-    if( ! (tcp->tcp_flags & (CI_TCP_FLAG_SYN|CI_TCP_FLAG_FIN)) ) {
-      ci_assert_equal(oo_tx_l3_len(pkt),
-                      sizeof(ci_ip4_hdr) + sizeof(ci_tcp_hdr)
-                      + CI_TCP_HDR_OPT_LEN(tcp) + paylen);
-      ci_assert_ge(CI_TCP_HDR_OPT_LEN(tcp), tcp_outgoing_opts_len(ts));
-    }
+      ci_tcp_tx_advance_too_long(ni, ts, pkt);
 
     if( SEQ_GT(pkt->pf.tcp_tx.end_seq, ts->snd_max) ) {
-#if CI_CFG_SPLIT_SEND_PACKETS_FOR_SMALL_RECEIVE_WINDOWS
       /* Packet won't fit in the receive window.  We'd rather not
        * split it - big packets are good for efficiency - so only do
        * so if there is nothing else in flight.
        */
-      if( ci_tcp_inflight(ts) ||
-          !SEQ_GT(ts->snd_max, pkt->pf.tcp_tx.start_seq) ||
+      if( ! CI_CFG_SPLIT_SEND_PACKETS_FOR_SMALL_RECEIVE_WINDOWS ||
+          ci_tcp_inflight(ts) ||
+          SEQ_LE(ts->snd_max, pkt->pf.tcp_tx.start_seq) ||
           ci_tcp_tx_split(ni, ts, sendq, pkt,
                           SEQ_SUB(ts->snd_max, pkt->pf.tcp_tx.start_seq), 1) ){
-#endif
         ++ts->stats.tx_stop_rwnd;
         break;
-#if CI_CFG_SPLIT_SEND_PACKETS_FOR_SMALL_RECEIVE_WINDOWS
       }
-#endif
     }
-    if( SEQ_GT(pkt->pf.tcp_tx.end_seq, cwnd_right_edge) ) {
-      ++ts->stats.tx_stop_cwnd;
+    if( SEQ_GT(pkt->pf.tcp_tx.end_seq, right_edge) ) {
+      ++(*p_stop_cntr);
       break;
     }
-#if CI_CFG_BURST_CONTROL
-    if(CI_UNLIKELY( ts->burst_window && ci_tcp_inflight(ts) > 
-                    ts->burst_window )) {
-      ++ts->stats.tx_stop_burst;
-      break;
-    }
-#endif
-
-    /* We should return without packet transmitting if:
-     *  - TCP_CORK is on or MSG_MORE was used for the packet;
-     *  - and the packet is last in queue;
-     *  - and the packet is partially filled (and has free segments)
-     * We MUST send SYN & FIN even if there is TCP_CORK.
-     */
-    if( (pkt->flags & CI_PKT_FLAG_TX_MORE) && OO_PP_IS_NULL(pkt->next) &&
-        ts->s.tx_errno == 0 &&
-        (PKT_TCP_TX_SEQ_SPACE(pkt) < tcp_eff_mss(ts)) &&
-        (pkt->n_buffers < CI_IP_PKT_SEGMENTS_MAX)) {
-
-      ci_assert(! (ts->tcpflags & CI_TCPT_FLAG_MSG_WARM));
-
-        /* We do not want to send packet now, but we'd like to do it
-         * later.  If user does send more data, he'll push it forward.
-         * But even if user does not send more data, we should eventually
-         * push this data (as it is done in Linux).
-         *
-         * If there are some packets in flight, we hope that ACK will
-         * wake us up.  Else, just start CORK timer.
-         */
-      if( !ci_tcp_inflight(ts) ) {
-        ci_assert(ci_ip_queue_is_empty(&ts->retrans));
-        ci_assert(!(ts->s.b.state & CI_TCP_STATE_NO_TIMERS));
-        /* If we have TCP_CORK, timer may be running by previous send.
-         * Check and restart if necessary.  We use double the delack
-         * time (50ms) to get roughly what we need once granularity of
-         * periodic timer is taken into account
-         */
-        if( ci_ip_timer_pending(ni, &ts->cork_tid) )
-          ci_ip_timer_modify(ni, &ts->cork_tid, ci_tcp_time_now(ni) +
-                             (NI_CONF(ni).tconst_delack << 1));
-        else {
-          ci_ip_timer_set(ni, &ts->cork_tid, ci_tcp_time_now(ni) +
-                          (NI_CONF(ni).tconst_delack << 1));
-        }
+    if( (pkt->flags & CI_PKT_FLAG_TX_MORE) && OO_PP_IS_NULL(pkt->next) )
+      if( ci_tcp_tx_handle_cork(ni, ts, pkt) ) {
+        ++ts->stats.tx_stop_more;
+        break;
       }
-      /* Next time we should not block the transmission. */
-      pkt->flags &= ~CI_PKT_FLAG_TX_MORE;
-      ++ts->stats.tx_stop_more;
-      break;
-    }
 
 #if CI_CFG_CONG_AVOID_NOTIFIED
     /* Is there local congestion, suggesting we should back off a bit? */
@@ -1326,8 +1383,13 @@ void ci_tcp_tx_advance(ci_tcp_state* ts, ci_netif* ni)
     /* place TCP options into outgoing packet */
     ci_tcp_tx_finish(ni, ts, pkt);
 
-    /* Finish-off the IP header. */
+    /* Finish-off the IP header.  We increment the ID field for payload
+     * segments because some old versions of Linux GRO require incrementing
+     * ID in order to combine segments.
+     */
     ci_tcp_ip_hdr_init(ip, oo_tx_l3_len(pkt));
+    ip->ip_id_be16 = CI_BSWAP_BE16(ts->s.pkt.ip.ip_id_be16);
+    ++(ts->s.pkt.ip.ip_id_be16);
 
     /* set the urgent pointer */
     ci_tcp_tx_set_urg_ptr(ts, ni, tcp);
@@ -1438,27 +1500,22 @@ void ci_tcp_tx_advance(ci_tcp_state* ts, ci_netif* ni)
 #endif
 
     ci_tcp_kalive_check_and_clear(ni, ts);
-    ci_tcp_rto_check_and_set(ni, ts);
     ci_tcp_delack_clear(ni, ts);
     ts->acks_pending = 0;
 
-#if CI_CFG_TAIL_DROP_PROBE
-    if(NI_OPTS(ni).tail_drop_probe &&
-       ts->taildrop_state == CI_TCP_TAIL_DROP_PRIMED){
-      /* Sending in this states suggests there was no problem */
-      ts->taildrop_state = CI_TCP_TAIL_DROP_ACTIVE;
-      ci_tcp_taildrop_clear(ni, ts);
+    /* Start the RTO/TLP timer (if not already running). */
+    if( ! ci_ip_timer_pending(ni, &(ts->rto_tid)) ) {
+      ci_iptime_t timeout;
+      if( ci_tcp_taildrop_probe_enabled(ni, ts) ) {
+        timeout = ci_tcp_taildrop_timeout(ni, ts);
+        ts->tcpflags |= CI_TCPT_FLAG_TAIL_DROP_TIMING;
+      }
+      else {
+        timeout = ts->rto;
+        ts->tcpflags &=~ CI_TCPT_FLAG_TAIL_DROP_TIMING;
+      }
+      ci_tcp_rto_set_with_timeout(ni, ts, timeout);
     }
-    /* This is the end of a burst, but avoid
-       falling into a delack trap */
-    if(ts->taildrop_state == CI_TCP_TAIL_DROP_ACTIVE
-       && ts->retrans.num > 1){
-      /* end of a burst */
-      ts->taildrop_mark = CI_BSWAP_BE32(TX_PKT_TCP(last_pkt)->tcp_seq_be32);
-      ts->taildrop_state = CI_TCP_TAIL_DROP_PRIMED;
-      ci_tcp_taildrop_check_and_set(ni, ts);
-    }
-#endif
   }
 
   /* congestion window validation rfc2861 */
@@ -1475,7 +1532,19 @@ void ci_tcp_send_rst_with_flags(ci_netif* netif, ci_tcp_state* ts,
   ci_ip_pkt_fmt* pkt;
   ci_tcp_hdr* tcp;
 
-  pkt = ci_netif_pkt_alloc(netif);
+  /* NB for CI_PKT_ALLOC_NO_REAP:
+   * Reaping packets is a slow process with unguaranteed result.  In some
+   * cases, we send a lot of RSTs:
+   * - when shutting down a listening socket with a lot of non-accepted
+   *   sockets in the queue;
+   * - when shutting down an application and the stack.
+   * We can repeatedly try to reap packets in vain; in the worst scenario
+   * we'll soft lockup the kernel.
+   *
+   * So we avoid reaping and do not send RSTs when under such serious
+   * memory pressure; we'll re-send RST if we get any packets from peer.
+   */
+  pkt = ci_netif_pkt_alloc(netif, CI_PKT_ALLOC_NO_REAP);
   if( CI_UNLIKELY(! pkt) ) {
     CI_TCP_EXT_STATS_INC_TCP_ABORT_FAILED( netif );
     LOG_U(log(LNTS_FMT "%s: out of pkt buffers, RST not sent",
@@ -1556,7 +1625,6 @@ int ci_tcp_reset_untrusted(ci_netif *netif, ci_tcp_state *ts)
   ip_len = sizeof(ci_ip4_hdr) + sizeof(ci_tcp_hdr);
   ip->ip_tot_len_be16 = CI_BSWAP_BE16(ip_len);
   ci_assert_equal(ip->ip_check_be16, 0);
-  ci_assert_equal(ip->ip_id_be16, 0);
 
   tcp = (ci_tcp_hdr *)(ip + 1);
   tcp->tcp_urg_ptr_be16 = 0;
@@ -1575,8 +1643,8 @@ int ci_tcp_reset_untrusted(ci_netif *netif, ci_tcp_state *ts)
                CI_BSWAP_BE16(tcp->tcp_source_be16),
                CI_IP_PRINTF_ARGS(&ip->ip_daddr_be32),
                CI_BSWAP_BE16(tcp->tcp_dest_be16)));
-  rc = cicp_raw_ip_send(cicppl_by_netif(netif), ip, ip_len,
-                        ts->s.pkt.ifindex, ts->s.pkt.nexthop);
+  rc = cicp_raw_ip_send(netif->cplane, ip, ip_len,
+                        ts->s.pkt.ifindex, ts->s.pkt.nexthop.ip4);
   ci_free(ip);
   return rc;
 }
@@ -1661,7 +1729,10 @@ void ci_tcp_reply_with_rst(ci_netif* netif, ciip_tcp_rx_pkt* rxp)
   }
   else {
     /* ?? TODO: should we respect here SO_BINDTODEVICE? */
-    ci_ip_send_pkt(netif, NULL, pkt);
+    ci_ip_cached_hdrs ipcache;
+    ci_ip_cache_init(&ipcache);
+    ci_ip_send_pkt_lookup(netif, NULL, pkt, &ipcache);
+    ci_ip_send_pkt_send(netif, pkt, &ipcache);
   }
   CI_TCP_STATS_INC_OUT_SEGS(netif);
   ci_netif_pkt_release(netif, pkt);
@@ -1684,7 +1755,7 @@ void ci_tcp_send_zwin_probe(ci_netif* netif, ci_tcp_state* ts)
   ci_assert(ci_ip_queue_is_empty(&ts->retrans));
   ci_assert(OO_SP_IS_NULL(ts->local_peer));
 
-  pkt = ci_netif_pkt_alloc(netif);
+  pkt = ci_netif_pkt_alloc(netif, 0);
   if( ! pkt ) {
     LOG_U(log(LNTS_FMT "out of pkt buffers, not sending zwin probe",
               LNTS_PRI_ARGS(netif, ts)));
@@ -1740,8 +1811,7 @@ void ci_tcp_send_zwin_probe(ci_netif* netif, ci_tcp_state* ts)
 }
 
 
-void ci_tcp_send_ack_loopback(ci_netif* netif, ci_tcp_state* ts,
-                              int sock_locked)
+void ci_tcp_send_ack_loopback(ci_netif* netif, ci_tcp_state* ts)
 {
   ci_tcp_state* peer;
   citp_waitable* w_peer;
@@ -1794,8 +1864,8 @@ void ci_tcp_send_ack_loopback(ci_netif* netif, ci_tcp_state* ts,
 }
 
 /* this function will always output an acknowledgement */
-void ci_tcp_send_ack(ci_netif* netif, ci_tcp_state* ts, ci_ip_pkt_fmt* pkt,
-                     int sock_locked)
+void ci_tcp_send_ack_rx(ci_netif* netif, ci_tcp_state* ts, ci_ip_pkt_fmt* pkt,
+                        int sock_locked, int update_window)
 {
   ci_tcp_hdr* tcp;
   ci_uint8* opt;
@@ -1806,7 +1876,7 @@ void ci_tcp_send_ack(ci_netif* netif, ci_tcp_state* ts, ci_ip_pkt_fmt* pkt,
 
   if( OO_SP_NOT_NULL(ts->local_peer) ) {
     ci_netif_pkt_release(netif, pkt);
-    ci_tcp_send_ack_loopback(netif, ts, sock_locked);
+    ci_tcp_send_ack_loopback(netif, ts);
     return;
   }
 
@@ -1817,7 +1887,8 @@ void ci_tcp_send_ack(ci_netif* netif, ci_tcp_state* ts, ci_ip_pkt_fmt* pkt,
 
   ts->acks_pending = 0;
   ci_tcp_delack_clear(netif, ts);
-  ci_tcp_calc_rcv_wnd(ts, "send_ack");
+
+  ci_tcp_calc_rcv_wnd_rx(ts, update_window, "send_ack");
 
   ci_assert(netif);
   ASSERT_VALID_PKT(netif, pkt);

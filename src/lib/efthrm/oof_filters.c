@@ -38,7 +38,6 @@
 #include "onload_kernel_compat.h"
 
 #include "oof_impl.h"
-#include <ci/net/ipv4.h>
 #include <onload/oof_interface.h>
 #include <onload/oof_socket.h>
 #include <onload/debug.h>
@@ -63,7 +62,6 @@ static void oof_mutex_lock_chk_not_atomic(struct mutex* m)
 # define mutex_lock  oof_mutex_lock_chk_not_atomic
 
 #endif
-
 
 /* If the number of sockets sharing a wild-match filter exceeds this value,
  * then the wild-match filter will be kept even after the socket that
@@ -116,16 +114,30 @@ int oof_use_all_local_ip_addresses = 0;
 #define QUIN_ARGS(proto, ip1, port1, ip2, port2)                        \
     FMT_PROTOCOL(proto), IPPORT_ARG((ip1), (port1)), IPPORT_ARG((ip2), (port2))
 
-#define SK_ADDR_FMT        QUIN_FMT
-#define SK_ADDR_ARGS(skf)                                       \
-    QUIN_ARGS(skf->sf_local_port->lp_protocol,                  \
-              skf->sf_laddr, skf->sf_local_port->lp_lport,      \
-              skf->sf_raddr, skf->sf_rport)
+#define IPX_PORT_ARG(ip,p) IPX_ARG(ip), FMT_PORT(p)
 
-#define SK_WILD_ADDR_FMT   TRIPLE_FMT
+#define IPX_TRIPLE_FMT     "%s "IPX_FMT":%d"
+#define IPX_TRIPLE_ARGS(proto, ip, port) \
+    FMT_PROTOCOL(proto), IPX_PORT_ARG((ip), (port))
+
+#define IPX_QUIN_FMT       "%s "IPX_FMT":%d "IPX_FMT":%d"
+#define IPX_QUIN_ARGS(proto, ip1, port1, ip2, port2) \
+    FMT_PROTOCOL(proto), IPX_PORT_ARG((ip1), (port1)), \
+    IPX_PORT_ARG((ip2), (port2))
+
+#define SK_ADDR_FMT        IPX_QUIN_FMT
+#define SK_ADDR_ARGS(skf)                                       \
+    IPX_QUIN_ARGS(skf->sf_local_port->lp_protocol,              \
+                  AF_IP(skf->sf_laddr),                         \
+                  skf->sf_local_port->lp_lport,                 \
+                  AF_IP(skf->sf_raddr),                         \
+                  skf->sf_rport)
+
+#define SK_WILD_ADDR_FMT   IPX_TRIPLE_FMT
 #define SK_WILD_ADDR_ARGS(skf)                                  \
-    TRIPLE_ARGS(skf->sf_local_port->lp_protocol,                \
-                skf->sf_laddr, skf->sf_local_port->lp_lport)
+    IPX_TRIPLE_ARGS(skf->sf_local_port->lp_protocol,            \
+                    AF_IP(skf->sf_laddr),                       \
+                    skf->sf_local_port->lp_lport)
 
 static struct tcp_helper_resource_s*
 oof_socket_stack_safe(struct oof_socket* skf);
@@ -162,10 +174,12 @@ oof_mcast_filter_hwport_mask(struct oof_manager* fm,
                              struct oof_mcast_filter* mf);
 
 static void
-__oof_manager_addr_add(struct oof_manager*, unsigned laddr, unsigned ifindex);
+__oof_manager_addr_add(struct oof_manager*, int af, ci_addr_t laddr,
+                       unsigned ifindex);
 
 static void
-__oof_manager_addr_del(struct oof_manager*, unsigned laddr, unsigned ifindex);
+__oof_manager_addr_del(struct oof_manager*, int af, ci_addr_t laddr,
+                       unsigned ifindex);
 
 static void
 __oof_mcast_update_filters(struct oof_manager* fm, int ifindex);
@@ -541,13 +555,15 @@ static struct oof_local_port*
 oof_local_port_alloc(struct oof_manager* fm, int protocol, int lport)
 {
   struct oof_local_port* lp;
-  int la_i;
+  struct oof_local_addr* la;
+  int la_i, is_active;
 
   ci_assert(fm->fm_local_addr_n >= 0);
 
   lp = CI_ALLOC_OBJ(struct oof_local_port);
   if( lp == NULL ) 
     return NULL;
+
   lp->lp_addr = CI_ALLOC_ARRAY(struct oof_local_port_addr, 
                                fm->fm_local_addr_max);
   if( lp->lp_addr == NULL ) {
@@ -561,8 +577,8 @@ oof_local_port_alloc(struct oof_manager* fm, int protocol, int lport)
   ci_dllist_init(&lp->lp_wild_socks);
   ci_dllist_init(&lp->lp_mcast_filters);
   for( la_i = 0; la_i < fm->fm_local_addr_n; ++la_i ) {
-    struct oof_local_addr* la = &fm->fm_local_addrs[la_i];
-    int is_active = ci_dllist_not_empty(&la->la_active_ifs);
+    la = &fm->fm_local_addrs[la_i];
+    is_active = ci_dllist_not_empty(&la->la_active_ifs);
     oof_local_port_addr_init(&lp->lp_addr[la_i],
                              is_active ? 0 : OOF_LPA_FLAG_REMOVED);
   }
@@ -1023,19 +1039,19 @@ oof_manager_free(struct oof_manager* fm)
 **********************************************************************/
 
 static int
-oof_manager_addr_find(struct oof_manager* fm, unsigned laddr)
+oof_manager_addr_find(struct oof_manager* fm, const ci_addr_t laddr)
 {
   int la_i;
 
-  ci_assert(fm->fm_local_addr_n >= 0);
+  ci_assert_ge(fm->fm_local_addr_n, 0);
   ci_assert(spin_is_locked(&fm->fm_inner_lock));
 
-  for( la_i = 0; la_i < fm->fm_local_addr_n; ++la_i )
-    if( fm->fm_local_addrs[la_i].la_laddr == laddr )
+  for( la_i = 0; la_i < fm->fm_local_addr_n; ++la_i ) {
+    if( !CI_IPX_ADDR_CMP(fm->fm_local_addrs[la_i].la_laddr, laddr) )
       return la_i;
+  }
   return -1;
 }
-
 
 static int oof_socket_can_share_hw_filter(struct oof_socket* skf,
                                           struct oo_hw_filter* filter)
@@ -1066,7 +1082,73 @@ oof_wild_socket(struct oof_local_port* lp, struct oof_local_port_addr* lpa)
 
 
 static void
-__oof_manager_addr_add(struct oof_manager* fm, unsigned laddr, unsigned ifindex)
+oof_manager_sw_filter_insert(struct oof_manager *fm, int af, ci_addr_t laddr,
+                             struct oof_local_port* lp, int la_i)
+{
+  struct oof_local_port_addr* lpa = &lp->lp_addr[la_i];
+  struct oof_socket* skf;
+  ci_dllist* wild_lists[2] =
+      { &lpa->lpa_semi_wild_socks, &lp->lp_wild_socks };
+  int i, af_space;
+
+  af_space = (IS_AF_INET6(af)) ? AF_SPACE_FLAG_IP6 : AF_SPACE_FLAG_IP4;
+
+  /* Add s/w filters for wild sockets. */
+  for( i = 0; i < 2; ++i )
+    CI_DLLIST_FOR_EACH2(struct oof_socket, skf, sf_lp_link, wild_lists[i]) {
+      if( oof_wild_socket_needs_sw_filter(lp, lpa, skf) ) {
+        int rc;
+
+        rc = oof_cb_sw_filter_insert(skf, af_space, laddr, lp->lp_lport,
+                                     addr_any, 0, lp->lp_protocol, 0);
+        if( rc != 0 ) {
+          oof_sw_insert_fail(skf, __FUNCTION__, rc);
+          /* Remove the corresponding hardware filters so that traffic
+           * continues to reach the socket, albeit without acceleration.
+           * BUT don't do that if existing TCP connections are using the
+           * hardware filter.
+           * With cluster filters there might be sibling cluster stacks
+           * using the same hw filter as well.
+           */
+#if CI_CFG_IPV6
+          if( IS_AF_INET6(af) )
+            return;
+#endif
+          if( (lp->lp_protocol == IPPROTO_UDP ||
+               lpa->lpa_n_full_sharers == 0 ) &&
+              ! oof_socket_has_cluster_sibling(&lp->lp_wild_socks, skf) &&
+              ! oof_socket_has_cluster_sibling(&lpa->lpa_semi_wild_socks, skf) )
+            oof_hw_filter_clear_wild(fm, lp, lpa, laddr.ip4);
+        }
+      }
+    }
+}
+
+static void
+oof_manager_sw_filter_remove(int af, ci_addr_t laddr, struct oof_local_port* lp,
+                             int la_i)
+{
+  struct oof_local_port_addr* lpa = &lp->lp_addr[la_i];
+  struct oof_socket* skf;
+  ci_dllist* wild_lists[2] =
+      { &lpa->lpa_semi_wild_socks, &lp->lp_wild_socks };
+  int i, af_space;
+
+  af_space = (IS_AF_INET6(af)) ? AF_SPACE_FLAG_IP6 : AF_SPACE_FLAG_IP4;
+
+  /* Remove s/w filters for wild sockets. */
+  for( i = 0; i < 2; ++i ) {
+    CI_DLLIST_FOR_EACH2(struct oof_socket, skf, sf_lp_link, wild_lists[i])
+      if( oof_wild_socket_needs_sw_filter(lp, lpa, skf) ) {
+        oof_cb_sw_filter_remove(skf, af_space, laddr, lp->lp_lport, addr_any, 0,
+                                lp->lp_protocol, 0);
+      }
+    }
+}
+
+static void
+__oof_manager_addr_add(struct oof_manager *fm, int af, ci_addr_t laddr,
+                       unsigned ifindex)
 {
   struct oof_local_port_addr* lpa;
   struct oof_local_port* lp;
@@ -1074,30 +1156,36 @@ __oof_manager_addr_add(struct oof_manager* fm, unsigned laddr, unsigned ifindex)
   struct oof_local_interface* li;
   struct oof_socket* skf;
   int hash, la_i, is_new, is_active;
+  ci_dllist *la_active_ifs;
+  char addr_str[CI_INET6_ADDRSTRLEN];
 
-  ci_assert(laddr != 0);
-  ci_assert(! CI_IP_IS_MULTICAST(laddr));
+  ci_assert(CI_IPX_ADDR_CMP_ANY(laddr));
+  ci_assert(!CI_IPX_IS_MULTICAST(laddr));
   ci_assert(spin_is_locked(&fm->fm_inner_lock));
   ci_assert(mutex_is_locked(&fm->fm_outer_lock));
+
+  ci_get_ip_str(laddr, addr_str, sizeof(addr_str));
 
   /* Duplicate? */
   la_i = oof_manager_addr_find(fm, laddr);
   if( la_i >= 0 ) {
     la = &fm->fm_local_addrs[la_i];
-    is_active = ci_dllist_not_empty(&la->la_active_ifs);
+    la_active_ifs = &la->la_active_ifs;
+
+    is_active = ci_dllist_not_empty(la_active_ifs);
     CI_DLLIST_FOR_EACH2(struct oof_local_interface, li, li_active_ifs_link, 
-                        &la->la_active_ifs)
+                        la_active_ifs)
       if( li->li_ifindex == ifindex )
         break;
     if( li == NULL ) {
       li = CI_ALLOC_OBJ(struct oof_local_interface);
       if( li == NULL ) {
-        ERR_LOG("%s: ERROR: "IP_FMT" couldn't allocate space for ifindex %d",
-                __FUNCTION__, IP_ARG(laddr), ifindex);
+        ERR_LOG("%s: ERROR: %s couldn't allocate space for ifindex %d",
+                __FUNCTION__, addr_str, ifindex);
         return; 
       }
       li->li_ifindex = ifindex;
-      ci_dllist_push(&la->la_active_ifs, &li->li_active_ifs_link);
+      ci_dllist_push(la_active_ifs, &li->li_active_ifs_link);
     }
     if( is_active )
       /* This local address is already active, nothing further to do. */
@@ -1106,29 +1194,33 @@ __oof_manager_addr_add(struct oof_manager* fm, unsigned laddr, unsigned ifindex)
   }
   else {
     /* New entry in local address table. */
-    la_i = oof_manager_addr_find(fm, 0);
+    la_i = oof_manager_addr_find(fm, addr_any);
     if( la_i < 0 ) {
-      if( fm->fm_local_addr_n ==  fm->fm_local_addr_max ) {
-        ci_log("%s: ERROR: "IP_FMT" overflows local address table",
-               __FUNCTION__, IP_ARG(laddr));
+      if( fm->fm_local_addr_n == fm->fm_local_addr_max ) {
+        ci_log("%s: ERROR: %s overflows local address table",
+               __FUNCTION__, addr_str);
         return;
       }
       la_i = fm->fm_local_addr_n;
       ++fm->fm_local_addr_n;
     }
+
     la = &fm->fm_local_addrs[la_i];
     la->la_laddr = laddr;
     la->la_sockets = 0;
-    ci_dllist_init(&la->la_active_ifs);
+    la_active_ifs = &la->la_active_ifs;
+
+    ci_dllist_init(la_active_ifs);
     li = CI_ALLOC_OBJ(struct oof_local_interface);
     if( li == NULL ) {
-      ci_log("%s: ERROR: "IP_FMT" couldn't allocate space for ifindex %d",
-             __FUNCTION__, IP_ARG(laddr), ifindex);
-      la->la_laddr = 0;
+      ci_log("%s: ERROR: %s couldn't allocate space for ifindex %d",
+             __FUNCTION__, addr_str, ifindex);
+      la->la_laddr = addr_any;
       return; 
     }
+
     li->li_ifindex = ifindex;
-    ci_dllist_push(&la->la_active_ifs, &li->li_active_ifs_link);
+    ci_dllist_push(la_active_ifs, &li->li_active_ifs_link);
     is_new = 1;
   }
 
@@ -1151,6 +1243,18 @@ __oof_manager_addr_add(struct oof_manager* fm, unsigned laddr, unsigned ifindex)
       ci_assert( ! ci_dllist_not_empty(&lpa->lpa_semi_wild_socks) || ! is_new );
     }
 
+#if CI_CFG_IPV6
+  if( IS_AF_INET6(af) ) {
+    for( hash = 0; hash < OOF_LOCAL_PORT_TBL_SIZE; ++hash )
+      CI_DLLIST_FOR_EACH2(struct oof_local_port, lp, lp_manager_link,
+                            &fm->fm_local_ports[hash]) {
+        oof_manager_sw_filter_insert(fm, AF_INET6, laddr, lp, la_i);
+      }
+
+    return;
+  }
+#endif
+
   /* Add new filters, and set new filters for wildcard users. */
   for( hash = 0; hash < OOF_LOCAL_PORT_TBL_SIZE; ++hash )
     CI_DLLIST_FOR_EACH2(struct oof_local_port, lp, lp_manager_link,
@@ -1161,7 +1265,7 @@ __oof_manager_addr_add(struct oof_manager* fm, unsigned laddr, unsigned ifindex)
         oof_hw_filter_set(fm, skf, &lpa->lpa_filter,
                           oof_socket_stack_effective(skf),
                           oof_socket_thc_effective(skf),
-                          lp->lp_protocol, 0, 0, laddr, lp->lp_lport,
+                          lp->lp_protocol, 0, 0, laddr.ip4, lp->lp_lport,
                           fm->fm_hwports_available & fm->fm_hwports_up,
                           OOF_SRC_FLAGS_DEFAULT, 1);
       /* Add h/w filters for full-match sockets. */
@@ -1175,50 +1279,34 @@ __oof_manager_addr_add(struct oof_manager* fm, unsigned laddr, unsigned ifindex)
         else
           oof_hw_filter_set(fm, skf, &skf->sf_full_match_filter,
                             oof_cb_socket_stack(skf), NULL,
-                            lp->lp_protocol, skf->sf_raddr, skf->sf_rport,
-                            skf->sf_laddr, lp->lp_lport,
+                            lp->lp_protocol, skf->sf_raddr.ip4, skf->sf_rport,
+                            skf->sf_laddr.ip4, lp->lp_lport,
                             fm->fm_hwports_available & fm->fm_hwports_up,
                             OOF_SRC_FLAGS_DEFAULT, 1);
       }
-      {
-        ci_dllist* wild_lists[2] =
-            { &lpa->lpa_semi_wild_socks, &lp->lp_wild_socks };
-        int i;
-
-        /* Add s/w filters for wild sockets. */
-        for( i = 0; i < 2; ++i )
-          CI_DLLIST_FOR_EACH2(struct oof_socket, skf, sf_lp_link, wild_lists[i]) {
-            if( oof_wild_socket_needs_sw_filter(lp, lpa, skf) ) {
-              int rc = oof_cb_sw_filter_insert(skf, laddr, lp->lp_lport, 0, 0,
-                                               lp->lp_protocol, 0);
-              if( rc != 0 ) {
-                oof_sw_insert_fail(skf, __FUNCTION__, rc);
-                /* Remove the corresponding hardware filters so that traffic
-                 * continues to reach the socket, albeit without acceleration.
-                 * BUT don't do that if existing TCP connections are using the
-                 * hardware filter.
-                 * With cluster filters there might be sibling cluster stacks
-                 * using the same hw filter as well.
-                 */
-                if( (lp->lp_protocol == IPPROTO_UDP ||
-                     lpa->lpa_n_full_sharers == 0 ) &&
-                    ! oof_socket_has_cluster_sibling(&lp->lp_wild_socks, skf) &&
-                    ! oof_socket_has_cluster_sibling(&lpa->lpa_semi_wild_socks, skf) )
-                  oof_hw_filter_clear_wild(fm, lp, lpa, laddr);
-              }
-            }
-          }
-      }
+      oof_manager_sw_filter_insert(fm, AF_INET, laddr, lp, la_i);
     }
 }
 
 
 void
-oof_manager_addr_add(struct oof_manager* fm, unsigned laddr, unsigned ifindex)
+oof_manager_addr_add(struct oof_manager* fm, int af, ci_addr_t laddr,
+                     unsigned ifindex)
 {
   struct oof_local_interface_details* lid;
+  char addr_str[CI_INET6_ADDRSTRLEN];
 
-  IPF_LOG("%s: addr="IP_FMT" ifindex=%d", __FUNCTION__, IP_ARG(laddr),ifindex);
+#if CI_CFG_IPV6
+  if ( af != AF_INET && af != AF_INET6 ) {
+#else
+  if ( af != AF_INET ) {
+#endif
+    ERR_LOG("%s: ERROR: bad addreess family %d", __FUNCTION__, af);
+    return;
+  }
+
+  ci_get_ip_str(laddr, addr_str, sizeof(addr_str));
+  IPF_LOG("%s: addr=%s ifindex=%d", __FUNCTION__, addr_str, ifindex);
 
   mutex_lock(&fm->fm_outer_lock);
   spin_lock_bh(&fm->fm_inner_lock);
@@ -1227,9 +1315,9 @@ oof_manager_addr_add(struct oof_manager* fm, unsigned laddr, unsigned ifindex)
 
   if( oof_use_all_local_ip_addresses ||
       (lid != NULL && lid->lid_hwport_mask != 0) )
-    __oof_manager_addr_add(fm, laddr, ifindex);
+    __oof_manager_addr_add(fm, af, laddr, ifindex);
   else
-    __oof_manager_addr_del(fm, laddr, ifindex);
+    __oof_manager_addr_del(fm, af, laddr, ifindex);
 
   spin_unlock_bh(&fm->fm_inner_lock);
   mutex_unlock(&fm->fm_outer_lock);
@@ -1244,7 +1332,7 @@ oof_manager_addr_dead(struct oof_manager* fm, struct oof_local_addr* la)
    */
   ci_assert(la->la_sockets == 0);
   ci_assert( ci_dllist_is_empty(&la->la_active_ifs) );
-  la->la_laddr = 0;
+  la->la_laddr = addr_any;
 }
 
 
@@ -1270,7 +1358,8 @@ oof_manager_addr_dead(struct oof_manager* fm, struct oof_local_addr* la)
  * processing of listenq/acceptq backlogs.
  */
 static void
-__oof_manager_addr_del(struct oof_manager* fm, unsigned laddr, unsigned ifindex)
+__oof_manager_addr_del(struct oof_manager *fm, int af, ci_addr_t laddr,
+                       unsigned ifindex)
 {
   struct oof_local_port_addr* lpa;
   struct oof_local_port* lp;
@@ -1279,8 +1368,9 @@ __oof_manager_addr_del(struct oof_manager* fm, unsigned laddr, unsigned ifindex)
   struct oof_local_interface* li_tmp;
   struct oof_socket* skf;
   int hash, la_i;
+  ci_dllist *la_active_ifs;
 
-  ci_assert(laddr != 0);
+  ci_assert(CI_IPX_ADDR_CMP_ANY(laddr));
   ci_assert(spin_is_locked(&fm->fm_inner_lock));
   ci_assert(mutex_is_locked(&fm->fm_outer_lock));
 
@@ -1288,24 +1378,45 @@ __oof_manager_addr_del(struct oof_manager* fm, unsigned laddr, unsigned ifindex)
   if( la_i < 0 )
     /* We never added this address, possibly due to overflow. */
     return;
-  la = &fm->fm_local_addrs[la_i];
 
-  if( ci_dllist_is_empty(&la->la_active_ifs) ) {
+  la = &fm->fm_local_addrs[la_i];
+  la_active_ifs = &la->la_active_ifs;
+
+  if( ci_dllist_is_empty(la_active_ifs) ) {
     /* Unused, so don't need do anything */
     return;
   }
 
   CI_DLLIST_FOR_EACH3(struct oof_local_interface, li, li_active_ifs_link, 
-                      &la->la_active_ifs, li_tmp)
+                      la_active_ifs, li_tmp)
     if( li->li_ifindex == ifindex ) {
       ci_dllist_remove(&li->li_active_ifs_link);
       ci_free(li);
     }
 
-  if( ci_dllist_not_empty(&la->la_active_ifs) ) {
+  if( ci_dllist_not_empty(la_active_ifs) ) {
     /* Not yet, unused, so don't do anything yet */
     return;
   }
+
+#if CI_CFG_IPV6
+  if( IS_AF_INET6(af) ) {
+    for( hash = 0; hash < OOF_LOCAL_PORT_TBL_SIZE; ++hash )
+      CI_DLLIST_FOR_EACH2(struct oof_local_port, lp, lp_manager_link,
+                        &fm->fm_local_ports[hash]) {
+        lpa = &lp->lp_addr[la_i];
+        lpa->lpa_flags |= OOF_LPA_FLAG_REMOVED;
+        lpa->lpa_n_full_sharers = 0;
+        oof_manager_sw_filter_remove(af, laddr, lp, la_i);
+      }
+
+    if( la->la_sockets )
+      return;
+
+    oof_manager_addr_dead(fm, la);
+    return;
+  }
+#endif
 
   /* Address is disabled; remove filters. */
   for( hash = 0; hash < OOF_LOCAL_PORT_TBL_SIZE; ++hash )
@@ -1313,7 +1424,7 @@ __oof_manager_addr_del(struct oof_manager* fm, unsigned laddr, unsigned ifindex)
                         &fm->fm_local_ports[hash]) {
       lpa = &lp->lp_addr[la_i];
       /* Remove h/w filters that use [laddr]. */
-      oof_hw_filter_clear_wild(fm, lp, lpa, la->la_laddr);
+      oof_hw_filter_clear_wild(fm, lp, lpa, la->la_laddr.ip4);
 
       CI_DLLIST_FOR_EACH2(struct oof_socket, skf, sf_lp_link,
                           &lpa->lpa_full_socks)
@@ -1322,19 +1433,7 @@ __oof_manager_addr_del(struct oof_manager* fm, unsigned laddr, unsigned ifindex)
        * and filter sharing has been disabled. */
       lpa->lpa_flags |= OOF_LPA_FLAG_REMOVED;
       lpa->lpa_n_full_sharers = 0;
-      {
-        ci_dllist* wild_lists[2] =
-            { &lpa->lpa_semi_wild_socks, &lp->lp_wild_socks };
-        int i;
-
-        /* Remove s/w filters for wild sockets. */
-        for( i = 0; i < 2; ++i ) {
-          CI_DLLIST_FOR_EACH2(struct oof_socket, skf, sf_lp_link, wild_lists[i])
-            if( oof_wild_socket_needs_sw_filter(lp, lpa, skf) )
-              oof_cb_sw_filter_remove(skf, laddr, lp->lp_lport, 0, 0,
-                                      lp->lp_protocol, 0);
-        }
-      }
+      oof_manager_sw_filter_remove(af, laddr, lp, la_i);
     }
 
   if( la->la_sockets )
@@ -1357,14 +1456,27 @@ __oof_manager_addr_del(struct oof_manager* fm, unsigned laddr, unsigned ifindex)
 
 
 void
-oof_manager_addr_del(struct oof_manager* fm, unsigned laddr, unsigned ifindex)
+oof_manager_addr_del(struct oof_manager* fm, int af, ci_addr_t laddr,
+                     unsigned ifindex)
 {
-  IPF_LOG("%s: addr="IP_FMT" ifindex=%d", __FUNCTION__, IP_ARG(laddr),ifindex);
+  char addr_str[CI_INET6_ADDRSTRLEN];
+
+#if CI_CFG_IPV6
+  if ( af != AF_INET && af != AF_INET6 ) {
+#else
+  if ( af != AF_INET ) {
+#endif
+    ERR_LOG("%s: ERROR: bad addreess family %d", __FUNCTION__, af);
+    return;
+  }
+
+  ci_get_ip_str(laddr, addr_str, sizeof(addr_str));
+  IPF_LOG("%s: addr=%s ifindex=%d", __FUNCTION__, addr_str, ifindex);
 
   mutex_lock(&fm->fm_outer_lock);
   spin_lock_bh(&fm->fm_inner_lock);
 
-  __oof_manager_addr_del(fm, laddr, ifindex);
+  __oof_manager_addr_del(fm, af, laddr, ifindex);
 
   spin_unlock_bh(&fm->fm_inner_lock);
   mutex_unlock(&fm->fm_outer_lock);
@@ -1400,7 +1512,7 @@ oof_manager_update_all_filters(struct oof_manager* fm)
       /* Find and update unicast filters. */
       for( la_i = 0; la_i < fm->fm_local_addr_n; ++la_i ) {
         lpa = &lp->lp_addr[la_i];
-        laddr = fm->fm_local_addrs[la_i].la_laddr;
+        laddr = fm->fm_local_addrs[la_i].la_laddr.ip4;
         if( ! oo_hw_filter_is_empty(&lpa->lpa_filter) )
           oof_hw_filter_update(fm, &lpa->lpa_filter,
                                lpa->lpa_filter.trs,
@@ -1414,8 +1526,8 @@ oof_manager_update_all_filters(struct oof_manager* fm)
           if( ! oo_hw_filter_is_empty(&skf->sf_full_match_filter) )
             oof_hw_filter_update(fm, &skf->sf_full_match_filter,
                                  skf->sf_full_match_filter.trs,
-                                 lp->lp_protocol, skf->sf_raddr, skf->sf_rport,
-                                 skf->sf_laddr, lp->lp_lport,
+                                 lp->lp_protocol, skf->sf_raddr.ip4, skf->sf_rport,
+                                 skf->sf_laddr.ip4, lp->lp_lport,
                                  OO_HW_VLAN_UNSPEC,
                                  fm->fm_hwports_available & fm->fm_hwports_up,
                                  OOF_SRC_FLAGS_DEFAULT);
@@ -1758,8 +1870,8 @@ oof_full_socks_add_hw_filters(struct oof_manager* fm,
     ci_assert(! oof_socket_is_clustered(skf));
     rc = oof_hw_filter_set(fm, skf, &skf->sf_full_match_filter,
                            oof_cb_socket_stack(skf), NULL,
-                           lp->lp_protocol, skf->sf_raddr, skf->sf_rport,
-                           skf->sf_laddr, lp->lp_lport,
+                           lp->lp_protocol, skf->sf_raddr.ip4, skf->sf_rport,
+                           skf->sf_laddr.ip4, lp->lp_lport,
                            fm->fm_hwports_available & fm->fm_hwports_up,
                            OOF_SRC_FLAGS_DEFAULT, 1);
     if( rc < 0 ) {
@@ -1912,15 +2024,20 @@ oof_local_port_addr_fixup_wild(struct oof_manager* fm,
 
 static void
 oof_local_port_fixup_wild(struct oof_manager* fm, struct oof_local_port* lp,
-                          enum fixup_wild_why why)
+                          enum fixup_wild_why why, int af_space)
 {
   struct oof_local_addr* la;
   int la_i;
   for( la_i = 0; la_i < fm->fm_local_addr_n; ++la_i ) {
     la = &fm->fm_local_addrs[la_i];
+
+    if( (CI_IS_ADDR_IP6(la->la_laddr) && !IS_AF_SPACE_IP6(af_space)) ||
+       (!CI_IS_ADDR_IP6(la->la_laddr) && IS_AF_SPACE_IP6(af_space)) )
+      continue;
+
     if( ci_dllist_not_empty(&la->la_active_ifs) )
       oof_local_port_addr_fixup_wild(fm, lp, &lp->lp_addr[la_i],
-                                     la->la_laddr, why);
+                                     la->la_laddr.ip4, why);
   }
 }
 
@@ -1930,10 +2047,11 @@ oof_local_port_fixup_wild(struct oof_manager* fm, struct oof_local_port* lp,
 static int
 oof_socket_add_full_sw(struct oof_socket* skf)
 {
-  return oof_cb_sw_filter_insert(skf, skf->sf_laddr,
-                                 skf->sf_local_port->lp_lport,
-                                 skf->sf_raddr, skf->sf_rport,
-                                 skf->sf_local_port->lp_protocol, 1);
+  struct oof_local_port* lp = skf->sf_local_port;
+  ci_addr_t laddr = skf->sf_laddr, raddr = skf->sf_raddr;
+
+  return oof_cb_sw_filter_insert(skf, skf->af_space, laddr, lp->lp_lport,
+                                 raddr, skf->sf_rport, lp->lp_protocol, 1);
 }
 
 
@@ -1941,16 +2059,20 @@ static void
 oof_socket_del_full_sw(struct oof_socket* skf, int stack_locked)
 {
   struct oof_local_port* lp = skf->sf_local_port;
-  oof_cb_sw_filter_remove(skf, skf->sf_laddr, lp->lp_lport,
-                          skf->sf_raddr, skf->sf_rport, lp->lp_protocol, stack_locked);
+  ci_addr_t laddr = skf->sf_laddr, raddr = skf->sf_raddr;
+
+  oof_cb_sw_filter_remove(skf, skf->af_space, laddr, lp->lp_lport, raddr,
+                          skf->sf_rport, lp->lp_protocol, stack_locked);
 }
 
 
 static void
-oof_socket_del_wild_sw(struct oof_socket* skf, unsigned laddr)
+oof_socket_del_wild_sw(struct oof_socket* skf, ci_addr_t laddr)
 {
-  oof_cb_sw_filter_remove(skf, laddr, skf->sf_local_port->lp_lport,
-                          0, 0, skf->sf_local_port->lp_protocol, 1);
+  struct oof_local_port* lp = skf->sf_local_port;
+
+  oof_cb_sw_filter_remove(skf, skf->af_space, laddr, lp->lp_lport, addr_any, 0,
+                          lp->lp_protocol, 1);
 }
 
 
@@ -1967,8 +2089,8 @@ oof_socket_del_full(struct oof_manager* fm, struct oof_socket* skf,
     ci_assert(oof_local_port_addr_valid(fm, lpa));
     ci_assert(lpa->lpa_n_full_sharers > 0);
     --lpa->lpa_n_full_sharers;
-    oof_local_port_addr_fixup_wild(fm, skf->sf_local_port, lpa, skf->sf_laddr,
-                                   fuw_del_full);
+    oof_local_port_addr_fixup_wild(fm, skf->sf_local_port, lpa,
+                                   skf->sf_laddr.ip4, fuw_del_full);
   }
 }
 
@@ -1985,8 +2107,8 @@ oof_socket_add_full_hw(struct oof_manager* fm, struct oof_socket* skf,
     struct oof_local_port* lp = skf->sf_local_port;
     rc = oof_hw_filter_set(fm, skf, &skf->sf_full_match_filter,
                            oof_cb_socket_stack(skf), NULL,
-                           lp->lp_protocol, skf->sf_raddr, skf->sf_rport,
-                           skf->sf_laddr, lp->lp_lport,
+                           lp->lp_protocol, skf->sf_raddr.ip4, skf->sf_rport,
+                           skf->sf_laddr.ip4, lp->lp_lport,
                            fm->fm_hwports_available & fm->fm_hwports_up,
                            OOF_SRC_FLAGS_DEFAULT, 1);
     if( rc < 0 ) {
@@ -2019,7 +2141,7 @@ oof_socket_add_full_hw(struct oof_manager* fm, struct oof_socket* skf,
 
 static int
 __oof_socket_add_wild(struct oof_manager* fm, struct oof_socket* skf,
-                      struct oof_local_port_addr* lpa, unsigned laddr)
+                      struct oof_local_port_addr* lpa, ci_addr_t laddr)
 {
   struct oof_local_port* lp = skf->sf_local_port;
   struct oof_socket* other_skf;
@@ -2034,23 +2156,29 @@ __oof_socket_add_wild(struct oof_manager* fm, struct oof_socket* skf,
   if( other_skf != NULL )
     /* Hide sw filter of other socket on the same stack
      *  (likely the wilder one) */
-    oof_cb_sw_filter_remove(other_skf, laddr, lp->lp_lport,
-                            0, 0, lp->lp_protocol, 1);
-  rc = oof_cb_sw_filter_insert(skf, laddr, lp->lp_lport, 0, 0,
-                               lp->lp_protocol, 1);
+    oof_cb_sw_filter_remove(other_skf, other_skf->af_space, laddr, lp->lp_lport,
+                            addr_any, 0, lp->lp_protocol, 1);
+
+  rc = oof_cb_sw_filter_insert(skf, skf->af_space, laddr, lp->lp_lport,
+                               addr_any, 0, lp->lp_protocol, 1);
   if( rc != 0 )
     return rc;
+
+#if CI_CFG_IPV6
+  if( IS_AF_SPACE_IP6(skf->af_space) )
+    return 0;
+#endif
 
   if( oo_hw_filter_is_empty(&lpa->lpa_filter) ) {
     rc = oof_hw_filter_set(fm, skf, &lpa->lpa_filter,
                            oof_socket_stack_effective(skf),
                            oof_socket_thc_effective(skf),
-                           lp->lp_protocol, 0, 0, laddr, lp->lp_lport,
+                           lp->lp_protocol, 0, 0, laddr.ip4, lp->lp_lport,
                            fm->fm_hwports_available & fm->fm_hwports_up,
                            OOF_SRC_FLAGS_DEFAULT, 1);
     if( rc != 0 )
-      oof_cb_sw_filter_remove(skf, laddr, lp->lp_lport, 0, 0,
-                              lp->lp_protocol, 1);
+      oof_cb_sw_filter_remove(skf, skf->af_space, laddr, lp->lp_lport,
+                              addr_any, 0, lp->lp_protocol, 1);
     return rc;
   }
   else if( ! oof_socket_can_share_hw_filter(skf, &lpa->lpa_filter) ) {
@@ -2059,9 +2187,10 @@ __oof_socket_add_wild(struct oof_manager* fm, struct oof_socket* skf,
      */
     OO_DEBUG_IPF(other_skf = oof_wild_socket(lp, lpa);
                  if( other_skf != NULL )
-                   ci_log(FSK_FMT "STEAL "TRIPLE_FMT" from "SK_FMT,
+                   ci_log(FSK_FMT "STEAL "IPX_TRIPLE_FMT" from "SK_FMT,
                           FSK_PRI_ARGS(skf),
-                          TRIPLE_ARGS(lp->lp_protocol, laddr, lp->lp_lport),
+                          IPX_TRIPLE_ARGS(lp->lp_protocol,
+                          AF_IP(laddr), lp->lp_lport),
                           SK_PRI_ARGS(other_skf)));
   }
   return 0;
@@ -2080,17 +2209,23 @@ oof_socket_steal_or_add_wild(struct oof_manager* fm, struct oof_socket* skf)
   int has_fail = 0;
   int rc, saved_rc = 0;
 
-  ci_assert(skf->sf_raddr == 0);
-  ci_assert(skf->sf_laddr == 0);
+  ci_assert(!CI_IPX_ADDR_CMP_ANY(skf->sf_laddr));
+  ci_assert(!CI_IPX_ADDR_CMP_ANY(skf->sf_raddr));
 
   skf_stack = oof_cb_socket_stack(skf);
 
   for( la_i = 0; la_i < fm->fm_local_addr_n; ++la_i ) {
     la = &fm->fm_local_addrs[la_i];
+
+    if( (CI_IS_ADDR_IP6(la->la_laddr) && !IS_AF_SPACE_IP6(skf->af_space)) ||
+       (!CI_IS_ADDR_IP6(la->la_laddr) && IS_AF_SPACE_IP6(skf->af_space)) )
+      continue;
+
     if( ci_dllist_is_empty(&la->la_active_ifs) )
       /* Entry invalid or address disabled. */
       continue;
     lpa = &lp->lp_addr[la_i];
+
     if( oof_socket_list_find_matching_stack(&lpa->lpa_semi_wild_socks,
                                             skf_stack, 0) == NULL ) {
       rc = __oof_socket_add_wild(fm, skf, lpa, la->la_laddr);
@@ -2148,6 +2283,7 @@ __oof_socket_add(struct oof_manager* fm, struct oof_socket* skf, int do_arm_only
   /* helper flags to describe what operations will be done for wild sockets */
   int do_arm = ! dummy && !oof_socket_no_unicast(skf);
   int do_insert = ! do_arm_only;
+  char laddr_str[CI_INET6_ADDRSTRLEN];
 
   ci_assert(ci_dllink_is_free(&skf->sf_lp_link));
   /* we need to do something */
@@ -2155,32 +2291,37 @@ __oof_socket_add(struct oof_manager* fm, struct oof_socket* skf, int do_arm_only
   /* multicast and full match sockets do not support two-stage add, but we
    * use the same path for sockets with no unicast so do allow that.
    */
-  ci_assert((do_arm && do_insert) || ! CI_IP_IS_MULTICAST(skf->sf_laddr) ||
+  ci_assert((do_arm && do_insert) ||
+            ! CI_IPX_IS_MULTICAST(skf->sf_laddr) ||
             oof_socket_no_unicast(skf));
-  ci_assert((do_arm && do_insert) || ! skf->sf_raddr ||
+  ci_assert((do_arm && do_insert) ||
+            ! CI_IPX_ADDR_CMP_ANY(skf->sf_raddr) ||
             oof_socket_no_unicast(skf));
 
-  if( skf->sf_laddr ) {
+  if( CI_IPX_ADDR_CMP_ANY(skf->sf_laddr) ) {
+    ci_get_ip_str(skf->sf_laddr, laddr_str, sizeof(laddr_str));
     la_i = oof_manager_addr_find(fm, skf->sf_laddr);
     if( la_i < 0 ) {
-      if( CI_IP_IS_MULTICAST(skf->sf_laddr) ) {
+      if( CI_IPX_IS_MULTICAST(skf->sf_laddr) ) {
         /* Local address is bound to multicast address.  We don't insert
          * any filters in this case.  Socket will get accelerated traffic
          * iff it does IP_ADD_MEMBERSHIP.  (NB. In practice this cannot be
          * a full-match add, as that goes via oof_udp_connect()).
          */
-        IPF_LOG(FSK_FMT IP_FMT" multicast -- not filtered",
-                FSK_PRI_ARGS(skf), IP_ARG(skf->sf_laddr));
+        IPF_LOG(FSK_FMT" %s multicast -- not filtered",
+                FSK_PRI_ARGS(skf), laddr_str);
         ci_dllist_push(&fm->fm_mcast_laddr_socks, &skf->sf_lp_link);
         return 0;
       }
-      ERR_LOG(FSK_FMT "ERROR: laddr="IP_FMT" not local",
-              FSK_PRI_ARGS(skf), IP_ARG(skf->sf_laddr));
+      ERR_LOG(FSK_FMT "ERROR: laddr=%s not local",
+              FSK_PRI_ARGS(skf), laddr_str);
       return -EINVAL;
     }
+
     lpa = &lp->lp_addr[la_i];
     la = &fm->fm_local_addrs[la_i];
-    if( skf->sf_raddr ) {
+
+    if( CI_IPX_ADDR_CMP_ANY(skf->sf_raddr) ) {
       if( oof_socket_is_clustered(skf) ) {
         ci_log("%s: ERROR: Full match filter with reuseport set", __FUNCTION__);
         return -EINVAL;
@@ -2210,8 +2351,8 @@ __oof_socket_add(struct oof_manager* fm, struct oof_socket* skf, int do_arm_only
       if( rc < 0 )
         return rc;
       ci_dllist_push(&lpa->lpa_semi_wild_socks, &skf->sf_lp_link);
-      if( do_arm )
-        oof_local_port_addr_fixup_wild(fm, lp, lpa, skf->sf_laddr,
+      if( !IS_AF_SPACE_IP6(skf->af_space) && do_arm )
+        oof_local_port_addr_fixup_wild(fm, lp, lpa, skf->sf_laddr.ip4,
                                        fuw_add_wild);
     }
     if( inc_laddr_ref )
@@ -2233,7 +2374,7 @@ __oof_socket_add(struct oof_manager* fm, struct oof_socket* skf, int do_arm_only
       return rc;
     ci_dllist_push(&lp->lp_wild_socks, &skf->sf_lp_link);
     if( do_arm )
-      oof_local_port_fixup_wild(fm, lp, fuw_add_wild);
+      oof_local_port_fixup_wild(fm, lp, fuw_add_wild, skf->af_space);
   }
   return rc;
 }
@@ -2313,7 +2454,7 @@ int oof_socket_can_update_stack(struct oof_manager* fm, struct oof_socket* skf,
 
   lp = skf->sf_local_port;
   ci_assert_nequal(lp, NULL);
-  if( skf->sf_laddr ) {
+  if( CI_IPX_ADDR_CMP_ANY(skf->sf_laddr) ) {
     la_i = oof_manager_addr_find(fm, skf->sf_laddr);
     ci_assert_ge(la_i, 0);
     list = &lp->lp_addr[la_i].lpa_semi_wild_socks;
@@ -2356,8 +2497,9 @@ int oof_socket_can_update_stack(struct oof_manager* fm, struct oof_socket* skf,
 
 int
 oof_socket_add(struct oof_manager* fm, struct oof_socket* skf,
-               int flags, int protocol, unsigned laddr, int lport,
-               unsigned raddr, int rport,
+               int flags, int protocol, int af_space,
+               ci_addr_t laddr, int lport,
+               ci_addr_t raddr, int rport,
                struct tcp_helper_cluster_s** thc_out)
 {
   struct oof_local_port* lp;
@@ -2375,8 +2517,10 @@ oof_socket_add(struct oof_manager* fm, struct oof_socket* skf,
   lp = skf->sf_local_port;
   do_arm_only = lp != NULL && oof_socket_is_dummy(skf);
 
-  IPF_LOG(FSK_FMT QUIN_FMT"%s%s%s%s", FSK_PRI_ARGS_SAFE(skf, no_stack),
-          QUIN_ARGS(protocol, laddr, lport, raddr, rport),
+  IPF_LOG(FSK_FMT IPX_QUIN_FMT"%s%s%s%s", FSK_PRI_ARGS_SAFE(skf, no_stack),
+          IPX_QUIN_ARGS(protocol,
+                    AF_IP(laddr), lport,
+                    AF_IP(raddr), rport),
           clustered ? " CLUSTERED" : "",
           do_arm_only ? " ARMING" : "",
           dummy ? " DUMMY" : "",
@@ -2391,10 +2535,16 @@ oof_socket_add(struct oof_manager* fm, struct oof_socket* skf,
     *thc_out = NULL;
 
   rc = -EINVAL;
-  if( lport == 0 || ((raddr || rport) && ! (raddr && rport)) ) {
-    ERR_LOG(FSK_FMT "ERROR: bad "IPPORT_FMT" "IPPORT_FMT,
-            FSK_PRI_ARGS_SAFE(skf, no_stack), IPPORT_ARG(laddr, lport),
-            IPPORT_ARG(raddr, rport));
+  if( IS_AF_SPACE_IP6(af_space) && protocol != IPPROTO_UDP )
+    goto just_unlock;
+
+  if( lport == 0 ||
+    ((CI_IPX_ADDR_CMP_ANY(raddr) || rport) &&
+    ! (CI_IPX_ADDR_CMP_ANY(raddr) && rport)) ) {
+    ERR_LOG(FSK_FMT "ERROR: bad "IPX_PORT_FMT" "IPX_PORT_FMT,
+            FSK_PRI_ARGS_SAFE(skf, no_stack),
+            IPX_PORT_ARG(AF_IP(laddr), lport),
+            IPX_PORT_ARG(AF_IP(raddr), rport));
     ci_assert(! do_arm_only);
     goto just_unlock;
   }
@@ -2408,9 +2558,10 @@ oof_socket_add(struct oof_manager* fm, struct oof_socket* skf,
     lp = oof_local_port_find(fm, protocol, lport);
     ci_assert_nequal(lp, NULL);
     ci_assert_equal(skf->sf_local_port, lp);
-    if( raddr == 0 ) {
-      ci_assert_equal(skf->sf_laddr, laddr);
-      ci_assert_equal(skf->sf_raddr, raddr);
+
+    if( !CI_IPX_ADDR_CMP_ANY(raddr) ) {
+      ci_assert(!CI_IPX_ADDR_CMP(skf->sf_laddr, laddr));
+      ci_assert(!CI_IPX_ADDR_CMP(skf->sf_raddr, raddr));
       ci_assert_equal(skf->sf_rport, rport);
       skf->sf_flags &= ~OOF_SOCKET_DUMMY;
       inc_laddr_ref = 0;
@@ -2422,11 +2573,12 @@ oof_socket_add(struct oof_manager* fm, struct oof_socket* skf,
        * ..almost: we need to make sure socket does not share clustered filter
        * so we set NO SHARING flag.
        */
-      ci_assert_nequal(laddr, 0);
-      ci_assert(skf->sf_laddr == 0 || skf->sf_laddr == laddr);
+      ci_assert(CI_IPX_ADDR_CMP_ANY(laddr));
+      ci_assert(!CI_IPX_ADDR_CMP_ANY(skf->sf_laddr) ||
+                !CI_IPX_ADDR_CMP(skf->sf_laddr, laddr));
       /* increase local addr reference count only
        * when original socket was fully wild */
-      inc_laddr_ref = skf->sf_laddr == 0;
+      inc_laddr_ref = CI_IPX_ADDR_CMP_ANY(skf->sf_laddr) ? 0 : 1;
       skf->sf_local_port = NULL;
       skf->sf_flags = OOF_SOCKET_NO_SHARING;
       do_arm_only = 0; /* fall through to socket creation from scratch */
@@ -2467,6 +2619,7 @@ oof_socket_add(struct oof_manager* fm, struct oof_socket* skf,
                     (no_ucast ? OOF_SOCKET_NO_UCAST : 0);
   }
 
+  skf->af_space = af_space;
   skf->sf_laddr = laddr;
   skf->sf_raddr = raddr;
   skf->sf_rport = rport;
@@ -2534,7 +2687,7 @@ oof_socket_update_sharer_details(struct oof_manager* fm, struct oof_socket* skf,
    */
   spin_lock_bh(&fm->fm_inner_lock);
 
-  skf->sf_raddr = raddr;
+  skf->sf_raddr = CI_ADDR_FROM_IP4(raddr);
   skf->sf_rport = rport;
 
   spin_unlock_bh(&fm->fm_inner_lock);
@@ -2550,6 +2703,7 @@ __oof_socket_share(struct oof_manager* fm, struct oof_socket* skf,
   struct oof_local_port* lp;
   struct oof_local_addr* la;
   int rc, la_i;
+  char laddr_str[CI_INET6_ADDRSTRLEN];
 
   ci_assert(spin_is_locked(&fm->fm_inner_lock));
 
@@ -2560,18 +2714,27 @@ __oof_socket_share(struct oof_manager* fm, struct oof_socket* skf,
                   ci_dllink_is_free(&listen_skf->sf_lp_link));
   ci_assert_impl(listen_skf->sf_local_port == NULL, listen_skf->sf_flags == 0);
 
-  if( skf->sf_local_port != NULL || ! skf->sf_laddr || ! skf->sf_raddr )
+  if( skf->sf_local_port != NULL )
+      return -EINVAL;
+
+  if( !CI_IPX_ADDR_CMP_ANY(skf->sf_laddr) ||
+      !CI_IPX_ADDR_CMP_ANY(skf->sf_raddr))
     return -EINVAL;
+
   if( (lp = listen_skf->sf_local_port) == NULL )
     return -EINVAL;
-  if( (la_i = oof_manager_addr_find(fm, skf->sf_laddr)) < 0 ) {
-    ERR_LOG(FSK_FMT "ERROR: laddr="IP_FMT" not local",
-            FSK_PRI_ARGS(skf), IP_ARG(skf->sf_laddr));
+
+  ci_get_ip_str(skf->sf_laddr, laddr_str, sizeof(laddr_str));
+
+  la_i = oof_manager_addr_find(fm, skf->sf_laddr);
+  if( la_i < 0 ) {
+    ERR_LOG(FSK_FMT "ERROR: laddr=%s not local", FSK_PRI_ARGS(skf), laddr_str);
     return -EINVAL;
   }
 
   lpa = &lp->lp_addr[la_i];
   la = &fm->fm_local_addrs[la_i];
+
   skf->sf_local_port = lp;
 
   /* Socket can be added even after addr has been removed
@@ -2594,8 +2757,8 @@ __oof_socket_share(struct oof_manager* fm, struct oof_socket* skf,
 
 int
 oof_socket_share(struct oof_manager* fm, struct oof_socket* skf,
-                 struct oof_socket* listen_skf, unsigned laddr,
-                 unsigned raddr, int rport)
+                 struct oof_socket* listen_skf, int af_space,
+                 ci_addr_t laddr, ci_addr_t raddr, int rport)
 {
   /* This entry point is used when promoting a syn-recv to a new passively
    * opened socket.  oof_socket_add() actually handles that case just fine,
@@ -2613,6 +2776,7 @@ oof_socket_share(struct oof_manager* fm, struct oof_socket* skf,
 
   spin_lock_bh(&fm->fm_inner_lock);
 
+  skf->af_space = af_space;
   skf->sf_laddr = laddr;
   skf->sf_raddr = raddr;
   skf->sf_rport = rport;
@@ -2628,7 +2792,7 @@ static void
 __oof_socket_del_wild(struct oof_manager* fm,
                       struct oof_socket* skf,
                       struct tcp_helper_resource_s* skf_stack,
-                      struct oof_local_port_addr* lpa, unsigned laddr)
+                      struct oof_local_port_addr* lpa, ci_addr_t laddr)
 {
   struct oof_local_port* lp = skf->sf_local_port;
   struct oof_socket* other_skf;
@@ -2643,8 +2807,9 @@ __oof_socket_del_wild(struct oof_manager* fm,
   other_skf = oof_wild_socket_matching_stack(lp, lpa, skf_stack);
   if( other_skf != NULL ) {
     /* Unhide hidden socket on the same stack */
-    int rc = oof_cb_sw_filter_insert(other_skf, laddr, lp->lp_lport,
-                                     0, 0, lp->lp_protocol, 1);
+    int rc = oof_cb_sw_filter_insert(other_skf, other_skf->af_space, laddr,
+                                     lp->lp_lport, addr_any, 0,
+                                     lp->lp_protocol, 1);
     if( rc != 0 )
       oof_sw_insert_fail(other_skf, __FUNCTION__, rc);
   }
@@ -2662,9 +2827,10 @@ oof_socket_del_semi_wild(struct oof_manager* fm, struct oof_socket* skf,
 
   oof_socket_remove_from_list(skf);
   if( ! hidden ) {
-    __oof_socket_del_wild(fm, skf, oof_cb_socket_stack(skf), lpa, skf->sf_laddr);
+    __oof_socket_del_wild(fm, skf, oof_cb_socket_stack(skf), lpa,
+                          skf->sf_laddr);
     oof_local_port_addr_fixup_wild(fm, skf->sf_local_port, lpa,
-                                   skf->sf_laddr, fuw_del_wild);
+                                   skf->sf_laddr.ip4, fuw_del_wild);
   }
 }
 
@@ -2687,9 +2853,15 @@ oof_socket_del_wild(struct oof_manager* fm, struct oof_socket* skf)
   skf_stack = oof_cb_socket_stack(skf);
   for( la_i = 0; la_i < fm->fm_local_addr_n; ++la_i ) {
     la = &fm->fm_local_addrs[la_i];
-    if(  ci_dllist_is_empty(&la->la_active_ifs) )
+
+    if( (CI_IS_ADDR_IP6(la->la_laddr) && !IS_AF_SPACE_IP6(skf->af_space)) ||
+       (!CI_IS_ADDR_IP6(la->la_laddr) && IS_AF_SPACE_IP6(skf->af_space)) )
+      continue;
+
+    if( ci_dllist_is_empty(&la->la_active_ifs) )
       /* Entry invalid or address disabled. */
       continue;
+
     lpa = &lp->lp_addr[la_i];
     if( oof_socket_list_find_matching_stack(&lpa->lpa_semi_wild_socks,
                                             skf_stack, 0) == NULL )
@@ -2716,22 +2888,23 @@ oof_socket_del(struct oof_manager* fm, struct oof_socket* skf)
   lp = skf->sf_local_port;
   dummy = oof_socket_is_dummy(skf);
 
-  ci_assert(! dummy || ! skf->sf_raddr);
-  ci_assert(! dummy || ! CI_IP_IS_MULTICAST(skf->sf_laddr));
+  ci_assert(! dummy || ! CI_IPX_ADDR_CMP_ANY(skf->sf_raddr));
+  ci_assert(! dummy || ! CI_IPX_IS_MULTICAST(skf->sf_laddr));
   ci_assert_equal(lp == NULL, ci_dllink_is_free(&skf->sf_lp_link));
   ci_assert_impl(lp == NULL, skf->sf_flags == 0);
 
   if( lp != NULL ) {
-    IPF_LOG(FSK_FMT QUIN_FMT,
+    IPF_LOG(FSK_FMT IPX_QUIN_FMT,
             FSK_PRI_ARGS_SAFE(skf, oof_socket_is_stackless(skf)),
-            QUIN_ARGS(lp->lp_protocol, skf->sf_laddr, lp->lp_lport,
-                      skf->sf_raddr, skf->sf_rport));
+            IPX_QUIN_ARGS(lp->lp_protocol, AF_IP(skf->sf_laddr),
+                          lp->lp_lport, AF_IP(skf->sf_raddr),
+                          skf->sf_rport));
 
     oof_socket_mcast_remove(fm, skf, &mcast_filters);
 
-    if( CI_IP_IS_MULTICAST(skf->sf_laddr) ) {
+    if( CI_IPX_IS_MULTICAST(skf->sf_laddr) ) {
       oof_socket_remove_from_list(skf);
-      if( skf->sf_raddr != 0 ) {
+      if( CI_IPX_ADDR_CMP_ANY(skf->sf_raddr) ) {
         /* Undo path for oof_udp_connect_mcast_laddr().  It's possible we
          * don't actually have either of these filters, if we haven't joined
          * relevant groups, or don't have hwports that need a full match
@@ -2746,12 +2919,13 @@ oof_socket_del(struct oof_manager* fm, struct oof_socket* skf)
         oof_hw_filter_clear_full(fm, skf);
       }
     }
-    else if( skf->sf_laddr ) {
+
+    else if( CI_IPX_ADDR_CMP_ANY(skf->sf_laddr) ) {
       la_i = oof_manager_addr_find(fm, skf->sf_laddr);
       ci_assert(la_i >= 0 && la_i < fm->fm_local_addr_n);
       lpa = &lp->lp_addr[la_i];
       la = &fm->fm_local_addrs[la_i];
-      if( skf->sf_raddr )
+      if( CI_IPX_ADDR_CMP_ANY(skf->sf_raddr) )
         oof_socket_del_full(fm, skf, lpa);
       else
         oof_socket_del_semi_wild(fm, skf, lpa);
@@ -2762,7 +2936,8 @@ oof_socket_del(struct oof_manager* fm, struct oof_socket* skf)
     else {
       oof_socket_del_wild(fm, skf);
       if(! dummy )
-        oof_local_port_fixup_wild(fm, skf->sf_local_port, fuw_del_wild);
+        oof_local_port_fixup_wild(fm, skf->sf_local_port, fuw_del_wild,
+                                  skf->af_space);
     }
 
     skf->sf_local_port = NULL;
@@ -2813,21 +2988,22 @@ oof_socket_del_sw(struct oof_manager* fm, struct oof_socket* skf)
                  skf->sf_flags == 0);
 
   if( (lp = skf->sf_local_port) != NULL ) {
-    IPF_LOG(FSK_FMT QUIN_FMT, FSK_PRI_ARGS(skf),
-            QUIN_ARGS(lp->lp_protocol, skf->sf_laddr, lp->lp_lport,
-                      skf->sf_raddr, skf->sf_rport));
+    IPF_LOG(FSK_FMT IPX_QUIN_FMT, FSK_PRI_ARGS(skf),
+            IPX_QUIN_ARGS(lp->lp_protocol, AF_IP(skf->sf_laddr),
+                          lp->lp_lport, AF_IP(skf->sf_raddr),
+                          skf->sf_rport));
     ucast_hw_filter = 1;
     mcast_hw_filter = oof_socket_mcast_remove_sw(fm, skf);
 
-    if( CI_IP_IS_MULTICAST(skf->sf_laddr) ) {
+    if( CI_IPX_IS_MULTICAST(skf->sf_laddr) ) {
       /* Nothing to do. */
     }
-    else if( skf->sf_laddr ) {
+    else if( CI_IPX_ADDR_CMP_ANY(skf->sf_laddr) ) {
       la_i = oof_manager_addr_find(fm, skf->sf_laddr);
       ci_assert(la_i >= 0 && la_i < fm->fm_local_addr_n);
       lpa = &lp->lp_addr[la_i];
       la = &fm->fm_local_addrs[la_i];
-      if( skf->sf_raddr ) {
+      if( skf->sf_raddr.ip4 ) {
         oof_socket_del_full_sw(skf, 1);
           /* If this endpoint only sharing SW filters and is not the
            * last one to be removed, it is safe to remove the filters
@@ -2853,9 +3029,10 @@ oof_socket_del_sw(struct oof_manager* fm, struct oof_socket* skf)
       else
         oof_socket_del_wild_sw(skf, skf->sf_laddr);
     }
-    else
+    else {
       for( la_i = 0; la_i < fm->fm_local_addr_n; ++la_i )
         oof_socket_del_wild_sw(skf, fm->fm_local_addrs[la_i].la_laddr);
+    }
     if( mcast_hw_filter || ucast_hw_filter )
       skf->sf_flags |= OOF_SOCKET_SW_FILTER_WAS_REMOVED;
   }
@@ -2905,24 +3082,24 @@ oof_udp_connect_mcast_laddr(struct oof_manager* fm, struct oof_socket* skf,
   unsigned hwports_full;
   int rc = 0;
 
-  IPF_LOG(FSK_FMT "%s "IPPORT_FMT" => "IPPORT_FMT" "IPPORT_FMT" multicast",
+  IPF_LOG(FSK_FMT "%s "IPX_PORT_FMT" => "IPPORT_FMT" "IPPORT_FMT" multicast",
           FSK_PRI_ARGS(skf), FMT_PROTOCOL(lp->lp_protocol),
-          IPPORT_ARG(skf->sf_laddr, lp->lp_lport),
+          IPX_PORT_ARG(AF_IP(skf->sf_laddr), lp->lp_lport),
           IPPORT_ARG(laddr, lp->lp_lport), IPPORT_ARG(raddr, rport));
 
   ci_assert(spin_is_locked(&fm->fm_inner_lock));
   ci_assert(mutex_is_locked(&fm->fm_outer_lock));
-  ci_assert(CI_IP_IS_MULTICAST(skf->sf_laddr));
+  ci_assert(CI_IPX_IS_MULTICAST(skf->sf_laddr));
   ci_assert(CI_IP_IS_MULTICAST(laddr));
   ci_assert(oo_hw_filter_is_empty(&skf->sf_full_match_filter) ||
-           (skf->sf_laddr == laddr && skf->sf_raddr == raddr &&
+           (skf->sf_laddr.ip4 == laddr && skf->sf_raddr.ip4 == raddr &&
             skf->sf_rport == rport));
 
-  laddr_old = skf->sf_laddr;
-  raddr_old = skf->sf_raddr;
+  laddr_old = skf->sf_laddr.ip4;
+  raddr_old = skf->sf_raddr.ip4;
   rport_old = skf->sf_rport;
-  skf->sf_laddr = laddr;
-  skf->sf_raddr = raddr;
+  skf->sf_laddr = CI_ADDR_FROM_IP4(laddr);
+  skf->sf_raddr = CI_ADDR_FROM_IP4(raddr);
   skf->sf_rport = rport;
 
   /* See if we've joined any groups on this laddr, and if so which hwports
@@ -2938,10 +3115,12 @@ oof_udp_connect_mcast_laddr(struct oof_manager* fm, struct oof_socket* skf,
    * add the sw filter the first time.
    */
   if( hwports != 0 && ! (skf->sf_flags & OOF_SOCKET_MCAST_FULL_SW_FILTER) ) {
+    ci_addr_t addr = CI_ADDR_FROM_IP4(laddr);
+
     /* Remove the wild filter before installing the full-match one to avoid
      * corrupting the filter table.
      */
-    oof_socket_del_wild_sw(skf, laddr);
+    oof_socket_del_wild_sw(skf, addr);
 
     rc = oof_socket_add_full_sw(skf);
     if( rc != 0 ) {
@@ -2976,8 +3155,8 @@ oof_udp_connect_mcast_laddr(struct oof_manager* fm, struct oof_socket* skf,
   return rc;
 
  fail1:
-  skf->sf_laddr = laddr_old;
-  skf->sf_raddr = raddr_old;
+  skf->sf_laddr = CI_ADDR_FROM_IP4(laddr_old);
+  skf->sf_raddr = CI_ADDR_FROM_IP4(raddr_old);
   skf->sf_rport = rport_old;
 
   return rc;
@@ -3000,6 +3179,7 @@ oof_udp_connect(struct oof_manager* fm, struct oof_socket* skf,
   int rc, la_i_new;
   int la_i_new_valid;
   int hidden;
+  ci_addr_t laddr_val, raddr_val;
 
   if( laddr == 0 || raddr == 0 || rport == 0 ) {
     ERR_LOG(FSK_FMT "ERROR: bad laddr="IP_FMT" raddr="IP_FMT" rport=%d",
@@ -3016,15 +3196,19 @@ oof_udp_connect(struct oof_manager* fm, struct oof_socket* skf,
     ERR_LOG(FSK_FMT "ERROR: no local port", FSK_PRI_ARGS(skf));
     goto unlock_out;
   }
-  if( lp->lp_protocol != IPPROTO_UDP || skf->sf_raddr ) {
-    ERR_LOG(FSK_FMT "ERROR: protocol=%s remote="IPPORT_FMT,
+  if( lp->lp_protocol != IPPROTO_UDP ||
+    CI_IPX_ADDR_CMP_ANY(skf->sf_raddr) ) {
+    ERR_LOG(FSK_FMT "ERROR: protocol=%s remote="IPX_PORT_FMT,
             FSK_PRI_ARGS(skf), FMT_PROTOCOL(lp->lp_protocol),
-            IPPORT_ARG(skf->sf_raddr, skf->sf_rport));
+            IPX_PORT_ARG(AF_IP(skf->sf_raddr), skf->sf_rport));
     goto unlock_out;
   }
-  la_i_new = oof_manager_addr_find(fm, laddr);
+
+  laddr_val = CI_ADDR_FROM_IP4(laddr);
+  la_i_new = oof_manager_addr_find(fm, laddr_val);
   if( la_i_new < 0 ) {
-    if( CI_IP_IS_MULTICAST(laddr) && CI_IP_IS_MULTICAST(skf->sf_laddr) ) {
+    if( CI_IP_IS_MULTICAST(laddr) &&
+        CI_IPX_IS_MULTICAST(skf->sf_laddr) ) {
       rc = oof_udp_connect_mcast_laddr(fm, skf, laddr, raddr, rport);
       if( rc < 0 )
         goto unlock_out;
@@ -3044,9 +3228,9 @@ oof_udp_connect(struct oof_manager* fm, struct oof_socket* skf,
   if( oof_socket_no_unicast(skf) )
     goto unlock_out;
 
-  IPF_LOG(FSK_FMT "%s "IPPORT_FMT" => "IPPORT_FMT" "IPPORT_FMT,
+  IPF_LOG(FSK_FMT "%s "IPX_PORT_FMT" => "IPPORT_FMT" "IPPORT_FMT,
           FSK_PRI_ARGS(skf), FMT_PROTOCOL(lp->lp_protocol),
-          IPPORT_ARG(skf->sf_laddr, lp->lp_lport),
+          IPX_PORT_ARG(AF_IP(skf->sf_laddr), lp->lp_lport),
           IPPORT_ARG(laddr, lp->lp_lport), IPPORT_ARG(raddr, rport));
 
   ci_assert(! oof_socket_is_dummy(skf));
@@ -3059,9 +3243,9 @@ oof_udp_connect(struct oof_manager* fm, struct oof_socket* skf,
    * existing s/w filter else we can confuse the filter table (which
    * requires that a socket be inserted only once for a given laddr).
    */
-  laddr_old = skf->sf_laddr;
-  skf->sf_laddr = laddr;
-  skf->sf_raddr = raddr;
+  laddr_old = skf->sf_laddr.ip4;
+  skf->sf_laddr = CI_ADDR_FROM_IP4(laddr);
+  skf->sf_raddr = CI_ADDR_FROM_IP4(raddr);
   skf->sf_rport = rport;
   rc = 0;
   if( la_i_new_valid )
@@ -3074,31 +3258,39 @@ oof_udp_connect(struct oof_manager* fm, struct oof_socket* skf,
    * filters yet as [skf] does not yet look like a full-match socket, so
    * state is not sufficiently consistent.
    */
-  skf->sf_laddr = laddr_old;
-  skf->sf_raddr = 0;
+  skf->sf_laddr= CI_ADDR_FROM_IP4(laddr_old);
+  skf->sf_raddr = ip4_addr_any;
   skf->sf_rport = 0;
   if( laddr_old ) {
-    la_i_old = oof_manager_addr_find(fm, laddr_old);
+    ci_addr_t laddr_old_val;
+
+    laddr_old_val = CI_ADDR_FROM_IP4(laddr_old);
+    la_i_old = oof_manager_addr_find(fm, laddr_old_val);
     ci_assert(la_i_old >= 0 && la_i_old < fm->fm_local_addr_n);
     lpa = &lp->lp_addr[la_i_old];
     hidden = ! oof_socket_is_first_in_same_stack(&lpa->lpa_semi_wild_socks,
                                                  skf);
     oof_socket_remove_from_list(skf);
-    if( ! hidden )
-      __oof_socket_del_wild(fm, skf, oof_cb_socket_stack(skf), lpa, laddr_old);
+    if( ! hidden ) {
+      laddr_val = CI_ADDR_FROM_IP4(laddr_old);
+      __oof_socket_del_wild(fm, skf, oof_cb_socket_stack(skf), lpa, laddr_val);
+    }
   }
   else {
     oof_socket_del_wild(fm, skf);
   }
 
   /* Finish making [skf] into a proper full-match socket. */
-  skf->sf_laddr = laddr;
-  skf->sf_raddr = raddr;
+  skf->sf_laddr = CI_ADDR_FROM_IP4(laddr);
+  skf->sf_raddr = CI_ADDR_FROM_IP4(raddr);
   skf->sf_rport = rport;
   rc = 0;
-  if( la_i_new_valid )
-    rc = oof_cb_sw_filter_insert(skf, laddr, lp->lp_lport, raddr, rport,
-                                 lp->lp_protocol, 1);
+  if( la_i_new_valid ) {
+    laddr_val = CI_ADDR_FROM_IP4(laddr);
+    raddr_val = CI_ADDR_FROM_IP4(raddr);
+    rc = oof_cb_sw_filter_insert(skf, AF_SPACE_FLAG_IP4, laddr_val, lp->lp_lport,
+                                 raddr_val, rport, lp->lp_protocol, 1);
+  }
   if( rc != 0 ) {
     /* NB. We haven't reset the socket to its previous state here.  We
      * leave it looking like a full-match, but with all filters missing.
@@ -3123,7 +3315,7 @@ oof_udp_connect(struct oof_manager* fm, struct oof_socket* skf,
       oof_manager_addr_dead(fm, la);
   }
   else {
-    oof_local_port_fixup_wild(fm, lp, fuw_udp_connect);
+    oof_local_port_fixup_wild(fm, lp, fuw_udp_connect, AF_SPACE_FLAG_IP4);
   }
 
  unlock_mcast_out:
@@ -3134,8 +3326,8 @@ oof_udp_connect(struct oof_manager* fm, struct oof_socket* skf,
   return 0;
 
  fail_reset_skf:
-  skf->sf_laddr = laddr_old;
-  skf->sf_raddr = 0;
+  skf->sf_laddr = CI_ADDR_FROM_IP4(laddr_old);
+  skf->sf_raddr = ip4_addr_any;
   skf->sf_rport = 0;
  unlock_out:
   spin_unlock_bh(&fm->fm_inner_lock);
@@ -3155,13 +3347,13 @@ oof_udp_connect(struct oof_manager* fm, struct oof_socket* skf,
  *
  */
 #define OOF_NEED_MCAST_FILTER(fm, skf, mm)                             \
-  ((((skf)->sf_raddr == 0) ||                                          \
+  ((((skf)->sf_raddr.ip4 == 0) ||                                          \
    ((mm)->mm_hwport_mask & fm->fm_hwports_mcast_replicate_capable)) && \
-   ((skf)->sf_laddr == 0 || (skf)->sf_laddr == ((mm)->mm_maddr)))
+   ((skf)->sf_laddr.ip4 == 0 || (skf)->sf_laddr.ip4 == ((mm)->mm_maddr)))
 
 
 #define OOF_CONNECTED_MCAST(skf, maddr)                         \
-  ((skf)->sf_raddr != 0 && (skf)->sf_laddr == (maddr))
+  ((skf)->sf_raddr.ip4 != 0 && (skf)->sf_laddr.ip4 == (maddr))
 
 
 /* Calculate the ports we want to install wild match multicast filters on.
@@ -3170,7 +3362,7 @@ oof_udp_connect(struct oof_manager* fm, struct oof_socket* skf,
  * multicast replication.
  */
 #define OOF_MCAST_WILD_HWPORTS(fm, mm)                                   \
-   ( ((mm)->mm_socket->sf_raddr == 0) ?                                  \
+   ( ((mm)->mm_socket->sf_raddr.ip4 == 0) ?                                  \
      ((mm)->mm_hwport_mask) :                                            \
      ((mm)->mm_hwport_mask & (fm)->fm_hwports_mcast_replicate_capable) )
 
@@ -3421,8 +3613,11 @@ oof_mcast_install(struct oof_manager* fm, struct oof_mcast_member* mm,
    */
   if( (! oof_socket_has_maddr_filter(skf, mm->mm_maddr)) &&
       (! OOF_CONNECTED_MCAST(skf, mm->mm_maddr)) ) {
-    rc = oof_cb_sw_filter_insert(skf, mm->mm_maddr, lp->lp_lport,
-                                 0, 0, lp->lp_protocol, 1);
+    ci_addr_t laddr_val;
+
+    laddr_val = CI_ADDR_FROM_IP4(mm->mm_maddr);
+    rc = oof_cb_sw_filter_insert(skf, AF_SPACE_FLAG_IP4, laddr_val, lp->lp_lport,
+                                 addr_any, 0, lp->lp_protocol, 1);
     if( rc != 0 )
       return rc; /* SW filter failed: do not insert HW */
   }
@@ -3480,6 +3675,8 @@ oof_mcast_install(struct oof_manager* fm, struct oof_mcast_member* mm,
                             mf->mf_vlan_id, install_hwport_mask,
                             OOF_SRC_FLAGS_DEFAULT_MCAST);
   if( rc != 0 ) {
+    ci_addr_t laddr;
+
     /* We didn't get all of the filters we wanted, but traffic should
      * still get there via the kernel stack.
      */
@@ -3494,8 +3691,9 @@ oof_mcast_install(struct oof_manager* fm, struct oof_mcast_member* mm,
       ci_dllist_pop(&lp->lp_mcast_filters);
       ci_dllist_push(mcast_filters, &mf->mf_lp_link);
     }
-    oof_cb_sw_filter_remove(skf, mm->mm_maddr, lp->lp_lport,
-                            0, 0, lp->lp_protocol, 1);
+    laddr = CI_ADDR_FROM_IP4(mm->mm_maddr);
+    oof_cb_sw_filter_remove(skf, AF_SPACE_FLAG_IP4, laddr, lp->lp_lport,
+                            addr_any, 0, lp->lp_protocol, 1);
   }
 
   return rc;
@@ -3590,9 +3788,12 @@ oof_mcast_remove(struct oof_manager* fm, struct oof_mcast_member* mm,
 
   /* Remove software filter if no filters remain for maddr. */
   if( ! oof_socket_has_maddr_filter(skf, mm->mm_maddr) &&
-      ! OOF_CONNECTED_MCAST(skf, mm->mm_maddr) )
-    oof_cb_sw_filter_remove(skf, mm->mm_maddr, lp->lp_lport,
-                            0, 0, lp->lp_protocol, stack_locked);
+      ! OOF_CONNECTED_MCAST(skf, mm->mm_maddr) ) {
+    ci_addr_t laddr = CI_ADDR_FROM_IP4(mm->mm_maddr);
+
+    oof_cb_sw_filter_remove(skf, AF_SPACE_FLAG_IP4, laddr, lp->lp_lport,
+                            addr_any, 0, lp->lp_protocol, stack_locked);
+  }
   return filter_removed;
 }
 
@@ -3870,8 +4071,8 @@ oof_socket_mcast_add(struct oof_manager* fm, struct oof_socket* skf,
        * install hw filters so that traffic can go via the kernel.
        */
       if( OOF_CONNECTED_MCAST(skf, maddr) )
-        rc = oof_udp_connect_mcast_laddr(fm, skf, skf->sf_laddr, skf->sf_raddr,
-                                         skf->sf_rport);
+        rc = oof_udp_connect_mcast_laddr(fm, skf, skf->sf_laddr.ip4,
+                                         skf->sf_raddr.ip4, skf->sf_rport);
       if( rc == 0 && OOF_NEED_MCAST_FILTER(fm, skf, mm) ) {
         rc = oof_mcast_install(fm, mm, &mcast_filters);
         if( rc != 0 ) {
@@ -3912,7 +4113,7 @@ oof_socket_mcast_del_connected(struct oof_manager* fm,
 
   CI_DLLIST_FOR_EACH2(struct oof_mcast_member, mm, mm_socket_link,
                       &skf->sf_mcast_memberships)
-    if( mm->mm_maddr == skf->sf_laddr )
+    if( mm->mm_maddr == skf->sf_laddr.ip4 )
       hwports |= mm->mm_hwport_mask;
 
   hwports_full = hwports & ~fm->fm_hwports_mcast_replicate_capable;
@@ -3921,8 +4122,8 @@ oof_socket_mcast_del_connected(struct oof_manager* fm,
   if( hwports_full ) {
     oof_hw_filter_update(fm, &skf->sf_full_match_filter,
                          oof_cb_socket_stack(skf),
-                         skf->sf_local_port->lp_protocol, skf->sf_raddr,
-                         skf->sf_rport, skf->sf_laddr,
+                         skf->sf_local_port->lp_protocol, skf->sf_raddr.ip4,
+                         skf->sf_rport, skf->sf_laddr.ip4,
                          skf->sf_local_port->lp_lport, OO_HW_VLAN_UNSPEC,
                          hwports_full, OOF_SRC_FLAGS_DEFAULT);
   }
@@ -4116,8 +4317,11 @@ oof_socket_mcast_remove_sw(struct oof_manager* fm, struct oof_socket* skf)
     ci_assert(mm->mm_socket == skf);
     ci_assert(CI_IP_IS_MULTICAST(mm->mm_maddr));
     if( mm->mm_filter != NULL ) {
-      oof_cb_sw_filter_remove(skf, mm->mm_maddr, skf->sf_local_port->lp_lport,
-                              0, 0, skf->sf_local_port->lp_protocol, 1);
+      struct oof_local_port* lp = skf->sf_local_port;
+      ci_addr_t laddr = CI_ADDR_FROM_IP4(mm->mm_maddr);
+
+      oof_cb_sw_filter_remove(skf, AF_SPACE_FLAG_IP4, laddr, lp->lp_lport,
+                              addr_any, 0, lp->lp_protocol, 1);
     }
   }
   return needs_cleanup;
@@ -4453,7 +4657,7 @@ oof_socket_dump_w_lp(const char* pf, struct oof_manager* fm,
                      void (*log)(void* opaque, const char* fmt, ...),
                      void* loga)
 {
-  struct tcp_helper_resource_s* skf_stack = oof_cb_socket_stack(skf);
+  struct tcp_helper_resource_s* skf_stack = oof_socket_stack_safe(skf);
   struct oof_local_port* lp = skf->sf_local_port;
   struct oof_local_port_addr* lpa;
   struct oof_mcast_filter* mf, *mf2;
@@ -4469,10 +4673,10 @@ oof_socket_dump_w_lp(const char* pf, struct oof_manager* fm,
   if( ! oo_hw_filter_is_empty(&skf->sf_full_match_filter) ) {
     state = "ACCELERATED (full)";
   }
-  else if( CI_IP_IS_MULTICAST(skf->sf_laddr) ) {
+  else if( CI_IPX_IS_MULTICAST(skf->sf_laddr) ) {
     CI_DLLIST_FOR_EACH2(struct oof_mcast_filter, mf, mf_lp_link,
                         &lp->lp_mcast_filters)
-      if( mf->mf_maddr == skf->sf_laddr && mf->mf_filter.trs == skf_stack ) {
+      if( mf->mf_maddr == skf->sf_laddr.ip4 && mf->mf_filter.trs == skf_stack ) {
         if( oo_hw_filter_hwports(&mf->mf_filter) )
           state = "ACCELERATED (multicast laddr)";
         else {
@@ -4493,11 +4697,13 @@ oof_socket_dump_w_lp(const char* pf, struct oof_manager* fm,
       /* Not done IP_ADD_MEMBERSHIP, so won't get packets. */
       state = "UNREACHABLE (need IP_ADD_MEMBERSHIP)";
   }
-  else if( skf->sf_laddr ) {
-    la_i = oof_manager_addr_find(fm, skf->sf_laddr);
+  else if( CI_IPX_ADDR_CMP_ANY(skf->sf_laddr) ) {
+    ci_addr_t laddr = skf->sf_laddr;
+
+    la_i = oof_manager_addr_find(fm, laddr);
     ci_assert(la_i >= 0 && la_i < fm->fm_local_addr_n);
     lpa = &lp->lp_addr[la_i];
-    if( skf->sf_raddr ) {
+    if( CI_IPX_ADDR_CMP_ANY(skf->sf_raddr) ) {
       if( oo_hw_filter_is_empty(&lpa->lpa_filter) )
         state = "ORPHANED (no filter)";
       else if( oof_socket_can_share_hw_filter(skf, &lpa->lpa_filter) )
@@ -4622,11 +4828,16 @@ oof_local_port_dump(struct oof_manager* fm, struct oof_local_port* lp,
   }
 
   for( la_i = 0; la_i < fm->fm_local_addr_n; ++la_i ) {
+    char addr_str[CI_INET6_ADDRSTRLEN];
+
     la = &fm->fm_local_addrs[la_i];
     lpa = &lp->lp_addr[la_i];
+
+    ci_get_ip_str(la->la_laddr, addr_str, sizeof(addr_str));
+
     if( ! oo_hw_filter_is_empty(&lpa->lpa_filter) )
-      log(loga, "  FILTER "IPPORT_FMT" hwports=%x stack=%d",
-          IPPORT_ARG(la->la_laddr, lp->lp_lport),
+      log(loga, "  FILTER %s:%d hwports=%x stack=%d",
+          addr_str, FMT_PORT(lp->lp_lport),
           oo_hw_filter_hwports(&lpa->lpa_filter),
           oof_cb_stack_id(lpa->lpa_filter.trs));
     if( ci_dllist_not_empty(&lpa->lpa_semi_wild_socks) ) {
@@ -4686,9 +4897,9 @@ oof_manager_dump(struct oof_manager* fm,
                 void* loga)
 {
   struct oof_local_port* lp;
-  struct oof_local_addr* la;
   struct oof_tproxy* ft;
   struct oof_socket* skf;
+  struct oof_local_addr* la;
   int la_i, hash;
   int i;
 
@@ -4702,10 +4913,15 @@ oof_manager_dump(struct oof_manager* fm,
       fm->fm_local_addr_n);
 
   for( la_i = 0; la_i < fm->fm_local_addr_n; ++la_i ) {
+    char addr_str[CI_INET6_ADDRSTRLEN];
+
     la = &fm->fm_local_addrs[la_i];
-    if( la->la_laddr == 0 )
+
+    if( !CI_IPX_ADDR_CMP_ANY(la->la_laddr) )
       continue;
-    log(loga, "  "IP_FMT" active=%d sockets=%d", IP_ARG(la->la_laddr),
+
+    ci_get_ip_str(la->la_laddr, addr_str, sizeof(addr_str));
+    log(loga, "  %s active=%d sockets=%d", addr_str,
         ci_dllist_not_empty(&la->la_active_ifs), la->la_sockets);
   }
 

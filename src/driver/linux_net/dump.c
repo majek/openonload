@@ -232,7 +232,7 @@ static int efx_dump_config_unsolicited(struct efx_nic *efx,
 	return 0;
 }
 
-void efx_dump_free_buffer(struct efx_nic *efx)
+static void efx_dump_free_buffer(struct efx_nic *efx)
 {
 	struct efx_dump_data *dump_data = efx->dump_data;
 	size_t pgn;
@@ -256,14 +256,14 @@ void efx_dump_free_buffer(struct efx_nic *efx)
 		dump_data->dma_addr = NULL;
 	}
 	dump_data->dumpfile.location = 0;
-	dump_data->dumpfile.buffer = 0;
+	dump_data->dumpfile.buffer = NULL;
 	dump_data->dumpfile.root_dma_handle = 0;
 	dump_data->dumpfile.mli_depth = 0;
 	dump_data->dumpfile.size = 0;
 	dump_data->total_pages = 0;
 }
 
-int efx_dump_alloc_buffer(struct efx_nic *efx)
+static int efx_dump_alloc_buffer(struct efx_nic *efx)
 {
 	struct efx_dump_data *dump_data = efx->dump_data;
 	size_t level_pages;
@@ -317,7 +317,7 @@ int efx_dump_alloc_buffer(struct efx_nic *efx)
 	pgn = 0;
 	for (level_pages = DUMPFILE_MAX_PAGES; level_pages > 1;
 	     level_pages = IPAGES(level_pages)) {
-		uint64_t *entries;
+		__le64 *entries;
 		size_t s;
 
 		for (s = 0; s < level_pages; s++) {

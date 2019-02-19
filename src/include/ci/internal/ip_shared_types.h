@@ -221,7 +221,6 @@ typedef union {
     ci_uint32         end_seq;  /* end sequence #, includes SYN/FIN flags */
     ci_uint32         window;   /* window advertised in the packet */
     ci_uint32         pay_len;  /* length of TCP payload */
-    ci_uint64         rx_stamp CI_ALIGN(8); /*!< Time we arrived */
 #if CI_CFG_TIMESTAMPING
     struct oo_timespec rx_hw_stamp; /*!< UTC time we arrived according to hw */
 #endif
@@ -251,7 +250,6 @@ typedef union {
   } tcp_tx CI_ALIGN(8);
   struct {
     ci_uint32         pay_len;              /*!< length of UDP payload */
-    ci_uint64         rx_stamp CI_ALIGN(8); /*!< Time we arrived */
 #if CI_CFG_TIMESTAMPING
     struct oo_timespec rx_hw_stamp; /*!< UTC time we arrived according to hw */
 #endif
@@ -373,9 +371,12 @@ struct ci_ip_pkt_fmt_s {
 #endif
 #define CI_PKT_FLAG_MSG_WARM       0x0800  /* pkt with a TX timestamp    */
 #define CI_PKT_FLAG_TX_CTPIO       0x1000  /* attempted CTPIO send       */
+#define CI_PKT_FLAG_TX_PSH_ON_ACK  0x2000  /* set PSH and emit on ack    */
 
 #define CI_PKT_FLAG_TX_MASK_ALLOWED                                     \
-    (CI_PKT_FLAG_TX_MORE | CI_PKT_FLAG_TX_PSH | CI_PKT_FLAG_NONB_POOL)
+    (CI_PKT_FLAG_TX_MORE | CI_PKT_FLAG_TX_PSH | CI_PKT_FLAG_NONB_POOL | \
+     CI_PKT_FLAG_TX_PSH_ON_ACK)
+
   ci_uint16             flags;
 
   /* ! RX-specific flags.  In contrast to [flags], [rx_flags] are owned by the
@@ -389,6 +390,11 @@ struct ci_ip_pkt_fmt_s {
    *  frag_next to form the packet
    */
   ci_int8               n_buffers;
+
+  /*! Time packet was sent or received.  Used for software timestamps
+   * (SO_TIMESTAMP, SIOCGSTAMP etc.) and onload_tcpdump.
+   */
+  ci_uint64             tstamp_frc CI_ALIGN(8);
 
   ci_ip_pkt_fmt_prefix  pf CI_ALIGN(8);
 
@@ -532,6 +538,32 @@ typedef struct {
 } ci_netif_filter_table;
 
 
+typedef struct {
+  ci_uint32 laddr;
+  ci_uint32 raddr;
+  ci_uint16 lport;
+  ci_uint16 rport;
+  ci_uint32 seq_no; /* ISN of next connection */
+  ci_iptime_t expiry; /* time (ticks) entry can be reused */
+  ci_uint32 route_count; /* for handling tombstones */
+} ci_tcp_prev_seq_t;
+
+#define CI_TCP_PREV_SEQ_IS_FREE(prev_seq)     ((prev_seq).laddr == 0)
+#define CI_TCP_PREV_SEQ_IS_TERMINAL(prev_seq) ((prev_seq).route_count == 0)
+
+#if CI_CFG_IPV6
+typedef struct {
+  ci_int32  id;
+  ci_int32  route_count;
+  ci_ip6_addr_t laddr;
+} ci_ip6_netif_filter_table_entry;
+
+typedef struct {
+  CI_ULCONST unsigned table_size_mask;
+  ci_ip6_netif_filter_table_entry table[1];
+} ci_ip6_netif_filter_table;
+#endif
+
 /*!
 ** ci_netif_config
 **
@@ -587,6 +619,8 @@ typedef struct {
   ci_iptime_t tconst_2msl_time;
   /* timeout for closing orphaned states in FIN_WAIT[12] & CLOSING */
   ci_iptime_t tconst_fin_timeout;
+  /* Worst 2MSL TIMEWAIT timeout duration we expect from peer */
+  ci_iptime_t tconst_peer2msl_time;
 
   /* PMTU discovery timeout */
   ci_iptime_t tconst_pmtu_discover_slow;
@@ -619,6 +653,7 @@ typedef struct {
 #define _CI_CFG_BITFIELD3  :3
 #define _CI_CFG_BITFIELD4  :4
 #define _CI_CFG_BITFIELD8  :8
+#define _CI_CFG_BITFIELD12 :12
 #define _CI_CFG_BITFIELD16 :16
 #define _CI_CFG_BITFIELDA8 CI_ALIGN(8)
     
@@ -650,15 +685,17 @@ typedef struct {
 typedef struct {
   ci_iptime_t sched_ticks;             /* scheduler's view of time     */
   ci_iptime_t ci_ip_time_real_ticks;   /* cache of real ticks   */
+  ci_iptime_t closest_timer;           /* the closest timer we have */
   ci_uint64   frc CI_ALIGN(8);
   ci_uint32   ci_ip_time_frc2tick;     /* bit shift to ticks    */
   ci_uint32   ci_ip_time_frc2us;       /* bit shift to us tick  */  
+  ci_uint32   ci_ip_time_frc2isn;      /* bit shift to ISN tick  */
 
 # define CI_IP_TIME_APP_GRANULARITY  1000u   /* approx tick in us     */
 # define CI_IP_TIME_MAX_FRCSHIFT     31u     /* largest tick shift    */
 
   ci_uint32   khz;                     /* processor speed in khz */
-  /*< precalculated min delay for ARP-confirming IP receipt */
+  ci_uint64   ci_ip_time_ms2tick_fxp;  /* ticks expressed in 1/(2^32) of ms */
   /* list of timers currently firing */
   ci_ni_dllist_t  fire_list;
   /* holds the timer wheels in a flat array */
@@ -676,23 +713,20 @@ typedef ci_uint32  ci_iptime_callback_param_t;
 */
 typedef struct {
   ci_ni_dllist_link           link;
-  ci_iptime_t                 time;         /* absolute time to expire  */  
-  oo_sp                       param1;       /* first parameter for fn   */
-  ci_iptime_callback_fn_t     fn;           /* function code for demux  */
-# define CI_IP_TIMER_TCP_RTO         0x1    /* TCP RTO callback         */
-# define CI_IP_TIMER_TCP_DELACK      0x2    /* TCP delack callback      */
-# define CI_IP_TIMER_TCP_ZWIN        0x3    /* TCP zero window callback */
-# define CI_IP_TIMER_TCP_KALIVE      0x4    /* TCP keep alive callback  */
-# define CI_IP_TIMER_TCP_LISTEN      0x5    /* TCP listen callback      */
-# define CI_IP_TIMER_NETIF_TIMEOUT   0x6    /* netif timeout state timer*/
-# define CI_IP_TIMER_PMTU_DISCOVER   0x7    /* IP PMTU discovery        */ 
-# define CI_IP_TIMER_TCP_STATS       0x9    /* TCP statistics callback  */
-# define CI_IP_TIMER_DEBUG_HOOK      0xa    /* Hook for timer debugging */
-# define CI_IP_TIMER_NETIF_STATS     0xb    /* netif statistics timer   */
-# define CI_IP_TIMER_UDP_TUNNEL      0xc    /* UDP tunnel frag discard  */
-# define CI_IP_TIMER_TCP_TAIL_DROP   0xd    /* TCP tail drop timer      */
-# define CI_IP_TIMER_TCP_CHIMNEY_PUSH 0xe   /* TCP offload push timer   */
-# define CI_IP_TIMER_TCP_CORK        0xf    /* TCP_CORK timer   */
+  ci_iptime_t                 time;          /* absolute time to expire  */
+  oo_sp                       param1;        /* first parameter for fn   */
+  ci_iptime_callback_fn_t     fn;            /* function code for demux  */
+# define CI_IP_TIMER_TCP_RTO            0x1  /* TCP RTO callback         */
+# define CI_IP_TIMER_TCP_DELACK         0x2  /* TCP delack callback      */
+# define CI_IP_TIMER_TCP_ZWIN           0x3  /* TCP zero window callback */
+# define CI_IP_TIMER_TCP_KALIVE         0x4  /* TCP keep alive callback  */
+# define CI_IP_TIMER_TCP_LISTEN         0x5  /* TCP listen callback      */
+# define CI_IP_TIMER_NETIF_TIMEOUT      0x6  /* netif timeout state timer*/
+# define CI_IP_TIMER_PMTU_DISCOVER      0x7  /* IP PMTU discovery        */
+# define CI_IP_TIMER_TCP_STATS          0x8  /* TCP statistics callback  */
+# define CI_IP_TIMER_DEBUG_HOOK         0x9  /* Hook for timer debugging */
+# define CI_IP_TIMER_NETIF_STATS        0xa  /* netif statistics timer   */
+# define CI_IP_TIMER_TCP_CORK           0xb  /* TCP_CORK timer           */
 } ci_ip_timer;
 
 
@@ -735,6 +769,56 @@ typedef struct {
   oo_pktbuf_set set[0];
 } oo_pktbuf_manager;
 
+
+enum oo_metrics_record_type {
+  MRT_TCP_OPEN,
+  MRT_TCP_REQ,
+};
+
+
+/*
+** Metrics export ring.
+*/
+struct oo_metrics_record {
+  ci_uint8                    type;
+  union {
+    struct {
+      ci_uint64               open_frc CI_ALIGN(8);
+      ci_uint32               conn_id;
+      ci_uint32               ep_id;
+      ci_uint32               lcl_ip, rmt_ip;
+      ci_uint16               lcl_port, rmt_port;
+      oo_metrics_intvl        open_time;
+      ci_uint8                active_open;
+      ci_uint8                open_retries;
+    } tcp_open;
+    struct {
+      ci_uint32               conn_id;
+      ci_uint32               rx_bytes;
+      ci_uint32               tx_bytes;
+      oo_metrics_intvl        app_time;
+      oo_metrics_intvl        tx_time;
+      oo_metrics_intvl        idle_time;
+      oo_metrics_intvl        rx_time;
+      ci_uint16               retransmits;
+      ci_uint8                flags;
+    } tcp_req;
+  };
+};
+
+
+struct oo_metrics_ring {
+  ci_uint32                   export_enabled;
+  ci_uint32                   drops;
+  volatile ci_uint16          metrics_write_i;
+  volatile ci_uint16          metrics_read_i;
+  struct oo_metrics_record    entries[CI_CFG_METRICS_RING_SIZE];
+};
+
+
+struct oo_stack_metrics {
+  ci_uint32                   conn_id_gen;
+};
 
 
 
@@ -841,6 +925,7 @@ typedef struct {
   CI_ULCONST ci_uint8   vi_arch;
   CI_ULCONST ci_uint8   vi_variant;
   CI_ULCONST ci_uint8   vi_revision;
+  CI_ULCONST ci_uint8   vi_nic_flags;
   CI_ULCONST ci_uint8   vi_channel;
   CI_ULCONST char       pci_dev[20];
   /* Transmit overflow queue.  Packets here are ready to send. */
@@ -906,6 +991,10 @@ struct ci_netif_state_s {
 # define CI_NETIF_FLAG_SCALABLE_FILTERS_RSS 0x8
 # define CI_NETIF_FLAG_UDP_SUPPORTED       0x10 /* Stack supports UDP. */
 # define CI_NETIF_FLAG_DO_INJECT_TO_KERNEL 0x20 /* Inject unmatched packets */
+#ifndef NDEBUG
+#define CI_NETIF_FLAG_PKT_ACCOUNT_PENDING  0x40 /* pending packet account */
+#endif
+
 
   /* To give insight into runtime errors detected.  See also copy in
    * ci_netif.
@@ -1013,6 +1102,10 @@ struct ci_netif_state_s {
 
   CI_ULCONST ci_uint32  active_wild_ofs; /**< offset of active wild table */
   CI_ULCONST ci_uint32  table_ofs;       /**< offset of s/w filter table */
+#if CI_CFG_IPV6
+  CI_ULCONST ci_uint32  ip6_table_ofs;   /**< offset of IPv6 s/w filter table */
+#endif
+  CI_ULCONST ci_uint32  seq_table_ofs;   /**< offset of seq no table */
   CI_ULCONST ci_uint32  buf_ofs;         /**< offset of packet metadata */
 
   ci_ip_timer_state     iptimer_state CI_ALIGN(8);
@@ -1119,6 +1212,7 @@ struct ci_netif_state_s {
    * stack creation time.  It is used only for logging purposes.
    */
   CI_ULCONST uid_t      uuid;
+  CI_ULCONST ci_uint32  creation_time_sec;
   
   ci_uint32             defer_work_count;
 
@@ -1137,8 +1231,13 @@ struct ci_netif_state_s {
 #define OO_INTF_I_DUMP_ALL 1
 #define OO_INTF_I_DUMP_NO_MATCH 2
   ci_uint8              dump_intf[OO_INTF_I_NUM];
-  volatile ci_uint8     dump_read_i;
-  volatile ci_uint8     dump_write_i;
+  volatile ci_uint16    dump_read_i;
+  volatile ci_uint16    dump_write_i;
+#endif
+
+#ifdef CI_CFG_TCP_METRICS
+  struct oo_stack_metrics metrics;
+  struct oo_metrics_ring  metrics_ring;
 #endif
 
   ef_vi_stats           vi_stats CI_ALIGN(8);
@@ -1168,6 +1267,9 @@ struct ci_netif_state_s {
   CI_ULCONST ci_uint32  active_wild_table_entries_n;
   ci_uint32             active_wild_n;
 
+  /* Number of entries in the table of previously-used sequence numbers. */
+  CI_ULCONST ci_uint32  seq_table_entries_n;
+
   CI_ULCONST ci_uint16  rss_instance;
   CI_ULCONST ci_uint16  cluster_size;
 
@@ -1178,8 +1280,36 @@ struct ci_netif_state_s {
   oo_pkt_p              kernel_packets_head;
   oo_pkt_p              kernel_packets_tail;
   ci_uint32             kernel_packets_pending;
-  ci_uint64             kernel_packets_last_forwarded;  /* Last timestamp. */
-  ci_uint64             kernel_packets_cycles;          /* Timer period. */
+  /* Last timestamp. */
+  ci_uint64             kernel_packets_last_forwarded  CI_ALIGN(8);
+  /* Timer period. */
+  ci_uint64             kernel_packets_cycles          CI_ALIGN(8);
+
+#if CI_CFG_PROC_DELAY
+  /* Feature to measure delays between receiving packets at NIC and
+   * processing them in onload.
+   *
+   * These fields track the corresponence between frc and wall clock.
+   */
+  ci_uint64             sync_frc      CI_ALIGN(8);
+  ci_uint64             sync_cost     CI_ALIGN(8);
+  ci_int64              max_frc_diff  CI_ALIGN(8);
+  ci_uint64             sync_ns       CI_ALIGN(8);
+  /* These are the results we are exporting. */
+  ci_uint32             proc_delay_max;
+  ci_uint32             proc_delay_min;
+  ci_uint32             proc_delay_hist[CI_CFG_PROC_DELAY_BUCKETS];
+  ci_uint32             proc_delay_negative;
+#endif
+
+  /* Reserved pkt buffers
+   * Sums over each eligible sock buffer:
+   *   ni_opts->endpoint_packet_reserve -
+   *   MIN(ni_opts->endpoint_packet_reserve, ep->rx_bufs_in_use)
+   * Eligible socket buffers are socket in TCP ESTABLISHED state only.
+   * Their exact count is nst->stats->tcp_curr_estab
+   */
+  ci_int32              reserved_pktbufs;
 
 
   /* Followed by:
@@ -1353,6 +1483,7 @@ typedef struct {
                                         CI_SB_AFLAG_IN_PASSIVE_CACHE | \
                                         CI_SB_AFLAG_IN_CACHE_NO_FD | \
                                         CI_SB_AFLAG_O_NONBLOCK | \
+                                        CI_SB_AFLAG_O_NONBLOCK_UNSYNCED | \
                                         CI_SB_AFLAG_O_CLOEXEC)
 #endif
 
@@ -1446,7 +1577,7 @@ typedef struct {
    * overloaded (when used in [ci_sock_cmn::pkt]) to be the bound local IP
    * of the socket, so we can't write it.  TODO: Change that!!
    */
-  ci_ip_addr_t    ip_saddr_be32;
+  ci_addr_t       ip_saddr;
 
   ci_uint16       dport_be16;  /* Dest port: This is an input. */
 
@@ -1460,7 +1591,7 @@ typedef struct {
   /* retrrc_localroute, and we really CAN handle it */
 #define CI_IP_CACHE_IS_LOCALROUTE       1
 
-  ci_ip_addr_t    nexthop;
+  ci_addr_t       nexthop;
   ci_mtu_t        mtu;
   ci_ifid_t       ifindex;
   cicp_encap_t    encap;
@@ -1478,9 +1609,19 @@ typedef struct {
    */
   ci_uint8        ether_header[2 * ETH_ALEN + ETH_VLAN_HLEN];
   ci_uint16       ether_type;
-  ci_ip4_hdr      ip;
+  union {
+    ci_ip4_hdr      ip;
+#if CI_CFG_IPV6
+    ci_ip6_hdr      ip6;
+#endif
+  };
 } ci_ip_cached_hdrs;
 
+#if CI_CFG_IPV6
+#define ipcache_is_ipv6(ipcache) ((ipcache).ether_type == CI_ETHERTYPE_IP6)
+#else
+#define ipcache_is_ipv6(ipcache) 0
+#endif
 
 typedef ci_int32 ci_pkt_priority_t;
 
@@ -1798,6 +1939,11 @@ struct  ci_udp_state_s {
 #define CI_UDPF_MCAST_FILTER    0x00010000  /*!< mcast filter added */
 #define CI_UDPF_NO_UCAST_FILTER 0x00020000  /*!< don't add unicast filters */
 
+#if CI_CFG_ZC_RECV_FILTER
+  /* Only safe to use these at user-level in context of caller who set them */
+  ci_uint64     recv_q_filter CI_ALIGN(8);
+  ci_uint64     recv_q_filter_arg CI_ALIGN(8);
+#endif
   ci_udp_recv_q recv_q;
 
 #if CI_CFG_TIMESTAMPING
@@ -1980,6 +2126,9 @@ typedef struct {
   ci_uint32            hash;        /* hash value for lookup table       */
   oo_p                 bucket_link; /* link used in hash buckets         */
 
+#if CI_CFG_TCP_METRICS
+  oo_metrics_tstamp    tstamp;
+#endif
 } ci_tcp_state_synrecv;
 
 /* State for maintaining ci_netif_state::ready_eps_list[ready_list_id]
@@ -2048,6 +2197,38 @@ typedef struct {
 
 } ci_tcp_socket_cmn;
 
+
+enum {
+  TSM_S_INITED,
+  TSM_S_RX,
+  TSM_S_TX,
+  TSM_S_DONE,
+};
+
+
+enum {
+  TSM_F_CLIENT      = 0x1,    /* did transmit before receive */
+  TSM_F_PIPELINED   = 0x2,    /* did send with data in recv q */
+  TSM_F_ABORTED     = 0x4,    /* non-clean transition to CLOSED */
+  TSM_F_EXPORT      = 0x8,    /* export has no missing records */
+};
+
+
+struct oo_tcp_socket_metrics {
+  /* State */
+  oo_metrics_tstamp ts_last;
+  oo_metrics_tstamp ts_enter;
+  ci_uint32         tx_isn;
+  ci_uint8          state;
+  ci_uint8          flags;
+  /* Metrics */
+  oo_metrics_intvl  tx_time;
+  oo_metrics_intvl  rx_time;
+  oo_metrics_intvl  idle_time;
+  oo_metrics_intvl  app_time;
+  ci_uint32         conn_id;
+  ci_uint8          retrans_adjust;
+};
 
 
 struct oo_tcp_socket_stats {
@@ -2123,13 +2304,26 @@ struct ci_tcp_state_s {
    * EF_TCP_SERVER_LOOPBACK=2 mode */
 #define CI_TCPT_FLAG_LOOP_FAKE          0x20000
 
-  /* this socket is a faked-up loopback connection for
-   * EF_TCP_SERVER_LOOPBACK=2 mode */
-#define CI_TCPT_FLAG_LOOP_FAKE          0x20000
-
 /* It should be under "#if CI_CFG_TCP_TOA", but CI_TCP_SOCKET_FLAGS_PRI_ARG
  * becomes too complicated... */
 #define CI_TCPT_FLAG_TOA                0x40000
+
+  /* Timer is running (rto timer is used) */
+#define CI_TCPT_FLAG_TAIL_DROP_TIMING   0x80000
+  /* Probe sent */
+#define CI_TCPT_FLAG_TAIL_DROP_MARKED   0x100000
+
+  /* Limited Transmit, RFC 3042.  This flag indicates that the socket is in a
+   * state in which Limited Transmit is permitted, allowing sends beyond the
+   * end of the congestion window up to a limit of two segments. */
+#define CI_TCPT_FLAG_LIMITED_TRANSMIT   0x200000
+
+  /* The socket has had its final sequence number remembered in the table */
+#define CI_TCPT_FLAG_SEQNO_REMEMBERED   0x400000
+
+  /* The socket have been shut down for write, but failed to send FIN
+   * because packet allocation failed.  Must send FIN, really. */
+#define CI_TCPT_FLAG_FIN_PENDING        0x800000
 
   /* flags advertised on SYN */
 # define CI_TCPT_SYN_FLAGS \
@@ -2235,7 +2429,6 @@ struct ci_tcp_state_s {
 # define CI_TCP_CONG_NOTIFIED   0x12 /* congestion has been notified somehow */
 
   ci_uint8             dup_acks;    /* number of dup-acks received        */
-  ci_uint8             dup_thresh;  /* dupack threshold -- constant for now */
 
   ci_uint8             incoming_tcp_hdr_len; /* expected TCP header length */
 
@@ -2253,13 +2446,9 @@ struct ci_tcp_state_s {
 #endif
 
 #if CI_CFG_TAIL_DROP_PROBE
-  ci_uint32            taildrop_state;
-  ci_uint32            taildrop_mark; /* Sequence number of tail of retransmit queue */
-#define CI_TCP_TAIL_DROP_INACTIVE 0x0
-#define CI_TCP_TAIL_DROP_ACTIVE   0x1
-#define CI_TCP_TAIL_DROP_WAITING  0x2
-#define CI_TCP_TAIL_DROP_PRIMED   0x4
-#define CI_TCP_TAIL_DROP_PROBED   0x8
+  /* This is set to snd_nxt value when a Tail Loss Probe is sent.
+   * Valid iff CI_TCPT_FLAG_TAIL_DROP_MARKED flag is set. */
+  ci_uint32            taildrop_mark;
 #endif
 
   /* Keep alive probes, and sending ACKs after gaps that may cause
@@ -2345,9 +2534,6 @@ struct ci_tcp_state_s {
 #if CI_CFG_TCP_SOCK_STATS
   ci_ip_timer          stats_tid;   /* Statistics report timer            */
 #endif
-#if CI_CFG_TAIL_DROP_PROBE
-  ci_ip_timer          taildrop_tid;/* Tail drop probe timer              */
-#endif
   ci_ip_timer          cork_tid;    /* TCP timer for TCP_CORK/MSG_MORE   */
 
 
@@ -2385,8 +2571,10 @@ struct ci_tcp_state_s {
     ci_iptime_t        time;
   } rcvbuf_drs;
 
-  struct oo_tcp_socket_stats  stats;
-
+  struct oo_tcp_socket_stats    stats;
+#if CI_CFG_TCP_METRICS
+  struct oo_tcp_socket_metrics  metrics;
+#endif
 };
 
 
@@ -2396,6 +2584,7 @@ typedef struct {
   ci_uint32            n_acks_reset;
   ci_uint32            n_acceptq_overflow;
   ci_uint32            n_acceptq_no_sock;
+  ci_uint32            n_acceptq_no_pkts;
   ci_uint32            n_accept_loop2_closed;
   ci_uint32            n_accept_os;
   ci_uint32            n_accept_no_fd;

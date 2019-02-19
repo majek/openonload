@@ -588,6 +588,7 @@ efab_ipp_icmp_qpkt(tcp_helper_resource_t* thr,
   {
     ci_tcp_state* ts = SOCK_TO_TCP(s);
 
+    CITP_STATS_NETIF(++ni->state->stats.tcp_connect_icmp);
     get_errno(icmp_type, icmp_code, &err, &hard);
     OO_DEBUG_IPP(ci_log("%s: TCP", __FUNCTION__));
 

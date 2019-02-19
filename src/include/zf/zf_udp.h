@@ -31,6 +31,7 @@
 #include <netinet/udp.h>
 #include <assert.h>
 
+struct zf_pkt_report;
 
 /*! \struct zfur
 **
@@ -420,6 +421,27 @@ zfut_send_single_warm(struct zfut *us, const void* buf, size_t buflen);
 */
 ZF_LIBENTRY ZF_HOT int
 zfut_send(struct zfut *us, const struct iovec* iov, int iov_cnt, int flags);
+
+
+/*! \brief Retrieve timestamp reports from previously sent data
+**
+** \param us           UDP zocket.
+** \param reports_out  Array to fill with timestamp reports
+** \param count_in_out IN: size of array, OUT: number of reports
+**
+** \return 0 on success
+** \return negative error code on failure. None are currently specified.
+**
+** If transmit timestamps are enabled, then one report will be generated for
+** each packet. The packet can be identified by the "start" field of the report,
+** which begins at 0 and increments after each packet is sent on this zocket.
+** If a packet is fragmented, then a single report will be generated with the
+** timestamp for the final fragment.
+*/
+ZF_LIBENTRY int
+zfut_get_tx_timestamps(struct zfut* us,
+                       struct zf_pkt_report* reports_out,
+                       int* count_in_out);
 
 
 /*! \brief Returns a #zf_waitable representing the given #zfut.

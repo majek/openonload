@@ -33,6 +33,7 @@
 #include "efx.h"
 #include "driverlink.h"
 #include "filter.h"
+#include "mcdi_pcol.h"
 #include "nic.h"
 #include "workarounds.h"
 
@@ -435,6 +436,9 @@ int efx_dl_rss_context_new(struct efx_dl_device *efx_dev, const u32 *indir,
 	if (!efx->type->rx_push_rss_context_config)
 		return -EOPNOTSUPP;
 
+	if (!efx->type->rx_set_rss_flags)
+		return -EOPNOTSUPP;
+
 	mutex_lock(&efx->rss_lock);
 	ctx = efx_alloc_rss_context_entry(efx);
 	if (!ctx) {
@@ -449,16 +453,25 @@ int efx_dl_rss_context_new(struct efx_dl_device *efx_dev, const u32 *indir,
 		netdev_rss_key_fill(ctx->rx_hash_key, sizeof(ctx->rx_hash_key));
 		key = ctx->rx_hash_key;
 	}
-	ctx->flags = flags;
 	ctx->num_queues = num_queues;
 	rc = efx->type->rx_push_rss_context_config(efx, ctx, indir, key);
 	if (rc)
-		efx_free_rss_context_entry(ctx);
-	else
-		*rss_context = ctx->user_id;
+		goto out_free;
+	*rss_context = ctx->user_id;
+	rc = efx->type->rx_set_rss_flags(efx, ctx, flags);
+	if (rc)
+		goto out_delete;
+	ctx->flags = flags;
+
 out_unlock:
 	mutex_unlock(&efx->rss_lock);
 	return rc;
+
+out_delete:
+	efx->type->rx_push_rss_context_config(efx, ctx, NULL, NULL);
+out_free:
+	efx_free_rss_context_entry(ctx);
+	goto out_unlock;
 }
 EXPORT_SYMBOL(efx_dl_rss_context_new);
 
@@ -575,26 +588,179 @@ int efx_dl_filter_redirect_rss(struct efx_dl_device *efx_dev,
 }
 EXPORT_SYMBOL(efx_dl_filter_redirect_rss);
 
-int efx_dl_vport_filter_insert(struct efx_dl_device *efx_dev,
-			       unsigned int vport_id,
-			       const struct efx_filter_spec *spec,
-			       u64 *filter_id_out, bool *is_exclusive_out)
+int efx_dl_vport_new(struct efx_dl_device *efx_dev, u16 vlan, bool vlan_restrict)
 {
 	struct efx_nic *efx = efx_dl_handle(efx_dev)->efx;
-	return efx->type->vport_filter_insert(efx, vport_id, spec,
-					      filter_id_out, is_exclusive_out);
-}
-EXPORT_SYMBOL(efx_dl_vport_filter_insert);
 
-int efx_dl_vport_filter_remove(struct efx_dl_device *efx_dev,
-			       unsigned int vport_id,
-			       u64 filter_id, bool is_exclusive)
+	return efx_vport_add(efx, vlan, vlan_restrict);
+}
+EXPORT_SYMBOL(efx_dl_vport_new);
+
+int efx_dl_vport_free(struct efx_dl_device *efx_dev, u16 port_id)
 {
 	struct efx_nic *efx = efx_dl_handle(efx_dev)->efx;
-	return efx->type->vport_filter_remove(efx, vport_id, filter_id,
-					      is_exclusive);
+
+	return efx_vport_del(efx, port_id);
 }
-EXPORT_SYMBOL(efx_dl_vport_filter_remove);
+EXPORT_SYMBOL(efx_dl_vport_free);
+
+int efx_dl_init_txq(struct efx_dl_device *efx_dev, dma_addr_t *dma_addrs,
+		    int n_dma_addrs, u16 vport_id, u8 stack_id, u32 owner_id,
+		    bool timestamp, u8 crc_mode, bool tcp_udp_only,
+		    bool tcp_csum_dis, bool ip_csum_dis, bool inner_tcp_csum,
+		    bool inner_ip_csum, bool buff_mode, bool pacer_bypass,
+		    bool ctpio, bool ctpio_uthresh, u32 instance, u32 label,
+		    u32 target_evq, u32 num_entries)
+{
+	MCDI_DECLARE_BUF(inbuf, MC_CMD_INIT_TXQ_EXT_IN_LEN);
+	struct efx_nic *efx = efx_dl_handle(efx_dev)->efx;
+	struct efx_vport *vpx;
+	u32 port_id;
+	int i, rc;
+
+	mutex_lock(&efx->vport_lock);
+	/* look up vport, convert to hw ID, and OR in stack_id */
+	if (vport_id == 0)
+		vpx = &efx->vport;
+	else
+		vpx = efx_find_vport_entry(efx, vport_id);
+	if (!vpx) {
+		rc = -ENOENT;
+		goto out_unlock;
+	}
+	if (vpx->vport_id == EVB_PORT_ID_NULL) {
+		rc = -EOPNOTSUPP;
+		goto out_unlock;
+	}
+	port_id = vpx->vport_id | EVB_STACK_ID(stack_id);
+
+	MCDI_SET_DWORD(inbuf, INIT_TXQ_EXT_IN_SIZE, num_entries);
+	MCDI_SET_DWORD(inbuf, INIT_TXQ_EXT_IN_TARGET_EVQ, target_evq);
+	MCDI_SET_DWORD(inbuf, INIT_TXQ_EXT_IN_LABEL, label);
+	MCDI_SET_DWORD(inbuf, INIT_TXQ_EXT_IN_INSTANCE, instance);
+	MCDI_SET_DWORD(inbuf, INIT_TXQ_EXT_IN_OWNER_ID, owner_id);
+	MCDI_SET_DWORD(inbuf, INIT_TXQ_EXT_IN_PORT_ID, port_id);
+
+	MCDI_POPULATE_DWORD_11(inbuf, INIT_TXQ_EXT_IN_FLAGS,
+			INIT_TXQ_EXT_IN_FLAG_BUFF_MODE, !!buff_mode,
+			INIT_TXQ_EXT_IN_FLAG_IP_CSUM_DIS, !!ip_csum_dis,
+			INIT_TXQ_EXT_IN_FLAG_TCP_CSUM_DIS, !!tcp_csum_dis,
+			INIT_TXQ_EXT_IN_FLAG_INNER_IP_CSUM_EN, !!inner_ip_csum,
+			INIT_TXQ_EXT_IN_FLAG_INNER_TCP_CSUM_EN, !!inner_tcp_csum,
+			INIT_TXQ_EXT_IN_FLAG_TCP_UDP_ONLY, !!tcp_udp_only,
+			INIT_TXQ_EXT_IN_CRC_MODE, crc_mode,
+			INIT_TXQ_EXT_IN_FLAG_TIMESTAMP, !!timestamp,
+			INIT_TXQ_EXT_IN_FLAG_CTPIO, !!ctpio,
+			INIT_TXQ_EXT_IN_FLAG_CTPIO_UTHRESH, !!ctpio_uthresh,
+			INIT_TXQ_EXT_IN_FLAG_PACER_BYPASS, !!pacer_bypass);
+
+	for (i = 0; i < n_dma_addrs; ++i)
+		MCDI_SET_ARRAY_QWORD(inbuf, INIT_TXQ_EXT_IN_DMA_ADDR, i,
+				     dma_addrs[i]);
+
+	rc = efx_mcdi_rpc(efx, MC_CMD_INIT_TXQ, inbuf, sizeof(inbuf),
+			  NULL, 0, NULL);
+out_unlock:
+	mutex_unlock(&efx->vport_lock);
+        return rc;
+}
+EXPORT_SYMBOL(efx_dl_init_txq);
+
+int efx_dl_init_rxq(struct efx_dl_device *efx_dev, dma_addr_t *dma_addrs,
+		    int n_dma_addrs, u16 vport_id, u8 stack_id, u32 owner_id,
+		    u8 crc_mode, bool timestamp, bool hdr_split, bool buff_mode,
+		    bool rx_prefix, u8 dma_mode, u32 instance, u32 label,
+		    u32 target_evq, u32 num_entries, u8 ps_buf_size,
+		    bool force_rx_merge)
+{
+	MCDI_DECLARE_BUF(inbuf, MC_CMD_INIT_RXQ_EXT_IN_LEN);
+	struct efx_nic *efx = efx_dl_handle(efx_dev)->efx;
+	struct efx_vport *vpx;
+	u32 port_id;
+	int i, rc;
+
+	mutex_lock(&efx->vport_lock);
+	/* look up vport, convert to hw ID, and OR in stack_id */
+	if (vport_id == 0)
+		vpx = &efx->vport;
+	else
+		vpx = efx_find_vport_entry(efx, vport_id);
+	if (!vpx) {
+		rc = -ENOENT;
+		goto out_unlock;
+	}
+	if (vpx->vport_id == EVB_PORT_ID_NULL) {
+		rc = -EOPNOTSUPP;
+		goto out_unlock;
+	}
+	port_id = vpx->vport_id | EVB_STACK_ID(stack_id);
+
+	MCDI_SET_DWORD(inbuf, INIT_RXQ_EXT_IN_SIZE, num_entries);
+	MCDI_SET_DWORD(inbuf, INIT_RXQ_EXT_IN_TARGET_EVQ, target_evq);
+	MCDI_SET_DWORD(inbuf, INIT_RXQ_EXT_IN_LABEL, label);
+	MCDI_SET_DWORD(inbuf, INIT_RXQ_EXT_IN_INSTANCE, instance);
+	MCDI_SET_DWORD(inbuf, INIT_RXQ_EXT_IN_OWNER_ID, owner_id);
+	MCDI_SET_DWORD(inbuf, INIT_RXQ_EXT_IN_PORT_ID, port_id);
+
+	MCDI_POPULATE_DWORD_8(inbuf, INIT_RXQ_EXT_IN_FLAGS,
+			INIT_RXQ_EXT_IN_FLAG_BUFF_MODE, !!buff_mode,
+			INIT_RXQ_EXT_IN_FLAG_HDR_SPLIT, !!hdr_split,
+			INIT_RXQ_EXT_IN_FLAG_TIMESTAMP, !!timestamp,
+			INIT_RXQ_EXT_IN_FLAG_PREFIX, !!rx_prefix,
+			INIT_RXQ_EXT_IN_CRC_MODE, crc_mode,
+			INIT_RXQ_EXT_IN_DMA_MODE, dma_mode,
+			INIT_RXQ_EXT_IN_PACKED_STREAM_BUFF_SIZE, ps_buf_size,
+			INIT_RXQ_EXT_IN_FLAG_FORCE_EV_MERGING, !!force_rx_merge);
+
+	for (i = 0; i < n_dma_addrs; ++i)
+		MCDI_SET_ARRAY_QWORD(inbuf, INIT_RXQ_EXT_IN_DMA_ADDR, i,
+				     dma_addrs[i]);
+
+	rc = efx_mcdi_rpc(efx, MC_CMD_INIT_RXQ, inbuf, sizeof(inbuf),
+			  NULL, 0, NULL);
+out_unlock:
+	mutex_unlock(&efx->vport_lock);
+        return rc;
+}
+EXPORT_SYMBOL(efx_dl_init_rxq);
+
+int efx_dl_set_multicast_loopback_suppression(struct efx_dl_device *efx_dev,
+					      bool suppress, u16 vport_id,
+					      u8 stack_id)
+{
+	MCDI_DECLARE_BUF(inbuf, MC_CMD_SET_PARSER_DISP_CONFIG_IN_LEN(1));
+	struct efx_nic *efx = efx_dl_handle(efx_dev)->efx;
+	struct efx_vport *vpx;
+	u32 port_id;
+	int rc;
+
+	mutex_lock(&efx->vport_lock);
+	/* look up vport, convert to hw ID, and OR in stack_id */
+	if (vport_id == 0)
+		vpx = &efx->vport;
+	else
+		vpx = efx_find_vport_entry(efx, vport_id);
+	if (!vpx) {
+		rc = -ENOENT;
+		goto out_unlock;
+	}
+	if (vpx->vport_id == EVB_PORT_ID_NULL) {
+		rc = -EOPNOTSUPP;
+		goto out_unlock;
+	}
+	port_id = vpx->vport_id | EVB_STACK_ID(stack_id);
+
+	MCDI_SET_DWORD(inbuf, SET_PARSER_DISP_CONFIG_IN_TYPE,
+		       MC_CMD_SET_PARSER_DISP_CONFIG_IN_VADAPTOR_SUPPRESS_SELF_TX);
+	MCDI_SET_DWORD(inbuf, SET_PARSER_DISP_CONFIG_IN_ENTITY, port_id);
+	MCDI_SET_DWORD(inbuf, SET_PARSER_DISP_CONFIG_IN_VALUE, !!suppress);
+	rc = efx_mcdi_rpc(efx, MC_CMD_SET_PARSER_DISP_CONFIG,
+			  inbuf, sizeof(inbuf), NULL, 0, NULL);
+out_unlock:
+	mutex_unlock(&efx->vport_lock);
+        return rc;
+}
+EXPORT_SYMBOL(efx_dl_set_multicast_loopback_suppression);
 
 int efx_dl_mcdi_rpc(struct efx_dl_device *efx_dev, unsigned int cmd,
 		    size_t inlen, size_t outlen, size_t *outlen_actual,

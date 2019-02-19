@@ -1,0 +1,25 @@
+# OpenOnload profile fragment for HAProxy common parts, shared by latency
+# and throughput profiles
+
+# HAProxy uses epoll sets within one process only
+onload_set EF_EPOLL_MT_SAFE 1
+
+# HAProxy uses pipes in a manner incompatible with Onload
+onload_set EF_PIPE 0
+
+# If is a common tactic of HAProxy configurations to use a loopback connection
+# in order to funnel everything down a single worker in order to combine
+# statistics or stick tables while scaling-out TLS handshakes. Use of
+# multithreaded mode instead can be more efficient with Onload, however we
+# include the following anyway to help existing configurations work
+onload_set EF_TCP_SERVER_LOOPBACK 1
+onload_set EF_TCP_CLIENT_LOOPBACK 3
+
+# HAProxy configurations by default use only one process. If the 'nbproc'
+# configuration option has been used then this setting must be altered to
+# match
+onload_set EF_CLUSTER_SIZE 1
+
+onload_set EF_SCALABLE_FILTERS "any=rss:active:passive"
+onload_set EF_SCALABLE_FILTERS_ENABLE 2
+onload_set EF_CLUSTER_NAME hapx

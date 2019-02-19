@@ -82,9 +82,6 @@ static int efab_file_move_supported_tcp(ci_netif *ni, ci_tcp_state *ts,
       !ci_ip_queue_is_empty(&ts->retrans) ||
       ci_ip_timer_pending(ni, &ts->rto_tid) ||
       ci_ip_timer_pending(ni, &ts->zwin_tid) ||
-#if CI_CFG_TAIL_DROP_PROBE
-      ci_ip_timer_pending(ni, &ts->taildrop_tid) ||
-#endif
       ci_ip_timer_pending(ni, &ts->cork_tid) ) {
     if( do_assert ) {
       ci_assert(ci_ip_queue_is_empty(&ts->send));
@@ -93,9 +90,6 @@ static int efab_file_move_supported_tcp(ci_netif *ni, ci_tcp_state *ts,
       ci_assert(ci_ip_queue_is_empty(&ts->retrans));
       ci_assert(! ci_ip_timer_pending(ni, &ts->rto_tid));
       ci_assert(! ci_ip_timer_pending(ni, &ts->zwin_tid));
-#if CI_CFG_TAIL_DROP_PROBE
-      ci_assert(! ci_ip_timer_pending(ni, &ts->taildrop_tid));
-#endif
       ci_assert(! ci_ip_timer_pending(ni, &ts->cork_tid));
     }
     return false;
@@ -203,7 +197,7 @@ static void efab_assert_file_move_supported(ci_netif *ni, ci_sock_cmn *s,
 }
 
 
-static void efab_ip_queue_copy(ci_netif *ni_to, ci_ip_pkt_queue *q_to,
+static int efab_ip_queue_copy(ci_netif *ni_to, ci_ip_pkt_queue *q_to,
                                ci_netif *ni_from, ci_ip_pkt_queue *q_from)
 {
   ci_ip_pkt_fmt *pkt_to, *pkt_from;
@@ -211,21 +205,24 @@ static void efab_ip_queue_copy(ci_netif *ni_to, ci_ip_pkt_queue *q_to,
 
   ci_ip_queue_init(q_to);
   if( q_from->num == 0 )
-    return;
+    return 0;
 
   ci_assert( OO_PP_NOT_NULL(q_from->head) );
   pp = q_from->head;
   do {
     pkt_from = PKT_CHK(ni_from, pp);
-    pkt_to = ci_netif_pkt_alloc(ni_to);
+    pkt_to = ci_netif_pkt_alloc(ni_to, 0);
+    if( pkt_to == NULL )
+      return -ENOBUFS;
     pkt_to->flags |= CI_PKT_FLAG_RX;
     ni_to->state->n_rx_pkts++;
     memcpy(&pkt_to->pay_len, &pkt_from->pay_len,
            CI_CFG_PKT_BUF_SIZE - CI_MEMBER_OFFSET(ci_ip_pkt_fmt, pay_len));
     ci_ip_queue_enqueue(ni_to, q_to, pkt_to);
     pp = pkt_from->next;
-    ci_netif_pkt_release(ni_from, pkt_from);
   } while( OO_PP_NOT_NULL(pp) );
+
+  return 0;
 }
 
 /* Move priv file to the alien_ni stack.
@@ -357,6 +354,9 @@ int efab_file_move_to_alien_stack(ci_private_t *priv, ci_netif *alien_ni,
     mid_ts->zwin_tid = new_ts->zwin_tid;
     mid_ts->kalive_tid = new_ts->kalive_tid;
     mid_ts->cork_tid = new_ts->cork_tid;
+#if CI_CFG_TCP_SOCK_STATS
+    mid_ts->stats_tid = new_ts->stats_tid;
+#endif
     ci_ip_queue_init(&mid_ts->recv1);
     ci_ip_queue_init(&mid_ts->recv2);
     ci_ip_queue_init(&mid_ts->send);
@@ -379,7 +379,7 @@ int efab_file_move_to_alien_stack(ci_private_t *priv, ci_netif *alien_ni,
     ci_ni_dllist_link_init(alien_ni, &new_ts->epcache_fd_link, sp, "ecfd");
     ci_ni_dllist_self_link(alien_ni, &new_ts->epcache_fd_link);
 #endif
-   
+
     /* free temporary mid_ts storage */
     CI_FREE_OBJ(mid_ts);
   }
@@ -397,6 +397,27 @@ int efab_file_move_to_alien_stack(ci_private_t *priv, ci_netif *alien_ni,
   if( rc != 0 ) {
     rc = -EINVAL;
     goto fail3;
+  }
+
+  /* Read all already-arrived packets after the filters move but before
+   * copying of the receive queue. */
+  ci_netif_poll(&old_thr->netif);
+  if( old_s->b.state & CI_TCP_STATE_TCP ) {
+    ci_tcp_state *new_ts = SOCK_TO_TCP(new_s);
+    ci_tcp_state *old_ts = SOCK_TO_TCP(old_s);
+
+    ci_tcp_rx_buf_account_begin(&new_thr->netif, new_ts);
+    rc = efab_ip_queue_copy(alien_ni, &new_ts->recv1,
+                            &old_thr->netif, &old_ts->recv1);
+    ci_tcp_rx_buf_account_end(&new_thr->netif, new_ts);
+    if( rc != 0 )
+      goto fail4;
+    ci_tcp_rx_buf_account_begin(&new_thr->netif, new_ts);
+    rc = efab_ip_queue_copy(alien_ni, &new_ts->recv2,
+                            &old_thr->netif, &old_ts->recv2);
+    ci_tcp_rx_buf_account_end(&new_thr->netif, new_ts);
+    if( rc != 0 )
+      goto fail4;
   }
 
   /* Allocate a new file for the new endpoint */
@@ -423,11 +444,7 @@ int efab_file_move_to_alien_stack(ci_private_t *priv, ci_netif *alien_ni,
   priv->fd_type = CI_PRIV_TYPE_ALIEN_EP;
   priv->_filp->f_op = &linux_tcp_helper_fops_alien;
   ci_wmb();
-  oo_file_moved(priv);
 
-  /* Read all already-arrived packets after the filters move but before
-   * copying of the receive queue. */
-  ci_netif_poll(&old_thr->netif);
   tcp_helper_endpoint_move_filters_post(old_ep, new_ep);
   efab_assert_file_move_supported(&old_thr->netif, old_s, drop_filter);
 
@@ -460,7 +477,7 @@ int efab_file_move_to_alien_stack(ci_private_t *priv, ci_netif *alien_ni,
     CI_TCP_STATS_INC_CURR_ESTAB(alien_ni);
 
 
-  /* Copy recv queue */
+  /* Copy/reset protocol-specific values */
   if( new_s->b.state & CI_TCP_STATE_TCP ) {
     ci_tcp_state *new_ts = SOCK_TO_TCP(new_s);
     ci_tcp_state *old_ts = SOCK_TO_TCP(old_s);
@@ -470,10 +487,9 @@ int efab_file_move_to_alien_stack(ci_private_t *priv, ci_netif *alien_ni,
     ci_ip_timer_clear(&old_thr->netif, &old_ts->kalive_tid);
     ci_ip_timer_clear(&old_thr->netif, &old_ts->delack_tid);
 
-    efab_ip_queue_copy(alien_ni, &new_ts->recv1,
-                       &old_thr->netif, &old_ts->recv1);
-    efab_ip_queue_copy(alien_ni, &new_ts->recv2,
-                       &old_thr->netif, &old_ts->recv2);
+    /* Recv queue have already been copied */
+    ci_tcp_rx_queue_drop(&old_thr->netif, old_ts, &old_ts->recv1);
+    ci_tcp_rx_queue_drop(&old_thr->netif, old_ts, &old_ts->recv2);
     new_ts->recv1_extract = new_ts->recv1.head;
     
     /* Ensure we update rcv_added with the data received in the last
@@ -488,7 +504,7 @@ int efab_file_move_to_alien_stack(ci_private_t *priv, ci_netif *alien_ni,
     new_ts->dsack_start = new_ts->dsack_end = 0;
     for( i = 0; i <= CI_TCP_SACK_MAX_BLOCKS; i++ )
       new_ts->last_sack[i] = OO_PP_NULL;
-    ci_ip_queue_drop(&old_thr->netif, &old_ts->rob);
+    ci_tcp_rx_queue_drop(&old_thr->netif, old_ts, &old_ts->rob);
   }
   else {
     /* There should not be any recv q, but drop it to be sure */
@@ -545,10 +561,15 @@ fail4:
    * We have not removed old sw filters yet. */
   tcp_helper_endpoint_move_filters_undo(old_ep, new_ep);
 fail3:
-  if( new_s->b.state & CI_TCP_STATE_TCP )
-    ci_tcp_state_free(alien_ni, SOCK_TO_TCP(new_s));
-  else
+  if( new_s->b.state & CI_TCP_STATE_TCP ) {
+    ci_tcp_state *new_ts = SOCK_TO_TCP(new_s);
+    ci_tcp_rx_queue_drop(alien_ni, new_ts, &new_ts->recv1);
+    ci_tcp_rx_queue_drop(alien_ni, new_ts, &new_ts->recv2);
+    ci_tcp_state_free(alien_ni, new_ts);
+  }
+  else {
     ci_udp_state_free(alien_ni, SOCK_TO_UDP(new_s));
+  }
 fail2:
 fail1:
   ci_netif_unlock(alien_ni);

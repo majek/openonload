@@ -63,8 +63,12 @@ typedef dma_addr_t ef_vi_dma_addr_t;
 
 #if defined(__i386__) || defined(__x86_64__)
 # define wmb_wc()  __asm__ __volatile__("sfence": : :"memory")
-#else
+#elif defined(__aarch64__)
+# define wmb_wc()  __asm__ __volatile__ ("dsb oshst" : : : "memory")
+#elif defined(__PPC__)
 # define wmb_wc()  __asm__ __volatile__("sync" : : :"memory")
+#else
+# error Unknown processor architecture
 #endif
 
 

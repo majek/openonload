@@ -49,6 +49,9 @@
 
 #define ci_netif_is_locked(ni)        ef_eplock_is_locked(&(ni)->state->lock)
 
+extern ci_uint64
+ci_netif_unlock_slow_common(ci_netif*, ci_uint64 lock_val) CI_HF;
+
 extern void ci_netif_unlock(ci_netif*) CI_HF;
 
 
@@ -235,17 +238,14 @@ ci_inline char* oo_state_off_to_ptr(ci_netif* ni, unsigned off)
 /* EP_BUF_SIZE must be an exact divisor of CI_PAGE_SIZE to ensure we don't
 ** straddle page boundaries.  We'd like to compute the number of EPs that
 ** fit in a page at compile-time, but that ain't easy.  So it is hard coded
-** here, and checked in ci_netif_ctor() to ensure it is sensible.
+** here, and checked in ci_netif_sanity_checks() to ensure it is sensible.
 */
-#define EP_BUF_SIZE 1024 /* MUST be 2^n, with n<=12 */
-#if (CI_PAGE_SIZE % EP_BUF_SIZE != 0)
-#error "EP_BUF_SIZE *must* be a divisor of PAGE_SIZE, and it's not"
-#endif
+#define EP_BUF_SIZE        CI_CFG_EP_BUF_SIZE
 #define EP_BUF_PER_PAGE    (CI_PAGE_SIZE / EP_BUF_SIZE)
 
 /* Aux buffers are sub-buffers of EP buffers.  Header at beginning,
  * and 7 aux buffer per 1024 bytes. */
-#define AUX_PER_BUF 7
+#define AUX_PER_BUF (CI_CFG_EP_BUF_SIZE / CI_AUX_MEM_SIZE - 1)
 
 
 /* TRUSTED_SOCK_ID(ni, id)
@@ -365,10 +365,6 @@ ci_inline char* oo_sockp_to_ptr(ci_netif* ni, oo_sp sockp)
 /*********************************************************************
 ************************ Packet buffer access ************************
 *********************************************************************/
-
-#define PKTS_PER_SET    (1u << CI_CFG_PKTS_PER_SET_S)
-#define PKTS_PER_SET_M  (PKTS_PER_SET - 1u)
-
 
 /* VALID_PKT_ID(ni, id)
 **
@@ -554,6 +550,18 @@ ci_inline void* oo_ip_data(ci_ip_pkt_fmt* pkt)
   const ci_ip4_hdr* ip = oo_ip_hdr(pkt);
   return (uint8_t*) ip + CI_IP4_IHL(ip);
 }
+
+#if CI_CFG_IPV6
+ci_inline ci_ip6_hdr* oo_ip6_hdr(ci_ip_pkt_fmt* pkt)
+{
+  return oo_l3_hdr(pkt);
+}
+
+ci_inline void* oo_ip6_data(ci_ip_pkt_fmt* pkt)
+{
+  return oo_ip6_hdr(pkt) + 1;
+}
+#endif
 
 
 /**********************************************************************

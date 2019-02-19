@@ -50,6 +50,7 @@
  ****************************************************************************
  */
 
+#include <ci/driver/internal.h>
 #include <ci/efrm/debug.h>
 #include <ci/efrm/driver_private.h>
 #include <ci/efrm/kernel_proc.h>

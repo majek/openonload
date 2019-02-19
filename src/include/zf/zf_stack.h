@@ -42,6 +42,9 @@ struct zf_attr;
 
 /*! \brief Initialize zf library.
 **
+** Should be called exactly once per process, and before any other API calls
+** are made.
+**
 ** \return 0 on success, or a negative error code.  This function uses
 ** attributes internally and can return any of the error codes returned by
 ** zf_attr_alloc().  Additionally, it can return the following:
@@ -136,9 +139,14 @@ ZF_LIBENTRY struct zf_waitable* zf_stack_to_waitable(struct zf_stack*);
 ZF_LIBENTRY int zf_stack_is_quiescent(struct zf_stack*);
 
 /**
- * \brief Print library name and version to stderr.
+ * \brief Returns library name and version.
  */
-ZF_LIBENTRY void zf_version(void);
+ZF_LIBENTRY const char* zf_version(void);
+
+/**
+ * \brief Prints library name and version to stderr, then exits.
+ */
+ZF_LIBENTRY void zf_print_version(void);
 
 #endif /* __ZF_STACK_H__ */
 /** @} */

@@ -251,11 +251,11 @@ tcp_helper_endpoint_set_filters(tcp_helper_endpoint_t* ep,
   ci_netif* ni = &ep->thr->netif;
   ci_sock_cmn* s = SP_TO_SOCK(ni, ep->id);
   tcp_helper_endpoint_t* listen_ep = NULL;
-  unsigned laddr, raddr;
+  ci_addr_t laddr, raddr;
   int protocol, lport, rport;
   int rc;
   unsigned long lock_flags;
-  int use_mac_filter;
+  int use_mac_filter, af_space;
 
   OO_DEBUG_TCPH(ci_log("%s: [%d:%d] bindto_ifindex=%d from_tcp_id=%d",
                        __FUNCTION__, ep->thr->id,
@@ -283,11 +283,13 @@ tcp_helper_endpoint_set_filters(tcp_helper_endpoint_t* ep,
   ci_assert(! ci_tcp_is_cacheable_active_wild_sharer(s));
 #endif
 
-  laddr = sock_laddr_be32(s);
-  raddr = sock_raddr_be32(s);
+  af_space = sock_af_space(s);
+  laddr = sock_laddr(s);
+  raddr = sock_raddr(s);
   lport = sock_lport_be16(s);
   rport = sock_rport_be16(s);
   protocol = sock_protocol(s);
+
   use_mac_filter = ci_tcp_use_mac_filter(ni, s, bindto_ifindex, from_tcp_id);
 
   /* Grab reference to the O/S socket.  This will be consumed by
@@ -341,29 +343,29 @@ tcp_helper_endpoint_set_filters(tcp_helper_endpoint_t* ep,
     else {
       OO_DEBUG_ERR(ci_log(
         "ERROR: %s is changing the socket [%d:%d] filter to "
-        "%s %s:%d -> %s:%d, "
+        "%s " IPX_PORT_FMT " -> " IPX_PORT_FMT ", "
         "the filter already exists and there is no backing socket.  "
         "Something went awry.",
         __func__, ep->thr->id, OO_SP_FMT(ep->id),
         protocol == IPPROTO_UDP ? "UDP" : "TCP",
-        ip_addr_str(laddr), lport, ip_addr_str(raddr), rport));
+        IPX_ARG(AF_IP(laddr)), lport, IPX_ARG(AF_IP(raddr)), rport));
       ci_assert(0);
     }
-    if( protocol == IPPROTO_UDP && raddr != 0 &&
-        ep->oofilter.sf_raddr == 0 ) {
+    if( protocol == IPPROTO_UDP && CI_IPX_ADDR_CMP_ANY(raddr) &&
+        !CI_IPX_ADDR_CMP_ANY(ep->oofilter.sf_raddr) ) {
       return oof_udp_connect(oo_filter_ns_to_manager(ep->thr->filter_ns),
-                             &ep->oofilter, laddr, raddr, rport);
+                             &ep->oofilter, laddr.ip4, raddr.ip4, rport);
     }
     if( protocol != IPPROTO_UDP ) {
       /* UDP re-connect is OK, but we do not expect anything else.
        * We've already crashed in DEBUG, but let's complain in NDEBUG. */
       OO_DEBUG_ERR(ci_log(
         "ERROR: %s is changing the socket [%d:%d] filter to "
-        "%s %s:%d -> %s:%d, "
+        "%s " IPX_PORT_FMT" -> " IPX_PORT_FMT ", "
         "but some filter is already installed.  Something went awry.",
         __func__, ep->thr->id, OO_SP_FMT(ep->id),
         protocol == IPPROTO_UDP ? "UDP" : "TCP",
-        ip_addr_str(laddr), lport, ip_addr_str(raddr), rport));
+        IPX_ARG(AF_IP(laddr)), lport, IPX_ARG(AF_IP(raddr)), rport));
       /* Filter is cleared so that endpoint comes back to consistent state:
        * tcp sockets after failed set filter operations have no filter.
        * However, as we are afraid that endpoint is compromised we
@@ -384,7 +386,7 @@ tcp_helper_endpoint_set_filters(tcp_helper_endpoint_t* ep,
   else if( OO_SP_NOT_NULL(from_tcp_id) )
     rc = oof_socket_share(oo_filter_ns_to_manager(ep->thr->filter_ns),
                           &ep->oofilter, &listen_ep->oofilter,
-                          laddr, raddr, rport);
+                          af_space, laddr, raddr, rport);
   else {
     int flags;
     ci_assert( ! in_atomic() );
@@ -405,13 +407,13 @@ tcp_helper_endpoint_set_filters(tcp_helper_endpoint_t* ep,
 
     rc = oof_socket_add(oo_filter_ns_to_manager(ep->thr->filter_ns),
                         &ep->oofilter, flags, protocol,
-                        laddr, lport, raddr, rport, NULL);
+                        af_space, laddr, lport, raddr, rport, NULL);
     if( rc != 0 && rc != -EFILTERSSOME &&
         (s->s_flags & CI_SOCK_FLAG_REUSEADDR) &&
         tcp_helper_endpoint_reuseaddr_cleanup(&ep->thr->netif, s) ) {
       rc = oof_socket_add(oo_filter_ns_to_manager(ep->thr->filter_ns),
                           &ep->oofilter, flags, protocol,
-                          laddr, lport, raddr, rport, NULL);
+                          af_space, laddr, lport, raddr, rport, NULL);
     }
     if( rc == 0 || rc == -EFILTERSSOME )
       s->s_flags |= CI_SOCK_FLAG_FILTER;

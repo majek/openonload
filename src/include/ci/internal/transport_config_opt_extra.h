@@ -24,4 +24,7 @@
 /* TCP TOA option support off (bug76883). */
 #define CI_CFG_TCP_TOA 0
 
+/* Decluster on unpostponed signal (bug79148). */
+#define CI_CFG_DECLUSTER 0
+
 #endif /* __CI_INTERNAL_TRANSPORT_CONFIG_OPT_EXTRA_H__ */

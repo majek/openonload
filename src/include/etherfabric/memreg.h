@@ -14,7 +14,7 @@
 */
 
 /****************************************************************************
- * Copyright 2012-2015: Solarflare Communications Inc,
+ * Copyright 2012-2018: Solarflare Communications Inc,
  *                      7505 Irvine Center Drive, Suite 100
  *                      Irvine, CA 92618, USA
  *
@@ -41,8 +41,8 @@
 *//*! \file
 ** \author    Solarflare Communications, Inc.
 ** \brief     Registering memory for EtherFabric Virtual Interface HAL.
-** \date      2015/02/16
-** \copyright Copyright &copy; 2015 Solarflare Communications, Inc. All
+** \date      2018/11/06
+** \copyright Copyright &copy; 2018 Solarflare Communications, Inc. All
 **            rights reserved. Solarflare, OpenOnload and EnterpriseOnload
 **            are trademarks of Solarflare Communications, Inc.
 *//*

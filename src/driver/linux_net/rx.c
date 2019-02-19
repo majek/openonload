@@ -1273,9 +1273,6 @@ void __efx_rx_packet(struct efx_channel *channel)
 	else
 #endif
 		efx_rx_deliver(channel, eh, rx_buf, channel->rx_pkt_n_frags);
-#if defined(EFX_USE_KCOMPAT) && defined(EFX_USE_NET_DEVICE_LAST_RX)
-	efx->net_dev->last_rx = jiffies;
-#endif
 out:
 	channel->rx_pkt_n_frags = 0;
 }
@@ -1313,8 +1310,8 @@ int efx_probe_rx_queue(struct efx_rx_queue *rx_queue)
 
 
 #if !defined(EFX_NOT_UPSTREAM) || defined(EFX_RX_PAGE_SHARE)
-void efx_init_rx_recycle_ring(struct efx_nic *efx,
-			      struct efx_rx_queue *rx_queue)
+static void efx_init_rx_recycle_ring(struct efx_nic *efx,
+				     struct efx_rx_queue *rx_queue)
 {
 	unsigned int page_ring_size;
 
@@ -2182,8 +2179,8 @@ void __efx_ssr_end_of_burst(struct efx_channel *channel)
 #ifdef CONFIG_RFS_ACCEL
 
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_NEW_FLOW_KEYS)
-int efx_rfs_filter_spec(struct efx_nic *efx, const struct sk_buff *skb,
-			struct efx_filter_spec *spec)
+static int efx_rfs_filter_spec(struct efx_nic *efx, const struct sk_buff *skb,
+			       struct efx_filter_spec *spec)
 {
 	struct flow_keys fk;
 
@@ -2216,8 +2213,8 @@ int efx_rfs_filter_spec(struct efx_nic *efx, const struct sk_buff *skb,
 #else /* !EFX_HAVE_NEW_FLOW_KEYS */
 
 /* The kernel flow dissector isn't up to the job, so use our own. */
-int efx_rfs_filter_spec(struct efx_nic *efx, const struct sk_buff *skb,
-			struct efx_filter_spec *spec)
+static int efx_rfs_filter_spec(struct efx_nic *efx, const struct sk_buff *skb,
+			       struct efx_filter_spec *spec)
 {
 	/* 60 octets is the maximum length of an IPv4 header (all IPv6 headers
 	 * are 40 octets), and we pull 4 more to get the port numbers

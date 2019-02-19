@@ -186,10 +186,6 @@ static int efx_tso_check_protocol(struct sk_buff *skb, __be16 *protocol)
 		struct vlan_ethhdr *veh = (struct vlan_ethhdr *)skb->data;
 
 		*protocol = veh->h_vlan_encapsulated_proto;
-#if defined(EFX_USE_KCOMPAT) && defined(EFX_HAVE_VLAN_NETWORK_HEADER_BUG)
-		/* vlan_dev_hard_header() may have moved the nh pointer */
-		skb_set_network_header(skb, sizeof(*veh));
-#endif
 	}
 #endif
 

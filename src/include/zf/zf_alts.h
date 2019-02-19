@@ -43,6 +43,9 @@ typedef uint64_t zf_althandle;
 ** value of the `alt_count` attribute used when creating the stack.  This value
 ** defaults to zero.
 **
+** \note TX alternatives are not supported on stacks running on bonded network
+** interfaces.
+**
 ** \see zf_alternatives_release()
 */
 ZF_LIBENTRY int

@@ -286,6 +286,7 @@ extern int
 tcp_helper_cluster_dump(tcp_helper_resource_t* thr, void* buf, int buf_len);
 
 
+
 extern void tcp_helper_pace(tcp_helper_resource_t*, int pace_val);
 
 extern int tcp_helper_cluster_alloc_thr(const char* name,
@@ -415,6 +416,8 @@ ci_inline void tcp_helper_request_wakeup(tcp_helper_resource_t* trs) {
 }
 
 
+void tcp_helper_request_timer(tcp_helper_resource_t* trs);
+
 extern void generic_tcp_helper_close(ci_private_t* priv);
 
 
@@ -495,7 +498,6 @@ oo_create_stack_fd(tcp_helper_resource_t *thr)
 }
 
 extern int onloadfs_get_dev_t(ci_private_t* priv, void* arg);
-extern void oo_file_moved(ci_private_t* priv);
 extern int onload_alloc_file(tcp_helper_resource_t *thr, oo_sp ep_id,
                              int flags, int fd_type, ci_private_t **priv_p);
 
@@ -623,7 +625,7 @@ tcp_helper_install_tproxy(int install,
  *---------------------------------------------------------------------------*/
 
 extern int
-efab_alloc_ephemeral_port(ci_uint32 laddr_be32,
+efab_alloc_ephemeral_port(ci_uint32 laddr_be32, ci_uint16 lport_be16,
                           struct efab_ephemeral_port_keeper** keeper_out);
 extern void
 efab_free_ephemeral_port(struct efab_ephemeral_port_keeper* keeper);
@@ -651,6 +653,7 @@ extern int tcp_helper_increase_active_wild_pool(tcp_helper_resource_t* rs,
 
 extern int
 tcp_helper_alloc_ephemeral_ports(struct efab_ephemeral_port_head* list_head,
+                                 struct efab_ephemeral_port_head* global_head,
                                  ci_uint32 laddr_be32, int count);
 
 extern void

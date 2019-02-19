@@ -39,7 +39,7 @@
 # include <stdlib.h>
 #  include <sys/uio.h>
 #  include <sys/types.h>
-#   include <sys/syscall.h>
+#   include <ci/internal/syscall.h>
 #  include <unistd.h>
 #else
 #  include <linux/slab.h>
@@ -74,7 +74,7 @@ static void __ef_log(const char* msg)
   v[1].iov_base = (char*) "\n";
   v[1].iov_len = 1;
 
-  syscall(__NR_writev, STDERR_FILENO, v, 2);
+  my_syscall3(writev, STDERR_FILENO, (long)v, 2);
 #endif
 }
 

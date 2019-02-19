@@ -30,6 +30,7 @@ typedef ci_int32 oo_pkt_p;
 #define OO_PP_ID(pp)             ((int) (pp))
 #define OO_PP_INIT(ni, pp, iid)  ((pp) = (ci_int32) (iid))
 #define OO_PP_ID_NULL            ((ci_int32) -1)
+#define OO_PP_ID_INVALID         ((ci_int32) -2)
 #define OO_PKT_ID(pkt)           ((int) (pkt)->pp)
 #define OO_PKT_PP_INIT(pkt, iid) ((pkt)->pp = (ci_int32) (iid))
 

@@ -98,6 +98,8 @@ typedef ci_int32 ci_kerr_t; /* range of OS kernel-mode return codes */
 # include <ci/tools/platform/gcc_x86.h>
 #elif defined(__PPC__)
 #  include <ci/tools/platform/gcc_ppc.h>
+#elif defined(__aarch64__)
+#  include <ci/tools/platform/gcc_aarch64.h>
 #else
 # error Unknown processor.
 #endif

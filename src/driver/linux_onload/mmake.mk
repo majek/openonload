@@ -59,6 +59,8 @@ x86_64_TARGET_SRCS := $(x86_TARGET_SRCS)
 powerpc_TARGET_SRCS    := ppc64_linux_trampoline_asm.o \
 			ppc64_linux_trampoline.o ppc64_linux_trampoline_internal.o
 
+arm64_TARGET_SRCS := aarch64_linux_trampoline.o aarch64_linux_trampoline_asm.o
+
 
 ######################################################
 # linux kbuild support
@@ -97,6 +99,11 @@ ifeq ($(ARCH),powerpc)
 # RHEL5/PPC requires you to pass this, because by default its userspace
 # is 32-bit, but its kernel was built with a 64-bit compiler!
 EXTRA_CFLAGS+= -m64
+endif
+
+ifeq ($(ARCH),arm64)
+# HACK: to circumvent build error on newever gcc/kernels on ARM (?)
+EXTRA_CFLAGS+= -Wno-error=discarded-qualifiers
 endif
 
 ifeq ($(strip $(CI_PREBUILT_IPDRV)),)

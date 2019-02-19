@@ -54,6 +54,7 @@
 
 #include <ci/driver/efab/hardware/host_ef10_common.h>
 #include <ci/driver/efab/hardware/ef10_vaddr.h>
+#include <ci/driver/efab/hardware/ef10_evq.h>
 
 #define EF10_DMA_TX_DESC_BYTES	8
 #define EF10_DMA_RX_DESC_BYTES	8
@@ -310,6 +311,7 @@ static inline int ef10_rx_dma_page_offset(uint vi_stride, uint dma_idx)
 
 #define EF10_DMA_Q_DEFAULT_MMAP \
 	(EF10_DMA_Q_DEFAULT_TX_SIZE * (EF10_DMA_TX_DESC_BYTES * 2))
+
 
 /*----------------------------------------------------------------------------
  *

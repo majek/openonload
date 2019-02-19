@@ -225,6 +225,7 @@ citp_protocol_impl citp_epollb_protocol_impl = {
 #endif
     .zc_send     = citp_nonsock_zc_send,
     .zc_recv     = citp_nonsock_zc_recv,
+    .zc_recv_filter = citp_nonsock_zc_recv_filter,
     .recvmsg_kernel = citp_nonsock_recvmsg_kernel,
     .tmpl_alloc     = citp_nonsock_tmpl_alloc,
     .tmpl_update    = citp_nonsock_tmpl_update,

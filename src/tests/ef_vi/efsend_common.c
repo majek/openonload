@@ -105,6 +105,14 @@ void common_usage()
   fprintf(stderr, "  -l <local-port>     - change local port to send from\n");
 }
 
+void print_and_exit(char* format, ...) {
+  va_list argptr;
+  va_start(argptr, format);
+  vfprintf(stderr, format, argptr);
+  va_end(argptr);
+  exit(1);
+}
+
 void parse_args(char *argv[], int *ifindex, int local_port, int vlan)
 {
   const char *interface, *mcast_ip;
@@ -116,10 +124,17 @@ void parse_args(char *argv[], int *ifindex, int local_port, int vlan)
   mcast_port = atoi(argv[0]);
 
   get_ipaddr_of_vlan_intf(interface, vlan, &local_ip);
-  CL_CHK(parse_interface(interface, ifindex));
-  CL_CHK(parse_host(local_ip, &sa_local.sin_addr));
+
+  if( ! parse_interface(interface, ifindex) )
+    print_and_exit("ERROR: Failed to parse interface %s\n", interface);
+
+  if( ! parse_host(local_ip, &sa_local.sin_addr) )
+    print_and_exit("ERROR: Failed to parse local address %s\n", local_ip);
   sa_local.sin_port = htons(local_port);
-  CL_CHK(parse_host(mcast_ip, &sa_mcast.sin_addr));
+
+  if ( ! parse_host(mcast_ip, &sa_mcast.sin_addr) )
+    print_and_exit("ERROR: Failed to parse multicast address %s\n", mcast_ip);
+
   sa_mcast.sin_port = htons(mcast_port);
 
   mcast_mac[0] = 0x1;

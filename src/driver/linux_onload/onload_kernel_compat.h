@@ -33,11 +33,6 @@
 #define kmem_cache kmem_cache_s
 #endif
 
-#if defined(EFRM_ALLOC_FILE_TAKES_STRUCT_PATH) || \
-  defined(EFRM_ALLOC_FILE_TAKES_CONST_STRUCT_PATH)
-#define EFRM_HAVE_STRUCT_PATH
-#endif
-
 
 #ifndef __NFDBITS
 # define __NFDBITS BITS_PER_LONG

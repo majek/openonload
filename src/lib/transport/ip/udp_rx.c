@@ -120,7 +120,7 @@ int ci_udp_csum_correct(ci_ip_pkt_fmt* pkt, ci_udp_hdr* udp)
   unsigned csum;
 
   ip_len = CI_BSWAP_BE16(oo_ip_hdr(pkt)->ip_tot_len_be16);
-  ip_paylen = ip_len - sizeof(ci_ip4_hdr);
+  ip_paylen = ip_len - CI_IP4_IHL(oo_ip_hdr(pkt));
   pkt->pf.udp.pay_len = CI_BSWAP_BE16(udp->udp_len_be16);
 
   if( pkt->pf.udp.pay_len + sizeof(ci_udp_hdr) > ip_paylen )
@@ -203,13 +203,13 @@ int ci_udp_rx_deliver(ci_sock_cmn* s, void* opaque_arg)
        * empty "fragment" at the head of the real packet.
        */
       if( ni->state->n_rx_pkts > NI_OPTS(ni).max_rx_packets ||
-          (q_pkt = ci_netif_pkt_alloc(ni)) == NULL )
+          (q_pkt = ci_netif_pkt_alloc(ni, 0)) == NULL )
         goto drop;
       ++ni->state->n_rx_pkts;
       q_pkt->pf.udp.pay_len = pkt->pf.udp.pay_len;
-      q_pkt->pf.udp.rx_stamp = pkt->pf.udp.rx_stamp;
+      q_pkt->tstamp_frc = pkt->tstamp_frc;
 #if CI_CFG_TIMESTAMPING
-      q_pkt->pf.udp.rx_hw_stamp.tv_sec = pkt->pf.udp.rx_hw_stamp.tv_sec;
+      q_pkt->pf.udp.rx_hw_stamp = pkt->pf.udp.rx_hw_stamp;
 #endif
       oo_offbuf_init(&q_pkt->buf, PKT_START(q_pkt), 0);
       q_pkt->flags = (CI_PKT_FLAG_RX_INDIRECT | CI_PKT_FLAG_UDP |
@@ -267,16 +267,31 @@ int ci_udp_rx_deliver(ci_sock_cmn* s, void* opaque_arg)
  * sizeof(ci_ip4_hdr) + sizeof(ci_udp_hdr) in length.
  */
 void ci_udp_handle_rx(ci_netif* ni, ci_ip_pkt_fmt* pkt, ci_udp_hdr* udp,
-                      int ip_paylen)
+                      int ip_paylen, ci_uint16 ether_type)
 {
   struct ci_udp_rx_deliver_state state;
   int dealt_with;
+  ci_ip4_hdr *ip4_hdr = NULL;
+#if CI_CFG_IPV6
+  ci_ip6_hdr *ip6_hdr = NULL;
+#endif
+  ci_addr_t daddr, saddr;
 
   ASSERT_VALID_PKT(ni, pkt);
-  ci_assert(oo_ip_hdr(pkt)->ip_protocol == IPPROTO_UDP);
-  ci_assert_gt(pkt->pay_len, ip_paylen);
 
-  pkt->pf.udp.rx_stamp = IPTIMER_STATE(ni)->frc;
+#if CI_CFG_IPV6
+  if( ether_type == CI_ETHERTYPE_IP6 ) {
+    ip6_hdr = oo_ip6_hdr(pkt);
+    ci_assert(ip6_hdr->next_hdr == IPPROTO_UDP);
+  }
+  else
+#endif
+  {
+    ip4_hdr = oo_ip_hdr(pkt);
+    ci_assert(ip4_hdr->ip_protocol == IPPROTO_UDP);
+  }
+
+  ci_assert_gt(pkt->pay_len, ip_paylen);
 
   LOG_UV( log( LPF "handle_rx: UDP:%p IP:%p", udp, oo_ip_hdr(pkt)));
 
@@ -296,20 +311,43 @@ void ci_udp_handle_rx(ci_netif* ni, ci_ip_pkt_fmt* pkt, ci_udp_hdr* udp,
   state.delivered = 0;
 
 
-  dealt_with = 
-    ci_netif_filter_for_each_match(ni,
-                                   oo_ip_hdr(pkt)->ip_daddr_be32,
-                                   udp->udp_dest_be16,
-                                   oo_ip_hdr(pkt)->ip_saddr_be32,
-                                   udp->udp_source_be16,
-                                   IPPROTO_UDP, pkt->intf_i, pkt->vlan,
-                                   ci_udp_rx_deliver, &state, NULL);
-  if( ! dealt_with ) {
-    ci_netif_filter_for_each_match(ni,
-                                   oo_ip_hdr(pkt)->ip_daddr_be32,
-                                   udp->udp_dest_be16,
-                                   0, 0, IPPROTO_UDP, pkt->intf_i, pkt->vlan,
-                                   ci_udp_rx_deliver, &state, NULL);
+#if CI_CFG_IPV6
+  if( ether_type == CI_ETHERTYPE_IP6 ) {
+    memcpy(daddr.ip6, ip6_hdr->daddr, sizeof(daddr.ip6));
+    memcpy(saddr.ip6, ip6_hdr->saddr, sizeof(saddr.ip6));
+
+    dealt_with =
+      ci_netif_filter_for_each_match_ip6(ni,
+                                         daddr, udp->udp_dest_be16,
+                                         saddr, udp->udp_source_be16,
+                                         IPPROTO_UDP, pkt->intf_i, pkt->vlan,
+                                         ci_udp_rx_deliver, &state, NULL);
+    if( ! dealt_with ) {
+      ci_netif_filter_for_each_match_ip6(ni,
+                                         daddr, udp->udp_dest_be16,
+                                         addr_any, 0,
+                                         IPPROTO_UDP, pkt->intf_i, pkt->vlan,
+                                         ci_udp_rx_deliver, &state, NULL);
+    }
+  }
+  else
+#endif
+  {
+    daddr = CI_ADDR_FROM_IP4(ip4_hdr->ip_daddr_be32);
+    saddr = CI_ADDR_FROM_IP4(ip4_hdr->ip_saddr_be32);
+
+    dealt_with =
+      ci_netif_filter_for_each_match(ni,
+                                     daddr.ip4, udp->udp_dest_be16,
+                                     saddr.ip4, udp->udp_source_be16,
+                                     IPPROTO_UDP, pkt->intf_i, pkt->vlan,
+                                     ci_udp_rx_deliver, &state, NULL);
+    if( ! dealt_with ) {
+      ci_netif_filter_for_each_match(ni,
+                                     daddr.ip4, udp->udp_dest_be16, 0, 0,
+                                     IPPROTO_UDP, pkt->intf_i, pkt->vlan,
+                                     ci_udp_rx_deliver, &state, NULL);
+    }
   }
 
   if( state.queued ) {
@@ -330,10 +368,10 @@ void ci_udp_handle_rx(ci_netif* ni, ci_ip_pkt_fmt* pkt, ci_udp_hdr* udp,
 
 #ifndef NDEBUG
     if( !NI_OPTS(ni).scalable_filter_enable )
-      LOG_U( log(LPFOUT "handle_rx: NO MATCH %s:%u->%s:%u",
-                 ip_addr_str(oo_ip_hdr(pkt)->ip_saddr_be32),
+      LOG_U( log(LPFOUT "handle_rx: NO MATCH " IPX_PORT_FMT "->" IPX_PORT_FMT,
+                 IPX_ARG(AF_IP(saddr)),
                  (unsigned) CI_BSWAP_BE16(udp->udp_source_be16),
-                 ip_addr_str(oo_ip_hdr(pkt)->ip_daddr_be32),
+                 IPX_ARG(AF_IP(daddr)),
                  (unsigned) CI_BSWAP_BE16(udp->udp_dest_be16)));
 #endif
     CITP_STATS_NETIF_INC(ni, udp_rx_no_match_drops);
@@ -346,8 +384,8 @@ void ci_udp_handle_rx(ci_netif* ni, ci_ip_pkt_fmt* pkt, ci_udp_hdr* udp,
 
  length_error:
   CI_UDP_STATS_INC_IN_ERRS(ni);
-  LOG_U(log("%s: ip_paylen=%d udp_len=%d",
-            __FUNCTION__, ip_paylen, pkt->pf.udp.pay_len));
+  LOG_U(CI_RLLOG(10, "%s: ip_paylen=%d udp_len=%d",
+                 __FUNCTION__, ip_paylen, pkt->pf.udp.pay_len));
   goto drop_out;
 
  drop_out:

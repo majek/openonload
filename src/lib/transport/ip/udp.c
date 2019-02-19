@@ -87,6 +87,10 @@ static void ci_udp_state_init(ci_netif* netif, ci_udp_state* us)
   udp_lport_be16(us) = 0;
   udp_rport_be16(us) = 0;
 
+#if CI_CFG_ZC_RECV_FILTER
+  us->recv_q_filter = 0;
+  us->recv_q_filter_arg = 0;
+#endif
   ci_udp_recv_q_init(&us->recv_q);
   us->zc_kernel_datagram = OO_PP_NULL;
   us->zc_kernel_datagram_count = 0;
@@ -141,7 +145,7 @@ ci_fd_t ci_udp_ep_ctor(citp_socket* ep, ci_netif* netif, int domain, int type)
   /* It's required to set protocol before ci_tcp_helper_sock_attach()
    * since it's used to determine if TCP or UDP file operations should be
    * attached to the file descriptor in kernel. */
-  sock_protocol(&us->s) = IPPROTO_UDP;
+   sock_protocol(&us->s) = IPPROTO_UDP;
 
   /* NB: this attach will close the os_sock_fd */
   fd = ci_tcp_helper_sock_attach(ci_netif_get_driver_handle(netif),  
@@ -173,15 +177,19 @@ ci_fd_t ci_udp_ep_ctor(citp_socket* ep, ci_netif* netif, int domain, int type)
 #endif
 
 
-void ci_udp_set_laddr(citp_socket* ep, unsigned laddr_be32, int lport_be16)
+void ci_udp_set_laddr(citp_socket* ep, ci_addr_t addr, int lport_be16)
 {
   ci_udp_state* us = SOCK_TO_UDP(ep->s);
-  udp_laddr_be32(us) = laddr_be32;
-  udp_lport_be16(us) = (ci_uint16) lport_be16;
-  if( CI_IP_IS_MULTICAST(laddr_be32) )
+
+  ci_sock_set_laddr(&us->s, addr, lport_be16);
+#if CI_CFG_IPV6
+  if( ipcache_is_ipv6(us->s.pkt) )
+    return;
+#endif
+  if( CI_IP_IS_MULTICAST(addr.ip4) )
     us->s.cp.ip_laddr_be32 = 0;
   else
-    us->s.cp.ip_laddr_be32 = laddr_be32;
+    us->s.cp.ip_laddr_be32 = addr.ip4;
   us->s.cp.lport_be16 = lport_be16;
 }
 
@@ -326,7 +334,7 @@ void ci_udp_state_dump(ci_netif* ni, ci_udp_state* us, const char* pf,
   logger(log_arg, "%s  snd: TO "OOF_IPCACHE_DETAIL, pf,
          OOFA_IPCACHE_DETAIL(ipcache));
   logger(log_arg, "%s  snd: TO "OOF_IP4PORT" => "OOF_IP4PORT, pf,
-         OOFA_IP4PORT(ipcache->ip_saddr_be32, udp_lport_be16(us)),
+         OOFA_IP4PORT(ipcache->ip_saddr.ip4, udp_lport_be16(us)),
          OOFA_IP4PORT(ipcache->ip.ip_daddr_be32, ipcache->dport_be16));
    
   /* State relating to connected sends. */

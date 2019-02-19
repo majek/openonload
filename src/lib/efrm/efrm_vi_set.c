@@ -64,7 +64,7 @@ efrm_rss_context_alloc_and_init(struct efrm_pd *pd,
 				struct efrm_client *client,
 				int num_qs,
 				int rss_mode,
-				unsigned *rss_context_out)
+				struct efrm_rss_context* rss_context)
 {
 	int rc;
 	int shared = 0;
@@ -78,11 +78,12 @@ efrm_rss_context_alloc_and_init(struct efrm_pd *pd,
 		0x6d, 0x5a, 0x6d, 0x5a, 0x6d, 0x5a, 0x6d, 0x5a,
 		0x6d, 0x5a, 0x6d, 0x5a, 0x6d, 0x5a, 0x6d, 0x5a,
 	};
-        const uint8_t* rx_hash_key = rx_hash_key_default;
-	uint32_t rx_indir_table[EFRM_RSS_INDIRECTION_TABLE_LEN];
 	if (num_qs > 1 && rss_mode != EFRM_RSS_MODE_DEFAULT &&
 	    !(efrm_client_get_nic(client)->flags & NIC_FLAG_ADDITIONAL_RSS_MODES))
 		return -EOPNOTSUPP;
+
+	rss_context->rss_mode = rss_mode;
+
 	/* If the number of queues needed is a power of 2 we can simply use
 	 * one of the shared contexts.
 	 * If nic reports RX_RSS_LIMITED, shared rss contexts do not exist,
@@ -109,10 +110,18 @@ efrm_rss_context_alloc_and_init(struct efrm_pd *pd,
 	 */
 	shared = 0;
 
-	/* Set up the indirection table to stripe evenly(ish) across VIs.
-	 * FIXME: maintain consistency with net driver */
+	/* Set up the indirection table to stripe evenly(ish) across VIs. */
 	for (index = 0; index < EFRM_RSS_INDIRECTION_TABLE_LEN; index++)
-		rx_indir_table[index] = index % num_qs;
+		rss_context->indirection_table[index] = index % num_qs;
+
+	/* Currently we always use the same key for the RSS hash. */
+	EFRM_BUILD_ASSERT(sizeof(rss_context->rss_hash_key) ==
+			  sizeof(rx_hash_key_default));
+	memcpy(rss_context->rss_hash_key, rx_hash_key_default,
+	       sizeof(rss_context->rss_hash_key));
+
+	/* All queues in the set are used in the table initially. */
+	rss_context->indirected_vis = (1ull << num_qs) - 1;
 
 	/* If we have an exclusive context we need to set up the key and
 	 * indirection table.
@@ -134,9 +143,9 @@ efrm_rss_context_alloc_and_init(struct efrm_pd *pd,
 	 */
 
 	rc = efrm_rss_context_alloc(client, efrm_pd_get_vport_id(pd),
-				    shared, rx_indir_table,
-				    rx_hash_key, rss_mode, num_qs,
-				    rss_context_out);
+				    shared, rss_context->indirection_table,
+				    rss_context->rss_hash_key, rss_mode,
+				    num_qs, &rss_context->rss_context_id);
 	return rc;
 }
 
@@ -150,6 +159,7 @@ int efrm_vi_set_alloc(struct efrm_pd *pd, int n_vis, unsigned vi_props,
 	struct efrm_nic *efrm_nic;
 	int i, j, rc;
 	int rss_limited;
+	int has_rss_context = 0;
 	EFRM_ASSERT(0 == (rss_modes &
 		  ~(EFRM_RSS_MODE_DEFAULT|EFRM_RSS_MODE_SRC|EFRM_RSS_MODE_DST)));
 	EFRM_ASSERT(rss_modes & (EFRM_RSS_MODE_DEFAULT|EFRM_RSS_MODE_SRC));
@@ -170,7 +180,7 @@ int efrm_vi_set_alloc(struct efrm_pd *pd, int n_vis, unsigned vi_props,
 		efrm_client_get_nic(client)->flags & NIC_FLAG_RX_RSS_LIMITED;
 
 	for (i = 0; i <= EFRM_RSS_MODE_ID_MAX; ++i)
-		vi_set->rss_context[i] = -1;
+		vi_set->rss_context[i].rss_context_id = -1;
 
 	if (!(n_vis > 1 || rss_limited)) {
 		/* Don't bother allocating a context of size 1, just use
@@ -204,11 +214,14 @@ int efrm_vi_set_alloc(struct efrm_pd *pd, int n_vis, unsigned vi_props,
 					 "back to default context.",
 					 __FUNCTION__, n_vis, rc);
 		}
+		else {
+			has_rss_context = 1;
+		}
 	}
 
  skip_context_alloc:
 	rc = efrm_vi_allocator_alloc_set(efrm_nic, vi_props, n_vis,
-					 vi_set->rss_context[0] != -1 ? 1 : 0,
+					 has_rss_context,
 					 -1, &vi_set->allocation);
 	if (rc != 0)
 		goto fail1;
@@ -229,13 +242,157 @@ int efrm_vi_set_alloc(struct efrm_pd *pd, int n_vis, unsigned vi_props,
 
 	return 0;
  fail1:
-	for (i = 0; i <= EFRM_RSS_MODE_ID_MAX; ++i)
-		if (vi_set->rss_context[i] != -1)
-			efrm_rss_context_free(client, vi_set->rss_context[i]);
+	for (i = 0; i <= EFRM_RSS_MODE_ID_MAX; ++i) {
+		struct efrm_rss_context* context = &vi_set->rss_context[i];
+		if (context->rss_context_id != -1)
+			efrm_rss_context_free(client, context->rss_context_id);
+	}
 
 	return rc;
 }
 EXPORT_SYMBOL(efrm_vi_set_alloc);
+
+
+static void iterate_queue(int num_queues, uint64_t* bitmap, uint32_t* index)
+{
+	uint32_t rotations = 0;
+
+	EFRM_ASSERT(*bitmap);
+	EFRM_ASSERT(*index < num_queues);
+	EFRM_ASSERT(num_queues <= sizeof(*bitmap) * 8);
+
+	/* The idea here is to rotate the queue bitmap to the right until the
+	 * next non-zero bit has made its way to the bottom bit. */
+	do {
+		uint64_t low_bit = *bitmap & 1;
+		*bitmap >>= 1;
+		*bitmap |= low_bit << (num_queues - 1);
+		++rotations;
+	} while (~*bitmap & 1);
+
+	/* Bump the returned index by the number of rotations that we made. */
+	*index = (*index + rotations) % num_queues;
+}
+
+
+/* This function rewrites the indirection table such that all traffic currently
+ * sent to the queue with ID [q_id] (relative to the start of the VI set)
+ * will be sent instead to other queues in the set. */
+static int
+__efrm_vi_set_redistribute_queue(struct efrm_vi_set* vi_set,
+				 int vi_set_rss_context, uint32_t q_id)
+{
+	struct efrm_rss_context* rss_context =
+		&vi_set->rss_context[vi_set_rss_context];
+	uint32_t indir_table_copy[EFRM_RSS_INDIRECTION_TABLE_LEN];
+	uint32_t new_q;
+	int new_q_relative;
+	uint64_t rotated_queues;
+	int index;
+	int rotated_q_id_index;
+	int rc;
+
+	/* Queue already not receiving traffic? */
+	if (~rss_context->indirected_vis & (1ull << q_id))
+		return -EALREADY;
+
+	/* No other queues available to replace it? */
+	if (CI_IS_POW2(rss_context->indirected_vis))
+		return -EBUSY;
+
+	/* Work on a copy of the initial state of the indirection table in case
+	 * we get a failure from driverlink. */
+	EFRM_BUILD_ASSERT(sizeof(indir_table_copy) ==
+			  sizeof(rss_context->indirection_table));
+	memcpy(indir_table_copy, rss_context->indirection_table,
+	       sizeof(indir_table_copy));
+
+	EFRM_ASSERT(vi_set->n_vis > 0);
+	EFRM_ASSERT(hweight64(rss_context->indirected_vis) <= vi_set->n_vis);
+
+	/* The initial value of [new_q] determines the first queue that will be
+	 * substituted in place of the old one.  Thereafter, we round-robin
+	 * amongst the queues that are still in the set.  We pick the initial
+	 * value here to be biased in favour of queues that are disadvantaged
+	 * by the initial state of the indirection table.  The calculation
+	 * involves first finding [new_q_relative], which is the index within
+	 * the set of queues previously in [indirected_vis], and then
+	 * converting this to the value actually used in the RSS table by using
+	 * iterate_queue(). */
+	rotated_queues = rss_context->indirected_vis;
+	new_q = 0;
+	if (! (rotated_queues & 1) )
+		iterate_queue(vi_set->n_vis, &rotated_queues, &new_q);
+	/* [new_q] is now equal to the first queue referenced by the RSS table
+	 * at entry to this function, which would correspond to a value of zero
+	 * for [new_q_relative]. */
+	new_q_relative = 128 % hweight64(rotated_queues);
+	for (index = 0; index < new_q_relative; ++index)
+		iterate_queue(vi_set->n_vis, &rotated_queues, &new_q);
+	/* [new_q] is now equal to the next queue in the set after that in the
+	 * final bucket, and this is the first value with which we should
+	 * replace table-entries for the queue that we're removing... unless,
+	 * that is, that this is itself the queue to be removed, in which case
+	 * we should bump it on to the next one. */
+	if (new_q == q_id)
+		iterate_queue(vi_set->n_vis, &rotated_queues, &new_q);
+	/* Finally, remove queue [q_id] from the set over which we iterate.  In
+	 * doing so, we have to account for the rotation that we've already
+	 * applied to [rotated_queues]. */
+	rotated_q_id_index = (q_id - new_q + vi_set->n_vis) % vi_set->n_vis;
+	rotated_queues &= ~(1ull << rotated_q_id_index);
+
+	for (index = 0; index < EFRM_RSS_INDIRECTION_TABLE_LEN; index++)
+		if (rss_context->indirection_table[index] == q_id) {
+			iterate_queue(vi_set->n_vis, &rotated_queues, &new_q);
+			EFRM_ASSERT(new_q != q_id);
+			EFRM_ASSERT(rss_context->indirected_vis &
+				    (1ull << new_q));
+			indir_table_copy[index] = new_q;
+		}
+
+	/* Push the changes to the NIC. */
+	rc = efrm_rss_context_update(vi_set->rs.rs_client,
+				     rss_context->rss_context_id,
+				     indir_table_copy,
+				     rss_context->rss_hash_key,
+				     rss_context->rss_mode);
+	if (rc == 0) {
+		/* Now that we've successfully reprogrammed the NIC, update
+		 * our record of the indirection table. */
+		memcpy(rss_context->indirection_table, indir_table_copy,
+		       sizeof(indir_table_copy));
+		/* Remember the fact that the queue is no longer receiving
+		 * traffic. */
+		rss_context->indirected_vis &= ~(1ull << q_id);
+
+	}
+
+	return rc;
+}
+
+
+int efrm_vi_set_redistribute_queue(struct efrm_vi_set* vi_set, uint32_t q_id)
+{
+	int i;
+	int rc = 0;
+
+	for (i = 0; i <= EFRM_RSS_MODE_ID_MAX; ++i) {
+		if (vi_set->rss_context[i].rss_context_id != -1) {
+			int rc1 = __efrm_vi_set_redistribute_queue(vi_set, i,
+								   q_id);
+			if (rc1 < 0) {
+				rc = rc1;
+				EFRM_ERR("%s: Failed to remove queue %u from "
+					 "VI set: rc1=%d", __FUNCTION__, q_id,
+					 rc1);
+			}
+		}
+	}
+
+	return rc;
+}
+EXPORT_SYMBOL(efrm_vi_set_redistribute_queue);
 
 
 void efrm_vi_set_release(struct efrm_vi_set *vi_set)
@@ -255,10 +412,12 @@ void efrm_vi_set_free(struct efrm_vi_set *vi_set)
 	efrm_nic = container_of(vi_set->rs.rs_client->nic,
 				struct efrm_nic, efhw_nic);
 
-	for (i = 0; i <= EFRM_RSS_MODE_ID_MAX; ++i)
-		if (vi_set->rss_context[i] != -1)
+	for (i = 0; i <= EFRM_RSS_MODE_ID_MAX; ++i) {
+		struct efrm_rss_context* context = &vi_set->rss_context[i];
+		if (context->rss_context_id != -1)
 			efrm_rss_context_free(vi_set->rs.rs_client,
-					      vi_set->rss_context[i]);
+					      context->rss_context_id);
+	}
 	efrm_vi_allocator_free_set(efrm_nic, &vi_set->allocation);
 	efrm_pd_release(vi_set->pd);
 	efrm_client_put(vi_set->rs.rs_client);
@@ -287,7 +446,7 @@ EXPORT_SYMBOL(efrm_vi_set_get_base);
 int efrm_vi_set_get_rss_context(struct efrm_vi_set *vi_set, unsigned rss_id)
 {
 	EFRM_ASSERT(rss_id <= EFRM_RSS_MODE_ID_MAX);
-	return vi_set->rss_context[rss_id];
+	return vi_set->rss_context[rss_id].rss_context_id;
 }
 EXPORT_SYMBOL(efrm_vi_set_get_rss_context);
 

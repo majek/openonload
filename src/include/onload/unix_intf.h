@@ -97,6 +97,7 @@ oo_resource_alloc(ci_fd_t fp, ci_resource_onload_alloc_t* io)
 #define OO_MMAP_FLAG_DEFAULT  0
 #define OO_MMAP_FLAG_READONLY 1
 #define OO_MMAP_FLAG_FIXED    2
+#define OO_MMAP_FLAG_POPULATE 4
 ci_inline int
 oo_resource_mmap(ci_fd_t fp, ci_uint8 map_type, unsigned long map_id,
                  unsigned bytes, int flags, void** p_out)
@@ -115,6 +116,8 @@ oo_resource_mmap(ci_fd_t fp, ci_uint8 map_type, unsigned long map_id,
     mmap_prot |= PROT_WRITE;
   if( flags & OO_MMAP_FLAG_FIXED )
     mmap_flags |= MAP_FIXED;
+  if( flags & OO_MMAP_FLAG_POPULATE )
+    mmap_flags |= MAP_POPULATE;
   *p_out = mmap((flags & OO_MMAP_FLAG_FIXED) ? *p_out : (void*) 0, bytes,
                 mmap_prot, mmap_flags, fp, offset);
   if( *p_out == MAP_FAILED ) {

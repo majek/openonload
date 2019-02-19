@@ -324,6 +324,10 @@ extern int onload_recvmsg_kernel(int fd, struct msghdr *msg, int flags);
  * kernel stack (e.g. because it has been bound to an address that is
  * not routed over a SFC interface) it will set msgs.rc to
  * -ESOCKTNOSUPPORT
+ *
+ * This function copies behaviour of normal send() functions when possible,
+ * which includes sleep in case when the TCP socket has not established
+ * connection yet.
  */
 
 #define ONLOAD_MSG_MORE MSG_MORE
@@ -346,10 +350,29 @@ extern int onload_zc_send(struct onload_zc_mmsg* msgs, int mlen, int flags);
  * Receive filtering 
  ******************************************************************************/
 
-/* This API is now depcrecated and not available anymore.  It is still
- * present in the headers and the stub libraries so that existing
- * applications that use the API continue to compile.  Any attempts to
- * actually use the API will return a -ENOSYS.
+/*
+ * onload_set_recv_filter() will install a callback that can intercept
+ * data received through the normal recv/recvmsg/recvmmsg API.
+ * This should not be used in conjunction with onload_zc_recv()
+ *
+ * The callback is invoked once per message and the cb_arg value is
+ * passed to the callback along with the message.  The callback's
+ * flags argument will be set to ONLOAD_ZC_MSG_SHARED if the msg is
+ * shared with other sockets and the caller should take care not to
+ * modify the contents of the iovec.
+ *
+ * The message can be found in msg->iov[], and the iovec is of length
+ * msg->msghdr.msg_iovlen.
+ *
+ * The callback must return ONLOAD_ZC_CONTINUE to allow the message to
+ * be delivered to the application. Other return codes such as
+ * ONLOAD_ZC_TERMINATE and ONLOAD_ZC_MODIFIED are deprecated and no
+ * longer supported.
+ *
+ * This function can only be used with accelerated sockets (those
+ * being handled by Onload).  If a socket has been handed over to the
+ * kernel stack (e.g. because it has been bound to an address that is
+ * not routed over a SFC interface) it will return -ESOCKTNOSUPPORT
  */
 
 typedef enum onload_zc_callback_rc 

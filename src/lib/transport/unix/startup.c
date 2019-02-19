@@ -527,6 +527,7 @@ static void citp_opts_getenv(citp_opts_t* opts)
 #endif
 
   GET_ENV_OPT_INT("EF_ONLOAD_FD_BASE",	fd_base);
+
 }
 
 
@@ -674,18 +675,29 @@ int citp_do_init(int max_init_level)
   int level;
   int saved_errno = errno;
 
-  _citp_do_init_inprogress++;
+  if( citp.init_level < max_init_level ) {
+    /* If threads are launched very early in program startup, then there could be
+     * a race here as multiple threads attempt to initialise on first access.
+     * The guard must be recursive, since this function might be re-entered during
+     * initialisation.
+     */
+    static pthread_mutex_t mutex = PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP;
 
-  for (level = citp.init_level;
-       level < CI_MIN(max_init_level, CITP_INIT_ALL);
-       level++) {
-    rc = cipt_init_funcs[level]();
-    if (rc < 0)
-      break;
-    citp.init_level = level + 1;
+    pthread_mutex_lock(&mutex);
+    _citp_do_init_inprogress++;
+
+    for (level = citp.init_level;
+         level < CI_MIN(max_init_level, CITP_INIT_ALL);
+         level++) {
+      rc = cipt_init_funcs[level]();
+      if (rc < 0)
+        break;
+      citp.init_level = level + 1;
+    }
+
+    --_citp_do_init_inprogress;
+    pthread_mutex_unlock(&mutex);
   }
-
-  --_citp_do_init_inprogress;
   Log_S(log("%s: reached level %d", __FUNCTION__, citp.init_level));
   if( rc == 0 )
     errno = saved_errno;
@@ -694,6 +706,10 @@ int citp_do_init(int max_init_level)
 
 void _init(void)
 {
+  if (getpagesize() != CI_PAGE_SIZE)
+    ci_fail(("Page size mismatch, expected %u, "
+             "but the current value is %u",
+             CI_PAGE_SIZE, getpagesize()));
   /* must not do any logging yet... */
   if( citp_do_init(CITP_INIT_ALL) < 0 )
     ci_fail(("EtherFabric transport library: failed to initialise (%d)",

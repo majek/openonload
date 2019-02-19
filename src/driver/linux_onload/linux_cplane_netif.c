@@ -190,6 +190,10 @@
  *****************************************************************************/
 
 
+static inline struct cicppl_instance* cicppl_by_netif(ci_netif *netif)
+{
+  return &netif->cplane->cppl;
+}
 
 
 /**
@@ -291,12 +295,13 @@ cicppl_mac_defer_send(ci_netif *netif, int *ref_os_rc,
     } else
     {
       struct cicppl_instance *cppl = cicppl_by_netif(netif);
+      (void) cppl;
       
       /* from this point onwards, pendable_pktid is an ARP buffer ID */
       ci_assert(cicppl_pktbuf_is_valid_id(cppl->pktpool, pendable_pktid));
 
       /* now we have a cicp_bufpool_t buffer ID we can call this: */
-      *ref_os_rc = cicpplos_pktbuf_defer_send(cppl, ip,
+      *ref_os_rc = cicpplos_pktbuf_defer_send(netif->cplane, ip,
 					      pendable_pktid, ifindex);
 
       return (*ref_os_rc == 0);
