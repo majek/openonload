@@ -42,7 +42,7 @@ struct efx_dl_device_info;
  * is not used for binary compatibility checking, as that is done by
  * kbuild and the module loader using symbol versions.
  */
-#define EFX_DRIVERLINK_API_VERSION 23
+#define EFX_DRIVERLINK_API_VERSION 24
 #define EFX_DRIVERLINK_API_VERSION_MINOR_MAX 0
 
 #ifndef EFX_DRIVERLINK_API_VERSION_MINOR
@@ -118,10 +118,6 @@ enum efx_dl_driver_flags {
  *	registered for a device implement this operation, they will be
  *	called in priority order from high to low, until one returns
  *	%true.  Context: NAPI.
- * @rx_packet: Called when processing an RX packet, after prefetching the data
- *      but before forming the skb.  Returns %true if the client wants the
- *      packet to be discarded, else %false.
- *      Context: NAPI.
  *
  * Prior to API version 7, only one driver with non-null @handle_event
  * could be registered for each device.  The @priority field was not
@@ -142,8 +138,6 @@ struct efx_dl_driver {
 	void (*reset_resume) (struct efx_dl_device *efx_dev, int ok);
 	int (*handle_event) (struct efx_dl_device *efx_dev,
 			     void *p_event, int budget);
-	bool (*rx_packet) (struct efx_dl_device *efx_dev, int channel,
-			   u8 *pkt_hdr, int len);
 
 /* private: */
 	struct list_head node;

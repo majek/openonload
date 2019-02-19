@@ -24,7 +24,7 @@
 #include "char_internal.h"
 #include "filter_list.h"
 
-#include <driver/linux_net/driverlink_api.h>
+#include <ci/driver/driverlink_api.h>
 
 
 static int

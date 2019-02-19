@@ -30,9 +30,6 @@
 #include "farch_regs.h"
 #include "mcdi_pcol.h"
 #include "aoe.h"
-#ifdef EFX_USE_MCDI_PROXY_AUTH
-#include "proxy_auth.h"
-#endif
 
 struct efx_mcdi_copy_buffer {
 	_MCDI_DECLARE_BUF(buffer, MCDI_CTL_SDU_LEN_MAX);
@@ -214,10 +211,6 @@ int efx_mcdi_init(struct efx_nic *efx)
 		netif_err(efx, probe, efx->net_dev,
 			  "Host already registered with MCPU\n");
 
-	if (efx->mcdi->fn_flags &
-	    (1 << MC_CMD_DRV_ATTACH_EXT_OUT_FLAG_PRIMARY))
-		efx->primary = efx;
-
 	return 0;
 fail4:
 	destroy_workqueue(mcdi->workqueue);
@@ -237,16 +230,10 @@ void efx_mcdi_detach(struct efx_nic *efx)
 	if (!efx->mcdi)
 		return;
 
-	if (!efx_nic_hw_unavailable(efx)) {
-#ifdef EFX_USE_MCDI_PROXY_AUTH
-		/* Stop the admin side of proxy authorization. */
-		efx_proxy_auth_stop(efx, true);
-#endif
-
+	if (!efx_nic_hw_unavailable(efx))
 		/* Relinquish the device (back to the BMC, if this is a LOM) */
 		efx_mcdi_drv_attach(efx, false, MC_CMD_FW_DONT_CARE,
 				NULL, NULL);
-	}
 }
 
 void efx_mcdi_fini(struct efx_nic *efx)
@@ -1202,7 +1189,7 @@ static bool efx_mcdi_complete_cmd(struct efx_mcdi_iface *mcdi,
 						efx, bufid, &hdr,
 						resp_hdr_len +
 							MC_CMD_ERR_ARG_OFST, 4);
-					err_arg = MCDI_DWORD(&hdr, ERR_ARG);
+					err_arg = EFX_DWORD_VAL(hdr);
 				}
 				_efx_mcdi_display_error(efx, cmd->cmd,
 							cmd->inlen, rc, err_arg,
@@ -1500,9 +1487,6 @@ static void efx_mcdi_ev_death(struct efx_nic *efx, bool bist)
 		efx->mc_bist_for_other_fn = true;
 		efx->type->mcdi_record_bist_event(efx);
 	}
-#ifdef EFX_USE_MCDI_PROXY_AUTH
-	efx_proxy_auth_detached(efx);
-#endif
 	spin_lock(&mcdi->iface_lock);
 	efx_mcdi_reboot_detected(efx);
 	/* if this is the result of a MC_CMD_REBOOT then don't schedule reset */
@@ -1558,6 +1542,12 @@ int efx_mcdi_process_event(struct efx_channel *channel,
 
 	case MCDI_EVENT_CODE_LINKCHANGE:
 		efx_mcdi_process_link_change(efx, event);
+		break;
+	case MCDI_EVENT_CODE_LINKCHANGE_V2:
+		efx_mcdi_process_link_change_v2(efx, event);
+		break;
+	case MCDI_EVENT_CODE_MODULECHANGE:
+		efx_mcdi_process_module_change(efx, event);
 		break;
 	case MCDI_EVENT_CODE_SENSOREVT:
 		efx_mcdi_sensor_event(efx, event);
@@ -1621,13 +1611,6 @@ int efx_mcdi_process_event(struct efx_channel *channel,
 			  EFX_QWORD_VAL(*event));
 		efx_schedule_reset(efx, RESET_TYPE_DMA_ERROR);
 		break;
-#ifdef EFX_USE_MCDI_PROXY_AUTH
-	case MCDI_EVENT_CODE_PROXY_REQUEST:
-		/* Request via MC from remote function for authorization. */
-		efx_proxy_auth_handle_request(efx,
-				MCDI_EVENT_FIELD(*event, PROXY_REQUEST_BUFF_INDEX));
-		break;
-#endif
 	case MCDI_EVENT_CODE_PROXY_RESPONSE:
 		efx_mcdi_ev_proxy_response(efx,
 				MCDI_EVENT_FIELD(*event, PROXY_RESPONSE_HANDLE),
@@ -1718,8 +1701,9 @@ int efx_mcdi_drv_attach(struct efx_nic *efx, bool driver_operating,
 	size_t outlen;
 	int rc;
 
-	MCDI_SET_DWORD(inbuf, DRV_ATTACH_IN_NEW_STATE,
-		       driver_operating ? 1 : 0);
+	MCDI_POPULATE_DWORD_2(inbuf, DRV_ATTACH_IN_NEW_STATE,
+			      DRV_ATTACH_IN_ATTACH, !!driver_operating,
+			      DRV_ATTACH_IN_WANT_V2_LINKCHANGES, 1);
 	MCDI_SET_DWORD(inbuf, DRV_ATTACH_IN_UPDATE, 1);
 	MCDI_SET_DWORD(inbuf, DRV_ATTACH_IN_FIRMWARE_ID, fw_variant);
 
@@ -1760,9 +1744,6 @@ int efx_mcdi_drv_attach(struct efx_nic *efx, bool driver_operating,
 				 MC_CMD_DRV_ATTACH_EXT_OUT_FLAG_PRIMARY;
 		}
 	}
-#ifdef EFX_USE_MCDI_PROXY_AUTH
-	efx_proxy_auth_attach(efx);
-#endif
 
 	return 0;
 
@@ -1771,12 +1752,16 @@ fail:
 	return rc;
 }
 
-int efx_mcdi_get_board_cfg(struct efx_nic *efx, u8 *mac_address,
+int efx_mcdi_get_board_perm_mac(struct efx_nic *efx, u8 *mac_address)
+{
+	return efx_mcdi_get_board_cfg(efx, 0, mac_address, NULL, NULL);
+}
+
+int efx_mcdi_get_board_cfg(struct efx_nic *efx, int port_num, u8 *mac_address,
 			   u16 *fw_subtype_list, u32 *capabilities)
 {
 	MCDI_DECLARE_BUF(outbuf, MC_CMD_GET_BOARD_CFG_OUT_LENMAX);
 	size_t outlen, i;
-	int port_num = efx_port_num(efx);
 	int rc;
 
 	BUILD_BUG_ON(MC_CMD_GET_BOARD_CFG_IN_LEN != 0);
@@ -1846,6 +1831,23 @@ int efx_mcdi_log_ctrl(struct efx_nic *efx, bool evq, bool uart, u32 dest_evq)
 	rc = efx_mcdi_rpc(efx, MC_CMD_LOG_CTRL, inbuf, sizeof(inbuf),
 			  NULL, 0, NULL);
 	return rc;
+}
+
+void efx_mcdi_log_puts(struct efx_nic *efx, const char *text)
+{
+	MCDI_DECLARE_BUF(inbuf, MC_CMD_PUTS_IN_LENMAX);
+	struct timespec tv;
+	int inlen;
+
+	ktime_get_real_ts(&tv);
+	inlen = snprintf(MCDI_PTR(inbuf, PUTS_IN_STRING),
+			 MC_CMD_PUTS_IN_STRING_MAXNUM,
+			 "{%ld %s}", tv.tv_sec, (text ? text : ""));
+	/* Count the NULL byte as well */
+	inlen += MC_CMD_PUTS_IN_STRING_OFST + 1;
+
+	MCDI_SET_DWORD(inbuf, PUTS_IN_DEST, 1);
+	efx_mcdi_rpc_quiet(efx, MC_CMD_PUTS, inbuf, inlen, NULL, 0, NULL);
 }
 
 int efx_mcdi_nvram_types(struct efx_nic *efx, u32 *nvram_types_out)
@@ -2342,8 +2344,8 @@ int efx_mcdi_set_workaround(struct efx_nic *efx, u32 type, bool enabled,
 	BUILD_BUG_ON(MC_CMD_WORKAROUND_OUT_LEN != 0);
 	MCDI_SET_DWORD(inbuf, WORKAROUND_IN_TYPE, type);
 	MCDI_SET_DWORD(inbuf, WORKAROUND_IN_ENABLED, enabled);
-	rc = efx_mcdi_rpc(efx, MC_CMD_WORKAROUND, inbuf, sizeof(inbuf),
-			  outbuf, sizeof(outbuf), &outlen);
+	rc = efx_mcdi_rpc_quiet(efx, MC_CMD_WORKAROUND, inbuf, sizeof(inbuf),
+				outbuf, sizeof(outbuf), &outlen);
 	if (rc)
 		return rc;
 

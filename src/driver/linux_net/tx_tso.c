@@ -30,6 +30,7 @@
 #include <linux/ipv6.h>
 #include <linux/slab.h>
 #include <net/ipv6.h>
+#include <net/tcp.h>
 #include <linux/if_ether.h>
 #if !defined(EFX_USE_KCOMPAT)
 #include <linux/highmem.h>

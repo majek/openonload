@@ -23,7 +23,7 @@
 #include "efch.h"
 #include <ci/efch/op_types.h>
 #include "filter_list.h"
-#include <driver/linux_net/driverlink_api.h>
+#include <ci/driver/driverlink_api.h>
 
 
 struct filter {
@@ -445,6 +445,7 @@ int efch_filter_list_op_add(struct efrm_resource *rs, struct efrm_pd *pd,
   int replace;
   struct efx_filter_spec spec;
   int need_spec = ! is_op_block_kernel_only(op->op);
+  unsigned stack_id;
 
   if( op->u.filter_add.flags & CI_RSOP_FILTER_ADD_FLAG_MCAST_LOOP_RECEIVE )
     efx_filter_flags |= EFX_FILTER_FLAG_TX;
@@ -460,13 +461,9 @@ int efch_filter_list_op_add(struct efrm_resource *rs, struct efrm_pd *pd,
 
   *copy_out = 1;
 
-#if EFX_DRIVERLINK_API_VERSION >= 15
-    {
-      unsigned stack_id = efrm_pd_stack_id_get(pd);
-      ci_assert( stack_id >= 0 );
-      efx_filter_set_stack_id(&spec, stack_id);
-    }
-#endif
+  stack_id = efrm_pd_stack_id_get(pd);
+  ci_assert( stack_id >= 0 );
+  efx_filter_set_stack_id(&spec, stack_id);
 
   switch(op->op) {
   case CI_RSOP_FILTER_ADD_IP4:
@@ -576,19 +573,16 @@ int efch_filter_list_add(struct efrm_resource *rs, struct efrm_pd *pd,
   struct filter *f;
   int replace;
   int rc;
+  unsigned stack_id;
 
   efx_filter_init_rx(&spec, EFX_FILTER_PRI_REQUIRED, EFX_FILTER_FLAG_RX_SCATTER,
                      rs->rs_instance);
 
   *copy_out = 1;
 
-#if EFX_DRIVERLINK_API_VERSION >= 15
-  {
-    unsigned stack_id = efrm_pd_stack_id_get(pd);
-    ci_assert( stack_id >= 0 );
-    efx_filter_set_stack_id(&spec, stack_id);
-  }
-#endif
+  stack_id = efrm_pd_stack_id_get(pd);
+  ci_assert( stack_id >= 0 );
+  efx_filter_set_stack_id(&spec, stack_id);
 
   if( filter_add->in.spec.l2.vid != 0xffff )
     rc = efch_filter_list_set_ip6_vlan(&spec, filter_add, &replace);

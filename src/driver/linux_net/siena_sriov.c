@@ -1101,9 +1101,8 @@ static ssize_t show_mac_addr(struct device *dev, struct device_attribute *attr,
 {
 	struct siena_vf *vf = container_of(attr, struct siena_vf,
 					   dev_attr_mac_addr);
-	DECLARE_MAC_BUF(macbuf);
 
-	return sprintf(buf, "%s", print_mac(macbuf, vf->addr.mac_addr));
+	return sprintf(buf, "%pM", vf->addr.mac_addr);
 }
 
 static ssize_t set_mac_addr(struct device *dev, struct device_attribute *attr,

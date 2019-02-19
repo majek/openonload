@@ -381,7 +381,7 @@ struct efx_pps_dev_attr {
  * @max_adjfreq: Current ppb adjustment, lives here instead of phc_clock_info as
  * 		 it must be accessable without PHC support, using private ioctls.
  * @current_adjfreq: Current ppb adjustment.
- * @phc_clock: Pointer to registered phc device (if primary function)
+ * @phc_clock: Pointer to registered phc device
  * @phc_clock_info: Registration structure for phc device
  * @pps_work: pps work task for handling pps events
  * @pps_workwq: pps work queue
@@ -548,6 +548,8 @@ static int efx_phc_settime32(struct ptp_clock_info *ptp,
 			     const struct timespec *ts);
 #endif
 #endif
+
+static LIST_HEAD(efx_all_funcs_list);
 
 bool efx_ptp_use_mac_tx_timestamps(struct efx_nic *efx)
 {
@@ -769,11 +771,11 @@ static ssize_t show_max_adjfreq(struct device *dev,
 				 char *buff)
 {
 	struct efx_nic *efx = pci_get_drvdata(to_pci_dev(dev));
-	struct efx_nic *primary = efx->primary;
+	struct efx_nic *phc_efx = efx->phc_efx;
 	s32 max_adjfreq = 0;
 
-	if (primary && primary->ptp_data)
-	        max_adjfreq = primary->ptp_data->max_adjfreq;
+	if (phc_efx && phc_efx->ptp_data)
+	        max_adjfreq = phc_efx->ptp_data->max_adjfreq;
 
 	return sprintf(buff, "%d\n", max_adjfreq);
 }
@@ -1200,6 +1202,29 @@ static int efx_ptp_get_timestamp_corrections(struct efx_nic *efx)
 	return 0;
 }
 
+static int efx_ptp_adapter_has_support(struct efx_nic *efx)
+{
+	MCDI_DECLARE_BUF(inbuf, MC_CMD_PTP_IN_READ_NIC_TIME_LEN);
+	MCDI_DECLARE_BUF_ERR(outbuf);
+	int rc;
+
+	MCDI_SET_DWORD(inbuf, PTP_IN_OP, MC_CMD_PTP_OP_READ_NIC_TIME);
+	MCDI_SET_DWORD(inbuf, PTP_IN_PERIPH_ID, 0);
+	rc = efx_mcdi_rpc_quiet(efx, MC_CMD_PTP, inbuf, sizeof(inbuf),
+				outbuf, sizeof(outbuf), NULL);
+	/* ENOSYS => the NIC doesn't support PTP.
+	 * EPERM => the NIC doesn't have a PTP license.
+	 */
+	if (rc == -ENOSYS || rc == -EPERM)
+		netif_info(efx, probe, efx->net_dev, "no PTP support (rc=%d)\n",
+			rc);
+	else if (rc)
+		efx_mcdi_display_error(efx, MC_CMD_PTP,
+				       MC_CMD_PTP_IN_READ_NIC_TIME_LEN,
+				       outbuf, sizeof(outbuf), rc);
+	return rc == 0;
+}
+
 /* Enable MCDI PTP support. */
 static int efx_ptp_enable(struct efx_nic *efx)
 {
@@ -1225,9 +1250,6 @@ static int efx_ptp_enable(struct efx_nic *efx)
 }
 
 /* Disable MCDI PTP support.
- *
- * Note that this function should never rely on the presence of ptp_data -
- * may be called before that exists.
  */
 static int efx_ptp_disable(struct efx_nic *efx)
 {
@@ -1240,12 +1262,7 @@ static int efx_ptp_disable(struct efx_nic *efx)
 	rc = efx_mcdi_rpc_quiet(efx, MC_CMD_PTP, inbuf, sizeof(inbuf),
 				outbuf, sizeof(outbuf), NULL);
 	rc = (rc == -EALREADY) ? 0 : rc;
-	/* If we get ENOSYS, the NIC doesn't support PTP, and thus this function
-	 * should only have been called during probe.
-	 */
-	if (rc == -ENOSYS || rc == -EPERM)
-		netif_info(efx, probe, efx->net_dev, "no PTP support\n");
-	else if (rc)
+	if (rc)
 		efx_mcdi_display_error(efx, MC_CMD_PTP,
 				       MC_CMD_PTP_IN_DISABLE_LEN,
 				       outbuf, sizeof(outbuf), rc);
@@ -2604,29 +2621,55 @@ bool efx_ptp_uses_separate_channel(struct efx_nic *efx)
 #endif
 }
 
-
-static bool efx_ptp_expose_clock(struct efx_nic *efx)
+/* Find interface on the same physical adapter (by port0 MAC address) and setup
+ * efx->phc_efx. This cannot be merged with efx_associate() as efx_phc_exposed()
+ * is required at probe time.
+ */
+static void efx_associate_phc(struct efx_nic *efx)
 {
-	static bool exposed = false;
+	struct efx_nic *other, *next;
 
-	/* Always provide a clock on the primary PF of every adapter. */
-	if (efx->mcdi->fn_flags &
-	    (1 << MC_CMD_DRV_ATTACH_EXT_OUT_FLAG_PRIMARY)) {
-		exposed = true;
-		return true;
+	EFX_WARN_ON_PARANOID(efx->phc_efx);
+	spin_lock(&ptp_all_funcs_list_lock);
+
+	list_for_each_entry_safe(other, next, &efx_all_funcs_list,
+				 node_ptp_all_funcs) {
+		EFX_WARN_ON_PARANOID(other == efx);
+		if (ether_addr_equal(other->adapter_base_addr,
+				     efx->adapter_base_addr)) {
+			efx->phc_efx = other;
+			goto out;
+		}
 	}
 
-#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_PHC_SUPPORT)
-#ifdef CONFIG_SFC_SRIOV
-	/* In a VM expose exactly 1 PHC clock on a VF, even across adapters. */
-	if ((efx_nic_rev(efx) >= EFX_REV_HUNT_A0) &&
-	    efx->type->is_vf && !exposed) {
-		exposed = true;
-		return true;
+	efx->phc_efx = efx;
+out:
+	list_add(&efx->node_ptp_all_funcs, &efx_all_funcs_list);
+	spin_unlock(&ptp_all_funcs_list_lock);
+}
+
+/* Clear efx->phc_efx for any interface that points to this one.
+*/
+static void efx_dissociate_phc(struct efx_nic *efx)
+{
+	struct efx_nic *other, *next;
+
+	spin_lock(&ptp_all_funcs_list_lock);
+
+	list_del(&efx->node_ptp_all_funcs);
+	list_for_each_entry_safe(other, next, &efx_all_funcs_list,
+		node_ptp_all_funcs) {
+		EFX_WARN_ON_PARANOID(other == efx);
+		if (other->phc_efx == efx)
+			other->phc_efx = NULL;
 	}
-#endif
-#endif
-	return false;
+
+	spin_unlock(&ptp_all_funcs_list_lock);
+}
+
+static inline bool efx_phc_exposed(struct efx_nic *efx)
+{
+	return efx->phc_efx == efx;
 }
 
 /* Initialise PTP state. */
@@ -2635,12 +2678,18 @@ int efx_ptp_probe(struct efx_nic *efx, struct efx_channel *channel)
 	struct efx_ptp_data *ptp;
 	int rc = 0;
 	unsigned int pos;
-	bool clock_exposed;
 
 	ptp = kzalloc(sizeof(struct efx_ptp_data), GFP_KERNEL);
 	efx->ptp_data = ptp;
 	if (!efx->ptp_data)
 		return -ENOMEM;
+
+	rc = efx_mcdi_get_board_cfg(efx, 0, efx->adapter_base_addr, NULL,
+				    NULL);
+	if (rc < 0)
+		return rc;
+
+	efx_associate_phc(efx);
 
 	ptp->efx = efx;
 	ptp->channel = channel;
@@ -2709,9 +2758,8 @@ int efx_ptp_probe(struct efx_nic *efx, struct efx_channel *channel)
 	/* TODO: add MCDI call to get this value from the NIC */
 	ptp->max_adjfreq = MAX_PPB;
 
-	clock_exposed = efx_ptp_expose_clock(efx);
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_PHC_SUPPORT)
-	if (clock_exposed) {
+	if (efx_phc_exposed(efx)) {
 		ptp->phc_clock_info = efx_phc_clock_info;
 		ptp->phc_clock_info.max_adj = ptp->max_adjfreq;
 		ptp->phc_clock = ptp_clock_register(&ptp->phc_clock_info,
@@ -2721,7 +2769,6 @@ int efx_ptp_probe(struct efx_nic *efx, struct efx_channel *channel)
 			goto fail3;
 		}
 		kref_get(&ptp->kref);
-
 		rc = efx_create_pps_worker(ptp);
 		if (rc < 0)
 			goto fail4;
@@ -2759,7 +2806,7 @@ int efx_ptp_probe(struct efx_nic *efx, struct efx_channel *channel)
 	 * older versions of sfptpd will try to synchronise multiple
 	 * net devices that share a clock.
 	 */
-	if (clock_exposed) {
+	if (efx_phc_exposed(efx)) {
 		rc = device_create_file(&efx->pci_dev->dev,
 					&dev_attr_ptp_caps);
 		if (rc < 0)
@@ -2776,8 +2823,7 @@ int efx_ptp_probe(struct efx_nic *efx, struct efx_channel *channel)
 
 #ifdef EFX_NOT_UPSTREAM
 fail8:
-	if (efx->mcdi->fn_flags &
-	    (1 << MC_CMD_DRV_ATTACH_EXT_OUT_FLAG_PRIMARY))
+	if (efx_phc_exposed(efx))
 		device_remove_file(&efx->pci_dev->dev, &dev_attr_ptp_caps);
 fail7:
 #ifdef CONFIG_SFC_DEBUGFS
@@ -2817,6 +2863,7 @@ fail:
 #ifdef EFX_NOT_UPSTREAM
 	kref_put(&ptp->kref, efx_ptp_delete_data);
 #endif
+	efx_dissociate_phc(efx);
 
 	return rc;
 }
@@ -2871,9 +2918,7 @@ void efx_ptp_remove(struct efx_nic *efx)
 	skb_queue_purge(&efx->ptp_data->txq);
 
 #ifdef EFX_NOT_UPSTREAM
-	if ((efx->mcdi->fn_flags &
-	     (1 << MC_CMD_DRV_ATTACH_EXT_OUT_FLAG_PRIMARY)) ||
-	    efx->ptp_data->phc_clock)
+	if (efx_phc_exposed(efx) || efx->ptp_data->phc_clock)
 		device_remove_file(&efx->pci_dev->dev, &dev_attr_ptp_caps);
 	device_remove_file(&efx->pci_dev->dev, &dev_attr_max_adjfreq);
 #endif
@@ -2905,6 +2950,7 @@ void efx_ptp_remove(struct efx_nic *efx)
 #ifdef EFX_NOT_UPSTREAM
 	kref_put(&efx->ptp_data->kref, efx_ptp_delete_data);
 #endif
+	efx_dissociate_phc(efx);
 }
 
 static void efx_ptp_remove_channel(struct efx_channel *channel)
@@ -3156,7 +3202,7 @@ static int efx_ptp_ts_init(struct efx_nic *efx, struct hwtstamp_config *init)
 void efx_ptp_get_ts_info(struct efx_nic *efx, struct ethtool_ts_info *ts_info)
 {
 	struct efx_ptp_data *ptp = efx->ptp_data;
-	struct efx_nic *primary = efx->primary;
+	struct efx_nic *phc_efx = efx->phc_efx;
 
 	ASSERT_RTNL();
 
@@ -3181,13 +3227,13 @@ void efx_ptp_get_ts_info(struct efx_nic *efx, struct ethtool_ts_info *ts_info)
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_PHC_SUPPORT)
 	if (ptp->phc_clock)
 		ts_info->phc_index = ptp_clock_index(ptp->phc_clock);
-	else if (primary && primary->ptp_data && primary->ptp_data->phc_clock)
+	else if (phc_efx && phc_efx->ptp_data && phc_efx->ptp_data->phc_clock)
 		ts_info->phc_index =
-			ptp_clock_index(primary->ptp_data->phc_clock);
+			ptp_clock_index(phc_efx->ptp_data->phc_clock);
 #else
-	/* Use primary's ifindex as a fake clock index */
-	if (primary && primary->ptp_data)
-		ts_info->phc_index = primary->net_dev->ifindex;
+	/* Use phc_efx's ifindex as a fake clock index */
+	if (phc_efx && phc_efx->ptp_data)
+		ts_info->phc_index = phc_efx->net_dev->ifindex;
 #endif
 	ts_info->tx_types = 1 << HWTSTAMP_TX_OFF | 1 << HWTSTAMP_TX_ON;
 	ts_info->rx_filters = ptp->efx->type->hwtstamp_filters;
@@ -3280,8 +3326,8 @@ static struct ptp_clock_info *efx_ptp_clock_info(struct efx_nic *efx)
 		return NULL;
 
 	phc_clock_info = &efx->ptp_data->phc_clock_info;
-	if (!phc_clock_info && efx->primary && efx->primary->ptp_data)
-		phc_clock_info = &efx->primary->ptp_data->phc_clock_info;
+	if (!phc_clock_info && efx->phc_efx && efx->phc_efx->ptp_data)
+		phc_clock_info = &efx->phc_efx->ptp_data->phc_clock_info;
 
 	return phc_clock_info;
 }
@@ -3882,10 +3928,7 @@ static const struct efx_channel_type efx_ptp_channel_type = {
 
 void efx_ptp_defer_probe_with_channel(struct efx_nic *efx)
 {
-	/* Check whether PTP is implemented on this NIC.  The DISABLE
-	 * operation will succeed if and only if it is implemented.
-	 */
-	if (efx_ptp_disable(efx) == 0)
+	if (efx_ptp_adapter_has_support(efx))
 		efx->extra_channel_type[EFX_EXTRA_CHANNEL_PTP] =
 			&efx_ptp_channel_type;
 }

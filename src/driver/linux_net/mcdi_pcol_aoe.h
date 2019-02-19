@@ -2258,6 +2258,8 @@
 #define          MC_CMD_AOE_OP_GET_ASIC_PORTS 0x19
 /* enum: Get FC assert information and register dump */
 #define          MC_CMD_AOE_OP_GET_FC_ASSERT_INFO 0x1a
+/* enum: Set MUM startup FUSE byte with extended delay */
+#define          MC_CMD_AOE_OP_MUM_STARTUP_FUSE 0x1b
 
 /* MC_CMD_AOE_OUT msgresponse */
 #define    MC_CMD_AOE_OUT_LEN 0
@@ -2578,6 +2580,17 @@
 #define       MC_CMD_AOE_IN_FC_BOOT_CONTROL_LEN 4
 #define        MC_CMD_AOE_IN_FC_BOOT_CONTROL_BOOT_ENABLE_LBN 0
 #define        MC_CMD_AOE_IN_FC_BOOT_CONTROL_BOOT_ENABLE_WIDTH 1
+
+/* MC_CMD_AOE_IN_MUM_STARTUP_FUSE msgrequest: On AOE2, set MUM startup FUSE
+ * byte with extended delay of 64ms. On some servers with noisy power rails,
+ * this ensures that the MUM IO pins do not show spurious transitions while the
+ * power rails are stabilising. Note that this operation requires a hard-
+ * powercycle to take effect. See bug76446.
+ */
+#define    MC_CMD_AOE_IN_MUM_STARTUP_FUSE_LEN 4
+/* Must be MC_CMD_AOE_OP_MUM_STARTUP_FUSE */
+/*            MC_CMD_AOE_IN_CMD_OFST 0 */
+/*            MC_CMD_AOE_IN_CMD_LEN 4 */
 
 /* MC_CMD_AOE_OUT_GET_FC_ASSERT_INFO msgresponse */
 #define    MC_CMD_AOE_OUT_GET_FC_ASSERT_INFO_LEN 144
@@ -2913,3 +2926,11 @@
 
 /* MC_CMD_AOE_OUT_FC_BOOT msgresponse */
 #define    MC_CMD_AOE_OUT_FC_BOOT_LEN 0
+
+/* MC_CMD_AOE_OUT_MUM_STARTUP_FUSE msgresponse */
+#define    MC_CMD_AOE_OUT_MUM_STARTUP_FUSE_LEN 4
+/* Current value of startup FUSE byte (fusebyte#4) read back after the update
+ * operation.
+ */
+#define       MC_CMD_AOE_OUT_MUM_STARTUP_FUSE_READBACK_VALUE_OFST 0
+#define       MC_CMD_AOE_OUT_MUM_STARTUP_FUSE_READBACK_VALUE_LEN 4

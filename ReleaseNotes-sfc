@@ -1,6 +1,6 @@
 Solarflare 4.X Linux network driver
 ===================================
-Version:  4.13.1.1034
+Version:  v4.14.0.1014
 
 
 Overview
@@ -77,7 +77,7 @@ kernel
 Installation of the driver can be confirmed by typing:
    modinfo sfc | grep version
 and checking for the line:
-   version: 4.13.1.1034
+   version: v4.14.0.1014
 
 All network interfaces available on the system can be found with:
   ifconfig -a
@@ -101,16 +101,16 @@ Linux distribution support for Solarflare Adapters
 --------------------------------------------------
 
 This driver package is supported on:
- - RedHat Enterprise Linux		          6.7, 6.8, 6.9
+ - RedHat Enterprise Linux		          6.7, 6.8, 6.9, 6.10
  - RedHat Enterprise Linux		          7.3, 7.4, 7.5
    - RedHat Enterprise Linux for Realtime	  7.3, 7.4
  - SuSE Linux Enterprise Server 11                sp4
    - SuSE Linux Enterprise RealTime Extension 11  sp4
  - SuSE Linux Enterprise Server 12                sp3
- - Canonical Ubuntu Server LTS                    14.04.5, 16.04.x
+ - Canonical Ubuntu Server LTS                    14.04.5, 16.04.x, 18.04
  - Debian 8 "Jessie"                              8.10
  - Debian 9 "Stretch"                             9.4
- - Kernel.org linux kernels                       3.0 to 4.16-rc1
+ - Kernel.org linux kernels                       3.0 to 4.16
 
 
 Solarflare aims to support the current and previous major release of each
@@ -130,53 +130,104 @@ Please contact your local Solarflare support representative or email
 Deprecation warnings
 --------------------
 
-The following features are being deprecated and may not be available in future releases
-of the Solarflare linux net driver. Please check the release notes to see whether these
-features have been removed.
+The following features are being deprecated and may not be available in future
+releases of the Solarflare linux net driver. Please check the release notes to
+see whether these features have been removed.
 
-Use of these features will currently only cause a warning message to be printed to the
-kernel console.
+Use of these features will currently only cause a warning message to be printed
+to the kernel console.
 
-Note that nothing has currently been changed and the full functionality remains in
-this release.
+Note that nothing has currently been changed and the full functionality remains
+in this release.
 
 SARFS:
- ~ This is a feature similar to the kernel feature ARFS (Accelerated Receive Flow
-   Steering) but implemented purely within the sfc.ko driver. All kernels that this
-   driver supports are new enough to support ARFS. Information on using in-kernel ARFS
-   is at https://www.kernel.org/doc/Documentation/networking/scaling.txt or please
-   consult the Solarflare Server Adapter User's Guide [SF-103837-CD] available at
-   https://support.solarflare.com
+ ~ This is a feature similar to the kernel feature ARFS (Accelerated Receive
+   Flow Steering) but implemented purely within the sfc.ko driver. All kernels
+   that this driver supports are new enough to support ARFS. Information on
+   using in-kernel ARFS is at
+   https://www.kernel.org/doc/Documentation/networking/scaling.txt or please
+   consult the Solarflare Server Adapter User's Guide [SF-103837-CD] available
+   at https://support.solarflare.com
 
 SXPS:
- ~ This is a feature similar to the kernel feature XPS (Transmit Packet Steering) but
-   implemented purely within the sfc.ko driver. All kernels that this driver supports
-   are new enough to support XPS. Information on using in-kernel XPS is at
-   https://www.kernel.org/doc/Documentation/networking/scaling.txt or please consult
-   the Solarflare Server Adapter User's Guide [SF-103837-CD] available at
-   https://support.solarflare.com
+ ~ This is a feature similar to the kernel feature XPS (Transmit Packet
+   Steering) but implemented purely within the sfc.ko driver. All kernels that
+   this driver supports are new enough to support XPS. Information on using
+   in-kernel XPS is at
+   https://www.kernel.org/doc/Documentation/networking/scaling.txt or please
+   consult the Solarflare Server Adapter User's Guide [SF-103837-CD] available
+   at https://support.solarflare.com
 
 Proxy MCDI authorization:
- ~ This feature had been used in a proof-of-concept to allow a userland utility to vet
-   and control requests to subscribe to a multicast group from an unprivileged
+ ~ This feature had been used by a proof-of-concept userland utility to vet and
+   control requests to subscribe to a multicast group from an unprivileged
    function (e.g. a VF in a VM).
 
 Driverlink RX packet callback:
- ~ This was used for inspecting/permitting all RX packets via a driverlink callback.
+ ~ This was used for inspecting/permitting all RX packets via a driverlink
+   callback.
 
 
 Changelog
 ---------
 
-### v4.13.1.1034 -- X2 GA release
+### v4.14.0.1013 -- update release for OpenOnload-201805
+[General changes]
+ ~ Kernel compat fixes to support linux 4.18 and RHEL 6.10
+ ~ Removal of obsolete kernel compat support
+
+[ESXi in-guest PTP]
+ ~ Allow VFs to register PHC clocks
+ ~ Register a single PHC clock per adapter (grouping on adapter base
+   MAC address)
+ ~ Ensure all adapter interfaces (including VFs) point to the single
+   PHC clock.
+ ~ VFs will only be able to read/sync to adapter clock unless extra
+   privileges are granted.
+
+[Removed features]
+ ~ Removal of previously deprecated features:
+   SARFS, SXPS, driverlink RX packet callback, proxy MCDI authorization.
+
+Issue 81032:
+ ~ Channels used for XDP transmit are now included in the output from
+   ethtool --get-channels, listed as "Other". These channels are only
+   created if the driver is loaded with the module parameter
+   xdp_alloc_tx_resources set.
+
+Issue 81011:
+ ~ Ethtool -s (sset/slinksettings) commands are now interpreted more simply,
+   using the autoneg setting to choose between using the advertise bitmap
+   or the speed/duplex settings. This works around a problem in some RHEL7
+   kernels where 'ethtool -s ... autoneg off' had no effect.
+
+Issue 80588:
+ ~ Fix for a memory leak when replacing an XDP programme. The driver was
+   retaining an additional reference to the old programme when a new one
+   was installed, resulting in it not being freed by the kernel.
+
+Issue 80393:
+ ~ Fix initialisation of filter semaphore for 5000/6000 series NICs.
+   A semaphore was not correctly initialised, causing errors from debug
+   kernels.
+
+Issue 80006:
+ ~ Fix the calculation of required resources when setting up XDP.
+   One XDP transmit queue is required per CPU, but we share an event queue
+   between multiplt transmit queues. This was not accounted for correctly,
+   meaning the driver could refuse to enable XDP despite having resources.
+
+### v4.13.1.1034 -- X2 GA release, OpenOnload-201805
 [General changes]
  ~ Kernel compat fixes to support linux 4.15
    [timespec_add_ns(), setup_timer(), mtd_erase_callback(), TICK_USEC ]
- ~ Support RSS spreading of ethtool ntuple filters and add this to driverlink APIs.
-   To configure this requires upstreamed ethtool changes or a copy of sfctool2 from the
-   sfutils package.
+ ~ Support RSS spreading of ethtool ntuple filters and add this to driverlink
+   APIs.
+   To configure this requires upstreamed ethtool changes or a copy of sfctool2
+   from the sfutils package.
  ~ Remove "ctpio_dmabuf_start" that was erroneously included in ethtool stats.
- ~ Expose flash partitions with default settings via MTD. These are now used by sfboot.
+ ~ Expose flash partitions with default settings via MTD. These are now used by
+   sfboot.
  ~ Replace asynchronous filter operations (e.g. ARFS) to ensure all filter table
    functions are called in a sleepable context.
 
@@ -187,19 +238,20 @@ Changelog
 
 Issue 79102:
  ~ Filter locking improvements.
- ~ This had been seen to cause a command such as "ip link set enp4s0f0 vf 0 vlan 100"
-   to cause hung task timeouts with "efx_ef10_filter_insert+0x94/0x900" in the stack.
+ ~ This had been seen to cause a command such as "ip link set ethX vf 0 vlan 10"
+   to cause hung task timeouts with "efx_ef10_filter_insert+0x94/0x900" in the
+   stack.
 
 Issue 78429:
- ~ Avoid using RSS files with "capture-packed-stream" firmware variant.
+ ~ Avoid using RSS filters with "capture-packed-stream" firmware variant.
    The error seen would be "efx_ef10_filter_insert failed rc=-95".
 
 SF-119883-KI / Issue 78299:
- ~ Fix for kernel panic or NMI. The backtrace will include "efx_mcdi_rpc_completer"
-   and a "__wake_up" function.
+ ~ Fix for kernel panic or NMI. The backtrace will include
+   "efx_mcdi_rpc_completer" and a "__wake_up" function.
 
 Issue 77962:
- ~ Handle delayed release of MTD memory by reference counting partition info memory.
+ ~ Handle delayed release of MTD memory by reference counting partition info.
  ~ This could cause a kernel WARNING and backtrace at:
      drivers/mtd/mtdcore.c:508 add_mtd_device+0x246/0x350 [mtd]
 
@@ -252,6 +304,25 @@ Issue 76297:
 [Stratus ftServer support] - Note these issues only affect PCI hot-plug cases
 Issue 76858:
  ~ Fix kernel crash in show_max_adjfreq+0x20/0x40.
+
+
+### v4.12.2.1014 -- update release for OpenOnload-201710
+[General changes]
+ ~ Kernel compatibility for upstream 4.15, 4.16-rc5 and RHEL 7.5.
+
+ ~ Increase the number of multicast filters used before reverting to the
+   'multicast all' filter. In response to customer feedback the maximum number
+   of multicast filters inserted has been increased from 256 to 512. Above
+   that the individual filters will still be replaced with a 'multicast all'
+   filter.
+
+SF-119883-KI / Issue 78131:
+ ~ A race condition in the MCDI (driver<=>adapter communication) state machine
+   could result in stack data being accessed from a different thread after it
+   had gone out of scope. This would result in invalid addresses being read or
+   a hard lockup, both with efx_mcdi_rpc_completer and __wake_up in the call
+   stack. A similar race (not observed in use) was identified and fixed in the
+   PTP/MCDI interaction.
 
 
 ### v4.12.2.1006 -- update release for OpenOnload-201710

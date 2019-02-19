@@ -201,21 +201,54 @@ fail:
 	return rc;
 }
 
-static int efx_mcdi_set_link(struct efx_nic *efx, u32 capabilities,
-			     u32 flags, u32 loopback_mode)
+static void efx_mcdi_set_link_completer(struct efx_nic *efx,
+					unsigned long cookie, int rc,
+					efx_dword_t *outbuf,
+					size_t outlen_actual)
 {
-	MCDI_DECLARE_BUF(inbuf, MC_CMD_SET_LINK_IN_LEN);
+	/* EAGAIN means another MODULECHANGE event came in while we were
+	 * doing the SET_LINK. Ignore the failure, we should be
+	 * trying again shortly.
+	 */
+	if (rc == -EAGAIN)
+		return;
+
+	/* For other failures, nothing we can do except log it */
+	if (rc) {
+		if (net_ratelimit())
+			netif_err(efx, link, efx->net_dev,
+				  "Failed to set link settings for new module (%#x)\n",
+				  rc);
+		return;
+	}
+
+	efx_link_set_advertising(efx, &cookie);
+}
+
+#define SET_LINK_SEQ_IGNORE (1 << MC_CMD_SET_LINK_IN_V2_MODULE_SEQ_IGNORE_LBN)
+
+static int efx_mcdi_set_link(struct efx_nic *efx, u32 capabilities,
+			     u32 flags, u32 loopback_mode, bool async, u8 seq)
+{
+	MCDI_DECLARE_BUF(inbuf, MC_CMD_SET_LINK_IN_V2_LEN);
 	int rc;
 
 	BUILD_BUG_ON(MC_CMD_SET_LINK_OUT_LEN != 0);
 
-	MCDI_SET_DWORD(inbuf, SET_LINK_IN_CAP, capabilities);
-	MCDI_SET_DWORD(inbuf, SET_LINK_IN_FLAGS, flags);
-	MCDI_SET_DWORD(inbuf, SET_LINK_IN_LOOPBACK_MODE, loopback_mode);
-	MCDI_SET_DWORD(inbuf, SET_LINK_IN_LOOPBACK_SPEED, 0 /* auto */);
+	MCDI_SET_DWORD(inbuf, SET_LINK_IN_V2_CAP, capabilities);
+	MCDI_SET_DWORD(inbuf, SET_LINK_IN_V2_FLAGS, flags);
+	MCDI_SET_DWORD(inbuf, SET_LINK_IN_V2_LOOPBACK_MODE, loopback_mode);
+	MCDI_SET_DWORD(inbuf, SET_LINK_IN_V2_LOOPBACK_SPEED, 0 /* auto */);
+	MCDI_SET_DWORD(inbuf, SET_LINK_IN_V2_MODULE_SEQ, seq);
 
-	rc = efx_mcdi_rpc(efx, MC_CMD_SET_LINK, inbuf, sizeof(inbuf),
-			  NULL, 0, NULL);
+	if (async)
+		rc = efx_mcdi_rpc_async(efx, MC_CMD_SET_LINK, inbuf,
+					sizeof(inbuf),
+					efx_mcdi_set_link_completer,
+					capabilities);
+	else
+		rc = efx_mcdi_rpc(efx, MC_CMD_SET_LINK, inbuf, sizeof(inbuf),
+				  NULL, 0, NULL);
 	return rc;
 }
 
@@ -556,9 +589,33 @@ static u8 mcdi_to_ethtool_media(u32 media)
 	}
 }
 
+static u8 efx_mcdi_link_state_flags(struct efx_link_state *link_state)
+{
+	return (link_state->up ? MC_CMD_GET_LINK_OUT_LINK_UP_LBN : 0) |
+	       (link_state->fd ? MC_CMD_GET_LINK_OUT_FULL_DUPLEX_LBN : 0);
+}
+
+static u8 efx_mcdi_link_state_fcntl(struct efx_link_state *link_state)
+{
+	switch (link_state->fc) {
+	case EFX_FC_AUTO | EFX_FC_TX | EFX_FC_RX:
+		return MC_CMD_FCNTL_AUTO;
+	case EFX_FC_TX | EFX_FC_RX:
+		return MC_CMD_FCNTL_BIDIR;
+	case EFX_FC_RX:
+		return MC_CMD_FCNTL_RESPOND;
+	default:
+		WARN_ON_ONCE(1);
+		/* fall through */
+	case 0:
+		return MC_CMD_FCNTL_OFF;
+	}
+}
+
 static void efx_mcdi_phy_decode_link(struct efx_nic *efx,
 			      struct efx_link_state *link_state,
-			      u32 speed, u32 flags, u32 fcntl)
+			      u32 speed, u32 flags, u32 fcntl,
+			      u32 ld_caps, u32 lp_caps)
 {
 	switch (fcntl) {
 	case MC_CMD_FCNTL_AUTO:
@@ -581,6 +638,8 @@ static void efx_mcdi_phy_decode_link(struct efx_nic *efx,
 	link_state->up = !!(flags & (1 << MC_CMD_GET_LINK_OUT_LINK_UP_LBN));
 	link_state->fd = !!(flags & (1 << MC_CMD_GET_LINK_OUT_FULL_DUPLEX_LBN));
 	link_state->speed = speed;
+	link_state->ld_caps = ld_caps;
+	link_state->lp_caps = lp_caps;
 }
 
 /* The semantics of the ethtool FEC mode bitmask are not well defined,
@@ -598,7 +657,7 @@ static void efx_mcdi_phy_decode_link(struct efx_nic *efx,
  * Both RS and BASER (whether AUTO or not) means use FEC if cable and link
  * partner support it, preferring RS to BASER.
  */
-static u32 ethtool_fec_caps_to_mcdi(u32 ethtool_cap)
+static u32 ethtool_fec_caps_to_mcdi(u32 supported_cap, u32 ethtool_cap)
 {
 	u32 ret = 0;
 
@@ -606,9 +665,10 @@ static u32 ethtool_fec_caps_to_mcdi(u32 ethtool_cap)
 		return 0;
 
 	if (ethtool_cap & ETHTOOL_FEC_AUTO)
-		ret |= (1 << MC_CMD_PHY_CAP_BASER_FEC_LBN) |
-		       (1 << MC_CMD_PHY_CAP_25G_BASER_FEC_LBN) |
-		       (1 << MC_CMD_PHY_CAP_RS_FEC_LBN);
+		ret |= ((1 << MC_CMD_PHY_CAP_BASER_FEC_LBN) |
+			(1 << MC_CMD_PHY_CAP_25G_BASER_FEC_LBN) |
+			(1 << MC_CMD_PHY_CAP_RS_FEC_LBN)) &
+		       supported_cap;
 	if (ethtool_cap & ETHTOOL_FEC_RS)
 		ret |= (1 << MC_CMD_PHY_CAP_RS_FEC_LBN) |
 		       (1 << MC_CMD_PHY_CAP_RS_FEC_REQUESTED_LBN);
@@ -641,7 +701,15 @@ static u32 mcdi_fec_caps_to_ethtool(u32 caps, bool is_25g)
 	       (baser == baser_req && rs == rs_req ? 0 : ETHTOOL_FEC_AUTO);
 }
 
-#ifdef EFX_NOT_UPSTREAM
+static u32 efx_get_mcdi_caps(struct efx_nic *efx)
+{
+	struct efx_mcdi_phy_data *phy_data = efx->phy_data;
+
+	return ethtool_linkset_to_mcdi_cap(efx->link_advertising) |
+	       ethtool_fec_caps_to_mcdi(phy_data->supported_cap,
+					efx->fec_config);
+}
+
 #define MCDI_PORT_SPEED_CAPS   ((1 << MC_CMD_PHY_CAP_10HDX_LBN) | \
 				(1 << MC_CMD_PHY_CAP_10FDX_LBN) | \
 				(1 << MC_CMD_PHY_CAP_100HDX_LBN) | \
@@ -653,13 +721,12 @@ static u32 mcdi_fec_caps_to_ethtool(u32 caps, bool is_25g)
 				(1 << MC_CMD_PHY_CAP_100000FDX_LBN) | \
 				(1 << MC_CMD_PHY_CAP_25000FDX_LBN) | \
 				(1 << MC_CMD_PHY_CAP_50000FDX_LBN))
-#endif
 
 static int efx_mcdi_phy_probe(struct efx_nic *efx)
 {
 	struct efx_mcdi_phy_data *phy_data;
 	MCDI_DECLARE_BUF(outbuf, MC_CMD_GET_LINK_OUT_LEN);
-	u32 caps;
+	u32 caps, ld_caps, lp_caps;
 	int rc;
 
 	/* Initialise and populate phy_data */
@@ -691,7 +758,7 @@ static int efx_mcdi_phy_probe(struct efx_nic *efx)
 	if (phy_data->mmd_mask & ~(1 << MC_CMD_MMD_CLAUSE22))
 		efx->mdio.mode_support |= MDIO_SUPPORTS_C45 | MDIO_EMULATE_C22;
 
-	caps = MCDI_DWORD(outbuf, GET_LINK_OUT_CAP);
+	caps = ld_caps = lp_caps = MCDI_DWORD(outbuf, GET_LINK_OUT_CAP);
 #ifdef EFX_NOT_UPSTREAM
 	/* If the link isn't advertising any speeds this is almost certainly
 	 * due to an in-distro driver bug, which can have an effect if loaded
@@ -752,7 +819,8 @@ static int efx_mcdi_phy_probe(struct efx_nic *efx)
 		efx, &efx->link_state,
 		MCDI_DWORD(outbuf, GET_LINK_OUT_LINK_SPEED),
 		MCDI_DWORD(outbuf, GET_LINK_OUT_FLAGS),
-		MCDI_DWORD(outbuf, GET_LINK_OUT_FCNTL));
+		MCDI_DWORD(outbuf, GET_LINK_OUT_FCNTL),
+		ld_caps, lp_caps);
 
 	efx->fec_config = mcdi_fec_caps_to_ethtool(caps,
 						   efx->link_state.speed == 25000 ||
@@ -779,12 +847,10 @@ fail:
 
 int efx_mcdi_port_reconfigure(struct efx_nic *efx)
 {
-	u32 caps = ethtool_linkset_to_mcdi_cap(efx->link_advertising);
-
-	caps |= ethtool_fec_caps_to_mcdi(efx->fec_config);
-
-	return efx_mcdi_set_link(efx, caps, efx_get_mcdi_phy_flags(efx),
-				 efx->loopback_mode);
+	return efx_mcdi_set_link(efx, efx_get_mcdi_caps(efx),
+				 efx_get_mcdi_phy_flags(efx),
+				 efx->loopback_mode, false,
+				 SET_LINK_SEQ_IGNORE);
 }
 
 /* Verify that the forced flow control settings (!EFX_FC_AUTO) are
@@ -827,14 +893,19 @@ static bool efx_mcdi_phy_poll(struct efx_nic *efx)
 
 	rc = efx_mcdi_rpc(efx, MC_CMD_GET_LINK, NULL, 0,
 			  outbuf, sizeof(outbuf), NULL);
-	if (rc)
+	if (rc) {
 		efx->link_state.up = false;
-	else
+	} else {
+		u32 ld_caps = MCDI_DWORD(outbuf, GET_LINK_OUT_CAP);
+		u32 lp_caps = ld_caps;
+
 		efx_mcdi_phy_decode_link(
 			efx, &efx->link_state,
 			MCDI_DWORD(outbuf, GET_LINK_OUT_LINK_SPEED),
 			MCDI_DWORD(outbuf, GET_LINK_OUT_FLAGS),
-			MCDI_DWORD(outbuf, GET_LINK_OUT_FCNTL));
+			MCDI_DWORD(outbuf, GET_LINK_OUT_FCNTL),
+			ld_caps, lp_caps);
+	}
 
 	return !efx_link_state_equal(&efx->link_state, &old_state);
 }
@@ -884,9 +955,32 @@ static void efx_mcdi_phy_get_settings(struct efx_nic *efx, struct ethtool_cmd *e
 #endif
 }
 
+static u32 ethtool_speed_to_mcdi_cap(bool duplex, u32 speed)
+{
+	if (duplex) {
+		switch (speed) {
+		case 10:     return 1 << MC_CMD_PHY_CAP_10FDX_LBN;
+		case 100:    return 1 << MC_CMD_PHY_CAP_100FDX_LBN;
+		case 1000:   return 1 << MC_CMD_PHY_CAP_1000FDX_LBN;
+		case 10000:  return 1 << MC_CMD_PHY_CAP_10000FDX_LBN;
+		case 40000:  return 1 << MC_CMD_PHY_CAP_40000FDX_LBN;
+		case 100000: return 1 << MC_CMD_PHY_CAP_100000FDX_LBN;
+		case 25000:  return 1 << MC_CMD_PHY_CAP_25000FDX_LBN;
+		case 50000:  return 1 << MC_CMD_PHY_CAP_50000FDX_LBN;
+		}
+	} else {
+		switch (speed) {
+		case 10:     return 1 << MC_CMD_PHY_CAP_10HDX_LBN;
+		case 100:    return 1 << MC_CMD_PHY_CAP_100HDX_LBN;
+		case 1000:   return 1 << MC_CMD_PHY_CAP_1000HDX_LBN;
+		}
+	}
+
+	return 0;
+}
+
 static int efx_mcdi_phy_set_settings(struct efx_nic *efx, struct ethtool_cmd *ecmd)
 {
-	bool autoneg = !!(efx->link_advertising[0] & ADVERTISED_Autoneg);
 	struct efx_mcdi_phy_data *phy_cfg = efx->phy_data;
 	unsigned int advertising = ecmd->advertising;
 	__ETHTOOL_DECLARE_LINK_MODE_MASK(new_adv);
@@ -894,59 +988,27 @@ static int efx_mcdi_phy_set_settings(struct efx_nic *efx, struct ethtool_cmd *ec
 	int rc;
 
 	/* Remove flow control settings that the MAC supports
-	 * but that the PHY can't advertise. */
+	 * but that the PHY can't advertise.
+	 */
 	if (~phy_cfg->supported_cap & (1 << MC_CMD_PHY_CAP_PAUSE_LBN))
 		advertising &= ~ADVERTISED_Pause;
 	if (~phy_cfg->supported_cap & (1 << MC_CMD_PHY_CAP_ASYM_LBN))
 		advertising &= ~ADVERTISED_Asym_Pause;
 
-	if (advertising != efx->link_advertising[0]) {
-		caps = ethtool_to_mcdi_cap(advertising);
-	} else if (ecmd->speed == efx->link_state.speed &&
-		   ecmd->duplex == efx->link_state.fd &&
-		   !!ecmd->autoneg == autoneg) {
-		/* ecmd->advertising is unchanged. Don't change the advertised
-		 * capabilities unless speed/duplex/fd has changed. */
-		return 0;
-	} else if (ecmd->duplex) {
-		switch (ethtool_cmd_speed(ecmd)) {
-		case 10:     caps = 1 << MC_CMD_PHY_CAP_10FDX_LBN;     break;
-		case 100:    caps = 1 << MC_CMD_PHY_CAP_100FDX_LBN;    break;
-		case 1000:   caps = 1 << MC_CMD_PHY_CAP_1000FDX_LBN;   break;
-		case 10000:  caps = 1 << MC_CMD_PHY_CAP_10000FDX_LBN;  break;
-		case 40000:  caps = 1 << MC_CMD_PHY_CAP_40000FDX_LBN;  break;
-		case 100000: caps = 1 << MC_CMD_PHY_CAP_100000FDX_LBN; break;
-		case 25000:  caps = 1 << MC_CMD_PHY_CAP_25000FDX_LBN;  break;
-		case 50000:  caps = 1 << MC_CMD_PHY_CAP_50000FDX_LBN;  break;
-		default:     return -EINVAL;
-		}
-	} else {
-		switch (ethtool_cmd_speed(ecmd)) {
-		case 10:     caps = 1 << MC_CMD_PHY_CAP_10HDX_LBN;     break;
-		case 100:    caps = 1 << MC_CMD_PHY_CAP_100HDX_LBN;    break;
-		case 1000:   caps = 1 << MC_CMD_PHY_CAP_1000HDX_LBN;   break;
-		default:     return -EINVAL;
-		}
-	}
+	if (ecmd->autoneg)
+		caps = ethtool_to_mcdi_cap(advertising) |
+				1 << MC_CMD_PHY_CAP_AN_LBN;
+	else
+		caps = ethtool_speed_to_mcdi_cap(ecmd->duplex,
+						 ethtool_cmd_speed(ecmd));
+	if (!caps)
+		return -EINVAL;
 
-	caps &= ~(1 << MC_CMD_PHY_CAP_AN_LBN);
-	if (ecmd->autoneg) {
-		caps |= 1 << MC_CMD_PHY_CAP_AN_LBN;
-		/* Override the flow control advertised capabilities since
-		 * ethtool never populates them correctly. Unfortunately
-		 * this means that "ethtool advertising" can't be used to
-		 * adjust the flow control capabilities. */
-		if (efx->wanted_fc & EFX_FC_RX)
-			caps |= ((1 << MC_CMD_PHY_CAP_PAUSE_LBN) |
-				 (1 << MC_CMD_PHY_CAP_ASYM_LBN));
-		if (efx->wanted_fc & EFX_FC_TX)
-			caps ^= (1 << MC_CMD_PHY_CAP_ASYM_LBN);
-	}
-
-	caps |= ethtool_fec_caps_to_mcdi(efx->fec_config);
+	caps |= ethtool_fec_caps_to_mcdi(phy_cfg->supported_cap,
+					 efx->fec_config);
 
 	rc = efx_mcdi_set_link(efx, caps, efx_get_mcdi_phy_flags(efx),
-			       efx->loopback_mode);
+			       efx->loopback_mode, false, SET_LINK_SEQ_IGNORE);
 	if (rc) {
 		if (rc == -EINVAL)
 			netif_err(efx, link, efx->net_dev,
@@ -962,7 +1024,7 @@ static int efx_mcdi_phy_set_settings(struct efx_nic *efx, struct ethtool_cmd *ec
 	 * convert the capabilities we're actually using back to an
 	 * advertising mask so that (1) get_settings() will report
 	 * correct information (2) we can push the capabilities again
-	 * after an MC reset.
+	 * after an MC reset, or recalculate them on module change.
 	 */
 	mcdi_to_ethtool_linkset(phy_cfg->media, caps, new_adv);
 	efx_link_set_advertising(efx, new_adv);
@@ -1011,7 +1073,6 @@ static void efx_mcdi_phy_get_ksettings(struct efx_nic *efx,
 static int efx_mcdi_phy_set_ksettings(struct efx_nic *efx,
 				      const struct ethtool_link_ksettings *settings)
 {
-	bool autoneg = !!(efx->link_advertising[0] & ADVERTISED_Autoneg);
 	const struct ethtool_link_settings *base = &settings->base;
 	struct efx_mcdi_phy_data *phy_cfg = efx->phy_data;
 	__ETHTOOL_DECLARE_LINK_MODE_MASK(advertising);
@@ -1029,46 +1090,19 @@ static int efx_mcdi_phy_set_ksettings(struct efx_nic *efx,
 	if (~phy_cfg->supported_cap & (1 << MC_CMD_PHY_CAP_ASYM_LBN))
 		__clear_bit(ETHTOOL_LINK_MODE_Asym_Pause_BIT, advertising);
 
-	if (memcmp(advertising, efx->link_advertising,
-		   sizeof(__ETHTOOL_DECLARE_LINK_MODE_MASK())) != 0) {
-		caps = ethtool_linkset_to_mcdi_cap(advertising);
-	} else if (base->speed == efx->link_state.speed &&
-		   base->duplex == (efx->link_state.fd ? DUPLEX_FULL :
-							 DUPLEX_HALF) &&
-		   base->autoneg == (autoneg ? AUTONEG_ENABLE :
-					       AUTONEG_DISABLE)) {
-		/* link_modes->advertising is unchanged. Don't change the
-		 * advertised capabilities unless speed/duplex/fd has changed.
-		 */
-		return 0;
-	} else if (base->duplex) {
-		switch (base->speed) {
-		case 10:     caps = 1 << MC_CMD_PHY_CAP_10FDX_LBN;     break;
-		case 100:    caps = 1 << MC_CMD_PHY_CAP_100FDX_LBN;    break;
-		case 1000:   caps = 1 << MC_CMD_PHY_CAP_1000FDX_LBN;   break;
-		case 10000:  caps = 1 << MC_CMD_PHY_CAP_10000FDX_LBN;  break;
-		case 40000:  caps = 1 << MC_CMD_PHY_CAP_40000FDX_LBN;  break;
-		case 100000: caps = 1 << MC_CMD_PHY_CAP_100000FDX_LBN; break;
-		case 25000:  caps = 1 << MC_CMD_PHY_CAP_25000FDX_LBN;  break;
-		case 50000:  caps = 1 << MC_CMD_PHY_CAP_50000FDX_LBN;  break;
-		default:     return -EINVAL;
-		}
-	} else {
-		switch (base->speed) {
-		case 10:     caps = 1 << MC_CMD_PHY_CAP_10HDX_LBN;     break;
-		case 100:    caps = 1 << MC_CMD_PHY_CAP_100HDX_LBN;    break;
-		case 1000:   caps = 1 << MC_CMD_PHY_CAP_1000HDX_LBN;   break;
-		default:     return -EINVAL;
-		}
-	}
+	if (base->autoneg)
+		caps = ethtool_linkset_to_mcdi_cap(advertising) |
+					1 << MC_CMD_PHY_CAP_AN_LBN;
+	else
+		caps = ethtool_speed_to_mcdi_cap(base->duplex, base->speed);
+	if (!caps)
+		return -EINVAL;
 
-	if (base->autoneg == AUTONEG_ENABLE)
-		caps |= 1 << MC_CMD_PHY_CAP_AN_LBN;
-
-	caps |= ethtool_fec_caps_to_mcdi(efx->fec_config);
+	caps |= ethtool_fec_caps_to_mcdi(phy_cfg->supported_cap,
+					 efx->fec_config);
 
 	rc = efx_mcdi_set_link(efx, caps, efx_get_mcdi_phy_flags(efx),
-			       efx->loopback_mode);
+			       efx->loopback_mode, false, SET_LINK_SEQ_IGNORE);
 	if (rc) {
 		if (rc == -EINVAL)
 			netif_err(efx, link, efx->net_dev,
@@ -1150,11 +1184,12 @@ static int efx_mcdi_phy_set_fecparam(struct efx_nic *efx,
 				     const struct ethtool_fecparam *fec)
 {
 	u32 caps = ethtool_linkset_to_mcdi_cap(efx->link_advertising);
+	struct efx_mcdi_phy_data *phy_data = efx->phy_data;
 	int rc;
 
-	caps |= ethtool_fec_caps_to_mcdi(fec->fec);
+	caps |= ethtool_fec_caps_to_mcdi(phy_data->supported_cap, fec->fec);
 	rc = efx_mcdi_set_link(efx, caps, efx_get_mcdi_phy_flags(efx),
-			       efx->loopback_mode);
+			       efx->loopback_mode, false, SET_LINK_SEQ_IGNORE);
 	if (rc)
 		return rc;
 
@@ -1574,10 +1609,19 @@ void efx_mcdi_process_link_change(struct efx_nic *efx, efx_qword_t *ev)
 	u32 flags, fcntl, speed, lpa;
 
 	speed = EFX_QWORD_FIELD(*ev, MCDI_EVENT_LINKCHANGE_SPEED);
-	EFX_WARN_ON_PARANOID(speed >= ARRAY_SIZE(efx_mcdi_event_link_speed));
-	speed = efx_mcdi_event_link_speed[speed];
+	if (speed < ARRAY_SIZE(efx_mcdi_event_link_speed)) {
+		speed = efx_mcdi_event_link_speed[speed];
+	} else {
+		if (net_ratelimit())
+			netif_warn(efx, hw, efx->net_dev,
+				   "Invalid speed enum %d in link change event",
+				   speed);
+		speed = 0;
+	}
 
-	flags = EFX_QWORD_FIELD(*ev, MCDI_EVENT_LINKCHANGE_LINK_FLAGS);
+	flags = efx_mcdi_link_state_flags(&efx->link_state) &
+		~(1 << MC_CMD_GET_LINK_OUT_LINK_UP_LBN);
+	flags |= EFX_QWORD_FIELD(*ev, MCDI_EVENT_LINKCHANGE_LINK_FLAGS);
 	fcntl = EFX_QWORD_FIELD(*ev, MCDI_EVENT_LINKCHANGE_FCNTL);
 	lpa = EFX_QWORD_FIELD(*ev, MCDI_EVENT_LINKCHANGE_LP_CAP);
 
@@ -1585,9 +1629,80 @@ void efx_mcdi_process_link_change(struct efx_nic *efx, efx_qword_t *ev)
 	 * which is only run after flushing the event queues. Therefore, it
 	 * is safe to modify the link state outside of the mac_lock here.
 	 */
-	efx_mcdi_phy_decode_link(efx, &efx->link_state, speed, flags, fcntl);
+	efx_mcdi_phy_decode_link(efx, &efx->link_state, speed, flags, fcntl,
+				 efx->link_state.ld_caps, lpa);
+	efx_link_status_changed(efx);
 
 	efx_mcdi_phy_check_fcntl(efx, lpa);
+}
+
+void efx_mcdi_process_link_change_v2(struct efx_nic *efx, efx_qword_t *ev)
+{
+	u32 link_up, flags, fcntl, speed, lpa;
+
+	speed = EFX_QWORD_FIELD(*ev, MCDI_EVENT_LINKCHANGE_V2_SPEED);
+	EFX_WARN_ON_PARANOID(speed >= ARRAY_SIZE(efx_mcdi_event_link_speed));
+	speed = efx_mcdi_event_link_speed[speed];
+
+	link_up = EFX_QWORD_FIELD(*ev, MCDI_EVENT_LINKCHANGE_V2_FLAGS_LINK_UP);
+	fcntl = EFX_QWORD_FIELD(*ev, MCDI_EVENT_LINKCHANGE_V2_FCNTL);
+	lpa = EFX_QWORD_FIELD(*ev, MCDI_EVENT_LINKCHANGE_V2_LP_CAP);
+	flags = efx_mcdi_link_state_flags(&efx->link_state) &
+		~(1 << MC_CMD_GET_LINK_OUT_LINK_UP_LBN);
+	flags |= !!link_up << MC_CMD_GET_LINK_OUT_LINK_UP_LBN;
+	flags |= 1 << MC_CMD_GET_LINK_OUT_FULL_DUPLEX_LBN;
+
+	efx_mcdi_phy_decode_link(efx, &efx->link_state, speed, flags, fcntl,
+				 efx->link_state.ld_caps, lpa);
+
+	efx_link_status_changed(efx);
+
+	efx_mcdi_phy_check_fcntl(efx, lpa);
+}
+
+void efx_mcdi_process_module_change(struct efx_nic *efx, efx_qword_t *ev)
+{
+	struct efx_mcdi_phy_data *phy_cfg = efx->phy_data;
+	u32 caps = efx_get_mcdi_caps(efx);
+	u8 flags = efx_mcdi_link_state_flags(&efx->link_state);
+	u32 ld_caps;
+	u8 seq;
+
+	ld_caps = EFX_QWORD_FIELD(*ev, MCDI_EVENT_MODULECHANGE_LD_CAP);
+	seq = EFX_DWORD_FIELD(*ev, MCDI_EVENT_MODULECHANGE_SEQ);
+
+	flags |= 1 << MC_CMD_GET_LINK_OUT_FULL_DUPLEX_LBN;
+
+	/* efx->link_state is only modified by efx_mcdi_phy_get_link(),
+	 * which is only run after flushing the event queues. Therefore, it
+	 * is safe to modify the link state outside of the mac_lock here.
+	 */
+	efx_mcdi_phy_decode_link(efx, &efx->link_state, efx->link_state.speed,
+				 flags,
+				 efx_mcdi_link_state_fcntl(&efx->link_state),
+				 ld_caps, 0);
+
+	/* See if efx->link_advertising works with the new module's ld_caps.
+	 * If it doesn't, reset to all speeds rather than go with no speed.
+	 */
+	if (ld_caps && caps && !(caps & ld_caps & MCDI_PORT_SPEED_CAPS)) {
+		caps |= (phy_cfg->supported_cap & MCDI_PORT_SPEED_CAPS);
+		caps &= ld_caps;
+
+		if (caps & MCDI_PORT_SPEED_CAPS)
+			netif_info(efx, link, efx->net_dev,
+				   "No configured speeds were supported with the new module. Resetting speed to default (caps=%#x)\n",
+				   caps);
+		else
+			netif_info(efx, link, efx->net_dev,
+				   "No speeds were supported with the new module (caps=%#x)\n",
+				   caps);
+
+		if (efx_mcdi_set_link(efx, caps, efx_get_mcdi_phy_flags(efx),
+				      efx->loopback_mode, true, seq) == 0)
+			mcdi_to_ethtool_linkset(phy_cfg->media, caps,
+						efx->link_advertising);
+	}
 
 	efx_link_status_changed(efx);
 }

@@ -114,6 +114,6 @@ Any questions?
 
 
 ==========
- version: openonload-201805
-revision: e8ca2c6c3767 (ool1805) openonload-201805/openonload-201805-rc7
-    date: Tue May  8 12:52:26 BST 2018
+ version: openonload-201805-u1
+revision: c5bb38d31f76 (ool1805-u1-hotfix) openonload-201805-u1
+    date: Wed Aug 22 10:44:04 BST 2018

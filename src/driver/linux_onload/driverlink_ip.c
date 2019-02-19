@@ -30,18 +30,7 @@
 
 #include <ci/internal/ip.h>
 #include <onload/driverlink_filter.h>
-
-/* For Medford 2 features. */
-#define EFX_DRIVERLINK_API_VERSION_MINOR 0
-#include <driver/linux_net/driverlink_api.h>
-
-/* When driverlink API version is updated we'll need to select a different
- * MINOR version.  Put this here to make sure we remember.
- */
-#if EFX_DRIVERLINK_API_VERSION != 23
-#error "EFX_DRIVERLINK_API_VERSION_MINOR needs updating"
-#endif
-
+#include <ci/driver/driverlink_api.h>
 #include <onload/linux_onload_internal.h>
 #include <onload/tcp_helper_fns.h>
 #include <onload/nic.h>
@@ -304,8 +293,6 @@ static int oo_dl_probe(struct efx_dl_device* dl_dev,
                        const char* silicon_rev)
 {
   struct oo_nic* onic = NULL;
-
-#if EFX_DRIVERLINK_API_VERSION >= 8
   struct efx_dl_falcon_resources *res;
 
   efx_dl_for_each_device_info_matching(dev_info, EFX_DL_FALCON_RESOURCES,
@@ -317,7 +304,6 @@ static int oo_dl_probe(struct efx_dl_device* dl_dev,
       return -1;
     }
   }
-#endif
 
   if( ! netif_running(net_dev) ) {
     onic = oo_nic_find_ifindex(net_dev->ifindex);
@@ -517,14 +503,12 @@ static struct notifier_block oo_netdev_notifier = {
 
 static struct efx_dl_driver oo_dl_driver = {
   .name = "onload",
-#if EFX_DRIVERLINK_API_VERSION >= 8
   .flags = EFX_DL_DRIVER_CHECKS_FALCON_RX_USR_BUF_SIZE
 #if EFX_DRIVERLINK_API_VERSION > 22 || (EFX_DRIVERLINK_API_VERSION == 22 && \
                                         EFX_DRIVERLINK_API_VERSION_MINOR > 4)
            | EFX_DL_DRIVER_CHECKS_MEDFORD2_VI_STRIDE
 #endif
     ,
-#endif
   .probe = oo_dl_probe,
   .remove = oo_dl_remove,
   .reset_suspend = oo_dl_reset_suspend,

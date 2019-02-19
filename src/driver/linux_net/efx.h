@@ -73,17 +73,6 @@ void efx_fini_tx_queue(struct efx_tx_queue *tx_queue);
 void efx_purge_tx_queue(struct efx_tx_queue *tx_queue);
 netdev_tx_t efx_hard_start_xmit(struct sk_buff *skb,
 				struct net_device *net_dev);
-#if defined(EFX_NOT_UPSTREAM) && defined(EFX_ENABLE_SFC_XPS)
-#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_NDO_SELECT_QUEUE_FALLBACK)
-u16 efx_select_queue(struct net_device *dev, struct sk_buff *skb,
-		     void *accel_priv, select_queue_fallback_t fallback);
-#elif defined(EFX_HAVE_NDO_SELECT_QUEUE_ACCEL_PRIV)
-u16 efx_select_queue(struct net_device *dev, struct sk_buff *skb,
-		     void *accel_priv);
-#else
-u16 efx_select_queue(struct net_device *dev, struct sk_buff *skb);
-#endif
-#endif
 int efx_enqueue_skb(struct efx_tx_queue *tx_queue, struct sk_buff *skb);
 void efx_xmit_done(struct efx_tx_queue *tx_queue, unsigned int index);
 void efx_xmit_done_single(struct efx_tx_queue *tx_queue);
@@ -184,12 +173,6 @@ static inline void efx_ssr_end_of_burst(struct efx_channel *channel)
 }
 
 #endif /* EFX_USE_SFC_LRO */
-
-#if defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_SARFS)
-int efx_sarfs_init(struct efx_nic *efx);
-void efx_sarfs_disable(struct efx_nic *efx);
-void efx_sarfs_fini(struct efx_nic *efx);
-#endif
 
 /* Filters */
 
@@ -388,6 +371,7 @@ int efx_reset_up(struct efx_nic *efx, enum reset_type method, bool ok);
 int efx_try_recovery(struct efx_nic *efx);
 
 /* Global */
+
 void efx_schedule_reset(struct efx_nic *efx, enum reset_type type);
 unsigned int efx_usecs_to_ticks(struct efx_nic *efx, unsigned int usecs);
 unsigned int efx_ticks_to_usecs(struct efx_nic *efx, unsigned int ticks);
@@ -400,6 +384,7 @@ void efx_set_stats_period(struct efx_nic *efx, unsigned int period_ms);
 #ifdef EFX_NOT_UPSTREAM
 extern int efx_target_num_vis;
 #endif
+extern spinlock_t ptp_all_funcs_list_lock;
 
 void efx_stop_eventq(struct efx_channel *channel);
 void efx_start_eventq(struct efx_channel *channel);
@@ -497,7 +482,8 @@ static inline void efx_rwsem_assert_write_locked(struct rw_semaphore *sem)
 }
 
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_XDP_TX)
-int efx_xdp_tx_buffer(struct efx_nic *efx, struct xdp_buff *xdp);
+int efx_xdp_tx_buffers(struct efx_nic *efx, int n, struct xdp_frame **xdpfs,
+		       bool flush);
 #endif
 
 #endif /* EFX_EFX_H */

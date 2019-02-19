@@ -489,13 +489,13 @@ struct efx_dl_device* efhw_nic_acquire_dl_device(struct efhw_nic* efhw_nic)
 
 	/* Acquire the lock if the driverlink device is live, taking care to
 	 * avoid races against it changing under our feet. */
-	dl_device = ACCESS_ONCE(lnic->dl_device);
+	dl_device = READ_ONCE(lnic->dl_device);
 	if (dl_device != NULL) {
 		down_read(&lnic->dl_sem);
 
 		/* A flush might have occurred between the first check and
 		 * obtaining the lock, so we must re-obtain the handle. */
-		dl_device = ACCESS_ONCE(lnic->dl_device);
+		dl_device = READ_ONCE(lnic->dl_device);
 		if (dl_device == NULL) {
 			up_read(&lnic->dl_sem);
 			return NULL;

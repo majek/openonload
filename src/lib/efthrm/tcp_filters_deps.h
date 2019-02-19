@@ -25,7 +25,7 @@
 #include <ci/efrm/vi_set.h>
 #include <ci/driver/efab/hardware.h>
 #include "oo_hw_filter.h"
-#include <driver/linux_net/driverlink_api.h>
+#include <ci/driver/driverlink_api.h>
 #include <onload/nic.h>
 
 #endif /* __TCP_FILTERS_DEPS_H__ */

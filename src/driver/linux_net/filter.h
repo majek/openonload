@@ -114,7 +114,6 @@ enum efx_filter_match_flags {
 
 /**
  * enum efx_filter_priority - priority of a hardware filter specification
- * @EFX_FILTER_PRI_SARFS: Driver inserted performance hint
  * @EFX_FILTER_PRI_HINT: Performance hint
  * @EFX_FILTER_PRI_AUTO: Automatic filter based on device address list
  *	or hardware requirements.  This may only be used by the filter
@@ -124,8 +123,7 @@ enum efx_filter_match_flags {
  *	networking and SR-IOV)
  */
 enum efx_filter_priority {
-	EFX_FILTER_PRI_SARFS = 0,
-	EFX_FILTER_PRI_HINT,
+	EFX_FILTER_PRI_HINT = 1,
 	EFX_FILTER_PRI_AUTO,
 	EFX_FILTER_PRI_MANUAL,
 	EFX_FILTER_PRI_REQUIRED,

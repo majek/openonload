@@ -13,22 +13,18 @@
 ** GNU General Public License for more details.
 */
 
-/****************************************************************************
- * Driver for Solarflare network controllers and boards
- * Copyright 2014-2017 Solarflare Communications Inc.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published
- * by the Free Software Foundation, incorporated herein by reference.
- */
+#ifndef __CI_DRIVER_DRIVERLINK_API__
+#define __CI_DRIVER_DRIVERLINK_API__
 
-#ifndef EFX_MCDI_PROXY_H
-#define EFX_MCDI_PROXY_H
+#define EFX_DRIVERLINK_API_VERSION_MINOR 0
 
-#include <linux/types.h>
-#include "net_driver.h"
+#include <driver/linux_net/driverlink_api.h>
 
-int efx_mcdi_proxy_nl_register(void);
-void efx_mcdi_proxy_nl_unregister(void);
-
+/* Every time the major driverlink version is bumped, this check forces a build
+ * failure, as it's necessary to audit the net driver change for compatibility
+ * with driverlink clients.  */
+#if EFX_DRIVERLINK_API_VERSION > 24
+#error "Driverlink API has changed.  Audit client code for compatibility."
 #endif
+
+#endif  /* __CI_DRIVER_DRIVERLINK_API__ */

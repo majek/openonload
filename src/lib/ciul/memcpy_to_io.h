@@ -98,15 +98,6 @@ static inline volatile uint64_t*
 
 #define WB_ALIGNED(p)  (((uintptr_t) (p) & (EF_VI_WRITE_BUFFER_SIZE - 1)) == 0)
 
-/* Helper to emit a word followed by an optional write barrier */
-#define EMIT_WORD(dst, data, wb_flush)          \
-  do {                                          \
-    if( (wb_flush) && WB_ALIGNED(dst) )         \
-      wmb_wc();                                 \
-    *(dst)++ = (data);                          \
-  } while(0)
-
-
 /* Copy data from host buffers into the PIO or CTPIO apertures.
  *
  * Both are mapped using write-combining memory, and we write to them
@@ -123,15 +114,6 @@ static inline volatile uint64_t*
  *
  * \param iovcnt  Number of iovec structures in the array.
  *
- * \param wb_flush  Non-zero to emit a write barrier (sfence on x86) between
- *                each write barrier.  This is intended to be a
- *                compile-time constant to allow the compiler to optimise
- *                this function.
- *
- * \param final_flush  Non-zero to emit a write barrier (sfence on x86) at
- *                the end.  This is intended to be a compile-time constant
- *                to allow the compiler to optimise this function.
- *
  * \param aligned Non-zero to permit this function to assume that the
  *                first iov is 64-bit aligned in both size and length.
  *                This is intended to be a compile-time constant to
@@ -146,8 +128,6 @@ static inline volatile uint64_t*
 __memcpy_iov_to_pio(volatile uint64_t* dst,
                     const struct iovec* iov,
                     unsigned iovcnt,
-                    int wb_flush,
-                    int final_flush,
                     int aligned,
                     int end_pad)
 {
@@ -190,7 +170,7 @@ __memcpy_iov_to_pio(volatile uint64_t* dst,
         continue;
 
       /* Emit the newly-aligned write. */
-      EMIT_WORD(dst, in_hand.word, wb_flush);
+      *dst++ = in_hand.word;
       in_hand_count = 0;
     }
 
@@ -206,7 +186,7 @@ __memcpy_iov_to_pio(volatile uint64_t* dst,
     len -= ((uint8_t *)data_end) - ((uint8_t *)data);
 
     while( data < data_end )
-      EMIT_WORD(dst, *data++, wb_flush);
+      *dst++ = *data++;
 
     /* Note that len can be negative here, in the case where we've
      * deliberately overshot the end of the last buffer. */
@@ -224,10 +204,6 @@ __memcpy_iov_to_pio(volatile uint64_t* dst,
     aligned = 0;
   }
 
-  /* If we have any remaining unaligned bytes, write them out. We
-   * don't use EMIT_WORD here because the write barrier is
-   * unconditional. */
-
   if( !aligned && (in_hand_count > 0) ) {
     *dst++ = in_hand.word;
   }
@@ -236,8 +212,7 @@ __memcpy_iov_to_pio(volatile uint64_t* dst,
     while( ! WB_ALIGNED(dst) )
       *dst++ = 0;
 
-  if( wb_flush || final_flush )
-    wmb_wc();
+  wmb_wc();
   return dst;
 }
 
@@ -247,7 +222,7 @@ __memcpy_iov_to_pio(volatile uint64_t* dst,
  * after the end of the region being copied into. */
 
 # define memcpy_iov_to_pio_aligned(dst, iov, iovcnt)    \
-  __memcpy_iov_to_pio((dst), (iov), (iovcnt), 0, 0, 1, 1)
+  __memcpy_iov_to_pio((dst), (iov), (iovcnt), 1, 1)
 
 /* Copies from a host buffer into the PIO or CTPIO region.  @param aligned dst,
  * src and len are all qword aligned. */
@@ -255,7 +230,7 @@ static inline volatile uint64_t*
   __memcpy_to_pio(volatile void* dst, const void* src, size_t len, int aligned)
 {
   struct iovec iov = { (void*) src, len };
-  return __memcpy_iov_to_pio(dst, &iov, 1, 0, 0, aligned, 0);
+  return __memcpy_iov_to_pio(dst, &iov, 1, aligned, 0);
 }
 
 # define memcpy_to_pio(dst, src, len)           \
