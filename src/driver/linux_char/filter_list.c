@@ -44,8 +44,11 @@ struct filter {
 #define FILTER_FLAGS_BLOCK_ALL \
         (FILTER_FLAGS_BLOCK_UNICAST | FILTER_FLAGS_BLOCK_MULTICAST)
 #define FILTER_FLAGS_USES_EFRM_FILTER    0x4
-#define FILTER_FLAGS_VPORT               0x8
-#define FILTER_FLAGS_VPORT_IS_EXCLUSIVE  0x10
+
+#if EFX_DRIVERLINK_API_VERSION < 25
+#  define FILTER_FLAGS_VPORT               0x8
+#  define FILTER_FLAGS_VPORT_IS_EXCLUSIVE  0x10
+#endif
   unsigned   flags;
 };
 
@@ -71,6 +74,7 @@ static void efch_filter_destruct(struct efrm_resource *rs,
                                  struct efrm_pd *pd, struct filter *f)
 {
   if( f->flags & FILTER_FLAGS_USES_EFRM_FILTER ) {
+#if EFX_DRIVERLINK_API_VERSION < 25
     if( f->flags & FILTER_FLAGS_VPORT ) {
       struct efhw_nic* efhw_nic = efrm_client_get_nic(rs->rs_client);
       struct efx_dl_device* efx_dev = efhw_nic_acquire_dl_device(efhw_nic);
@@ -83,7 +87,9 @@ static void efch_filter_destruct(struct efrm_resource *rs,
       /* If [efx_dev] is NULL, the hardware is morally absent and so there's
        * nothing to do. */
     }
-    else {
+    else
+#endif
+    {
       efrm_filter_remove(rs->rs_client, f->efrm_filter_id);
     }
   }
@@ -186,7 +192,7 @@ static int efch_filter_insert(struct efrm_resource *rs, struct efrm_pd *pd,
                               bool replace)
 {
   int rc;
-
+#if EFX_DRIVERLINK_API_VERSION < 25
   if( efrm_pd_has_vport(pd) ) {
     struct efhw_nic* efhw_nic = efrm_client_get_nic(rs->rs_client);
     struct efx_dl_device* efx_dev = efhw_nic_acquire_dl_device(efhw_nic);
@@ -204,15 +210,19 @@ static int efch_filter_insert(struct efrm_resource *rs, struct efrm_pd *pd,
       rc = 0;
     }
   }
-  else {
+  else
+#endif
+  {
     rc = efrm_filter_insert(rs->rs_client, spec, replace);
   }
   if( rc < 0 )
     return rc;
 
+#if EFX_DRIVERLINK_API_VERSION < 25
   if( efrm_pd_has_vport(pd) )
     f->flags |= FILTER_FLAGS_VPORT;
   else
+#endif
     f->efrm_filter_id = rc;
   f->flags |= FILTER_FLAGS_USES_EFRM_FILTER;
 
@@ -461,6 +471,10 @@ int efch_filter_list_op_add(struct efrm_resource *rs, struct efrm_pd *pd,
 
   *copy_out = 1;
 
+#if EFX_DRIVERLINK_API_VERSION >= 25
+  if( efrm_pd_has_vport(pd) )
+    efx_filter_set_vport_id(&spec, efrm_pd_get_vport_id(pd));
+#endif
   stack_id = efrm_pd_stack_id_get(pd);
   ci_assert( stack_id >= 0 );
   efx_filter_set_stack_id(&spec, stack_id);

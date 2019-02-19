@@ -52,8 +52,14 @@ for sym in __read_chk __recv_chk __recvfrom_chk __poll_chk \
 done
 
 {
-echo -n "#define CI_HAVE_PCAP "
-check_library_presence pcap.h pcap
+rval=`check_library_presence pcap.h pcap`
+if [ ! -z $require_optional_targets ]; then
+  if [ $rval -eq 0 ]; then
+      exit -2
+  fi
+fi
+echo "#define CI_HAVE_PCAP $rval"
+
 echo -n "#define CI_HAVE_SPLICE_RETURNS_SSIZE_T "
 check_prototype fcntl.h splice \
     "ssize_t (*foo)(int, loff_t*, int, loff_t*, size_t, unsigned int)"

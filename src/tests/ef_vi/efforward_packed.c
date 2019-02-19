@@ -364,7 +364,7 @@ static void usage_msg(FILE* s)
 }
 
 
-static void usage_err(void)
+static __attribute__ ((__noreturn__)) void usage_err(void)
 {
   usage_msg(stderr);
   exit(1);

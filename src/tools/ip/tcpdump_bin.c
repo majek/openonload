@@ -61,8 +61,6 @@ static int cfg_dump_no_match_only = 0;
 /* capture precision */
 static const char *cfg_precision = "micro";
 static int do_nano = 0;
-static struct timeval tv_now;
-static struct timespec ts_now;
 
 /* Interface to dump */
 static const char *cfg_interface = "any";
@@ -82,6 +80,9 @@ static volatile int stacklist_has_update = 0;
 #define MAX_PATTERNS 10
 static const char *filter_patterns[MAX_PATTERNS];
 static int filter_patterns_n = 0;
+
+/* NB. Signed value important for use in division below. */
+static ci_int64 cpu_khz;
 
 
 static ci_cfg_desc cfg_opts[] = {
@@ -115,6 +116,85 @@ static void usage(const char* msg)
   ci_app_opt_usage(cfg_opts, N_CFG_OPTS);
   ci_log(" ");
   exit(-1);
+}
+
+
+struct frc_sync {
+  uint64_t          sync_frc;
+  uint64_t          sync_cost;
+  int64_t           max_frc_diff;
+  struct timespec   sync_ts;
+};
+
+
+static void frc_resync(struct frc_sync* fs)
+{
+  uint64_t after_frc, cost;
+
+  if( fs->sync_cost == 0 ) {
+    /* First time: Measure sync_cost and set other params. */
+    int i;
+    fs->max_frc_diff = cpu_khz * 1000 / 10;
+    for( i = 0; i < 10; ++i ) {
+      ci_frc64(&fs->sync_frc);
+      clock_gettime(CLOCK_REALTIME, &fs->sync_ts);
+      ci_frc64(&after_frc);
+      cost = after_frc - fs->sync_frc;
+      if( i == 0 )
+        fs->sync_cost = cost;
+      else
+        fs->sync_cost = CI_MIN(fs->sync_cost, cost);
+    }
+    LOG_DUMP(ci_log("cpu_khz=%"PRId64" sync_cost=%"PRIu64"\n",
+                    cpu_khz, fs->sync_cost));
+  }
+
+  /* Determine correspondence between frc and host clock. */
+  do {
+    ci_frc64(&fs->sync_frc);
+    clock_gettime(CLOCK_REALTIME, &fs->sync_ts);
+    ci_frc64(&after_frc);
+  } while( after_frc - fs->sync_frc > fs->sync_cost * 3 );
+}
+
+
+static void pkt_tstamp(const ci_ip_pkt_fmt* pkt, struct timespec* ts_out)
+{
+  static struct frc_sync fs;
+  int64_t ns, frc_diff = pkt->tstamp_frc - fs.sync_frc;
+
+  /* This if() triggers on the first call. */
+  if( frc_diff > fs.max_frc_diff ) {
+    frc_resync(&fs);
+    frc_diff = pkt->tstamp_frc - fs.sync_frc;
+  }
+
+  *ts_out = fs.sync_ts;
+  ns = frc_diff * 1000000 / cpu_khz;
+  if( ns >= 0 ) {
+    while( ns >= 1000000000 ) {  /* NB. This loop is much cheaper than div */
+      ts_out->tv_sec += 1;
+      ns -= 1000000000;
+    }
+    ts_out->tv_nsec += ns;
+    if( ts_out->tv_nsec >= 1000000000 ) {
+      ts_out->tv_nsec -= 1000000000;
+      ts_out->tv_sec += 1;
+    }
+  }
+  else {
+    while( ns <= -1000000000 ) {  /* NB. This loop is much cheaper than div */
+      ts_out->tv_sec -= 1;
+      ns += 1000000000;
+    }
+    if( -ns <= ts_out->tv_nsec ) {
+      ts_out->tv_nsec += ns;
+    }
+    else {
+      ts_out->tv_nsec += 1000000000 + ns;
+      ts_out->tv_sec -= 1;
+    }
+  }
 }
 
 
@@ -177,6 +257,8 @@ static void stack_dump_on(ci_netif *ni)
   int i;
   ci_assert(ci_netif_is_locked(ni));
 
+  cpu_khz = IPTIMER_STATE(ni)->khz;
+
 #ifdef NDEBUG
   {
     int i;
@@ -234,6 +316,7 @@ static void stack_dump_off(ci_netif *ni)
   memset(ni->state->dump_intf, 0, sizeof(ni->state->dump_intf));
   libstack_netif_lock(ni);
   oo_tcpdump_free_pkts(ni, ni->state->dump_read_i);
+  ni->state->dump_read_i = ni->state->dump_write_i;
   ci_log("Onload stack [%d,%s]: stop packet dump",
          ni->state->stack_id, ni->state->name);
 }
@@ -259,27 +342,38 @@ static void stack_dump(ci_netif *ni)
 {
   int strip_vlan = cfg_encap.type & CICP_LLAP_TYPE_VLAN;
   int do_strip_vlan = strip_vlan;
-  ci_uint8 max_i = ni->state->dump_write_i;
+  ci_uint16 read_i = ni->state->dump_read_i;
+  ci_uint16 i, fill_level = ni->state->dump_write_i - read_i;
   sigset_t sigset;
+
+  if( fill_level == 0 )
+    return;
 
   sigemptyset(&sigset);
   sigaddset(&sigset, SIGINT);
 
-  /* We store old value of max_i, so we can dump a limited number of
-   * packets and go to the next stack even if this stack adds more and more
-   * job for us. */
-  for( ;
-       ni->state->dump_read_i != max_i;
-       ni->state->dump_read_i++ ) {
+  /* Dump a batch of packets, then update dump_read_i.  Avoid writing
+   * dump_read_i frequently since dirtying the cache line adds overhead to
+   * the application we're monitoring.
+   */
+  if( fill_level > CI_CFG_DUMPQUEUE_LEN / 4 )
+    fill_level = CI_CFG_DUMPQUEUE_LEN / 4;
+
+  /* Barrier to ensure entries in dump ring are written. */
+  ci_rmb();
+
+  /* Prevent ^C from creating truncated dump file */
+  CI_TEST( pthread_sigmask(SIG_BLOCK, &sigset, NULL) == 0 );
+
+  for( i = 0; i < fill_level; ++i, ++read_i ) {
     struct oo_pcap_pkthdr hdr;
+    struct timespec ts;
     int paylen;
     int fraglen;
     oo_pkt_p id;
     ci_ip_pkt_fmt *pkt;
-    
-    /* dump_read_i should be set BEFORE we use this packet */
-    ci_wmb();
-    id = ni->state->dump_queue[ni->state->dump_read_i % CI_CFG_DUMPQUEUE_LEN];
+
+    id = ni->state->dump_queue[read_i % CI_CFG_DUMPQUEUE_LEN];
     if( id == OO_PP_NULL )
       continue;
     pkt = PKT_CHK_NNL(ni, id);
@@ -319,39 +413,31 @@ static void stack_dump(ci_netif *ni)
     if( do_strip_vlan )
       paylen -= ETH_VLAN_HLEN;
     hdr.caplen = CI_MIN(cfg_snaplen, paylen);
-    fraglen = hdr.caplen;
-    if( pkt->n_buffers > 1 )
-      fraglen = CI_MIN(fraglen, pkt->buf_len);
     hdr.len = paylen;
+    pkt_tstamp(pkt, &ts);
+    hdr.t.ts.tv_sec = ts.tv_sec;
     if( do_nano )
-      hdr.t.ts.tv_sec = ts_now.tv_sec;
+      hdr.t.ts.tv_nsec = ts.tv_nsec;
     else
-      hdr.t.tv.tv_sec = tv_now.tv_sec;
-    /* Avoid another gettimeofday().
-     * Possibly, we should increment tv_now.tv_usec, but:
-     * 10Gbit/sec=10Kbit/usec=1Kbyte/usec.
-     * I.e., for one interface with 10Gbit/sec,
-     * minimal packet of 64bytes takes less than usec.
-     * For 2 full-duplex 10Gbit/s interfaces things are worse. */
-    if( do_nano )
-      hdr.t.ts.tv_nsec = ts_now.tv_nsec;
-    else
-      hdr.t.tv.tv_usec = tv_now.tv_usec;
+      hdr.t.tv.tv_usec = ts.tv_nsec / 1000;
     LOG_DUMP(ci_log("%u: got ni %d pkt %d len %d ref %d",
-                    ni->state->dump_read_i, ni->state->stack_id,
+                    read_i, ni->state->stack_id,
                     OO_PKT_FMT(pkt), paylen, pkt->refcount));
 
-    /* Prevent ^C from creating truncated dump file */
-    pthread_sigmask(SIG_BLOCK, &sigset, NULL);
-
     dump_data(&hdr, sizeof(hdr));
+    fraglen = hdr.caplen;
     if( do_strip_vlan ) {
+      if( pkt->n_buffers > 1 )
+        fraglen = CI_MIN(fraglen, pkt->buf_len - ETH_VLAN_HLEN);
       dump_data(oo_ether_hdr(pkt), 2 * ETH_ALEN);
       dump_data((char *)oo_ether_hdr(pkt) + 2 * ETH_ALEN + ETH_VLAN_HLEN,
                 fraglen - 2 * ETH_ALEN);
     }
-    else
+    else {
+      if( pkt->n_buffers > 1 )
+        fraglen = CI_MIN(fraglen, pkt->buf_len);
       dump_data(oo_ether_hdr(pkt), fraglen);
+    }
 
     /* Dump all scatter-gather chain */
     if( pkt->n_buffers  > 1 ) {
@@ -360,15 +446,20 @@ static void stack_dump(ci_netif *ni)
         hdr.caplen -= fraglen;
         fraglen = CI_MIN(hdr.caplen, frag->buf_len);
         if( fraglen > 0 )
-          dump_data(pkt->dma_start, fraglen);
+          dump_data(frag->dma_start, fraglen);
         if( OO_PP_IS_NULL(frag->frag_next) )
           break;
         frag = PKT_CHK_NNL(ni, frag->frag_next);
       } while( frag != NULL );
     }
-
-    pthread_sigmask(SIG_UNBLOCK, &sigset, NULL);
   }
+
+  /* Ensure we've finished reading before we release. */
+  ci_mb();
+  ni->state->dump_read_i = read_i;
+
+  dump_flush();
+  CI_TEST( pthread_sigmask(SIG_UNBLOCK, &sigset, NULL) == 0 );
 }
 
 /* Pre detach: almost the same as stack_dump_off, but dump packets instead
@@ -598,6 +689,7 @@ int main(int argc, char* argv[])
 
   ci_app_usage = usage;
   cfg_lock = 1; /* lock when attaching */
+  cfg_nopids = 1; /* pids are not needed, and can cause excessive delay */
 
   ci_app_getopt(USAGE_STR, &argc, argv, cfg_opts, N_CFG_OPTS);
   --argc; ++argv;
@@ -673,12 +765,6 @@ int main(int argc, char* argv[])
         ci_spinloop_pause();
     }
 
-    if( do_nano ) {
-      clock_gettime(CLOCK_REALTIME, &ts_now);
-    }
-    else {
-      gettimeofday(&tv_now, NULL);
-    }
     for_each_stack(stack_dump, 0);
     /* Re-enable signals */
 
@@ -691,29 +777,30 @@ int main(int argc, char* argv[])
        else
          for_each_stack(stack_verify_used, 0);
     }
-    else
-      dump_flush();
   }
 
   /* unreachable */
   return 0;
 }
+
 #else /* CI_HAVE_PCAP */
-int
-main(int argc, char* argv[])
+
+int main(int argc, char* argv[])
 {
-  ci_log("Onload was compiled without libpcap development package installed.  "
-         "You need to install libpcap-devel or libpcap-dev package "
+  ci_log("Onload was compiled without the libpcap development package.  "
+         "You need to install the libpcap-devel or libpcap-dev package "
          "to run onload_tcpdump.");
   return 1;
 }
+
 #endif /* CI_HAVE_PCAP */
 #else /* CI_CFG_TCPDUMP */
-int
-main(int argc, char* argv[])
+
+int main(int argc, char* argv[])
 {
   ci_log("Onload was compiled without tcpdump support.  "
-         "Please, turn CI_CFG_TCPDUMP on.");
+         "Please turn CI_CFG_TCPDUMP on.");
   return 1;
 }
+
 #endif /* CI_CFG_TCPDUMP */

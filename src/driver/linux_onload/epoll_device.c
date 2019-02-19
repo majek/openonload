@@ -758,6 +758,7 @@ static void oo_epoll_prime_all_stacks(struct oo_epoll_private* priv)
   
   OO_EPOLL_FOR_EACH_STACK(priv, i, thr, ni) {
     tcp_helper_request_wakeup(thr);
+    ci_frc64(&thr->netif.state->last_sleep_frc);
     CITP_STATS_NETIF_INC(&thr->netif, muxer_primes);
   }
 }
@@ -905,6 +906,7 @@ static int oo_epoll1_spin_on(struct file* home_filp,
   int rc, ret = 0;
   struct oo_epoll_private *priv = home_filp->private_data;
   tcp_helper_resource_t* thr = priv->p.p1.home_stack;
+  s64 end;
 
   if( ! thr )
     return 0;
@@ -912,6 +914,7 @@ static int oo_epoll1_spin_on(struct file* home_filp,
   ept.rc = 0;
   ept.filp = home_filp;
   ept.task = current;
+  end = ktime_to_ns(ktime_add_us(ktime_get(), timeout_us));
 
 again:
   ept.w[0] = ept.w[1] = NULL;
@@ -956,20 +959,19 @@ again:
     if( ret != 0 ) {
       /* We have been woken up by relevant event or a signal,
        * either of these is good to terminate the loop. */
-      timeout_us = 0;
+      end = 0;
     }
   }
   /* task is always in TASK_RUNNING state here */
 
   ret = ept.rc;
-  timeout_us -= sleep_iter_us;
 out:
   if( ept.w[0] != NULL )
     remove_wait_queue(ept.w[0], &ept.wq[0]);
   if( ept.w[1] != NULL )
     remove_wait_queue(ept.w[1], &ept.wq[1]);
   /* FIXME optimize use of wqs */
-  if( ret == 0 && timeout_us > 0 )
+  if( ret == 0 && ktime_to_ns(ktime_get()) < end )
     goto again;
 
   return ret;
@@ -1084,7 +1086,7 @@ static long oo_epoll_fop_unlocked_ioctl(struct file* filp,
     sock_priv = sock_file->private_data;
 
     rc = 0;
-    if( oo_epoll_add_stack(priv, sock_priv->thr) )
+    if( ! oo_epoll_add_stack(priv, sock_priv->thr) )
       rc = -ENOSPC;
     
     fput(sock_file);

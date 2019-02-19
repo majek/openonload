@@ -252,14 +252,13 @@ int ef_vi_transmit_alt_free(struct ef_vi* vi, ef_driver_handle vi_dh)
 }
 
 
-#define MEDFORD_BYTES_PER_BUFFER (512)
-#define MEDFORD_BYTES_PER_WORD   (32)
 
 int ef_vi_transmit_alt_query_buffering(struct ef_vi* vi,
                                        int ifindex,
                                        ef_driver_handle dh, 
                                        int n_alts)
 {
+  unsigned long buffer_size;
   unsigned long available_buffering;
 
   if( ! (vi->vi_flags & EF_VI_TX_ALT) ) {
@@ -271,13 +270,23 @@ int ef_vi_transmit_alt_query_buffering(struct ef_vi* vi,
                                   EF_VI_CAP_TX_ALTERNATIVES_CP_BUFFERS,
                                   &available_buffering);
   if( rc != 0 ) {
-    LOGVV(ef_log("%s: ERROR: capabilities failed", __func__));
+    LOGVV(ef_log("%s: ERROR: failed to query buffer count: rc=%d", __func__,
+                 rc));
+    return rc;
+  }
+
+  rc = ef_vi_capabilities_get(dh, ifindex,
+                              EF_VI_CAP_TX_ALTERNATIVES_CP_BUFFER_SIZE,
+                              &buffer_size);
+  if( rc != 0 ) {
+    LOGVV(ef_log("%s: ERROR: failed to query buffer size: rc=%d", __func__,
+                 rc));
     return rc;
   }
 
   switch( vi->nic_type.arch ) {
   case EF_VI_ARCH_EF10:
-    return MEDFORD_BYTES_PER_BUFFER * (available_buffering - 2*n_alts);
+    return buffer_size * (available_buffering - 2*n_alts);
 
   default:
     return -EINVAL;
@@ -290,6 +299,9 @@ int ef_vi_transmit_alt_query_buffering(struct ef_vi* vi,
 int ef_vi_transmit_alt_query_overhead(ef_vi* vi,
                                       struct ef_vi_transmit_alt_overhead *out)
 {
+  /* This holds true on all current hardware. */
+  const uint32_t MEDFORD_BYTES_PER_WORD = 32;
+
   if( (vi->nic_type.arch != EF_VI_ARCH_EF10) ||
       (vi->nic_type.variant == 'A') ||
       ! (vi->vi_flags & EF_VI_TX_ALT) ) {
@@ -477,6 +489,7 @@ int __ef_vi_alloc(ef_vi* vi, ef_driver_handle vi_dh,
   nic_type.arch = (unsigned char) rc;
   nic_type.variant = ra.u.vi_out.nic_variant;
   nic_type.revision = ra.u.vi_out.nic_revision;
+  nic_type.nic_flags = ra.u.vi_out.nic_flags;
 
   rc = check_nic_compatibility(vi_flags, nic_type.arch);
   if( rc != 0 )
@@ -485,7 +498,7 @@ int __ef_vi_alloc(ef_vi* vi, ef_driver_handle vi_dh,
   ids = (void*) (state + 1);
 
   ef_vi_init(vi, nic_type.arch, nic_type.variant, nic_type.revision,
-	     vi_flags, state);
+	     vi_flags, nic_type.nic_flags, state);
   ef_vi_init_out_flags(vi, (ra.u.vi_out.out_flags & EFHW_VI_CLOCK_SYNC_STATUS) ?
                        EF_VI_OUT_CLOCK_SYNC_STATUS : 0);
   ef_vi_init_io(vi, io_mmap_ptr);
@@ -499,24 +512,26 @@ int __ef_vi_alloc(ef_vi* vi, ef_driver_handle vi_dh,
 		   ra.u.vi_out.rx_prefix_len);
     mem_mmap_ptr += (ef_vi_rx_ring_bytes(vi) + CI_PAGE_SIZE-1) & CI_PAGE_MASK;
     ids += rxq_capacity;
-    if( vi_flags & (EF_VI_RX_TIMESTAMPS | EF_VI_TX_TIMESTAMPS) ) {
-      int rx_ts_correction, tx_ts_correction;
-      enum ef_timestamp_format ts_format;
-      rc = get_ts_correction(vi_dh, ra.out_id.index,
-                             &rx_ts_correction, &tx_ts_correction);
-      if( rc < 0 )
-        goto fail5;
-      ef_vi_init_rx_timestamping(vi, rx_ts_correction);
-      ef_vi_init_tx_timestamping(vi, tx_ts_correction);
-      rc = get_ts_format(vi_dh, ra.out_id.index,
-                         &ts_format);
-      if( rc < 0 )
-        goto fail5;
-      ef_vi_set_ts_format(vi, ts_format);
-    }
   }
   if( txq_capacity )
     ef_vi_init_txq(vi, txq_capacity, mem_mmap_ptr, ids);
+  if( vi_flags & (EF_VI_RX_TIMESTAMPS | EF_VI_TX_TIMESTAMPS) ) {
+    int rx_ts_correction, tx_ts_correction;
+    enum ef_timestamp_format ts_format;
+    rc = get_ts_correction(vi_dh, ra.out_id.index,
+                            &rx_ts_correction, &tx_ts_correction);
+    if( rc < 0 )
+      goto fail5;
+    if( rxq_capacity )
+      ef_vi_init_rx_timestamping(vi, rx_ts_correction);
+    if( txq_capacity )
+      ef_vi_init_tx_timestamping(vi, tx_ts_correction);
+    rc = get_ts_format(vi_dh, ra.out_id.index,
+                        &ts_format);
+    if( rc < 0 )
+      goto fail5;
+    ef_vi_set_ts_format(vi, ts_format);
+  }
 
   if( need_vi_stats_buf(vi_flags) ) {
     ef_vi_stats* stats = calloc(1, sizeof(ef_vi_stats));

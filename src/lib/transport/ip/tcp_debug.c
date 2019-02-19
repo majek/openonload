@@ -220,11 +220,12 @@ static void ci_tcp_state_cong_assert_valid(ci_netif* ni, ci_tcp_state* ts,
     verify(ts->congstate == CI_TCP_CONG_RTO ||
            ts->congstate == CI_TCP_CONG_RTO_RECOV ||
            ts->congstate == CI_TCP_CONG_FAST_RECOV ||
-           ts->congstate == CI_TCP_CONG_COOLING);
+           ts->congstate == CI_TCP_CONG_COOLING ||
+           ts->congstate == (CI_TCP_CONG_COOLING | CI_TCP_CONG_RTO) );
     verify(SEQ_LE(ts->congrecover, tcp_snd_nxt(ts)));
 
     if( SEQ_LT(tcp_snd_una(ts), ts->congrecover) ) {
-      if( ts->congstate != CI_TCP_CONG_COOLING ) {
+      if( ~ts->congstate & CI_TCP_CONG_COOLING ) {
         verify(SEQ_LE(ts->retrans_seq, ts->congrecover));
         if( SEQ_LE(tcp_snd_una(ts), ts->retrans_seq) ) {
           verify(IS_VALID_PKT_ID(ni, ts->retrans_ptr));
@@ -707,9 +708,9 @@ void ci_tcp_socket_listen_dump(ci_netif* ni, ci_tcp_socket_listen* tls,
     logger(log_arg, "%s  sockcache_hit=%d", pf, s->n_sockcache_hit);
 #endif
     logger(log_arg,
-           "%s  l_overflow=%d l_no_synrecv=%d aq_overflow=%d aq_no_sock=%d",
+           "%s  l_overflow=%d l_no_synrecv=%d aq_overflow=%d aq_no_sock=%d aq_no_pkts=%d",
            pf, s->n_listenq_overflow, s->n_listenq_no_synrecv,
-           s->n_acceptq_overflow, s->n_acceptq_no_sock);
+           s->n_acceptq_overflow, s->n_acceptq_no_sock, s->n_acceptq_no_pkts);
     logger(log_arg, "%s  a_loop2_closed=%d a_no_fd=%d ack_rsts=%d os=%d rx_pkts=%d",
            pf, s->n_accept_loop2_closed, s->n_accept_no_fd,
            s->n_acks_reset, s->n_accept_os, s->n_rx_pkts);
@@ -795,12 +796,19 @@ void ci_tcp_state_dump(ci_netif* ni, ci_tcp_state* ts,
   logger(log_arg, "%s  snd: limited rwnd=%d cwnd=%d nagle=%d more=%d app=%d",
          pf, stats.tx_stop_rwnd, stats.tx_stop_cwnd, stats.tx_stop_nagle,
          stats.tx_stop_more, stats.tx_stop_app);
+#if CI_CFG_TAIL_DROP_PROBE
+  if( ts->tcpflags & CI_TCPT_FLAG_TAIL_DROP_MARKED )
+    logger(log_arg, "%s  snd: tail loss probe at %x", pf, ts->taildrop_mark);
+#endif
 
   logger(log_arg, "%s  rcv: nxt-max=%08x-%08x wnd adv=%d cur=%d %s%s", pf,
          tcp_rcv_nxt(ts), tcp_rcv_wnd_right_edge_sent(ts),
          tcp_rcv_wnd_advertised(ts), tcp_rcv_wnd_current(ts),
          ci_tcp_is_in_faststart(ts) ? " FASTSTART":"",
          ci_tcp_can_use_fast_path(ts) ? " FAST":"");
+  logger(log_arg, "%s  rcv: isn=%08x up=%08x urg_data=%04x q=%s", pf,
+         stats.rx_isn, tcp_rcv_up(ts), tcp_urg_data(ts),
+         TS_QUEUE_RX(ts) == &ts->recv1 ? "recv1" : "recv2");
   logger(log_arg, "%s  rcv: bytes=%d tot_pkts=%" PRIx64
                   " rob_pkts=%d q_pkts=%d+%d usr=%d",
          pf, ts->rcv_added - stats.rx_isn, stats.rx_pkts, ts->rob.num,

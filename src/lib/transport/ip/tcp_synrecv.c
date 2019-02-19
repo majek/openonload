@@ -375,7 +375,7 @@ void ci_tcp_listenq_drop(ci_netif* ni, ci_tcp_socket_listen* tls,
   /* ACKED means that the connection is in ESTABLISHED state.
    * We should reset it when dropping. */
   if( tsr->retries & CI_FLAG_TSR_RETRIES_ACKED ) {
-    ci_ip_pkt_fmt* pkt = ci_netif_pkt_alloc(ni);
+    ci_ip_pkt_fmt* pkt = ci_netif_pkt_alloc(ni, CI_PKT_ALLOC_NO_REAP);
     if( pkt != NULL )
       ci_tcp_synrecv_send(ni, tls, tsr, pkt,
                           CI_TCP_FLAG_RST | CI_TCP_FLAG_ACK, NULL);
@@ -596,12 +596,24 @@ int ci_tcp_listenq_try_promote(ci_netif* netif, ci_tcp_socket_listen* tls,
                                ci_tcp_state** ts_out)
 {
   int rc = 0;
+  int rx_n, max_rx_n;
 
   ci_assert(netif);
   ci_assert(tls);
   ci_assert(tls->s.b.state == CI_TCP_LISTEN);
   ci_assert(tsr);
 
+  if( NI_OPTS(netif).endpoint_packet_reserve != 0 &&
+      (rx_n = ci_netif_pkt_rx_n(netif)) >
+      (max_rx_n = CI_MIN(ci_netif_pkt_free_n(netif),
+                         NI_OPTS(netif).max_rx_packets)) ) {
+    LOG_U(log(LPF LNT_FMT" acceptq: lack of pkt bufs to promote synrecv (n=%d max=%d)",
+              LNT_PRI_ARGS(netif, tls), rx_n, max_rx_n));
+    CI_TCP_EXT_STATS_INC_LISTEN_NO_PKTS(netif);
+    CITP_STATS_TCP_LISTEN(++tls->stats.n_acceptq_no_pkts);
+    return -ENOMEM;
+  }
+  else
   if( (int) ci_tcp_acceptq_n(tls) < tls->acceptq_max ) {
     ci_tcp_state* ts;
     int scalable = (tls->s.s_flags & CI_SOCK_FLAG_SCALPASSIVE) != 0;
@@ -683,13 +695,17 @@ int ci_tcp_listenq_try_promote(ci_netif* netif, ci_tcp_socket_listen* tls,
                                    S_SP(tls));
       }
       else if( OO_SP_IS_NULL(tsr->local_peer) ) {
+        ci_addr_t laddr, raddr;
+
         /* Now set the s/w filter.  We leave the hw filter in place for cached
          * EPS. This will probably not have the correct raddr and rport, but as
          * it's sharing the listening socket's filter that's not a problem.  It
          * will be updated if this is still around when the listener is closed.
          */
-        rc = ci_netif_filter_insert(netif, S_SP(ts), tsr->l_addr,
-                                    sock_lport_be16(&tls->s), tsr->r_addr,
+        laddr = CI_ADDR_FROM_IP4(tsr->l_addr);
+        raddr = CI_ADDR_FROM_IP4(tsr->r_addr);
+        rc = ci_netif_filter_insert(netif, S_SP(ts), AF_SPACE_FLAG_IP4, laddr,
+                                    sock_lport_be16(&tls->s), raddr,
                                     tsr->r_port, tcp_protocol(ts));
       }
       if (rc < 0) {
@@ -764,8 +780,8 @@ int ci_tcp_listenq_try_promote(ci_netif* netif, ci_tcp_socket_listen* tls,
     else {
       /* Must be after initialising snd_una. */
       ci_tcp_clear_rtt_timing(ts);
-      ts->timed_ts = tsr->timest;
     }
+    ts->timed_ts = tsr->timest;
     /* SACK has nothing to be done. */
 
     /* ?? ECN */
@@ -793,7 +809,9 @@ int ci_tcp_listenq_try_promote(ci_netif* netif, ci_tcp_socket_listen* tls,
     /* NB. Must have already set peer (which we have). */
     ci_tcp_set_established_state(netif, ts);
     CITP_STATS_NETIF(++netif->state->stats.synrecv2established);
-  
+
+    ci_tcp_metrics_on_promote(netif, ts, tsr);
+
     ci_assert(ts->ka_probes == 0);
     ci_tcp_kalive_restart(netif, ts, ci_tcp_kalive_idle_get(ts));
     ci_tcp_set_flags(ts, CI_TCP_FLAG_ACK);

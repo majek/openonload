@@ -38,6 +38,7 @@
 #include <ci/tools/sysdep.h>
 #include <ci/tools/byteorder.h>
 #include <ci/net/ipv4.h>
+#include <ci/net/ipv6.h>
 #include <linux/neighbour.h>
 
 /* At user level, net/if.h and linux/if.h cannot both be #included.  However,
@@ -73,11 +74,11 @@ typedef ci_uint8 ci_hwport_id_t;
 #define CI_HWPORT_ID_BAD          ((ci_hwport_id_t) -1)
 #define CI_HWPORT_ID_BAD_LICENSED ((ci_hwport_id_t) -2)
 typedef ci_uint16 ci_ifid_t;
-#define CI_IFID_BAD 0
+#define CI_IFID_BAD  0
+#define CI_IFID_LOOP 1
 
 typedef ci_uint8 cicp_prefixlen_t;
 #define CI_IP_PREFIXLEN_BAD 0xff
-typedef ci_uint32 ci_ip_addr_t;
 
 typedef ci_uint8 ci_mac_addr_t[6];
 typedef ci_uint16 ci_mtu_t;
@@ -229,8 +230,25 @@ typedef struct
   /* XXX store flag: primary or secondary (see IFA_F_SECONDARY) */
 } cicp_ipif_row_t;
 
+typedef struct
+{
+  /* keys: */
+  ci_ip6_addr_t    net_ip6;
+  cicp_prefixlen_t net_ipset;
+  ci_ifid_t        ifindex;
+
+  /* data: */
+  ci_uint8         scope;
+} cicp_ip6if_row_t;
+
 static inline int
 cicp_ipif_row_is_free(cicp_ipif_row_t *row)
+{
+  return row->net_ipset == CI_IP_PREFIXLEN_BAD;
+}
+
+static inline int
+cicp_ip6if_row_is_free(cicp_ip6if_row_t *row)
 {
   return row->net_ipset == CI_IP_PREFIXLEN_BAD;
 }
@@ -238,23 +256,7 @@ cicp_ipif_row_is_free(cicp_ipif_row_t *row)
 /*
  *** Route Cache table ***
  */
-
-typedef ci_uint8 cicp_route_type_t;
-enum {
-  /* Route goes outside, and we can handle it if it goes via our NIC. */
-  CICP_ROUTE_NORMAL,
-  /* Local route: in some cases, we accelerate loopback connections. */
-  CICP_ROUTE_LOCAL,
-  /* A route which we can not handle: broadcast (should set broadcast MAC,
-   * which we do not do), blackhole, etc.  We should handle the packet or
-   * the connrction over to the OS. */
-  CICP_ROUTE_ALIEN
-}; /* cicp_route_type_t */
-
 typedef ci_uint8 cicp_ip_tos_t;
-
-/* NUD_REACHABLE etc */
-typedef ci_uint8 cicp_arp_status_t;
 
 /* Keys for forward cache table. */
 struct cp_fwd_key {
@@ -288,7 +290,6 @@ struct cp_fwd_data {
   ci_ip_addr_t      next_hop;
   ci_mtu_t          mtu;
   ci_ifid_t         ifindex;
-  cicp_route_type_t type;
 
   ci_uint8          arp_valid;
   ci_mac_addr_t     src_mac;
@@ -343,7 +344,12 @@ struct cp_fwd_row {
   struct cp_fwd_data    data[2]; /* two snapshots of data */
 
   /* Version is the "data" version. Even version means that snapshot of data
-   * at index 0 is to be read by clients, odd that the data under index 1*/
+   * at index 0 is to be read by clients, odd that the data under index 1.
+   *
+   * When data changes, both copies are updated, one-after another.
+   * The version may be updated without any data change, for example for
+   * CICP_FWD_FLAG_STALE flag.
+   */
   cp_version_t version;
   uint32_t use; /* in how many probe sequences record is used */
   uint8_t flags;
@@ -405,6 +411,7 @@ struct cp_tables_dim {
 
   /* Number of ipif rows */
   cicp_rowid_t ipif_max;
+  cicp_rowid_t ip6if_max;
 
   /* Number of fwd cache rows, must be 2^n */
   ci_uint8 fwd_ln2;
@@ -419,8 +426,10 @@ struct cp_tables_dim {
   /* signal to request sync with OS */
   ci_int32 os_sync_sig;
 
-#ifdef CP_UNIT
-  ci_uint16 server_pid;
+  /* PID of the server process */
+  ci_uint32 server_pid;
+
+#ifdef CP_SYSUNIT
   ci_uint16 sub_server_pid;
 #endif
 };
@@ -459,6 +468,10 @@ struct cp_mibs {
   /* Version of the hwport, ipif, llap tables */
   cp_version_t* version;
 
+  /* Version of the llap tables. Not used in selecting which table to index,
+   * but rather a finer heuristic to detect stale llap rows. */
+  cp_version_t* llap_version;
+
   /* Version of "dump from OS" point of view: odd means "dump in progress".
    * It is increased when dump is started and when it finishes
    * successfully. */
@@ -476,6 +489,7 @@ struct cp_mibs {
   struct cp_hwport_row* hwport;
   cicp_llap_row_t* llap;
   cicp_ipif_row_t* ipif;
+  cicp_ip6if_row_t* ip6if;
 
   /* See CP_FWD_PREFIX_*.  There is a single copy of each fwd_prefix bitmap
    * shared between both MIB frames.  It is not protected by any lock, as each
@@ -492,6 +506,11 @@ struct cp_mibs {
   /* Read-write data, array size fwd_max */
   struct cp_fwd_rw_row* fwd_rw;
 };
+
+static inline ci_uint8 cp_get_largest_prefix(ci_uint64 prefix_bitmask)
+{
+  return 63 - __builtin_clzll(prefix_bitmask);
+}
 
 
 typedef struct
@@ -630,6 +649,7 @@ cp_get_licensed_hwports(struct cp_mibs* mib, cicp_hwport_mask_t hwports, int fla
 extern int cp_get_acceleratable_llap_count(struct cp_mibs*);
 extern int cp_get_acceleratable_ifindices(struct cp_mibs*,
                                           ci_ifid_t* ifindices, int max_count);
+extern ci_ifid_t cp_get_hwport_ifindex(struct cp_mibs*, ci_hwport_id_t);
 
 
 /* This is an arbitrary limit of re-hashing when searching or adding
@@ -639,7 +659,15 @@ extern int cp_get_acceleratable_ifindices(struct cp_mibs*,
 extern cicp_mac_rowid_t
 cp_fwd_find_row(struct cp_mibs* mib, struct cp_fwd_key* key);
 extern cicp_mac_rowid_t
-cp_fwd_find_match(struct cp_mibs* mib, struct cp_fwd_key* key);
+__cp_fwd_find_match(struct cp_mibs* mib, struct cp_fwd_key* key,
+                    ci_uint64 src_prefs, ci_uint64 dst_prefs);
+static inline cicp_mac_rowid_t
+cp_fwd_find_match(struct cp_mibs* mib, struct cp_fwd_key* key)
+{
+  ci_uint64 src_prefs = mib->fwd_prefix[CP_FWD_PREFIX_SRC];
+  ci_uint64 dst_prefs = mib->fwd_prefix[CP_FWD_PREFIX_DST];
+  return __cp_fwd_find_match(mib, key, src_prefs, dst_prefs);
+}
 
 static inline int ci_frc64_after(uint64_t old_frc, uint64_t new_frc)
 {
@@ -669,5 +697,25 @@ cp_fwd_find_row_found_perfect_match(struct cp_mibs* mib, cicp_mac_rowid_t id,
   return id != CICP_MAC_ROWID_BAD &&
          ! cp_fwd_udp_route_needs_promotion(mib, id, key);
 }
+
+
+/* Bits for AF_UNIX message when asking to print the sp_server internal
+ * state:
+ * (1 << CP_SERVER_PRINT_STATE_FOO) | (1 << CP_SERVER_PRINT_STATE_BAR) | ...
+ * 0 is considered to be equal to all-ones except STAT_DOC.
+ */
+#define CP_SERVER_PRINT_STATE_BASE  0
+#define CP_SERVER_PRINT_STATE_DST   1
+#define CP_SERVER_PRINT_STATE_SRC   2
+#define CP_SERVER_PRINT_STATE_LLAP  3
+#define CP_SERVER_PRINT_STATE_TEAM  4
+#define CP_SERVER_PRINT_STATE_MAC   5
+#define CP_SERVER_PRINT_STATE_FWD   6
+#define CP_SERVER_PRINT_STATE_STAT  7
+#define CP_SERVER_PRINT_STATE_MAC6  8
+#define CP_SERVER_PRINT_STATE_DST6  9
+#define CP_SERVER_PRINT_STATE_SRC6  10
+#define CP_SERVER_PRINT_STATE_STAT_DOC 11 /* This one MUST be the last */
+
 
 #endif /* __TOOLS_CPLANE_PUBLIC_H__ */

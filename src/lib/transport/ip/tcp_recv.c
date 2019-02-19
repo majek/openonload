@@ -100,12 +100,12 @@ int ci_tcp_send_wnd_update(ci_netif* ni, ci_tcp_state* ts, int sock_locked)
   if( SEQ_SUB(ts->rcv_delivered + ci_tcp_max_rcv_window(ts),
               tcp_rcv_wnd_right_edge_sent(ts))
       >= ci_tcp_ack_trigger_delta(ts) ) {
-    ci_ip_pkt_fmt* pkt = ci_netif_pkt_alloc(ni);
+    ci_ip_pkt_fmt* pkt = ci_netif_pkt_alloc(ni, 0);
     if( pkt ) {
       LOG_TR(log(LNTS_FMT "window update advertised=%d",
                  LNTS_PRI_ARGS(ni, ts), tcp_rcv_wnd_advertised(ts)));
       CITP_STATS_NETIF_INC(ni, wnd_updates_sent);
-      ci_tcp_send_ack(ni, ts, pkt, sock_locked);
+      ci_tcp_send_ack_rx(ni, ts, pkt, sock_locked, CI_TRUE);
       /* Update the ack trigger so we won't attempt to send another windows
       ** update for a while.
       */
@@ -120,8 +120,7 @@ int ci_tcp_send_wnd_update(ci_netif* ni, ci_tcp_state* ts, int sock_locked)
 /* This is called after we've pulled a certain amount of data from the
 ** receive queue, and sends a window update if appropriate.
 */
-static void ci_tcp_recvmsg_send_wnd_update(ci_netif* ni, ci_tcp_state* ts,
-                                           int flags)
+static void ci_tcp_recvmsg_send_wnd_update(ci_netif* ni, ci_tcp_state* ts)
 {
   if( ! ci_netif_trylock(ni) ) {
     ci_bit_set(&ts->s.s_aflags, CI_SOCK_AFLAG_NEED_ACK_BIT);
@@ -251,7 +250,7 @@ ci_tcp_recvmsg_get_nopeek(int peek_off, ci_tcp_state *ts, ci_netif *netif,
   if( oo_offbuf_left(&(*pkt)->buf) == 0 ) {
     /* We've emptied the current packet. */
     if( CI_UNLIKELY(SEQ_LE(ts->ack_trigger, ts->rcv_delivered)) )
-      ci_tcp_recvmsg_send_wnd_update(netif, ts, rinf->a->flags);
+      ci_tcp_recvmsg_send_wnd_update(netif, ts);
     if( total == max_bytes || OO_PP_IS_NULL((*pkt)->next) )
       /* We've emptied the receive queue. Return non-zero to report this
        * to the calling function, so that it can return appropriately. */
@@ -315,7 +314,7 @@ ci_tcp_recvmsg_get(struct tcp_recv_info *rinf)
    * ci_tcp_recvmsg_get could be called multiple times; so only update
    * if zero bytes received so far. */
   if( rinf->rc == 0 ) {
-    rinf->timestamp = pkt->pf.tcp_rx.rx_stamp;
+    rinf->timestamp = pkt->tstamp_frc;
 #if CI_CFG_TIMESTAMPING
     rinf->hw_timestamp.tv_sec = pkt->pf.tcp_rx.rx_hw_stamp.tv_sec;
     rinf->hw_timestamp.tv_nsec = pkt->pf.tcp_rx.rx_hw_stamp.tv_nsec;
@@ -337,13 +336,22 @@ ci_tcp_recvmsg_get(struct tcp_recv_info *rinf)
     ci_assert(oo_offbuf_not_empty(&pkt->buf));
     ci_assert(oo_offbuf_left(&pkt->buf) > peek_off);
 
-    n = ci_ip_copy_pkt_to_user(netif, &rinf->piov.io, pkt, peek_off);
+    if(CI_LIKELY( ! (rinf->a->flags & CI_MSG_TRUNC) ))
+      n = ci_ip_copy_pkt_to_user(netif, &rinf->piov.io, pkt, peek_off);
+    else {
+      /* Very strange kernel behaviour: MSG_TRUNC will consume the number
+       * of bytes requested, but will not write to the user's pointer in any
+       * circumstances. This code does the same. */
+      n = CI_MIN(oo_offbuf_left(&pkt->buf) - peek_off, rinf->piov.io.iov_len);
+      oo_offbuf_advance(&pkt->buf, n);
+      CI_IOVEC_LEN(&rinf->piov.io) -= n;
+    }
 #ifdef  __KERNEL__
     if( n < 0 )  return total;
 #endif
 
     total += n;
-    ci_assert(total <= max_bytes);
+    ci_assert_le(total, max_bytes);
 
     if(CI_LIKELY( ! (rinf->a->flags & (MSG_PEEK | ONLOAD_MSG_ONEPKT)) )) {
       if( ci_tcp_recvmsg_get_nopeek(peek_off, ts, netif, &pkt, total, n,
@@ -392,6 +400,19 @@ ci_tcp_recvmsg_get(struct tcp_recv_info *rinf)
 }
 
 
+ci_inline const volatile uint32_t*
+next_future_location(ci_netif* ni, int intf_i, const uint32_t* poison)
+{
+  ci_ip_pkt_fmt* pkt;
+
+  ci_assert(*poison == CI_PKT_RX_POISON);
+
+  pkt = ci_netif_intf_may_poll_future(ni, intf_i) ?
+        ci_netif_intf_next_rx_pkt(ni, intf_i) : NULL;
+  return pkt ? ci_netif_poison_location(pkt) : poison;
+}
+
+
 /* Returns >0 if socket is readable.  Returns 0 if spin times-out.  Returns
  * -ve error code otherwise.
  */
@@ -404,7 +425,19 @@ static int ci_tcp_recvmsg_spin(ci_netif* ni, ci_tcp_state* ts,
   citp_signal_info* si = citp_signal_get_specific_inited();
 #endif
   ci_uint64 max_spin = ts->s.b.spin_cycles;
-  int rc, spin_limit_by_so = 0;
+  int rc, spin_limit_by_so = 0, intf_i = ts->s.pkt.intf_i;
+
+  /* Cache the next expected packet buffer to save work within the loop.
+   * We need to update this after polling. If someone else polls, then this
+   * pointer might no longer point to the expected packet. This might lead to
+   * missing a packet from the future, but will not cause any functional
+   * problems as the packet will be handled correctly in due course.
+   *
+   * If there is no future packet to poll, then we point to a local location
+   * which always contains the "poison" value.
+   */
+  const uint32_t poison = CI_PKT_RX_POISON;
+  const volatile uint32_t* future = next_future_location(ni, intf_i, &poison);
 
   if( ts->s.so.rcvtimeo_msec ) {
     ci_uint64 max_so_spin = (ci_uint64)ts->s.so.rcvtimeo_msec *
@@ -418,20 +451,32 @@ static int ci_tcp_recvmsg_spin(ci_netif* ni, ci_tcp_state* ts,
   now_frc = start_frc;
 
   do {
+    rc = 1;
     if( ci_netif_may_poll(ni) ) {
-      if( ci_netif_need_poll_spinning(ni, now_frc) ) {
+      if( *future != CI_PKT_RX_POISON && ci_netif_trylock(ni) ) {
+        ci_netif_poll_intf_future(ni, intf_i, now_frc);
+        ci_netif_unlock(ni);
+        if( tcp_rcv_usr(ts) )
+          goto out;
+        future = next_future_location(ni, intf_i, &poison);
+      }
+
+      if( ni->state->poll_work_outstanding ||
+          ci_netif_need_poll_spinning(ni, now_frc) ) {
         if( ci_netif_trylock(ni) ) {
           ci_netif_poll_n(ni, NI_OPTS(ni).evs_per_poll);
           ci_netif_unlock(ni);
         }
+        if( tcp_rcv_usr(ts) )
+          goto out;
+        future = next_future_location(ni, intf_i, &poison);
       }
       else if( ! ni->state->is_spinner )
         ni->state->is_spinner = 1;
     }
-    if( tcp_rcv_usr(ts) || TCP_RX_DONE(ts) ) {
-      ni->state->is_spinner = 0;
-      return 1;
-    }
+    if( tcp_rcv_usr(ts) || TCP_RX_DONE(ts) )
+      goto out;
+
     ci_frc64(&now_frc);
     rc = OO_SPINLOOP_PAUSE_CHECK_SIGNALS(ni, now_frc, &schedule_frc, 
                                          ts->s.so.rcvtimeo_msec, &ts->s.b, si);
@@ -529,8 +574,6 @@ int ci_tcp_recvmsg(const ci_tcp_recvmsg_args* a)
   rinf.a = a;
   rinf.rc = 0;
   rinf.msg_flags = 0;
-
-  /* ?? TODO: MSG_TRUNC */
 
   /* Grab the per-socket lock so we can access the receive queue. */
   rinf.rc = ci_sock_lock(ni, &ts->s.b);
@@ -777,7 +820,7 @@ int ci_tcp_recvmsg(const ci_tcp_recvmsg_args* a)
           ci_netif_trylock(ni) ) {
         ci_netif_poll_n(ni, NI_OPTS(ni).evs_per_poll);
         ci_netif_unlock(ni);
-        if( ci_udp_recv_q_not_empty(&ts->timestamp_q) )
+        if( (pkt = ci_udp_recv_q_get(ni, &ts->timestamp_q)) != NULL )
           goto timestamp_q_nonempty;
       }
     }
@@ -870,6 +913,7 @@ static void move_from_recv2_to_recv1(ci_netif* ni, ci_tcp_state* ts,
   if( n ) {
     LOG_URG(log(NTS_FMT "recvmsg: moving %d pkts from recv2 to recv1",
                 NTS_PRI_ARGS(ni, ts), n));
+    /* as this is move between recv queues - no pkt receive adjustment needed */
     ci_ip_queue_move(ni, recv2, recv1, tail, n);
     /* The extract pointer can only be made -ve when the receive queues are
     ** emptied (and both locks are held).  It can only be -ve here if after
@@ -892,8 +936,10 @@ static void move_from_recv2_to_recv1(ci_netif* ni, ci_tcp_state* ts,
     
   }
 
-  /* If we've managed to empty recv2, we can switch back to recv1. */
-  if( OO_PP_IS_NULL(recv2->head) ) {
+  /* If we've managed to empty recv2, and we're not still waiting for the
+   * urgent data to arrive, then we can switch back to recv1.
+   */
+  if( OO_PP_IS_NULL(recv2->head) && !(tcp_urg_data(ts) & CI_TCP_URG_COMING) ) {
     LOG_URG(log(NTS_FMT "recvmsg: switch to recv1", NTS_PRI_ARGS(ni, ts)));
     TS_QUEUE_RX_SET(ts, recv1);
     ci_assert(!(tcp_urg_data(ts) & CI_TCP_URG_PTR_VALID));
@@ -1214,7 +1260,7 @@ static int ci_tcp_recvmsg_recv2(struct tcp_recv_info *rinf)
   ci_assert(tcp_urg_data(ts) & CI_TCP_URG_PTR_VALID);
 
   if ( rinf->rc == 0 )
-    rinf->timestamp = pkt->pf.tcp_rx.rx_stamp;
+    rinf->timestamp = pkt->tstamp_frc;
 
   if( tcp_rcv_up(ts) == rd_nxt_seq ) {
     /* We are staring at the urgent byte. */
@@ -1233,9 +1279,12 @@ static int ci_tcp_recvmsg_recv2(struct tcp_recv_info *rinf)
     }
     
 
-    if( ! (ts->s.s_flags & CI_SOCK_FLAG_OOBINLINE) ) {
+    if( ! (ts->s.s_flags & CI_SOCK_FLAG_OOBINLINE) &&
+        ! oo_offbuf_is_empty(buf) ) {
       /* App is trying to read past the urgent data.  In this case the
       ** urgent data just disappears (just as if it had never been there).
+      ** buf may be empty iff the urgent pointer pointed to the FIN: in that
+      ** case we can safely ignore it
       */
       oo_offbuf_advance(buf, 1);
       ++ts->rcv_delivered;
@@ -1264,7 +1313,7 @@ static int ci_tcp_recvmsg_recv2(struct tcp_recv_info *rinf)
   head_pkt = pkt;
   n = 0;
   tail_pkt = 0; /* just to suppress compiler warning */
-  while( tcp_rcv_up(ts) >= pkt->pf.tcp_rx.end_seq ) {
+  while( SEQ_GE(tcp_rcv_up(ts), pkt->pf.tcp_rx.end_seq) ) {
     tail_pkt = pkt;
     ++n;
     if( OO_PP_IS_NULL(pkt->next) )  break;

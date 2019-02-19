@@ -72,7 +72,7 @@ ci_ip_pkt_fmt* __ci_netif_pkt(ci_netif* ni, unsigned id)
                           OO_MMAP_TYPE_NETIF,
                           CI_NETIF_MMAP_ID_PKTSET(setid),
                           CI_CFG_PKT_BUF_SIZE * PKTS_PER_SET,
-                          OO_MMAP_FLAG_DEFAULT,
+                          OO_MMAP_FLAG_POPULATE,
                           &p);
     if( rc < 0 ) {
       ci_log("%s: oo_resource_mmap for pkt set %d failed (%d)",
@@ -108,12 +108,18 @@ int ci_netif_pktset_best(ci_netif* ni)
       n_free = ni->packets->set[i].n_free;
       ret = i;
     }
+    if( n_free >= CI_CFG_PKT_SET_HIGH_WATER ) {
+      /* We've found a set which is almost-free.  Let's reuse it
+       * to avoid pulling in any new sets, and keep all the used packets
+       * in a small group of working sets. */
+      return ret;
+    }
   }
   return ret;
 }
 
 
-ci_ip_pkt_fmt* ci_netif_pkt_alloc_slow(ci_netif* ni, int for_tcp_tx, int use_nonb)
+ci_ip_pkt_fmt* ci_netif_pkt_alloc_slow(ci_netif* ni, int flags)
 {
   /* This is the slow path of ci_netif_pkt_alloc() and
   ** ci_netif_pkt_tx_tcp_alloc().  Either free pool is empty, or we have
@@ -124,7 +130,7 @@ ci_ip_pkt_fmt* ci_netif_pkt_alloc_slow(ci_netif* ni, int for_tcp_tx, int use_non
 
   ci_assert(ci_netif_is_locked(ni));
 
-  if( use_nonb ||
+  if( (flags & CI_PKT_ALLOC_USE_NONB) ||
       (ni->packets->n_free == 0 &&
        ni->packets->sets_n == ni->packets->sets_max) )
     if( (pkt = ci_netif_pkt_alloc_nonb(ni)) != NULL ) {
@@ -134,7 +140,7 @@ ci_ip_pkt_fmt* ci_netif_pkt_alloc_slow(ci_netif* ni, int for_tcp_tx, int use_non
       return pkt;
     }
 
-  if( for_tcp_tx )
+  if( flags & CI_PKT_ALLOC_FOR_TCP_TX )
     if(CI_UNLIKELY( ! ci_netif_pkt_tx_may_alloc(ni) ))
       return NULL;
 
@@ -161,10 +167,12 @@ ci_ip_pkt_fmt* ci_netif_pkt_alloc_slow(ci_netif* ni, int for_tcp_tx, int use_non
       break;
   }
 
-  if( ni->packets->n_free == 0 )
-    ci_netif_try_to_reap(ni, 1);
-  if( ni->packets->n_free > 0 )
-    goto again;
+  if( ! (flags & CI_PKT_ALLOC_NO_REAP) ) {
+    if( ni->packets->n_free == 0 )
+      ci_netif_try_to_reap(ni, 1);
+    if( ni->packets->n_free > 0 )
+      goto again;
+  }
 
   return NULL;
 }

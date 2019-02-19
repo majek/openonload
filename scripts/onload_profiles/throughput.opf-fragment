@@ -1,0 +1,47 @@
+#
+# Tuning profile for applications favouring high throughput and scale over low
+# latency.
+# For use within another profile only.
+#
+
+# Enable scalable epoll implementation.
+onload_set EF_UL_EPOLL 3
+
+# Improve performance with many sockets.
+onload_set EF_TCP_SHARED_LOCAL_PORTS_REUSE_FAST 1
+onload_set EF_TCP_SHARED_LOCAL_PORTS 570000
+onload_set EF_TCP_SHARED_LOCAL_PORTS_MAX $EF_TCP_SHARED_LOCAL_PORTS
+onload_set EF_TCP_SHARED_LOCAL_PORTS_NO_FALLBACK 1
+onload_set EF_TCP_SHARED_LOCAL_PORTS_PER_IP 1
+onload_set EF_TCP_SHARED_LOCAL_PORTS_PER_IP_MAX 32000
+onload_set EF_TCP_SHARED_LOCAL_PORTS_STEP 2048
+
+# Support lots of sockets and enable socket caching.
+onload_set EF_MAX_ENDPOINTS 1000000
+onload_set EF_SOCKET_CACHE_MAX $(( $EF_MAX_ENDPOINTS / 4 ))
+
+# A balance between being responsive at low throughput and being able to
+# avoid almost all interrupts at very high throughput
+onload_set EF_INT_DRIVEN 0
+onload_set EF_POLL_USEC 20
+
+# Allocate plenty of packet memory and force hugepages.
+onload_set EF_MAX_PACKETS $(( (180000*32) / $EF_CLUSTER_SIZE ))
+onload_set EF_PREALLOC_PACKETS 1
+onload_set EF_USE_HUGE_PAGES 2
+
+# Disable low-latency sends to minimise CPU overheads.
+onload_set EF_TX_PUSH 0
+
+# Prevent spinning inside socket calls.
+onload_set EF_PKT_WAIT_SPIN 0
+onload_set EF_TCP_RECV_SPIN 0
+onload_set EF_TCP_SEND_SPIN 0
+onload_set EF_TCP_CONNECT_SPIN 0
+onload_set EF_TCP_ACCEPT_SPIN 0
+onload_set EF_UDP_RECV_SPIN 0
+onload_set EF_UDP_SEND_SPIN 0
+
+# Kernel packet injection
+onload_set EF_KERNEL_PACKETS_BATCH_SIZE 1
+

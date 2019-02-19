@@ -33,6 +33,8 @@ struct oo_cplane_handle {
 
   struct pid* server_pid;
 
+  /* Unlike all other members of this structure, this link is protected by
+   * the global cp_lock, not by cp_handle_lock below. */
   ci_dllink link;
 
 
@@ -50,7 +52,8 @@ struct oo_cplane_handle {
    * don't need their own references, as the underlying file has one. */
   atomic_t refcount;
 
-  /* Lock-ordering note: cp_handle_lock should be taken after cp_lock when both
+  /* cp_handle_lock protects all members of this structure except "link".
+   * Lock-ordering note: cp_handle_lock should be taken after cp_lock when both
    * are needed. */
   spinlock_t cp_handle_lock;
   wait_queue_head_t cp_waitq;

@@ -26,16 +26,21 @@
   
 /*! \cidoxg_lib_transport_unix */
 
+#include <signal.h>
 #include <internal.h>
 #include <ci/internal/transport_config_opt.h>
 #include <ci/tools/sllist.h>
 #include <onload/dup2_lock.h>
 #include <cplane/cplane.h>
+#include <onload/ul/tcp_helper.h>
 
 
 #define LPF "citp_netif_"
 #define LPFIN "-> " LPF
 #define LPFOUT "<- " LPF
+
+
+
 
 int citp_netif_init_ctor(void)
 {
@@ -44,6 +49,7 @@ int citp_netif_init_ctor(void)
   citp_set_log_level(CITP_OPTS.log_level);
 
   citp_cmn_netif_init_ctor(CITP_OPTS.netif_dtor);
+
 
   return 0;
 }

@@ -417,9 +417,19 @@ efab_signal_put_tramp_data(struct mm_signal_data *tramp_data)
 }
 
 asmlinkage long
+#ifdef ONLOAD_SYSCALL_PTREGS
+efab_linux_trampoline_sigaction(const struct pt_regs *regs)
+#else
 efab_linux_trampoline_sigaction(int sig, const struct sigaction *act,
                                 struct sigaction *oact, size_t sigsetsize)
+#endif
 {
+#ifdef ONLOAD_SYSCALL_PTREGS
+  int sig = regs->di;
+  const struct sigaction *act = (const struct sigaction *)regs->si;
+  struct sigaction *oact = (struct sigaction *)regs->dx;
+  size_t sigsetsize = regs->r10;
+#endif
   int rc = 0;
   struct sigaction old, new;
   struct mm_signal_data *tramp_data;
@@ -484,10 +494,20 @@ static inline compat_uptr_t ptr_to_compat(void __user *uptr)
 /* On PPC there is no 32-bit sigaction - or rather, all sigaction calls are 32-bit.
  */
 asmlinkage int
+#ifdef ONLOAD_SYSCALL_PTREGS
+efab_linux_trampoline_sigaction32(const struct pt_regs *regs)
+#else
 efab_linux_trampoline_sigaction32(int sig, const struct sigaction32 *act32,
                                   struct sigaction32 *oact32,
                                   unsigned int sigsetsize)
+#endif
 {
+#ifdef ONLOAD_SYSCALL_PTREGS
+  int sig = regs->bx;
+  const struct sigaction32 *act32 = (const struct sigaction32 *)regs->cx;
+  struct sigaction32 *oact32 = (struct sigaction32 *)regs->dx;
+  unsigned int sigsetsize = regs->si;
+#endif
   struct sigaction act, oact;
   compat_sigset_t set32;
   int rc;

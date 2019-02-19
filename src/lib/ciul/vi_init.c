@@ -239,7 +239,8 @@ int ef_vi_tx_ring_bytes(struct ef_vi* vi)
 
 
 int ef_vi_init(struct ef_vi* vi, int arch, int variant, int revision,
-	       unsigned ef_vi_flags, ef_vi_state* state)
+	       unsigned ef_vi_flags, unsigned char nic_flags,
+	       ef_vi_state* state)
 {
   memset(vi, 0, sizeof(*vi));
   /* vi->vi_qs_n = 0; */
@@ -248,6 +249,7 @@ int ef_vi_init(struct ef_vi* vi, int arch, int variant, int revision,
   vi->nic_type.arch = arch;
   vi->nic_type.variant = variant;
   vi->nic_type.revision = revision;
+  vi->nic_type.nic_flags = nic_flags;
   vi->vi_flags = (enum ef_vi_flags) ef_vi_flags;
   vi->ep_state = state;
   /* vi->vi_stats = NULL; */
@@ -333,6 +335,32 @@ void ef_vi_init_timer(struct ef_vi* vi, int timer_quantum_ns)
 void ef_vi_init_rx_timestamping(struct ef_vi* vi, int rx_ts_correction)
 {
   vi->rx_ts_correction = rx_ts_correction;
+  if( vi->ts_format == TS_FORMAT_SECONDS_QTR_NANOSECONDS ) {
+    /* If a packet arrives more than halfway through a nanosecond, then the
+     * resulting timestamp is more accurate if we round up rather than
+     * down.
+     *
+     * Ensure that rx_ts_correction ends up <= 0.  It always will if the
+     * correction is realistic!
+     */
+    if( vi->rx_ts_correction == 0 ) {
+      /* Bug83458: Some old firmware versions return value of 0.  We
+       * know this is wrong, and we can write faster timestamp
+       * handling code if we limit it to -2
+       *
+       * We should only get here on Medford II or later, so use a
+       * value that we know is appropriate for that hardware.
+       */
+       LOG(ef_log("%s: ERROR: NIC returned zero timestamp correction. "
+                  "Firmware update required to get accurate timestamps.",
+                  __FUNCTION__));
+      vi->rx_ts_correction = -76;
+    }
+
+    EF_VI_ASSERT(vi->rx_ts_correction <= -2);
+    if( vi->rx_ts_correction <= -2 )
+      vi->rx_ts_correction += 2;
+  }
   vi->inited |= EF_VI_INITED_RX_TIMESTAMPING;
 }
 

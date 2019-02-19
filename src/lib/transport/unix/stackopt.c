@@ -134,6 +134,7 @@ int onload_stack_opt_set_int(const char* opt_env, int64_t opt_val)
   #define _CI_CFG_BITVAL3  3
   #define _CI_CFG_BITVAL4  4
   #define _CI_CFG_BITVAL8  8
+  #define _CI_CFG_BITVAL12 12
   #define _CI_CFG_BITVAL16 16
   #define _CI_CFG_BITVALA8 _CI_CFG_BITVAL
 

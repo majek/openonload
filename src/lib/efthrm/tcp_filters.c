@@ -181,6 +181,8 @@ oo_hw_filter_set_hwport(struct oo_hw_filter* oofilter, int hwport,
         /* fallback to default RSS context */
         rss_context = efrm_vi_set_get_rss_context
             (oofilter->thc->thc_vi_set[hwport], EFRM_RSS_MODE_ID_DEFAULT);
+      if( rss_context == -1 )
+        rss_context = EFX_FILTER_RSS_CONTEXT_DEFAULT;
       spec.rss_context = rss_context;
     }
 

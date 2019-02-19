@@ -290,6 +290,30 @@ int onload_zc_send(struct onload_zc_mmsg* msgs, int mlen, int flags)
 }
 
 
+int onload_set_recv_filter(int fd, onload_zc_recv_filter_callback filter,
+                           void* cb_arg, int flags)
+{
+  int rc;
+  citp_lib_context_t lib_context;
+  citp_fdinfo* fdi;
+
+  Log_CALL(ci_log("%s(%d, %p, %p, %x)", __FUNCTION__, fd, filter,
+                  cb_arg, flags));
+
+  if( (fdi = citp_fdtable_lookup_fast(&lib_context, fd)) ) {
+    rc = citp_fdinfo_get_ops(fdi)->zc_recv_filter(fdi, filter, cb_arg, flags);
+    citp_fdinfo_release_ref_fast(fdi);
+    citp_exit_lib(&lib_context, rc >= 0);
+  } else {
+    citp_exit_lib_if(&lib_context, TRUE);
+    rc = -ESOCKTNOSUPPORT;
+  }
+
+  Log_CALL_RESULT(rc);
+  return rc;
+}
+
+
 int onload_recvmsg_kernel(int fd, struct msghdr *msg, int flags)
 {
   int rc;

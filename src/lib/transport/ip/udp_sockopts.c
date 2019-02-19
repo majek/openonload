@@ -299,6 +299,12 @@ int ci_udp_getsockopt(citp_socket* ep, ci_fd_t fd, int level,
       u = us->s.cp.ip_mcast_ttl;
       goto u_out_char;
 
+#ifdef IP_MULTICAST_ALL
+    case IP_MULTICAST_ALL:
+      u = 0;
+      goto u_out_char;
+#endif
+
     default:
       return ci_get_sol_ip(netif, &us->s, fd, optname, optval, optlen);
     }
@@ -514,6 +520,18 @@ static int ci_udp_setsockopt_lk(citp_socket* ep, ci_fd_t fd, ci_fd_t os_sock,
         CHECK_MCAST_JOIN_LEAVE_RC(rc, os_sock, IP_DROP_SOURCE_MEMBERSHIP,
                                   optval, optlen);
       return rc;
+    }
+#endif
+
+#ifdef IP_MULTICAST_ALL
+    case IP_MULTICAST_ALL:
+    {
+      if( (rc = opt_not_ok(optval,optlen,int)) )
+        goto fail_inval;
+      if( *(int *)optval )
+        RET_WITH_ERRNO(EINVAL);
+      else
+        return rc;
     }
 #endif
 

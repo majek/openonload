@@ -54,7 +54,7 @@ void __ci_tcp_listen_to_normal(ci_netif* netif, ci_tcp_socket_listen* tls)
 }
 
 
-static int ci_tcp_add_fin(ci_tcp_state* ts, ci_netif* netif)
+int ci_tcp_add_fin(ci_tcp_state* ts, ci_netif* netif)
 {
   ci_ip_pkt_queue* sendq = &ts->send;
   ci_ip_pkt_fmt* pkt;
@@ -69,46 +69,27 @@ static int ci_tcp_add_fin(ci_tcp_state* ts, ci_netif* netif)
     /* Bang the fin on the end of the send queue. */
     pkt = PKT_CHK(netif, sendq->tail);
     tcp_hdr = TX_PKT_TCP(pkt);
-    tcp_hdr->tcp_flags |= CI_TCP_FLAG_FIN;
+    tcp_hdr->tcp_flags |= CI_TCP_FLAG_FIN | CI_TCP_FLAG_PSH;
     tcp_enq_nxt(ts) += 1;
     pkt->pf.tcp_tx.end_seq = tcp_enq_nxt(ts);
-    if( SEQ_LE(pkt->pf.tcp_tx.end_seq, ts->snd_max) )
-      /* It may now be possible to push data that was delayed by TCP_CORK
-       * or MSG_MORE.
-       */
-      ci_tcp_tx_advance(ts, netif);
+    pkt->flags &=~ CI_PKT_FLAG_TX_MORE;
+    ci_tcp_tx_advance(ts, netif);
     return 0;
   }
 
-#ifdef __KERNEL__
-  /* In theory we could call ci_netif_pkt_alloc_block() here (if the caller
-   * passes can_block=1), but the pain of trying to recover from the case
-   * where it drops the lock and can't retake it makes it desirable to
-   * avoid that case, even if it means we more frequently fail to get
-   * a packet 
-   */
-  pkt = ci_netif_pkt_alloc(netif);
-#else
-  {
-    int is_locked = 1;
-    int rc = ci_netif_pkt_alloc_block(netif, &ts->s, &is_locked,
-                                      CI_TRUE/*can_block*/, &pkt);
-    /* In UL, ci_netif_pkt_alloc_block(can_block=TRUE) never fails. */
-    (void)rc;
-    ci_assert_equal(rc, 0);
-    --netif->state->n_async_pkts;
-    if (is_locked == 0)
-      ci_netif_lock(netif);
-    ci_assert(pkt != NULL);
-  }
-#endif
+  /* We MUST NOT call ci_netif_pkt_alloc_block() here, because we MUST NOT
+   * release the stack lock when we've already moved the TCP state but have
+   * not yet sent the FIN itself.  Processing packet in such inconsistent
+   * state results in weirdness. */
+  pkt = ci_netif_pkt_alloc(netif, CI_PKT_ALLOC_USE_NONB);
 
   if( pkt )
     ci_tcp_enqueue_no_data(ts, netif, pkt);
   else {
     LOG_U(log(LNTS_FMT "%s: out of pkt bufs",
               LNTS_PRI_ARGS(netif, ts), __FUNCTION__));
-    return ENOBUFS;
+    CITP_STATS_NETIF_INC(netif, tcp_cant_fin);
+    return -ENOBUFS;
   }
   return 0;
 }
@@ -175,11 +156,15 @@ int __ci_tcp_shutdown(ci_netif* netif, ci_tcp_state* ts, int how)
   /* Minimise race condtion with spinning poll/select/epoll:
    * ci_tcp_set_slow_state() sets write event, so we set read event just
    * after this.  See bug 22390. */
-  ci_tcp_set_flags(ts, CI_TCP_FLAG_FIN | CI_TCP_FLAG_ACK);
-  if( ts->s.b.state == CI_TCP_CLOSE_WAIT )
+  if( ts->s.b.state == CI_TCP_CLOSE_WAIT ) {
     ci_tcp_set_slow_state(netif, ts, CI_TCP_LAST_ACK);
-  else
+    /* peer is going to TIME_WAIT and
+     * ISN for next connection needs to be recorded */
+    ci_tcp_prev_seq_remember(netif, ts);
+  }
+  else {
     ci_tcp_set_slow_state(netif, ts, CI_TCP_FIN_WAIT1);
+  }
   /* if not tied to an fd, make sure we leave this state at some point */
 #if CI_CFG_FD_CACHING
   if( ts->s.b.sb_aflags & (CI_SB_AFLAG_ORPHAN | CI_SB_AFLAG_IN_CACHE) )
@@ -192,21 +177,17 @@ int __ci_tcp_shutdown(ci_netif* netif, ci_tcp_state* ts, int how)
     ts->s.rx_errno = CI_SHUT_RD;
   ts->s.tx_errno = EPIPE;
 
+  /* Ensure that the is no send prequeue. */
+  ci_tcp_sendmsg_enqueue_prequeue(netif, ts, CI_TRUE);
+  ci_tcp_set_flags(ts, CI_TCP_FLAG_FIN | CI_TCP_FLAG_ACK);
+
   /* Add the FIN now. */
   if( (rc = ci_tcp_add_fin(ts, netif)) != 0 ) {
-    LOG_E(ci_log("%s: failed to enqueue FIN, error %d", __FUNCTION__, rc));
-    /* Drop the connection to avoid it getting stuck in LAST-ACK. Note
-     * that this is far from ideal as we're breaking the TCP state
-     * diagram, but there's not a lot of choice in this scenario.
-     * It's not as bad as you might think though: we can only really
-     * get here in-kernel (as we do not block in kernel mode),
-     * which mainly means we've come from all_fds_gone which has found
-     * a socket in acceptq that is not an orphan, so the bad case is
-     * limited in scope.
-     */
-    ci_tcp_drop(netif, ts, 0);
-    CITP_STATS_NETIF_INC(netif, tcp_drop_cant_fin);
-   }
+    ts->tcpflags |= CI_TCPT_FLAG_FIN_PENDING;
+    tcp_enq_nxt(ts) += 1;
+    if( ci_ip_queue_is_empty(&ts->retrans) )
+      ci_tcp_rto_set(netif, ts);
+  }
 
   ci_tcp_wake_not_in_poll(netif, ts,
                           CI_SB_FLAG_WAKE_TX |
@@ -561,6 +542,9 @@ int ci_tcp_close(ci_netif* netif, ci_tcp_state* ts)
     goto drop;
   }
 
+  if( CI_UNLIKELY( ts->tcpflags & CI_TCPT_FLAG_FIN_PENDING ) )
+    ci_tcp_resend_fin(ts, netif);
+
   if( (ts->s.b.state == CI_TCP_TIME_WAIT) ||
       (ts->s.b.state == CI_TCP_CLOSING)   ||
       (ts->s.b.state == CI_TCP_LAST_ACK) )
@@ -759,18 +743,21 @@ void ci_tcp_listen_update_cached(ci_netif* netif, ci_tcp_socket_listen* tls)
    * while they can share our wild filter, but the details need to be correct
    * before they get their own full match filter.
    */
-  if( tls->s.s_flags & CI_SOCK_FLAG_SCALPASSIVE )
-    return;
 
   while( (l = ci_ni_dllist_try_pop(netif, &tls->epcache_connected)) ) {
     cached_state = CI_CONTAINER(ci_tcp_state, epcache_link, l);
     ci_ni_dllist_self_link(netif, &cached_state->epcache_link);
 
+    if( tls->s.s_flags & CI_SOCK_FLAG_SCALPASSIVE )
+      continue;
     cached_ep = ci_netif_ep_get(netif, cached_state->s.b.bufid);
     tcp_helper_endpoint_update_filter_details(cached_ep);
   }
   ci_assert(ci_ni_dllist_is_valid(netif, &tls->epcache_connected.l));
   ci_assert(ci_ni_dllist_is_empty(netif, &tls->epcache_connected));
+
+  if( tls->s.s_flags & CI_SOCK_FLAG_SCALPASSIVE )
+    return;
 
   /* We also need to update the filters for the pending list, so they can be
    * shutdown cleanly.

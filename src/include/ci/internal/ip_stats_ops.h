@@ -452,6 +452,8 @@ ci_ip_stats_update(ci_ip_stats *dest_stats, ci_ip_stats *src_stats) {
       __CI_TCP_EXT_STATS_INC( (netif), listen_overflows )
 #define CI_TCP_EXT_STATS_INC_LISTEN_DROPS( netif ) \
       __CI_TCP_EXT_STATS_INC( (netif), listen_drops )
+#define CI_TCP_EXT_STATS_INC_LISTEN_NO_PKTS( netif ) \
+      __CI_TCP_EXT_STATS_INC( (netif), listen_no_pkts )
 
 #define CI_TCP_EXT_STATS_INC_TCP_PREQUEUED( netif ) \
       __CI_TCP_EXT_STATS_INC( (netif), tcp_prequeued )

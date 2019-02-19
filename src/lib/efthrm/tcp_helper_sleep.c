@@ -143,6 +143,7 @@ efab_tcp_helper_sock_sleep(tcp_helper_resource_t* trs,
   if( ! ci_netif_is_spinner(ni) ) {
     CITP_STATS_NETIF(++trs->netif.state->stats.sock_sleep_primes);
     tcp_helper_request_wakeup(trs);
+    tcp_helper_request_timer(trs);
     ci_frc64(&ni->state->last_sleep_frc);
   }
 

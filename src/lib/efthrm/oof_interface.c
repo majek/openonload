@@ -110,19 +110,23 @@ oof_cb_sw_filter_apply(ci_netif* ni)
 
   spin_lock_bh(&ni->swf_update_lock);
   for( op = ni->swf_update_first; op != NULL; op = ni->swf_update_first) {
+    ci_addr_t laddr, raddr;
 
     ni->swf_update_first = op->next;
     if( op->next == NULL )
       ni->swf_update_last = NULL;
     spin_unlock_bh(&ni->swf_update_lock);
 
+    laddr = CI_ADDR_FROM_IP4(op->laddr);
+    raddr = CI_ADDR_FROM_IP4(op->raddr);
+
     if( op->op == OOF_CB_SW_FILTER_OP_ADD ) {
-      ci_netif_filter_insert(ni, op->sock_id, op->laddr, op->lport,
-                             op->raddr, op->rport, op->protocol);
+      ci_netif_filter_insert(ni, op->sock_id, AF_SPACE_FLAG_IP4, laddr, op->lport,
+                             raddr, op->rport, op->protocol);
     }
     else {
-      ci_netif_filter_remove(ni, op->sock_id, op->laddr, op->lport,
-                             op->raddr, op->rport, op->protocol);
+      ci_netif_filter_remove(ni, op->sock_id, AF_SPACE_FLAG_IP4, laddr, op->lport,
+                             raddr, op->rport, op->protocol);
     }
 
     ci_free(op);
@@ -170,41 +174,65 @@ oof_cb_sw_filter_postpone(struct oof_socket* skf, unsigned laddr, int lport,
   }
 }
 
-/* Fixme: most callers of oof_cb_sw_filter_insert do not check rc. */
-int
-oof_cb_sw_filter_insert(struct oof_socket* skf, unsigned laddr, int lport,
-                        unsigned raddr, int rport, int protocol,
-                        int stack_locked)
+static int
+oof_cb_sw_filter_update(struct oof_socket* skf, int af_space,
+                        const ci_addr_t laddr, int lport,
+                        const ci_addr_t raddr, int rport,
+                        int protocol, int stack_locked, bool insert)
 {
   ci_netif* ni = skf_to_ni(skf);
   struct tcp_helper_resource_s *trs = netif2tcp_helper_resource(ni);
   int rc = 0;
 
-  ci_assert(!stack_locked || ci_netif_is_locked(ni));
-
   /* We are holding a spinlock, so claim to be in driverlink context here */
   if( stack_locked || efab_tcp_helper_netif_try_lock(trs, 1) ) {
     if( ni->swf_update_first != NULL )
       oof_cb_sw_filter_apply(ni);
-    rc = ci_netif_filter_insert(ni, OO_SP_FROM_INT(ni, skf_to_ep(skf)->id),
-                                laddr, lport, raddr, rport, protocol);
+    if( insert ) {
+        rc = ci_netif_filter_insert(ni, OO_SP_FROM_INT(ni, skf_to_ep(skf)->id),
+                                    af_space, laddr, lport, raddr, rport, protocol);
+    }
+    else
+    {
+      ci_netif_filter_remove(ni, OO_SP_FROM_INT(ni, skf_to_ep(skf)->id),
+                             af_space, laddr, lport, raddr, rport, protocol);
+    }
     if( ! stack_locked )
       efab_tcp_helper_netif_unlock(trs, 1);
+  } else {
+    if( !IS_AF_SPACE_IP6(af_space) )
+      oof_cb_sw_filter_postpone(skf, laddr.ip4, lport, raddr.ip4, rport,
+                                protocol, insert ? OOF_CB_SW_FILTER_OP_ADD :
+                                OOF_CB_SW_FILTER_OP_REMOVE);
   }
-  else
-    oof_cb_sw_filter_postpone(skf, laddr, lport, raddr, rport, protocol,
-                              OOF_CB_SW_FILTER_OP_ADD);
   return rc;
+}
+
+/* Fixme: most callers of oof_cb_sw_filter_insert do not check rc. */
+int
+oof_cb_sw_filter_insert(struct oof_socket* skf, int af_space,
+                        const ci_addr_t laddr, int lport,
+                        const ci_addr_t raddr, int rport,
+                        int protocol, int stack_locked)
+{
+#ifndef NDEBUG
+  ci_netif* ni = skf_to_ni(skf);
+#endif
+
+  ci_assert(!stack_locked || ci_netif_is_locked(ni));
+
+  return oof_cb_sw_filter_update(skf, af_space, laddr, lport, raddr, rport,
+                                 protocol, stack_locked, true);
 }
 
 
 void
-oof_cb_sw_filter_remove(struct oof_socket* skf, unsigned laddr, int lport,
-                        unsigned raddr, int rport, int protocol,
-                        int stack_locked)
+oof_cb_sw_filter_remove(struct oof_socket* skf, int af_space,
+                        const ci_addr_t laddr, int lport,
+                        const ci_addr_t raddr, int rport,
+                        int protocol, int stack_locked)
 {
   ci_netif* ni = skf_to_ni(skf);
-  struct tcp_helper_resource_s *trs = netif2tcp_helper_resource(ni);
 
   if( skf->sf_flags & OOF_SOCKET_SW_FILTER_WAS_REMOVED )
     return;
@@ -218,18 +246,9 @@ oof_cb_sw_filter_remove(struct oof_socket* skf, unsigned laddr, int lport,
    * are set. */
   ci_assert(!stack_locked || ci_netif_is_locked(ni));
 
-  /* We are holding a spinlock, so claim to be in driverlink context here */
-  if( stack_locked || efab_tcp_helper_netif_try_lock(trs, 1) ) {
-    if( ni->swf_update_first != NULL )
-      oof_cb_sw_filter_apply(ni);
-    ci_netif_filter_remove(ni, OO_SP_FROM_INT(ni, skf_to_ep(skf)->id),
-                           laddr, lport, raddr, rport, protocol);
-    if( ! stack_locked )
-      efab_tcp_helper_netif_unlock(trs, 1);
-  }
-  else
-    oof_cb_sw_filter_postpone(skf, laddr, lport, raddr, rport, protocol,
-                              OOF_CB_SW_FILTER_OP_REMOVE);
+  oof_cb_sw_filter_update(skf, af_space, laddr, lport, raddr, rport, protocol,
+                          stack_locked, false);
+
 }
 
 

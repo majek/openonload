@@ -519,6 +519,7 @@ enum onload_delegated_send_rc {
 /* Resolve ARP if necessary - it might take some time */
 #define ONLOAD_DELEGATED_SEND_FLAG_RESOLVE_ARP 0x2
 
+#ifndef ONLOAD_INCLUDE_DS_DATA_ONLY
 /* Prepare to make a delegated send.  
  *
  * This function reserves up to "size" bytes for future delegated
@@ -744,6 +745,8 @@ onload_socket_nonaccel(int domain, int type, int protocol);
  */
 extern int
 onload_socket_unicast_nonaccel(int domain, int type, int protocol);
+
+#endif /* ONLOAD_INCLUDE_DS_DATA_ONLY */
 
 #ifdef __cplusplus
 }

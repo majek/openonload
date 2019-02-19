@@ -102,8 +102,7 @@ int efx_ef10_sriov_set_vf_link_state(struct efx_nic *efx, int vf_i,
 int efx_ef10_vswitch_alloc(struct efx_nic *efx, unsigned int port_id,
 			   unsigned int vswitch_type);
 int efx_ef10_vswitch_free(struct efx_nic *efx, unsigned int port_id);
-int efx_ef10_vport_alloc(struct efx_nic *efx, unsigned int port_id_in,
-			 unsigned int vport_type, u16 vlan, bool vlan_restrict,
+int efx_ef10_vport_alloc(struct efx_nic *efx, u16 vlan, bool vlan_restrict,
 			 unsigned int *port_id_out);
 int efx_ef10_vport_free(struct efx_nic *efx, unsigned int port_id);
 int efx_ef10_evb_port_assign(struct efx_nic *efx, unsigned int port_id,

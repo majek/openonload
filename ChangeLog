@@ -1,3 +1,168 @@
+openonload-201811
+-----------------
+
+Update sfc net driver to v4.15.0.1012
+
+Add support for bonding in TCPDirect
+Add support for transmit timestamps in TCPDirect
+Preview support for AArch64, the ARM 64-bit architecture
+Improve Onload TCP performance in lossy network environments
+Improve Onload TCP latency for blocking receives
+New and updated Onload profiles for NGINX, HAProxy and Node.js
+
+Support for new Solarflare adapters X2541 and X2542
+Support for recent Linux kernel versions (up to 4.19)
+Support for recent Linux distributions (RHEL 6.10, Ubuntu 18.10, SLES 15)
+
+Deprecate AMD architectures prior to Zen
+Deprecate 5000-series and 6000-series adapters
+Deprecate SLES 11 and Ubuntu 16.04 LTS
+
+task69030: zfsink example reports local port number if not specified
+task58517: support getsockopt(SO_BINDTODEVICE)
+task69894: support source-specific multicast in TCPDirect
+task74732: extend and improve stats descriptions in onload_stackdump
+task75138: add creation time to stackdump output
+task79664: add lowest_free_pkts statistic
+task79926: new tail loss probe implementation, enabled by EF_TAIL_DROP_PROBE
+task79958: reinstate datagram callbacks without support for filtering
+task79988: fix onload_tcpdump timestamp accuracy
+task79990: fix unduly small onload_tcpdump ring size limit and improve performance
+task80004: count number of packets missed by onload_tcpdump in stackdump
+task80030: implement cp_server --affinity <64-bit mask>
+task80076: support Limited Transmit (RFC 3042), controlled by EF_TCP_EARLY_RETRANSMIT stack option
+task80123: support Early Retransmit (RFC 5827), controlled by EF_TCP_EARLY_RETRANSMIT stack option
+task80411: increment IP ID field in TCP segments (allows GRO on old kernels)
+
+SF-120852-KI/bug80441: Interoperability issue between MacOS stack peer and an Onload stack peer can result in data corruption
+SF-120923-KI/bug81874: Data corruption when receiving scattered packets with RX batching
+SF-121076-KI/bug79902: vm_op_nopage() failed messages observed in kernel logs when using onload
+SF-121123-KI/bug79517: Incorrect transmit timestamps can be reported for transmit-only ef_vi applications
+SF-121132-KI/bug80440: Onload TCP characteristics affected by shortened timer periods
+SF-121136-KI/bug82114: The default Onload forwarding table is small
+SF-121200-KI/bug80271: Failure of SolarCapture with RSS and ef_vi RSS vport filters
+SF-121203-KI/bug80246: Onload control plane can fail to handle interface renaming
+SF-121204-KI/bug80538: Onload can miss failover of interfaces in LACP bond
+SF-121205-KI/bug80532: Occasional send latency in the order of 30 microseconds
+SF-121206-KI/bug80833: Onload drops transmit packets when sending to many multicast groups
+SF-121211-KI/bug81454: Onload stack sharing using EF_SHARE_WITH=-1 does not work correctly
+SF-121234-KI/bug77419: Application hang with kernel trace showing oo_timesync_wait_for_cpu_khz_to_stabilize
+SF-121283-KI/bug83129/bug83155: Incorrect receive timestamps can be reported occasionally by Onload, TCPDirect and ef_vi
+
+bug22926: improve socket reuse by connect()
+bug33044: use MAP_POPULATE for non lazily-allocated resources where beneficial
+bug34353: allow onload_stackdump doc with loaded drivers
+bug35981/bug81082: apply workaround for 7000-series datapath lockup at ef_vi level
+bug38556/bug79834: fixes to SACK implementation
+bug40912: getsockopt() and setsockopt() reflect the fact that IP_MULTICAST_ALL is fixed to 0
+bug51866: fix to delete orphaned stacks with TIME_WAIT sockets when free VIs exhausted
+bug56537: validate optval on setsockopt()
+bug58185/bug60057: fix zc_send(tcp sock in !sync state)
+bug66006: TCPDirect to use its own tx req id instead of one supplied by ef_vi
+bug67336: fix dracut -f --kver onload_install failure on RHEL 6
+bug67438: check EF_USE_HUGE_PAGES setting before carrying out other huge pages checks
+bug67711: TCPDirect to count RX discard events
+bug68596: onload_install suceeds without unnecessary dependencies unless --require-optional-targets specified
+bug69502: delegated send: honour SO_SNDBUF limitation for send window
+bug70056: do not try to send negative-sized datagram
+bug70394: fix calculation of maximum tcp_adv_win_scale value to use
+bug70873: add zf_reactor_perform_attr() to take a user-specified reactor_spin_count
+bug72033: options to improve rate of efforward application
+bug73219: basic support for IP options
+bug74477: fix building with CI_CFG_PIO off
+bug75645: empower user with CAP_NET_RAW when necessary to trigger ARP via OS
+bug75709: report timer initialisation failure in release builds
+bug75781: fix 500us latency receiving SYNACKACK from an epoll-using application in non-interrupt-driven blocking mode
+bug75781: pick a correctly-affinitized IRQ for an application using clustering
+bug76434: add public API to change logging location
+bug77423: guard onload library initialisation against thread races
+bug77607: modify zf_version() to return the version string
+bug78119: disable unnecessary pid map generation for tcpdump, speeding up startup
+bug78559: fix case where signal received while waiting for cplane startup
+bug78566: fix spurious 'No space in ephemeral port table' failure.
+bug78683: update openonload.spec file to run dracut
+bug78948: fix TCPDirect to track which incoming sequence numbers have been acked
+bug79067: check for FORCE_EV_MERGING capability before using it
+bug79183: ensure that cp_server is usable before syncing with it
+bug79189: fix build without CI_CFG_PIO and with CI_CFG_CTPIO
+bug79229: add onload_install options to skip initramfs and TCPDirect
+bug79272: fix memory leaks when unmapping stacks from processes
+bug79356: fix build without CONFIG_NAMESPACES
+bug79460: remove dependency on jansson for orm_json
+bug79548: packet buffer allocation: add early check for limit
+bug79631: fix cplane for nested namespaces
+bug79669: fix missing MAC address when resolving route under a ScaleOutOnload license
+bug79678: fix network interface reference count zeroing at allocation time
+bug79688: reset UL-only ep-to-fd mapping at handover
+bug79697: increment no_match_in_active_wild stat instead of injecting to kernel pointlessly
+bug79733: add tcp_connect_* stats for different failure cases
+bug79765: add various cplane stats to mibdump
+bug79808: use stdout instead of syslog for onload_mibdump internal
+bug79817: fix clustering on 6000- and 5000-series NICs.
+bug79830: fix sequencing of potentially-deferred send and shutdown
+bug79915/bug80157: fix sleep-spin epoll_wait() timeouts to match configuration
+bug79929: support TIME_WAIT assassination; turn it on by default
+bug79962: fix rare crash closing a listening socket in scalable passive mode with socket caching
+bug79964: reply with empty ACK to SYN in LAST-ACK state
+bug79966: avoid unnecessary checking of FIN flag in SYN-SENT state
+bug79971: rework scheduling of timers to improve TCP retransmission behaviour
+bug79989: onload_tcpdump: fix assertion fail on restart with debug build
+bug80033: ensure early errors in cp_server startup get logged
+bug80054: improve policy on setting PSH flag
+bug80206: avoid removing record for teaming slaves that become inactive
+bug80237: add zf_stack_has_pending_events() to TCPDirect for UDP
+bug80265: on stack allocation in TCPDirect do not leak VI on fw variant mismatch
+bug80287: onload_tcpdump: fix broken dump of large packet payload
+bug80288: fix HW timestamp with shared-stack UDP multicast replication
+bug80357: improve sequence number interop when reusing TIME_WAIT; new stack options tune ISN selection policy and new ISN cache
+bug80373: fix UDP Path MTU discovery
+bug80384: when bond state changes, update fwd entries instead of removing
+bug80389: fix early RTO timeouts and broken tail-drop probes
+bug80448: do not scale window while in SYN-SENT
+bug80517/bug80557/bug80850: Improve duplicate ACK processing
+bug80585: fix failure in some circumstance to retrieve timestamp from queue, avoiding crash
+bug80600: do not split a segment with paylen==MSS that also has a FIN
+bug80624: fix loss of non-blocking sync state for sockets after trip through socket cache
+bug80670: ignore RST packets with bad timestamps in SYN-RECV
+bug80713: fix RX sniff filter removal via ef_vi_filter_del
+bug80765: add option to ignore urgent flag in received packets and count such packets
+bug80765: avoid infinite loop in recv() when receiving SYN mid-connection
+bug80857: fix fast delegated sends to be done when possible, avoiding assertion failure
+bug80912: limit advertised MSS when setsockopt(TCP_MAXSEG) applied.
+bug80929: fix TCPDirect delegated send to respect setting of max_delegated_wnd over 0xffff
+bug80958/bug80959/bug80960/bug80961/bug81107/bug82076: fix 'urgent data' processing defects
+bug81023: onload_move_fd: handle out-of-packets condition
+bug81035: fix error in atomic counter implementation, avoiding rare lock-up
+bug81039: fix decision to prime interrupts at user level and report in statistic
+bug81256: avoid corrupting O_CLOEXEC flag on fcntl(F_GETFD)
+bug81272: keep trying to resolve an ARP entry that has become stale
+bug81374: fix Onload sends and receives of more than 2GiB, avoiding SIGSEGV
+bug81423: avoid SIGFPE in rare case when write occurs close to RST receipt
+bug81455: interpret and report TX alternatives resources correctly on X2 NICs
+bug81502: do not enter COOLING after RTO-triggered retransmit
+bug81503: zf_delegated_send_complete(): set TCP PUSH flag for the last segment
+bug81534: fix assertion when receiving scattered packets in high-throughput mode
+bug81574: fix cause of error when trying to release unsent buffers after onload_zc_send() failure
+bug81699: onload_stackdump: fix kernel assertion in oof_socket_dump_w_lp()
+bug81703: on fd alloc failure restore ORPHAN aflag correctly
+bug81749: fix memory corruption in splice()
+bug81775: add interception for syscall() libc function
+bug81778: improve memreg-order; fix TCPDirect MCDI RX errors with 1 GB huge pages
+bug81787: improve TCP slow-start behaviour and don't consider retransmissions in RTT estimates
+bug81878: validate length of user-provided interface name
+bug81906: do not reopen TIME_WAIT connection for non-TCP_LISTEN sockets
+bug82089: accept FIN + RST from macOS
+bug82139/82372: don't update peer timestamp on receipt of invalid ACKs
+bug82140: allow SYNACK-ACK without timestamp option
+bug82308: fix TCPDirect to disable CTPIO when so configured
+bug82327: rate-limit messages about corrupted packets
+bug82408: implement expected behaviour for TCP recv(MSG_TRUNC), ignoring destination buffer
+bug82423: avoid packet leak and re-send FIN after initially failing to allocate packet for it
+bug82448: fix value reported by zft_send_space() when the send window is small
+bug83101: avoid infinite loop in signal handling when SA_ONESHOT used
+bug83198: reduce thread stack requirement in userspace
+
+
 openonload-201805-u1
 --------------------
 
@@ -103,7 +268,6 @@ bug77141: speed up ci_tcp_connect_find_local_peer() when netif filter present
 bug77146: fix loop if TCPDirect send is longer than 64KB
 bug77283: drop IP-fragmented TCP packets in scalable modes, avoids stream corruption
 bug77368: add new stackdump "stacks" command to produce the default no-arg behaviour
-bug77419: avoid hang on creation of > UINT_MAX stacks or epoll sets.
 bug77450: handle EF_EVENT_TYPE_RX_MULTI_DISCARD in onload for high-throughput modes
 bug77461: improve error message on unrecognised ioctl.
 bug77643: fix onload_stackdump watch_stats mixing up stats
@@ -990,7 +1154,7 @@ bug43406: fix ef_eventq_wait() returning prematurely
 bug42034: fix compile issue when CONFIG_SFC_RESOURCE_VF is not defined
 bug44302: fix cross compiling for RT kernel failing due to kernel-devel pkg
 bug44092: improve TCP window handling for accelerated loopback path
-bug44412: fix tx timestamp kernel backtrace on packets handled in kernel 
+bug44412: fix tx timestamp kernel backtrace on packets handled in kernel
 bug43337: allow blocking in epoll_wait() on set with no accelerated fds
 bug44257: ensure type of CI_PAGE_MASK can mask a pointer on PPC64
 bug44257: fix ef_memreg_alloc() to work on PPC

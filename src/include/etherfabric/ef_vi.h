@@ -15,7 +15,7 @@
 
 /****************************************************************************
  * Copyright 2002-2005: Level 5 Networks Inc.
- * Copyright 2005-2017: Solarflare Communications Inc,
+ * Copyright 2005-2018: Solarflare Communications Inc,
  *                      7505 Irvine Center Drive, Suite 100
  *                      Irvine, CA 92618, USA
  *
@@ -43,8 +43,8 @@
 ** \author    Solarflare Communications, Inc.
 ** \brief     Virtual Interface definitions for EtherFabric Virtual
 **            Interface HAL.
-** \date      2017/02/21
-** \copyright Copyright &copy; 2017 Solarflare Communications, Inc. All
+** \date      2018/11/06
+** \copyright Copyright &copy; 2018 Solarflare Communications, Inc. All
 **            rights reserved. Solarflare, OpenOnload and EnterpriseOnload
 **            are trademarks of Solarflare Communications, Inc.
 *//*
@@ -377,6 +377,8 @@ enum {
   EF_EVENT_RX_DISCARD_OTHER,
   /** Inner IP header or TCP/UDP checksum error */
   EF_EVENT_RX_DISCARD_INNER_CSUM_BAD,
+  /** Maximum value of this enumeration */
+  EF_EVENT_RX_DISCARD_MAX, /* Keep this last */
 };
 
 /*! \brief Get the TX descriptor ring ID used for a transmit error */
@@ -706,6 +708,8 @@ struct ef_vi_nic_type {
   char           variant;
   /** Revision of the NIC */
   unsigned char  revision;
+  /** Flags indicating hardware features */
+  unsigned char  nic_flags;
 };
 
 /*! \brief Per-packet overhead information
@@ -1251,17 +1255,20 @@ ef_vi_receive_get_bytes(ef_vi* vi, const void* pkt, uint16_t* bytes_out);
 #define EF_VI_RECEIVE_BATCH 15
 
 
-/*! \brief Unbundle an event of type EF_EVENT_TYPE_RX_MULTI
+/*! \brief Unbundle an event of type EF_EVENT_TYPE_RX_MULTI or
+**         EF_EVENT_TYPE_RX_MULTI_DISCARD
 **
 ** \param ep    The virtual interface that has raised the event.
-** \param event The event, of type EF_EVENT_TYPE_RX_MULTI.
+** \param event The event, of type EF_EVENT_TYPE_RX_MULTI or
+**              EF_EVENT_TYPE_RX_MULTI_DISCARD.
 ** \param ids   Array of size EF_VI_RECEIVE_BATCH, that is updated on return
 **              with the DMA ids that were used in the original
 **              ef_vi_receive_init() call.
 **
 ** \return The number of valid ef_request_ids (can be zero).
 **
-** Unbundle an event of type EF_EVENT_TYPE_RX_MULTI.
+** Unbundle an event of type EF_EVENT_TYPE_RX_MULTI or
+** EF_EVENT_TYPE_RX_MULTI_DISCARD.
 **
 ** In RX event merge mode the NIC will coalesce multiple packet receptions
 ** into a single RX event.  This reduces PCIe load, enabling higher potential

@@ -143,6 +143,15 @@ static int efch_dma_map(struct efrm_pd *pd,
   return 0;
 }
 
+
+/* Returns the maximal possible order of a compound page beginning at the page
+ * containing the passed address. */
+static inline unsigned addr_page_align_order(uint64_t addr)
+{
+  return (unsigned) __ffs(addr >> PAGE_SHIFT);
+}
+
+
 static int
 memreg_rm_alloc(ci_resource_alloc_t* alloc_,
                 ci_resource_table_t* priv_opt,
@@ -156,7 +165,8 @@ memreg_rm_alloc(ci_resource_alloc_t* alloc_,
   uint64_t in_mem_end;
   uint64_t first_page;
   uint64_t last_page;
-  int comp_order;
+  unsigned comp_order;
+  int this_comp_order;
   int comp_shift;
   unsigned long comp_size;
   unsigned long comp_mask;
@@ -246,31 +256,40 @@ memreg_rm_alloc(ci_resource_alloc_t* alloc_,
     goto fail3;
   }
 
-  /* Take the order of the first page as our order to start with. */
-  comp_order = compound_order(mr->pages[0]);
-  
-  /* If the size of the memreg isn't a multiple of pages of mr->order we
-   * know there must be pages of a different order present.
+  /* Compound pages of order n can be programmed to the buffer table using
+   * (1 << (n - m)) entries or order m for any m <= n.  (The NIC imposes
+   * restrictions on admissible values of m, but we can resolve those later.)
+   * The memreg API requires that we use a constant order for all entries in
+   * the allocation, so the optimal order is the minimum over all pages in the
+   * allocation.  Find that minimal order: let i index pages of size PAGE_SIZE,
+   * and check the order for the first page in each compound page, incrementing
+   * i to skip the tail pages.
    */
-  if (comp_order != 0 && (mr->n_pages & (((1 << comp_order) - 1))) != 0)
-    comp_order = 0;
-   
-  /* Check the rest of the pages, to ensure that they're all the right order,
-   * otherwise just use order 0.
-   */
-  if (comp_order != 0) {
-    int i;
-    /* Here i indexes pages of size PAGE_SIZE.  We check the order for the first
-     * page in each compound page, incrementing i to skip the tail pages.
-     */
-    for (i = 0; i < mr->n_pages; i += 1 << comp_order) {
-      if (compound_order(mr->pages[i]) != comp_order) {
-        comp_order = 0;
-
-        break;
-      }
-    }
+  comp_order = UINT_MAX;
+  for (i = 0; comp_order > 0 && i < mr->n_pages; i += 1u << this_comp_order) {
+    uint64_t page_addr = (uint64_t)(ci_uintptr_t)page_address(mr->pages[i]);
+    this_comp_order = CI_MIN(compound_order(compound_head(mr->pages[i])),
+                             addr_page_align_order(page_addr));
+    comp_order = CI_MIN(comp_order, this_comp_order);
   }
+  ci_assert_lt(comp_order, UINT_MAX);
+
+  /* The API requires that the end of the allocation be NIC-page-aligned, and
+   * we checked this earlier.  There are two further complications:
+   *   1. On systems where PAGE_SIZE != EFHW_NIC_PAGE_SIZE, we have no
+   *      guarantee that the end of the allocation is PAGE_SIZE-aligned.  We
+   *      handle this later using mr->head and mr->tail.
+   *   2. On all systems, there is no guarantee that the end of the allocation
+   *      is comp_order-aligned.  For example, the caller could memreg a buffer
+   *      backed by a huge page that is aligned to the huge page at the start
+   *      but not at the end.  This appears to us here as a compound page of
+   *      huge-page order, but that doesn't imply alignment of the end of the
+   *      allocation.  We fix this case up now, by clamping comp_order to the
+   *      effective order induced by the final full PAGE_SIZE-sized page in the
+   *      allocation.  Any misalignment beyond that point is an instance of
+   *      case 1 above.
+   */
+  comp_order = CI_MIN(comp_order, addr_page_align_order(in_mem_end));
 
   comp_shift = PAGE_SHIFT + comp_order;
   comp_size = 1UL << comp_shift;

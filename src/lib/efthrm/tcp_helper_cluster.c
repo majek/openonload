@@ -228,13 +228,13 @@ static int thc_alloc(const char* cluster_name, int protocol, int port_be16,
     }
   }
 
-  if( tcp_helper_get_ns_components(&thc->thc_cplane, &thc->thc_filter_ns)
-      != 0 ) {
+  if( (rc = tcp_helper_get_ns_components(&thc->thc_cplane,
+                                         &thc->thc_filter_ns)) < 0) {
     tcp_helper_free_ephemeral_ports(thc->thc_ephem_table,
                                     thc->thc_ephem_table_entries);
     kfree(thc->thc_thr_rrobin);
     kfree(thc);
-    return -ENOMEM;
+    return rc;
   }
 
   strcpy(thc->thc_name, cluster_name);
@@ -249,13 +249,13 @@ static int thc_alloc(const char* cluster_name, int protocol, int port_be16,
   thc->thc_switch_addr        = 0;
 
   if( flags & THC_FLAG_PREALLOC_LPORTS ) {
-    /* we know on this path that shared local ports are not per-ip, so pass
-     * an address of zero here. */
+    /* We know on this path that shared local ports are not per-IP, so pass
+     * an address of zero here, and likewise pass NULL for the global table. */
     struct efab_ephemeral_port_head* ephemeral_ports;
     tcp_helper_get_ephemeral_port_list(thc->thc_ephem_table, 0,
                                        thc->thc_ephem_table_entries,
                                        &ephemeral_ports);
-    if( (rc = tcp_helper_alloc_ephemeral_ports(ephemeral_ports, 0,
+    if( (rc = tcp_helper_alloc_ephemeral_ports(ephemeral_ports, NULL, 0,
                                                ephemeral_port_count)) < 0 ) {
       tcp_helper_free_ephemeral_ports(thc->thc_ephem_table,
                                       thc->thc_ephem_table_entries);
@@ -1224,6 +1224,7 @@ int efab_tcp_helper_reuseport_bind(ci_private_t *priv, void *arg)
   int do_sock_unlock = 1;
   oo_sp new_sock_id;
   int scalable;
+  ci_addr_t laddr, raddr;
 
   tcp_helper_reheat_state_t reheat_state = {
     .thr_prior_index    = -1,
@@ -1292,12 +1293,16 @@ int efab_tcp_helper_reuseport_bind(ci_private_t *priv, void *arg)
     goto unlock_sock;
   }
 
+  laddr = CI_ADDR_FROM_IP4(trb->addr_be32);
+  raddr = ip4_addr_any;
+
   if( priv->thr->thc ) {
     /* Reserve proto:port[:ip] until bind (or close)*/
     rc = oof_socket_add(fm, oofilter,
                        OOF_SOCKET_ADD_FLAG_CLUSTERED |
                        OOF_SOCKET_ADD_FLAG_DUMMY,
-                       protocol, trb->addr_be32, trb->port_be16, 0, 0,
+                       protocol, AF_SPACE_FLAG_IP4,
+                       laddr, trb->port_be16, raddr, 0,
                        &ported_thc);
     if( rc > 0 )
       rc = 0;
@@ -1322,7 +1327,8 @@ int efab_tcp_helper_reuseport_bind(ci_private_t *priv, void *arg)
                       OOF_SOCKET_ADD_FLAG_CLUSTERED |
                       OOF_SOCKET_ADD_FLAG_DUMMY |
                       OOF_SOCKET_ADD_FLAG_NO_STACK,
-                      protocol, trb->addr_be32, trb->port_be16, 0, 0,
+                      protocol, AF_SPACE_FLAG_IP4,
+                      laddr, trb->port_be16, raddr, 0,
                       &ported_thc);
   if( rc < 0 ) /* non-clustered socket on the tuple */
     goto alloc_fail0;
@@ -1654,3 +1660,5 @@ int tcp_helper_cluster_dump(tcp_helper_resource_t* thr, void* buf, int buf_len)
 {
   return oo_dump_to_user(thc_dump_fn, NULL, buf, buf_len);
 }
+
+

@@ -55,9 +55,6 @@ static void ci_tcp_state_setup_timers(ci_netif* ni, ci_tcp_state* ts)
 #if CI_CFG_TCP_SOCK_STATS
   ci_tcp_setup_timer(stats,    CI_IP_TIMER_TCP_STATS,  "stat");
 #endif
-#if CI_CFG_TAIL_DROP_PROBE
-  ci_tcp_setup_timer(taildrop, CI_IP_TIMER_TCP_TAIL_DROP,"tdrp");
-#endif
   ci_tcp_setup_timer(cork,     CI_IP_TIMER_TCP_CORK,   "cork");
 
 #undef ci_tcp_setup_timer
@@ -145,6 +142,37 @@ static void ci_tcp_state_tcb_init_fixed(ci_netif* netif, ci_tcp_state* ts,
   TS_TCP(ts)->tcp_check_be16 = 0;
 }
 
+void ci_tcp_state_tcb_reinit_minimal(ci_netif* netif, ci_tcp_state* ts)
+{
+  ts->congstate = CI_TCP_CONG_OPEN;
+  ts->cwnd_extra = 0;
+  ts->dup_acks = 0;
+  ts->bytes_acked = 0;
+
+  /* ts->eff_mss is not cleared as might be used without lock on send path */
+  ts->ssthresh = 0;
+
+  /* PAWs RFC1323, connections always start idle */
+  ts->tspaws = ci_tcp_time_now(netif) - (NI_CONF(netif).tconst_paws_idle+1);
+  ts->tsrecent = 0;
+
+  /* delayed acknowledgements */
+  ts->acks_pending = 0;
+
+  /* Faststart */
+  CITP_TCP_FASTSTART(ts->faststart_acks = 0);
+
+  /* number of retransmissions */
+  ts->retransmits = 0;
+
+  /* TCP timers, RTO, SRTT, RTTVAR */
+  ts->rto = NI_CONF(netif).tconst_rto_initial;
+  ts->sa = 0; /* set to zero to provoke initialisation in ci_tcp_update_rtt */
+  ts->sv = NI_CONF(netif).tconst_rto_initial; /* cwndrecover b4 rtt measured */
+
+  ts->local_peer = OO_SP_NULL;
+}
+
 /* Reset state for a connection, used for shutdown following listen. */
 static void ci_tcp_state_tcb_reinit(ci_netif* netif, ci_tcp_state* ts,
                                     int from_cache)
@@ -202,11 +230,6 @@ static void ci_tcp_state_tcb_reinit(ci_netif* netif, ci_tcp_state* ts,
   TS_TCP(ts)->tcp_flags = 0u;
 
 
-  ts->congstate = CI_TCP_CONG_OPEN;
-  ts->cwnd_extra = 0;
-  ts->dup_acks = 0;
-  ts->bytes_acked = 0;
-
 #if CI_CFG_BURST_CONTROL
   /* Burst control */
   ts->burst_window = 0;
@@ -221,40 +244,16 @@ static void ci_tcp_state_tcb_reinit(ci_netif* netif, ci_tcp_state* ts,
   ts->t_last_recv_ack = ts->t_last_recv_payload = ts->t_prev_recv_payload = 
     ci_tcp_time_now(netif);
 
-  ts->eff_mss = 0;
+  /* TCP_MAXSEG */
+  ts->c.user_mss = 0;
   ts->amss = 0;
-  ts->ssthresh = 0;
-
-  /* PAWs RFC1323, connections always start idle */
-  ts->tspaws = ci_tcp_time_now(netif) - (NI_CONF(netif).tconst_paws_idle+1);
-  ts->tsrecent = 0;
-
-  /* delayed acknowledgements */
-  ts->acks_pending = 0;
-
-  /* Faststart */
-  CITP_TCP_FASTSTART(ts->faststart_acks = 0);
-
-#if CI_CFG_TAIL_DROP_PROBE
-  /* probing for dropped tails */
-  ts->taildrop_state = CI_TCP_TAIL_DROP_INACTIVE;
-#endif
-  /* dupack threshold */
-  ci_tcp_set_dupack_thresh(ts, 0);
+  ts->eff_mss = 0;
 
   ts->zwin_probes = 0;
   ts->zwin_acks = 0;
   ts->ka_probes = 0;
-  /* TCP_MAXSEG */
-  ts->c.user_mss = 0;
 
-  /* number of retransmissions */
-  ts->retransmits = 0;
-
-  /* TCP timers, RTO, SRTT, RTTVAR */
-  ts->rto = NI_CONF(netif).tconst_rto_initial;
-  ts->sa = 0; /* set to zero to provoke initialisation in ci_tcp_update_rtt */
-  ts->sv = NI_CONF(netif).tconst_rto_initial; /* cwndrecover b4 rtt measured */
+  ci_tcp_state_tcb_reinit_minimal(netif, ts);
 
 #if CI_CFG_TCP_SOCK_STATS
   ci_tcp_stats_init(netif, ts);
@@ -266,9 +265,9 @@ static void ci_tcp_state_tcb_reinit(ci_netif* netif, ci_tcp_state* ts,
 
   ts->tmpl_head = OO_PP_NULL;
 
-  ts->local_peer = OO_SP_NULL;
 
   memset(&ts->stats, 0, sizeof(ts->stats));
+  ci_tcp_metrics_init(ts);
 
   /* ts is in valid state now */
   ci_wmb();
@@ -330,9 +329,8 @@ void ci_tcp_state_reinit(ci_netif* netif, ci_tcp_state* ts)
 ci_tcp_state* ci_tcp_get_state_buf_from_cache(ci_netif *netif)
 {
   ci_tcp_state *ts = NULL;
-#if CI_CFG_FD_CACHING
-  ci_uint32 nonblocking;
 
+#if CI_CFG_FD_CACHING
   if( ci_ni_dllist_not_empty(netif, &netif->state->active_cache.cache) ) {
     /* Take the first entry from the cache.  However, do not take it
      * if the ep's pid does not match current pid which may happen if
@@ -401,14 +399,7 @@ ci_tcp_state* ci_tcp_get_state_buf_from_cache(ci_netif *netif)
     LOG_EP(ci_log("Taking cached socket "NSS_FMT" fd %d off cached list",
                   NSS_PRI_ARGS(netif, &ts->s), ts->cached_on_fd));
 
-    nonblocking = ts->s.b.sb_aflags &
-                  (CI_SB_AFLAG_O_NONBLOCK | CI_SB_AFLAG_O_NONBLOCK_UNSYNCED);
     ci_tcp_state_init(netif, ts, 1);
-    /* ci_tcp_state_init() resets the nonblock flags. We restore them to
-     * mirror the OS status of the fd.  The flags will be fixed in
-     * citp_tcp_cached_fixup_flags() if needed. */
-    if( nonblocking )
-      ci_atomic32_or(&ts->s.b.sb_aflags, nonblocking);
 
     /* Shouldn't have touched these bits of state */
     ci_assert(!(ts->s.b.sb_aflags & CI_SB_AFLAG_ORPHAN));

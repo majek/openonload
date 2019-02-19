@@ -23,8 +23,9 @@
 #include <cplane/mib.h>
 
 struct oo_op_cplane_ipmod {
-  ci_ip_addr_t net_ip;
-  ci_ifid_t ifindex;
+  int address_family;
+  int mib_id;
+  cicp_rowid_t row_id;
   ci_int8/*bool*/ add;
 };
 
@@ -85,9 +86,6 @@ enum {
   OO_OP_OOF_CP_LLAP_UPDATE_FILTERS,
 #define OO_IOC_OOF_CP_LLAP_UPDATE_FILTERS OO_IOC_W(OOF_CP_LLAP_UPDATE_FILTERS, \
                                                    struct oo_op_cplane_llapmod)
-
-  OO_OP_CP_PRINT,
-#define OO_IOC_CP_PRINT           OO_IOC_NONE(CP_PRINT)
 
   OO_OP_CP_NOTIFY_LLAP_MONITORS,
 #define OO_IOC_CP_NOTIFY_LLAP_MONITORS OO_IOC_NONE(CP_NOTIFY_LLAP_MONITORS)

@@ -54,6 +54,8 @@ usage () {
   err "  MMAKETOOL_ADD_LIBC    - add gcc library version to build dir, if set"
   err "  MMAKETOOL_ADD_DISTRIBUTION - add linux distn to build dir, if set"
   err "  MMAKETOOL_ADD_HOST    - add host name to build dir, if set"
+  err "  MMAKETOOL_ADD_DEBUG   - for debug builds append 'debug' suffix to "
+  err "                          build dir, if set"
   err "  EF_USERBUILD          - use as user build dir, if set"
   err "  EF_DRIVERBUILD        - use as driver build dir, if set"
   err "  EF_MCBUILD            - use as MCPU build dir, if set"
@@ -207,6 +209,11 @@ add_opts() {
   local host=$(uname -n)
   local k=$(toolplatform)
 
+  if [ -n "$MMAKETOOL_ADD_DEBUG" ]; then
+    if [ "$NDEBUG" != "1" ]; then
+      dir="$dir""_debug"
+    fi
+  fi
   if [ -n "$MMAKETOOL_ADD_LIBC" ]; then
     local libc=$(libc_version)
     if [ -n "$libc" ]; then
@@ -369,6 +376,10 @@ distrib_is_ubuntu() {
   fi
 }
 
+gcc_major_version() {
+  gcc --version |head -1 |sed "s/^gcc.*) \([1-9]*\)\..*$/\1/"
+}
+
 mcbuild_base() {
   case "$(processor)" in
     x86_64) echo sienamc_host_x86_64 ;;
@@ -500,6 +511,7 @@ case "$1" in
 --ignoreenv)    MMAKETOOL_ADD_LIBC=
 		MMAKETOOL_ADD_DISTRIBUTION=
 		MMAKETOOL_ADD_HOST=
+		MMAKETOOL_ADD_DEBUG=
 		MMAKETOOL_RB_NAMES=
 		option=yes
 		;;
@@ -569,6 +581,8 @@ case "$1" in
 --distribution)	sfc_disttag
 		;;
 --distrib_is_ubuntu)	distrib_is_ubuntu
+		;;
+--gcc_major_version)	gcc_major_version
 		;;
 --libc)         libc_version
 		;;

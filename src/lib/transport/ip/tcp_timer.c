@@ -32,6 +32,9 @@
 #define LPF "TCP TIMER "
 
 
+static void ci_tcp_timeout_taildrop(ci_netif* netif, ci_tcp_state* ts);
+
+
 #ifndef __KERNEL__
 #ifndef NDEBUG
 static void ci_tcp_timer_dump_consts(ci_netif* netif)
@@ -111,7 +114,8 @@ void ci_tcp_timer_init(ci_netif* netif)
     ci_tcp_time_ms2ticks(netif, 2*NI_OPTS(netif).msl_seconds*1000);
   NI_CONF(netif).tconst_fin_timeout = 
     ci_tcp_time_ms2ticks(netif, NI_OPTS(netif).fin_timeout*1000);
-
+  NI_CONF(netif).tconst_peer2msl_time =
+    ci_tcp_time_ms2ticks(netif, NI_OPTS(netif).tcp_isn_2msl * 1000);
 
   NI_CONF(netif).tconst_pmtu_discover_slow = 
     ci_tcp_time_ms2ticks(netif, CI_PMTU_TCONST_DISCOVER_SLOW);
@@ -186,7 +190,7 @@ void ci_tcp_timeout_listen(ci_netif* netif, ci_tcp_socket_listen* tls)
       if( (~tsr->retries & CI_FLAG_TSR_RETRIES_ACKED) ||
           tls->c.tcp_defer_accept == OO_TCP_DEFER_ACCEPT_OFF ) {
         int rc = 0;
-        ci_ip_pkt_fmt* pkt = ci_netif_pkt_alloc(netif);
+        ci_ip_pkt_fmt* pkt = ci_netif_pkt_alloc(netif, 0);
 
         if( pkt == NULL ) {
           /* We have no packet buffers to process the synacks any further,
@@ -464,7 +468,7 @@ void ci_tcp_timeout_delack(ci_netif* netif, ci_tcp_state* ts)
   LOG_TV(log(LNT_FMT "DELACK now=0x%x acks_pending=%x", LNT_PRI_ARGS(netif,ts),
 	     ci_tcp_time_now(netif), ts->acks_pending));
 
-  pkt = ci_netif_pkt_alloc(netif);
+  pkt = ci_netif_pkt_alloc(netif, 0);
   if( pkt ) {
     CI_TCP_EXT_STATS_INC_DELAYED_ACK( netif );
     CITP_STATS_NETIF_INC(netif, acks_sent);
@@ -488,15 +492,17 @@ static void ci_tcp_drop_due_to_rto(ci_netif *ni, ci_tcp_state *ts,
             ts->s.b.state, ts->s.so_error, ts->retransmits, max_retrans));
   /* Linux does NOT send RST here. */
   ts->retransmits = 0;
+  if( ts->s.b.state == CI_TCP_SYN_SENT )
+    CITP_STATS_NETIF(++ni->state->stats.tcp_connect_timedout);
   ci_tcp_drop(ni, ts, ETIMEDOUT);
-
 }
 
 
 void ci_tcp_send_corked_packets(ci_netif* netif, ci_tcp_state* ts)
 {
   /* Remove CI_PKT_FLAG_TX_MORE flag flag to ensure that we no more defer
-   * sending unnecessarily.
+   * sending unnecessarily.  Set PSH flag in the last packet.
+   *
    * ci_tcp_tx_advance() may be unable to send all the packets because of
    * congestion window or other limitations, but we have to ensure that the
    * packets are sent as soon as these other limitations cease to exist.
@@ -526,13 +532,20 @@ void ci_tcp_timeout_rto(ci_netif* netif, ci_tcp_state* ts)
 {
   ci_ip_pkt_queue* rtq = &ts->retrans;
   unsigned max_retrans;
+  int seq_used;
+
+  if( CI_CFG_TAIL_DROP_PROBE &&
+      (ts->tcpflags & CI_TCPT_FLAG_TAIL_DROP_TIMING) ) {
+    ci_tcp_timeout_taildrop(netif, ts);
+    return;
+  }
 
   ci_assert(netif);
   ci_assert(ts);
   ci_assert(ts->s.b.state != CI_TCP_CLOSED);
 
   /* Must have data unacknowledged for an RTO timeout. */
-  ci_assert(!ci_ip_queue_is_empty(rtq));
+  ci_assert(!ci_tcp_retransq_is_empty(ts));
 
   LOG_TL(ci_ip_pkt_fmt* pkt = PKT(netif, rtq->head);
 	 log(LNTS_FMT "RTO now=%x srtt=%u rttvar=%u rto=%u retransmits=%d",
@@ -553,17 +566,20 @@ void ci_tcp_timeout_rto(ci_netif* netif, ci_tcp_state* ts)
   ts->burst_window = 0;
 #endif
 
-#if CI_CFG_TAIL_DROP_PROBE
-  /* RTO generally means a dropped tail, so be more inquisitive from
-     now on. */
-  if(NI_OPTS(netif).tail_drop_probe &&
-     ts->taildrop_state != CI_TCP_TAIL_DROP_ACTIVE){
-    ts->taildrop_state = CI_TCP_TAIL_DROP_ACTIVE;
-  }
-#endif
-
   if( ts->s.b.state == CI_TCP_SYN_SENT ) {
     max_retrans = NI_OPTS(netif).retransmit_threshold_syn;
+    switch( ts->retransmits ) {
+      case 0:
+        CITP_STATS_NETIF(++netif->state->stats.tcp_syn_retrans_once);
+        break;
+      case 1:
+        CITP_STATS_NETIF(++netif->state->stats.tcp_syn_retrans_twice);
+        break;
+      case 2:
+        CITP_STATS_NETIF(++netif->state->stats.tcp_syn_retrans_thrice);
+        break;
+    }
+    CITP_STATS_NETIF(++netif->state->stats.tcp_syn_retrans);
   }
   else if( ts->s.b.sb_aflags & CI_SB_AFLAG_ORPHAN ) {
     max_retrans = NI_OPTS(netif).retransmit_threshold_orphan;
@@ -572,6 +588,27 @@ void ci_tcp_timeout_rto(ci_netif* netif, ci_tcp_state* ts)
   else {
     max_retrans = NI_OPTS(netif).retransmit_threshold;
     CITP_STATS_NETIF(++netif->state->stats.tcp_rtos);
+  }
+
+  /* Re-send FIN if necessary */
+  if( CI_UNLIKELY( ts->tcpflags & CI_TCPT_FLAG_FIN_PENDING ) ) {
+    if( ci_tcp_resend_fin(ts, netif) ) {
+      /* ci_tcp_add_fin() calls ci_tcp_tx_advance(), so we've already
+       * pushed something to the net, and restarted RTO.  Return. */
+      return;
+    }
+    if( ts->retransmits >= max_retrans) {
+      ci_tcp_drop_due_to_rto(netif, ts, max_retrans);
+      CITP_STATS_NETIF_INC(netif, tcp_cant_fin_dropped);
+      return;
+    }
+    /* There are no packets.  It is useless to retransmit anything.
+     * Do not use too large RTO - we know that FIN was "lost" on this side
+     * of network.
+     */
+    ++ts->retransmits;
+    ci_tcp_rto_set(netif, ts);
+    return;
   }
 
   if( ts->retransmits >= max_retrans || NI_OPTS(netif).rst_delayed_conn ) {
@@ -587,7 +624,7 @@ void ci_tcp_timeout_rto(ci_netif* netif, ci_tcp_state* ts)
     return;
   }
 
-  if( ts->congstate == CI_TCP_CONG_RTO ){
+  if( ts->congstate & CI_TCP_CONG_RTO ){
     /* RTO after a retransmission based on an RTO.
     **
     ** Ambiguous what to do here, but 2*SMSS is sensible: See:
@@ -627,6 +664,7 @@ void ci_tcp_timeout_rto(ci_netif* netif, ci_tcp_state* ts)
   ts->rto <<= 1u;
   ts->rto = CI_MIN(ts->rto, NI_CONF(netif).tconst_rto_max);    
   ci_tcp_rto_set(netif, ts);
+  ci_assert(!(ts->tcpflags & CI_TCPT_FLAG_TAIL_DROP_TIMING));
 
   /* Delete all SACK marks (RFC2018 p6).  The reason is that the receiver
   ** is permitted to drop data that it has SACKed but not ACKed.  This
@@ -644,47 +682,72 @@ void ci_tcp_timeout_rto(ci_netif* netif, ci_tcp_state* ts)
   ** packet from here.  (This is the right thing to do).
   */
   ++ts->retransmits;
-  ci_tcp_retrans_recover(netif, ts, 0);
+
+  if( ci_tcp_retrans(netif, ts, ts->cwnd, 0, &seq_used) )
+    /* All data has already been retransmitted and state can move to COOLING.
+     * However, we keep CONG_RTO flag so that on next incoming ACK srtt
+     * could be updated */
+    ts->congstate = CI_TCP_CONG_RTO | CI_TCP_CONG_COOLING;
+  ci_assert(SEQ_LT(tcp_snd_una(ts), ts->congrecover));
 }
 
 
-#if CI_CFG_TAIL_DROP_PROBE
-/* Called as action on a tail drop timer timeout */
-void ci_tcp_timeout_taildrop(ci_netif* netif, ci_tcp_state* ts)
+static void ci_tcp_timeout_taildrop(ci_netif* netif, ci_tcp_state* ts)
 {
-  ci_ip_pkt_queue *rtq = &ts->retrans;
-  ci_ip_pkt_fmt *rtq_tail;
-  unsigned rtq_tail_seq;
-
+#if CI_CFG_TAIL_DROP_PROBE
   ci_assert(NI_OPTS(netif).tail_drop_probe);
+  ci_assert(ts->tcpflags & CI_TCPT_FLAG_TAIL_DROP_TIMING);
 
-  /* check that there is >1 packet in the RTQ: otherwise could be a DELACK */
-  if(ts->taildrop_state == CI_TCP_TAIL_DROP_PRIMED
-     && rtq->num > 1){
-    
-    rtq_tail = PKT_CHK(netif, ts->retrans.tail);
-    rtq_tail_seq = CI_BSWAP_BE32(TX_PKT_TCP(rtq_tail)->tcp_seq_be32);
+  LOG_TL(log(FNTS_FMT "now=%x srtt=%u+%u "TCP_SND_FMT,
+	     FNTS_PRI_ARGS(netif, ts), ci_tcp_time_now(netif), 
+	     tcp_srtt(ts), tcp_rttvar(ts), TCP_SND_PRI_ARG(ts)));
 
-    if (SEQ_LE(rtq_tail_seq, ts->taildrop_mark)){
-      if(ci_tcp_send_taildrop_probe(netif, ts)){
-	LOG_TV(log("Sending tail drop probe, mark %08x, una %08x seq %08x-%08x", 
-		  ts->taildrop_mark, tcp_snd_una(ts), rtq_tail_seq,
-		  rtq_tail->pf.tcp_tx.end_seq));
-	/* probe sent */
-	ts->taildrop_state = CI_TCP_TAIL_DROP_PROBED;
-      }
-      else{
-	/* try again later? */
-	ci_tcp_taildrop_check_and_set(netif, ts);
-      }
+  if( CI_UNLIKELY( ts->tcpflags & CI_TCPT_FLAG_FIN_PENDING ) ) {
+    if( ci_tcp_resend_fin(ts, netif) )
+      return;
+    if( ts->retrans.num == 0 ) {
+      /* Force normal RTO for the unsent FIN */
+      ts->tcpflags &=~ CI_TCPT_FLAG_TAIL_DROP_TIMING;
+      ci_tcp_rto_set(netif, ts);
+      return;
+    }
+  }
+  ci_assert(ts->retrans.num > 0);
+
+  /* Restart RTO timer before calling ci_tcp_tx_advance() (so that it
+   * doesn't enable TLP timer) and before calling ci_tcp_retrans_one()
+   * (which asserts that the RTO timer is already running).
+   */
+  ts->tcpflags &=~ CI_TCPT_FLAG_TAIL_DROP_TIMING;
+  ci_tcp_rto_set(netif, ts);
+
+  /* If we have new data to send, and window, send that. */
+  if( ts->send.num > 0 ) {
+    const ci_ip_pkt_fmt* pkt = PKT_CHK(netif, ts->send.head);
+    if( SEQ_LE(pkt->pf.tcp_tx.end_seq, ts->snd_max) ) {
+      ci_uint32 cntr;
+      ci_tcp_tx_advance_to(netif, ts, pkt->pf.tcp_tx.end_seq, &cntr);
+      CITP_STATS_NETIF(++netif->state->stats.tail_drop_probe_sendq);
       return;
     }
   }
 
-  /* if conditions couldn't be met, suggests that tail drop didn't take place */
-  ts->taildrop_state = CI_TCP_TAIL_DROP_ACTIVE;
-}
+  /* At most one outstanding TLP retransmission */
+  if( (ts->tcpflags & CI_TCPT_FLAG_TAIL_DROP_MARKED) &&
+      /* MARKED doesn't get cleared until snd_una goes past the mark, so
+       * una has to be before the mark to indicate a probe is inflight.
+       */
+      SEQ_LT(tcp_snd_una(ts), ts->taildrop_mark) )
+    return;
+
+  if( ci_tcp_retrans_one(ts, netif, PKT_CHK(netif, ts->retrans.tail)) )
+    return;
+
+  ts->taildrop_mark = ts->snd_nxt;
+  ts->tcpflags |= CI_TCPT_FLAG_TAIL_DROP_MARKED;
+  CITP_STATS_NETIF(++netif->state->stats.tail_drop_probe_retrans);
 #endif
+}
 
 
 /*! \cidoxg_end */

@@ -107,8 +107,7 @@ if ! [ -n "$num_workers" ]; then
 fi
 log "$module: configuring for $num_workers workers"
 
-# Enable scalable epoll implementation.
-onload_set EF_UL_EPOLL 3
+# nginx uses epoll within one process only
 onload_set EF_EPOLL_MT_SAFE 1
 
 # Enable clustering to spread connections over workers.
@@ -121,39 +120,32 @@ onload_set EF_CLUSTER_HOT_RESTART 1
 onload_set EF_SCALABLE_FILTERS "any=rss:active:passive"
 onload_set EF_SCALABLE_FILTERS_ENABLE 2
 onload_set EF_SCALABLE_LISTEN_MODE 1
-onload_set EF_TCP_SHARED_LOCAL_PORTS_REUSE_FAST 1
-onload_set EF_TCP_SHARED_LOCAL_PORTS 32000
-onload_set EF_TCP_SHARED_LOCAL_PORTS_MAX $EF_TCP_SHARED_LOCAL_PORTS
-onload_set EF_TCP_SHARED_LOCAL_PORTS_NO_FALLBACK 1
-onload_set EF_TCP_SHARED_LOCAL_PORTS_PER_IP 1
-
-# Support lots of sockets and enable socket caching.
-onload_set EF_MAX_ENDPOINTS 1000000
-onload_set EF_SOCKET_CACHE_MAX $(( $EF_MAX_ENDPOINTS / 4 ))
 
 # Enable spinning and sleep-spin mode.
 onload_set EF_POLL_USEC 1000000
 onload_set EF_SLEEP_SPIN_USEC 50
 
-# Allocate plenty of packet memory and force hugepages.
-onload_set EF_MAX_PACKETS $(( (60000*32) / $num_workers ))
-onload_set EF_PREALLOC_PACKETS 1
-onload_set EF_USE_HUGE_PAGES 2
+onload_import throughput
+onload_import wan-traffic
 
-# Tune TCP socket parameters.
-onload_set EF_TCP_SYNRECV_MAX 10000
+# In case invocation tries to send signal to existing instance of nginx
+# omit stack checking.
+if echo "$@" | perl -n -e 'if(/\s-s/) {exit 1}'; then
+  # In case of cold restart make sure previous instance (of the same name) has
+  # ceased to exist and in case references to onload stacks are still being
+  # released - wait.
 
-# Disable low-latency sends to minimise CPU overheads.
-onload_set EF_TX_PUSH 0
-
-# Prevent spinning inside socket calls.
-onload_set EF_PKT_WAIT_SPIN 0
-onload_set EF_TCP_RECV_SPIN 0
-onload_set EF_TCP_SEND_SPIN 0
-onload_set EF_TCP_CONNECT_SPIN 0
-onload_set EF_TCP_ACCEPT_SPIN 0
-onload_set EF_UDP_RECV_SPIN 0
-onload_set EF_UDP_SEND_SPIN 0
-
-# Kernel packet injection
-onload_set EF_KERNEL_PACKETS_BATCH_SIZE 1
+  ITER=0
+  while onload_stackdump --nopids stacks | grep "\s${EF_CLUSTER_NAME}-c" >/dev/null; do
+    if (( $ITER % 20 == 19 )); then
+      echo Onload stacks of name ${EF_CLUSTER_NAME}-c## still present. >&2
+      echo Verify that previous instance of Nginx has been killed. >&2
+      onload_stackdump --nopids stacks >&2
+      if (( $ITER > 50 )); then
+        exit 16
+      fi
+    fi
+    ITER=$(( $ITER + 1 ))
+    sleep 0.2;
+  done
+fi

@@ -537,6 +537,26 @@ void efx_farch_tx_remove(struct efx_tx_queue *tx_queue)
 	efx_free_special_buffer(tx_queue->efx, &tx_queue->txd);
 }
 
+/* Maximum number of descriptors required for a single SKB */
+unsigned int efx_farch_tx_max_skb_descs(struct efx_nic *efx)
+{
+	unsigned int max_descs;
+
+	/* We need a header, and at least one payload descriptor for each
+	 * output segment we might produce.
+	 */
+	max_descs = EFX_TSO_MAX_SEGS * 2;
+
+	/* We then need to allow for possible DMA boundaries within each
+	 * output segment. Input fragments from the kernel can be bigger than
+	 * our max MTU. We can have at most MAX_SKB_FRAGS separate input
+	 * fragments, and a limited number of extra boundaries within that.
+	 */
+	max_descs += MAX_SKB_FRAGS + DIV_ROUND_UP(GSO_MAX_SIZE, EFX_PAGE_SIZE);
+
+	return max_descs;
+}
+
 /**************************************************************************
  *
  * RX path
@@ -1633,9 +1653,8 @@ irqreturn_t efx_farch_fatal_interrupt(struct efx_nic *efx)
 		efx_oword_t reg;
 		efx_reado(efx, &reg, FR_AZ_MEM_STAT);
 		netif_err(efx, hw, efx->net_dev,
-			  "SYSTEM ERROR: memory parity error "EFX_OWORD_FMT" (SN:%s)\n",
-			  EFX_OWORD_VAL(reg),
-			  efx->vpd_sn);
+			  "SYSTEM ERROR: memory parity error "EFX_OWORD_FMT"\n",
+			  EFX_OWORD_VAL(reg));
 	}
 
 	/* Disable both devices */
@@ -2380,6 +2399,8 @@ efx_farch_filter_from_gen_spec(struct efx_farch_filter_spec *spec,
 	bool is_full = false;
 
 	if ((gen_spec->flags & EFX_FILTER_FLAG_RX_RSS) && gen_spec->rss_context)
+		return -EINVAL;
+	if ((gen_spec->flags & EFX_FILTER_FLAG_VPORT_ID) && gen_spec->vport_id)
 		return -EINVAL;
 
 	spec->priority = gen_spec->priority;
@@ -3528,20 +3549,6 @@ void efx_farch_filter_unblock_kernel(struct efx_nic *efx,
 
 	up_write(&state->lock);
 }
-
-int efx_farch_vport_filter_insert(struct efx_nic *efx, unsigned int vport_id,
-				  const struct efx_filter_spec *spec,
-				  u64 *filter_id_out, bool *is_exclusive_out)
-{
-	return -EOPNOTSUPP;
-}
-
-int efx_farch_vport_filter_remove(struct efx_nic *efx, unsigned int vport_id,
-				  u64 filter_id, bool is_exclusive)
-{
-	return -EOPNOTSUPP;
-}
-
 #endif /* EFX_NOT_UPSTREAM */
 
 void efx_farch_filter_sync_rx_mode(struct efx_nic *efx)

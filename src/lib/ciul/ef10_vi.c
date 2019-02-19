@@ -46,6 +46,7 @@
 
 #include "ef_vi_internal.h"
 #include <etherfabric/pio.h>
+#include <ci/efhw/common.h>
 #include "logging.h"
 #include "memcpy_to_io.h"
 
@@ -779,7 +780,10 @@ static void ef10_vi_initialise_ops(ef_vi* vi)
   }
   vi->ops.receive_push           = ef10_ef_vi_receive_push;
   vi->ops.eventq_poll            = ef10_ef_eventq_poll;
-  vi->ops.eventq_prime           = ef10_ef_eventq_prime;
+  if( vi->nic_type.nic_flags & EFHW_VI_NIC_BUG35388_WORKAROUND )
+    vi->ops.eventq_prime         = ef10_ef_eventq_prime_bug35388_workaround;
+  else
+    vi->ops.eventq_prime         = ef10_ef_eventq_prime;
   vi->ops.eventq_timer_prime     = ef10_ef_eventq_timer_prime;
   vi->ops.eventq_timer_run       = ef10_ef_eventq_timer_run;
   vi->ops.eventq_timer_clear     = ef10_ef_eventq_timer_clear;

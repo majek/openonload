@@ -190,14 +190,16 @@ cicp_raw_sock_send(struct socket *raw_sock, ci_ip_addr_t ip_be32,
 
 
 static int
-cicp_raw_sock_send_bindtodev(struct cicppl_instance* cppl,
+cicp_raw_sock_send_bindtodev(struct oo_cplane_handle* cp,
                              int ifindex, ci_ip_addr_t ip_be32,
                              const void* buf, unsigned int size)
 {
-  struct net_device *dev = NULL;
+  struct cicppl_instance* cppl = &cp->cppl;
+  struct net_device* dev = NULL;
   mm_segment_t oldfs;
   int rc;
   char* ifname;
+  const struct cred *orig_creds = NULL;
 
   if( ifindex != cppl->bindtodevice_ifindex ) {
     dev = dev_get_by_index(cppl->cp->cp_netns, ifindex);
@@ -209,11 +211,13 @@ cicp_raw_sock_send_bindtodev(struct cicppl_instance* cppl,
       return -EINVAL;
     }
 
+    orig_creds = oo_cplane_empower_cap_net_raw(cp->cp_netns);
     oldfs = get_fs();
     set_fs(KERNEL_DS);
     rc = sock_setsockopt(cppl->bindtodev_raw_sock, SOL_SOCKET, SO_BINDTODEVICE, 
                          ifname, strlen(ifname));
     set_fs(oldfs);
+    oo_cplane_drop_cap_net_raw(orig_creds);
 
     if( dev != NULL )
       dev_put(dev);
@@ -241,7 +245,7 @@ cicp_raw_sock_send_bindtodev(struct cicppl_instance* cppl,
 
 
 
-int cicp_raw_ip_send(struct cicppl_instance* cppl,
+int cicp_raw_ip_send(struct oo_cplane_handle* cp,
                      const ci_ip4_hdr* ip, int len, ci_ifid_t ifindex,
                      ci_ip_addr_t next_hop)
 {
@@ -273,14 +277,14 @@ int cicp_raw_ip_send(struct cicppl_instance* cppl,
   ci_assert(next_hop);
   ci_assert_ge(ifindex, 1);
 
-  return cicp_raw_sock_send_bindtodev(cppl, ifindex, next_hop, ip, len);
+  return cicp_raw_sock_send_bindtodev(cp, ifindex, next_hop, ip, len);
 }
 
 
 struct cicp_raw_sock_work_parcel {
   struct work_struct wqi;
   int pktid;
-  struct cicppl_instance *cppl;
+  struct oo_cplane_handle* cp;
   ci_ifid_t ifindex;
   ci_ip_addr_t ip;
 };
@@ -299,16 +303,16 @@ cicppl_arp_pkt_tx_queue(struct work_struct *data)
    * if the IP packet that caused the transaction isn't given */
   if (wp->pktid < 0) goto out;
   
-  ci_assert(cicppl_pktbuf_is_valid_id(wp->cppl->pktpool, wp->pktid));
+  ci_assert(cicppl_pktbuf_is_valid_id(wp->cp->cppl.pktpool, wp->pktid));
 
-  pkt = cicppl_pktbuf_pkt(wp->cppl->pktpool, wp->pktid);
+  pkt = cicppl_pktbuf_pkt(wp->cp->cppl.pktpool, wp->pktid);
   if (CI_UNLIKELY(pkt == 0)) {
     ci_log("%s: BAD packet %d", __FUNCTION__, wp->pktid);
     goto out;
   }
   ip = (void*) (pkt + 1);
 
-  rc = cicp_raw_ip_send(wp->cppl, ip, pkt->len, wp->ifindex, wp->ip);
+  rc = cicp_raw_ip_send(wp->cp, ip, pkt->len, wp->ifindex, wp->ip);
   OO_DEBUG_ARP(ci_log("%s: send packet to "CI_IP_PRINTF_FORMAT" via raw "
                     "socket, rc=%d", __FUNCTION__,
                     CI_IP_PRINTF_ARGS(&wp->ip), rc));
@@ -317,14 +321,14 @@ cicppl_arp_pkt_tx_queue(struct work_struct *data)
            so we shouldn't really increment the statistics in it.
 	   We will anyway though.
     */
-    CICP_STAT_INC_DROPPED_IP(wp->cppl);
+    CICP_STAT_INC_DROPPED_IP(&wp->cp->cppl);
     OO_DEBUG_ARP(ci_log("%s: failed to queue packet, rc=%d", __FUNCTION__, rc));
   }
 
   /* release the ARP module buffer */
-  spin_lock_bh(&wp->cppl->lock);
-  cicppl_pktbuf_free(wp->cppl->pktpool, wp->pktid);
-  spin_unlock_bh(&wp->cppl->lock);
+  spin_lock_bh(&wp->cp->cppl.lock);
+  cicppl_pktbuf_free(wp->cp->cppl.pktpool, wp->pktid);
+  spin_unlock_bh(&wp->cp->cppl.lock);
  out:
   /* free the work parcel */
   ci_free(wp);
@@ -339,7 +343,7 @@ cicppl_arp_pkt_tx_queue(struct work_struct *data)
  *  The control plane must not be locked when calling this function.
  */
 extern int /*rc*/
-cicpplos_pktbuf_defer_send(struct cicppl_instance *cppl,
+cicpplos_pktbuf_defer_send(struct oo_cplane_handle* cp,
                            ci_ip_addr_t ip, int pendable_pktid, 
                            ci_ifid_t ifindex)
 /* schedule a workqueue task to send IP packet using the raw socket */
@@ -348,7 +352,7 @@ cicpplos_pktbuf_defer_send(struct cicppl_instance *cppl,
   
   if (CI_LIKELY(wp != NULL)) {
     wp->pktid = pendable_pktid;
-    wp->cppl = cppl;
+    wp->cp = cp;
     wp->ifindex = ifindex;
     wp->ip = ip;
     INIT_WORK(&wp->wqi, cicppl_arp_pkt_tx_queue);

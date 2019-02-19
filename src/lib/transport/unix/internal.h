@@ -180,6 +180,8 @@ typedef struct {
 #endif
   int  (*zc_send     )(citp_fdinfo*, struct onload_zc_mmsg*, int);
   int  (*zc_recv     )(citp_fdinfo*, struct onload_zc_recv_args*);
+  int  (*zc_recv_filter)(citp_fdinfo*, onload_zc_recv_filter_callback,
+                         void*, int);
   int  (*recvmsg_kernel)(citp_fdinfo*, struct msghdr*, int);
   int  (*tmpl_alloc)(citp_fdinfo*, const struct iovec*, int,
                      struct oo_msg_template**, unsigned);

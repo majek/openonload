@@ -140,6 +140,16 @@ CI_CFG_OPT("EF_URG_RFC", urg_rfc, ci_uint32,
 "the location of the urgent point in TCP packet headers.",
            1, , 0, 0, 1, yesno)
 
+#define EF_TCP_URG_MODE_ALLOW 0
+#define EF_TCP_URG_MODE_IGNORE 1
+CI_CFG_OPT("EF_TCP_URG_MODE", urg_mode, ci_uint32,
+"allow  - process urgent flag and pointer.\n"
+"ignore - ignore the urgent flag and pointer in received packets.\n"
+"         WARNING: applications actually using urgent data will see "
+"corrupt streams",
+           1, , EF_TCP_URG_MODE_ALLOW, 0, 1, oneof:allow;ignore)
+
+
 CI_CFG_OPT("EF_TX_PUSH", tx_push, ci_uint32,
 "Enable low-latency transmit.",
            1, , 1, 0, 1, yesno)
@@ -374,7 +384,6 @@ CI_CFG_OPT("EF_VALIDATE_ENV", validate_env, ci_uint32,
 
 #if CI_CFG_TAIL_DROP_PROBE
 CI_CFG_OPT("EF_TAIL_DROP_PROBE", tail_drop_probe, ci_uint32,
-/* FIXME: when shoudl one use this? */
 "Whether to probe if the tail of a TCP burst isn't ACKed quickly.",
            , , 1, 0, 1, yesno)
 #endif
@@ -522,6 +531,11 @@ CI_CFG_OPT("EF_TCP_RCVBUF_MODE", tcp_rcvbuf_mode, ci_uint32,
 CI_CFG_OPT("EF_HIGH_THROUGHPUT_MODE", rx_merge_mode, ci_uint32,
 "This option causes onload to optimise for throughput at the cost of latency.",
            1, , 0, 0, 1, yesno)
+
+CI_CFG_OPT("EF_TCP_TIME_WAIT_ASSASSINATION", time_wait_assassinate, ci_uint32,
+"Allow TCP TIME-WAIT state assassination, as with "
+"/proc/sys/net/ipv4/tcp_rfc1337 set to  0",
+           1, , 1, 0, 1, yesno)
 
 /**********************************************************************
  * Narrow fields (few bits).
@@ -713,7 +727,8 @@ CI_CFG_OPT("EF_TCP_SYN_OPTS", syn_opts, ci_uint32,
            4, , CI_TCPT_SYN_FLAGS, MIN, MAX, bitmask)
 
 CI_CFG_OPT("EF_TCP_ADV_WIN_SCALE_MAX", tcp_adv_win_scale_max, ci_uint32,
-"Maximum value for TCP window scaling that will be advertised.",
+"Maximum value for TCP window scaling that will be advertised.  Set it "
+"to 0 to turn window scaling off.",
            4, , CI_TCP_WSCL_MAX, 0, 14, bincount)
 
 CI_CFG_OPT("EF_TCP_TCONST_MSL", msl_seconds, ci_uint32,
@@ -1098,6 +1113,16 @@ CI_CFG_OPT("EF_MAX_ENDPOINTS", max_ep_bufs, ci_uint32,
            , , CI_CFG_NETIF_MAX_ENDPOINTS, 4, CI_CFG_NETIF_MAX_ENDPOINTS_MAX,
            count)
 
+
+CI_CFG_OPT("EF_ENDPOINT_PACKET_RESERVE", endpoint_packet_reserve, ci_uint16,
+"This option enables reservation of packets per endpoint.  No other endpoints"
+"would be able to use that reserved quota.  Furthermore, "
+"new endpoints will only be created if there are enough free packets to reserve.  "
+"Currently, this option is limited to TCP sockets and enforced on incoming "
+"TCP connections.",
+          , , 0, 0, 1024, count)
+
+
 CI_CFG_OPT("EF_TCP_SNDBUF_ESTABLISHED_DEFAULT", tcp_sndbuf_est_def, ci_uint32,
 "Overrides the OS default SO_SNDBUF value for TCP sockets in the ESTABLISHED "
 "state if the OS default SO_SNDBUF value falls outside bounds set with this "
@@ -1268,6 +1293,11 @@ CI_CFG_OPT("EF_TCP_FASTSTART_LOSS", tcp_faststart_loss, ci_uint32,
            ,  , 64*1024, 0, MAX, count)
 #endif
 
+CI_CFG_OPT("EF_TCP_EARLY_RETRANSMIT", tcp_early_retransmit, ci_uint32,
+"Enables the Early Retransmit (RFC 5827) algorithm for TCP, and also the "
+"Limited Transmit (RFC 3042) algorithm, on which Early Retransmit depends.",
+           1, , 1, 0, 1, yesno)
+
 CI_CFG_OPT("EF_RFC_RTO_INITIAL", rto_initial, ci_iptime_t,
 "Initial retransmit timeout in milliseconds.  i.e. The number of "
 "milliseconds to wait for an ACK before retransmitting packets.",
@@ -1361,10 +1391,10 @@ CI_CFG_OPT("EF_CTPIO_CT_THRESH", ctpio_ct_thresh, ci_uint16,
 #if CI_CFG_CTPIO
 CI_CFG_OPT("EF_CTPIO_SWITCH_BYPASS", ctpio_switch_bypass, ci_uint32,
 "Allows CTPIO to be enabled on interfaces using the adapter's internal "
-"switch.  This switching functionality is used to implement hardware "
-"multicast loopback and hardware loopback between interfaces, as used by "
-"virtual machines.  CTPIO bypasses the switch, and hence is not compatible "
-"with those features.",
+"switch (i.e. on interfaces running full-feature firmware).  This switching "
+"functionality is used to implement hardware multicast loopback and hardware "
+"loopback between interfaces, as used by virtual machines.  CTPIO bypasses "
+"the switch, and hence is not compatible with those features.",
            1, , 0, 0, 1, yesno)
 #endif
 
@@ -1432,8 +1462,8 @@ CI_CFG_OPT("EF_TCP_SHARED_LOCAL_PORTS_REUSE_FAST",
 
 CI_CFG_OPT("EF_TCP_SHARED_LOCAL_PORTS_MAX", tcp_shared_local_ports_max,
            ci_uint32,
-"This setting sets the maximum size of the pool of local shared ports.  "
-"See EF_TCP_SHARED_LOCAL_PORTS for details.",
+"This setting sets the maximum size of the pool of local shared ports "
+"in the stack.  See EF_TCP_SHARED_LOCAL_PORTS for details.",
            , , 100, 0, MAX, count)
 
 CI_CFG_OPT("EF_TCP_SHARED_LOCAL_PORTS_NO_FALLBACK",
@@ -1448,6 +1478,20 @@ CI_CFG_OPT("EF_TCP_SHARED_LOCAL_PORTS_PER_IP",
 "When set, ports reserved for the pool of shared local ports will be reserved "
 "per local IP address on demand.",
            1, , 0, 0, 1, yesno)
+
+CI_CFG_OPT("EF_TCP_SHARED_LOCAL_PORTS_PER_IP_MAX", tcp_shared_local_ports_per_ip_max,
+           ci_uint32,
+"Sets the maximum size of the pool of local shared ports "
+"for given local IP address.  When used with scalable RSS mode this "
+"setting limits the total number within the cluster.  0 - no limit.  "
+"See EF_TCP_SHARED_LOCAL_PORTS for details.",
+           , , 0, 0, MAX, count)
+
+CI_CFG_OPT("EF_TCP_SHARED_LOCAL_PORTS_STEP",
+           tcp_shared_local_ports_step, ci_uint32,
+"Controls the number of ports allocated when expanding the pool of shared "
+"local ports.",
+           , , 1, 1, MAX, count)
 
 CI_CFG_STR_OPT("EF_SCALABLE_FILTERS", scalable_filter_string, ci_string256,
 "Specifies the interface on which to enable support for scalable filters, "
@@ -1475,7 +1519,8 @@ CI_CFG_STR_OPT("EF_SCALABLE_FILTERS", scalable_filter_string, ci_string256,
 " rss:passive, transparent_active:passive, active, rss:active, rss:passive:active.\n "
 "It is possible to specify both an active mode interface and a passive mode "
 "interface.  If two interfaces are specfied then both the active and passive "
-"interfaces must have the same rss qualifier. ",
+"interfaces must have the same rss qualifier. Furthermore, if the interface "
+"is the string 'any', scalable filters are installed on all interfaces.",
                ,  , "", none, none, )
 
 #define CITP_SCALABLE_MODE_NONE              0x0
@@ -1605,6 +1650,44 @@ CI_CFG_OPT("EF_KERNEL_PACKETS_TIMER_USEC", kernel_packets_timer_usec,
 "Controls the maximum time for which Onload will queue up a packet that was "
 "received by Onload but should be forwarded to the kernel.",
            , , 500, MIN, MAX, count)
+
+CI_CFG_OPT("EF_TCP_ISN_MODE", tcp_isn_mode, ci_uint16,
+"Selects behaviour with which Onload interacts with peers when reusing four tuples:\n"
+" * clocked - Linux compatible behaviour (default)\n"
+" * clocked+cache - additional cache to avoid failed connection attempts "
+"Note: the behaviour is relevant to high connection rate usecases with high "
+"outgoing data rates.\n"
+"When in clocked+cache mode, sequence numbers used by closed TCP connections "
+"are remembered so that initial sequence numbers for subsequent uses of the "
+"same four-tuple can be selected so as not to overlap with the previous "
+"connection's sequence space.",
+           1, , 1, 0, 1, oneof:clocked;clocked+cache)
+
+CI_CFG_OPT("EF_TCP_ISN_INCLUDE_PASSIVE", tcp_isn_include_passive, ci_uint16,
+"Enables populating isn cache with passively opened connections.  "
+"Relevant when EF_TCP_ISN_MODE is set to clocked+cache.",
+           1, , 0, 0, 1, yesno)
+
+
+#define CITP_TCP_ISN_2MSL_DEFAULT 240
+/* Needs to be less than half of isn clock's wrap time */
+#define CITP_TCP_ISN_2MSL_MAX 480
+CI_CFG_OPT("EF_TCP_ISN_2MSL", tcp_isn_2msl, ci_uint16,
+"Maximum time that peer's are assumed to stay in TIMEWAIT state.  In seconds.  "
+"Relevant when EF_TCP_ISN_MODE is set to clocked+cache",
+         12, , CITP_TCP_ISN_2MSL_DEFAULT, MIN, CITP_TCP_ISN_2MSL_MAX, time:sec)
+
+CI_CFG_OPT("EF_TCP_ISN_OFFSET", tcp_isn_offset, ci_uint32,
+"Increase in sequence number between subsequent connections reusing the same 4-tuple.  "
+"Lower value allows to reduce use of ISN cache, however potentially being unsafe "
+"with some host types or rare usecases.",
+         , , (65535 + 2), MIN, MAX, count)
+
+CI_CFG_OPT("EF_TCP_ISN_CACHE_SIZE", tcp_isn_cache_size, ci_uint32,
+"Cache size for recently used four tuples and their last sequence number.  "
+"0 - automatically chosen.  "
+"Relevant when EF_TCP_ISN_MODE is set to clocked+cache.",
+           , , 0, MIN, MAX, time:sec)
 
 
 #ifdef CI_CFG_OPTGROUP

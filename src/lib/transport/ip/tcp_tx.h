@@ -83,13 +83,13 @@ ci_inline void ci_tcp_ip_hdr_init(ci_ip4_hdr* ip, unsigned len)
   ci_assert_equal(CI_IP4_IHL(ip), sizeof(ci_ip4_hdr));
   ip->ip_tot_len_be16 = CI_BSWAP_BE16((ci_uint16) len);
   ip->ip_check_be16 = 0;
-  ci_assert_equal(ip->ip_id_be16, 0);
 }
 
 
-ci_inline void __ci_tcp_calc_rcv_wnd(ci_tcp_state* ts)
+ci_inline void __ci_tcp_calc_rcv_wnd(ci_tcp_state* ts, int advance)
 {
-  /* Calculate receive window, avoiding silly windows and snap-back. */
+  /* Calculate receive window, avoiding silly windows and snap-back.
+   * Fill-in tcp header window field. */
 
   int new_window;
   unsigned new_rhs;
@@ -105,11 +105,14 @@ ci_inline void __ci_tcp_calc_rcv_wnd(ci_tcp_state* ts)
    * as required by RFC1122 silly window avoidance.
    *
    * Do not apply silly window avoidance when we have nothing to read:
-   * probably, rcvbuf is too small.
+   * probably, rcvbuf is too small unless
+   * we have pending rob data. Small advances of window will undermine
+   * duplicate ACKs (turning them into plain window updates).
    */
-  delta = tcp_rcv_usr(ts) ? ts->amss : 0;
+  delta = (tcp_rcv_usr(ts) || OO_PP_NOT_NULL(ts->rob.head)) ? ts->amss : 0;
 
-  if( CI_LIKELY( SEQ_GE(new_rhs, ts->rcv_wnd_right_edge_sent + delta) ) ) {
+  if( advance &&
+      CI_LIKELY( SEQ_GE(new_rhs, ts->rcv_wnd_right_edge_sent + delta) ) ) {
     /* We are ready to move on the window right edge. */
     ts->rcv_wnd_advertised = new_window;
     tcp_rcv_wnd_right_edge_sent(ts) = new_rhs;
@@ -130,8 +133,9 @@ ci_inline void __ci_tcp_calc_rcv_wnd(ci_tcp_state* ts)
 }
 
 
-#define ci_tcp_calc_rcv_wnd(ts, caller)  __ci_tcp_calc_rcv_wnd(ts)
-
+#define ci_tcp_calc_rcv_wnd(ts, caller)  __ci_tcp_calc_rcv_wnd(ts, CI_TRUE)
+#define ci_tcp_calc_rcv_wnd_rx(ts, advance, caller) \
+                                     __ci_tcp_calc_rcv_wnd((ts), (advance))
 
 ci_inline void ci_tcp_tx_maybe_do_striping(ci_ip_pkt_fmt* pkt,
                                            ci_tcp_state* ts) {

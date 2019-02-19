@@ -54,6 +54,8 @@
 #ifndef __CI_EFRM_DRIVER_PRIVATE_H__
 #define __CI_EFRM_DRIVER_PRIVATE_H__
 
+
+#include <ci/driver/driverlink_api.h>
 #include <ci/efrm/resource.h>
 #include <ci/efrm/sysdep.h>
 
@@ -109,7 +111,9 @@ struct vi_resource_dimensions {
 #define VI_RES_MEM_BAR_UNDEFINED ((unsigned)~0)
 	unsigned mem_bar;
 	unsigned vi_stride;
+#if EFX_DRIVERLINK_API_VERSION < 25
 	unsigned vport_id;
+#endif
 
 	/* SRIOV Only */
 	unsigned vf_vi_base;

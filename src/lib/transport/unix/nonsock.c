@@ -163,6 +163,17 @@ int citp_nonsock_recvmsg_kernel(citp_fdinfo* fdi, struct msghdr *msg,
   Log_V(log(LPF "recvmsg_kernel(%d)", fdi->fd));
   return -ENOTSOCK;
 }
+int citp_nonsock_zc_recv_filter(citp_fdinfo* fdi,
+                                onload_zc_recv_filter_callback filter,
+                                void* cb_arg, int flags)
+{
+  Log_V(log(LPF "zc_recv_filter(%d)", fdi->fd));
+# if CI_CFG_ZC_RECV_FILTER
+  return -ESOCKTNOSUPPORT;
+# else
+  return -ENOSYS;
+# endif
+}
 
 int citp_nonsock_tmpl_alloc(citp_fdinfo* fdi, const struct iovec* initial_msg,
                             int mlen, struct oo_msg_template** omt_pp,

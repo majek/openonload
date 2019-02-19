@@ -199,7 +199,7 @@ extern int __ci_icmp_send_error(ci_netif *ni,
     return -1;
     
   } else
-  { ci_ip_pkt_fmt *tx_pkt = ci_netif_pkt_alloc(ni);
+  { ci_ip_pkt_fmt *tx_pkt = ci_netif_pkt_alloc(ni, 0);
     
     if (NULL == tx_pkt) {
       LOG_IPP( log(LPF "send-error: !!No buff, yet expected at least one!!")); 

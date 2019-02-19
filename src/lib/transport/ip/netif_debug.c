@@ -317,6 +317,7 @@ static void ci_netif_dump_pkt_summary(ci_netif* ni, oo_dump_log_fn_t logger,
          (used - ns->n_rx_pkts - ns->n_looppkts), tx_ring, tx_oflow);
   logger(log_arg, "  pkt_bufs: in_loopback=%d in_sock=%d", ns->n_looppkts,
          used - ns->n_rx_pkts - ns->n_looppkts - tx_ring - tx_oflow);
+  logger(log_arg, "  pkt_bufs: rx_reserved=%d", ns->reserved_pktbufs);
 }
 
 
@@ -588,11 +589,11 @@ static void ci_netif_dump_vi(ci_netif* ni, int intf_i, oo_dump_log_fn_t logger,
   logger(log_arg, "%s: stack=%d intf=%d dev=%s hw=%d%c%d", __FUNCTION__,
          NI_ID(ni), intf_i, nic->pci_dev, (int) nic->vi_arch,
          nic->vi_variant, (int) nic->vi_revision);
-  logger(log_arg, "  vi=%d pd_owner=%d channel=%d%s vi_flags=%x oo_vi_flags=%x",
+  logger(log_arg, "  vi=%d pd_owner=%d channel=%d tcpdump=%s vi_flags=%x oo_vi_flags=%x",
          ef_vi_instance(vi), nic->pd_owner, (int) nic->vi_channel,
-         ni->state->dump_intf[intf_i] == OO_INTF_I_DUMP_ALL ? " tcpdump" : (
-         ni->state->dump_intf[intf_i] == OO_INTF_I_DUMP_NO_MATCH ? " tcpdump --no-match" : ""),
-         vi->vi_flags, nic->oo_vi_flags);
+         ni->state->dump_intf[intf_i] == OO_INTF_I_DUMP_ALL ? "all" :
+         (ni->state->dump_intf[intf_i] == OO_INTF_I_DUMP_NO_MATCH ?
+          "nomatch" : "off"), vi->vi_flags, nic->oo_vi_flags);
   logger(log_arg, "  evq: cap=%d current=%x is_32_evs=%d is_ev=%d",
          ef_eventq_capacity(vi), (unsigned) ef_eventq_current(vi),
          ef_eventq_has_many_events(vi, 32), ef_eventq_has_event(vi));
@@ -739,6 +740,12 @@ void ci_netif_dump_to_logger(ci_netif* ni, oo_dump_log_fn_t logger,
   ci_ip_timer_state its;
 #endif
   ci_uint64 tmp;
+#ifdef __KERNEL__
+  struct timespec nowspec;
+#else
+  time_t nowt;
+  char buff[20];
+#endif
   long diff;
   int intf_i;
   int i;
@@ -763,6 +770,17 @@ void ci_netif_dump_to_logger(ci_netif* ni, oo_dump_log_fn_t logger,
       , ""
 #endif
       );
+#ifdef __KERNEL__
+  getnstimeofday(&nowspec);
+  logger(log_arg, "  creation_time=%u (delta=%usecs)", ns->creation_time_sec,
+         (ci_uint32) nowspec.tv_sec - ns->creation_time_sec);
+#else
+  nowt = ns->creation_time_sec;
+  strftime(buff, 20, "%Y-%m-%d %H:%M:%S", localtime(&nowt));
+  time(&nowt);
+  logger(log_arg, "  creation_time=%s (delta=%lusecs)", buff,
+         nowt - ns->creation_time_sec);
+#endif
 
   tmp = ni->state->lock.lock;
   logger(log_arg, "  lock=%"CI_PRIx64" "CI_NETIF_LOCK_FMT"  nics=%"CI_PRIx64
@@ -805,10 +823,12 @@ void ci_netif_dump_to_logger(ci_netif* ni, oo_dump_log_fn_t logger,
   if( ns->error_flags )
     logger(log_arg, "  ERRORS: "CI_NETIF_ERRORS_FMT,
            CI_NETIF_ERRORS_PRI_ARG(ns->error_flags));
-  if( ni->state->dump_write_i != ni->state->dump_read_i )
-    logger(log_arg, "  tcpdump: %d/%d packets in queue",
-           (ci_uint8)(ni->state->dump_write_i - ni->state->dump_read_i),
-           CI_CFG_DUMPQUEUE_LEN);
+  {
+    ci_uint16 dwi = ni->state->dump_write_i, dri = ni->state->dump_read_i;
+    if( dwi != dri )
+      logger(log_arg, "  tcpdump: %d/%d packets in queue (wr=%u rd=%u)",
+             (int)(ci_uint16) (dwi - dri), CI_CFG_DUMPQUEUE_LEN, dwi, dri);
+  }
 
 #if CI_CFG_FD_CACHING
   logger(log_arg, "  active cache: hit=%d avail=%d cache=%s pending=%s",

@@ -239,25 +239,6 @@ static void efx_dequeue_buffer(struct efx_tx_queue *tx_queue,
 	buffer->flags = 0;
 }
 
-unsigned int efx_tx_max_skb_descs(struct efx_nic *efx)
-{
-	/* Header and payload descriptor for each output segment, plus
-	 * one for every input fragment boundary within a segment
-	 */
-	unsigned int max_descs = EFX_TSO_MAX_SEGS * 2 + MAX_SKB_FRAGS;
-
-	/* Possibly one more per segment for option descriptors */
-	if (efx_nic_rev(efx) >= EFX_REV_HUNT_A0)
-		max_descs += EFX_TSO_MAX_SEGS;
-
-	/* Possibly more for PCIe page boundaries within input fragments */
-	if (PAGE_SIZE > EFX_PAGE_SIZE)
-		max_descs += max_t(unsigned int, MAX_SKB_FRAGS,
-				   DIV_ROUND_UP(GSO_MAX_SIZE, EFX_PAGE_SIZE));
-
-	return max_descs;
-}
-
 static void efx_tx_maybe_stop_queue(struct efx_tx_queue *txq1)
 {
 	/* We need to consider both queues that the net core sees as one */
@@ -340,7 +321,7 @@ static void efx_memcpy_64(void __iomem *dest, void *src, size_t len)
 	size_t i;
 
 	WARN_ON_ONCE(len % 8 != 0);
-	WARN_ON_ONCE(((u8 *)dest - (u8 *) 0) % 8 != 0);
+	WARN_ON_ONCE(((u8 __iomem *) dest - (u8 __iomem *) 0) % 8 != 0);
 
 	for(i = 0; i < l64; i++)
 		writeq(src64[i], &dest64[i]);
@@ -1088,12 +1069,6 @@ netdev_tx_t efx_hard_start_xmit(struct sk_buff *skb,
 	tx_queue = efx->select_tx_queue(channel, skb);
 
 	rc = efx_enqueue_skb(tx_queue, skb);
-#if defined(EFX_USE_KCOMPAT) && defined(EFX_USE_NET_DEVICE_TRANS_START)
-	if (likely(!rc)) {
-		/* Update last TX timer */
-		efx->net_dev->trans_start = jiffies;
-	}
-#endif
 	return NETDEV_TX_OK;
 }
 

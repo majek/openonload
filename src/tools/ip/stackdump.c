@@ -74,7 +74,7 @@ static void do_stack_ops(int argc, char* argv[])
     }
 
     if( op->flags & FL_ARG_U ) {
-      if( sscanf(argv[1], " %u %c", &arg_u[0], &dummy) != 1 ) {
+      if( sscanf(argv[1], " %" CI_PRIu64 " %c", &arg_u[0], &dummy) != 1 ) {
         ci_log("Bad argument to '%s' (expected unsigned)", op->name);
         ci_app_usage(0);
       }
@@ -82,7 +82,7 @@ static void do_stack_ops(int argc, char* argv[])
       ++argv;
     }
     else if( op->flags & FL_ARG_X ) {
-      if( sscanf(argv[1], " %x %c", &arg_u[0], &dummy) != 1 ) {
+      if( sscanf(argv[1], " %" CI_PRIx64 " %c", &arg_u[0], &dummy) != 1 ) {
         ci_log("Bad argument to '%s' (expected hex)", op->name);
         ci_app_usage(0);
       }
@@ -155,7 +155,7 @@ static void do_socket_ops(int argc, char* argv[])
     }
 
     if( op->flags & FL_ARG_U ) {
-      if( sscanf(argv[1], " %u %c", &arg_u[0], &dummy) != 1 ) {
+      if( sscanf(argv[1], " %" CI_PRIu64 " %c", &arg_u[0], &dummy) != 1 ) {
 	ci_log("Expected <int> for command %s", op->name);
 	ci_app_usage(0);
       }
@@ -378,6 +378,12 @@ int main(int argc, char* argv[])
     return -1;
   }
 
+  /* onload_stackdump docs does not require the driver to be loaded */
+  if( argc == 2 && ! strcmp(argv[1], "doc") ) {
+    print_docs(--argc, ++argv);
+    return 0;
+  }
+
   ci_app_getopt("[stack-index]", &argc, argv, cfg_opts, N_CFG_OPTS);
   --argc; ++argv;
   if( libstack_init(NULL) != 0 )
@@ -441,13 +447,6 @@ int main(int argc, char* argv[])
       if( doing_sockets )  cant_do_both();
       list_all_stacks(1);
       doing_stacks = 1;
-    }
-    else if( !  strcmp(argv[0], "doc") ) {
-      if( doing_sockets || doing_stacks) {
-        ci_app_usage("Cannot mix doc with other commands");
-      }
-      print_docs(argc, argv);
-      break;
     }
     else if( ! strcmp(argv[0], "threads") ) {
       if( doing_sockets || doing_stacks )

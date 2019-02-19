@@ -569,10 +569,10 @@ CI_CFG_OPT("EF_SIGNALS_NOPOSTPONE", signals_no_postpone, ci_uint64,
 "Comma-separated list of signal numbers to avoid postponing "
 "of the signal handlers.  "
 "Your application will deadlock if one of the handlers uses socket "
-"function.  By default, the list includes SIGBUS, SIGFPE, SIGSEGV and "
-"SIGPROF.\n"
+"function.  By default, the list includes SIGILL, SIGBUS, SIGFPE, "
+"SIGSEGV and SIGPROF.\n"
 "Please specify numbers, not string aliases: EF_SIGNALS_NOPOSTPONE=7,11,27 "
-"instead of EF_SIGNALS_NOPOSTPONE=SIGILL,SIGBUS,SIGSEGV,SIGPROF.\n"
+"instead of EF_SIGNALS_NOPOSTPONE=SIGBUS,SIGSEGV,SIGPROF.\n"
 "You can set EF_SIGNALS_NOPOSTPONE to empty value to postpone "
 "all signal handlers in the same way if you suspect these signals "
 "to call network functions.",
@@ -675,6 +675,7 @@ CI_CFG_OPT("EF_SYNC_CPLANE_AT_CREATE", sync_cplane, ci_uint32,
 "\n"
 "Sync operation time is limited by cplane_init_timeout onload module option.",
            2, , 1, 0, 2, oneof:never;first;always)
+
 
 #ifdef CI_CFG_OPTGROUP
 /* put definitions of categories and expertise levels here */

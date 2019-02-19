@@ -318,12 +318,19 @@ static struct page* vm_op_nopage(struct vm_area_struct* vma,
     return pg;
 
   /* Linux walks VMAs on core dump, suppress the message */
-  if( ~current->flags & PF_DUMPCORE )
-    NI_LOG(&trs->netif, RESOURCE_WARNINGS,
-           "%s: %u vma=%p sz=%lx pageoff=%lx id=%d FAILED",
-           __FUNCTION__, trs->id, vma, vma->vm_end - vma->vm_start,
-           (address - vma->vm_start) >> CI_PAGE_SHIFT,
-           OO_MMAP_OFFSET_TO_MAP_ID(VMA_OFFSET(vma)));
+  if( ~current->flags & PF_DUMPCORE ) {
+    /* We don't generally expect to fail to map, but there are legitimate
+     * cases where this occurs, such as the application using
+     * mlockall(MCL_FUTURE) resulting in the kernel trying to fault in pages
+     * that would back not yet allocated resources.  Because of this we only
+     * log failure as a debug message.
+     */
+    OO_DEBUG_TRAMP(ci_log("%s: %u vma=%p sz=%lx pageoff=%lx id=%d FAILED",
+                          __FUNCTION__, trs->id,
+                          vma, vma->vm_end - vma->vm_start,
+                          (address - vma->vm_start) >> CI_PAGE_SHIFT,
+                          OO_MMAP_OFFSET_TO_MAP_ID(VMA_OFFSET(vma))));
+  }
 
   return NOPAGE_SIGBUS;
 }

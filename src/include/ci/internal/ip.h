@@ -46,9 +46,10 @@
 #include <ci/internal/ip_stats.h>
 #include <etherfabric/ef_vi.h>
 #include <etherfabric/pio.h>
+#include <etherfabric/internal/internal.h>
 #include <onload/offbuf.h>
 #include <cplane/cplane.h>
-#include <ci/net/ipv4.h>
+#include <ci/net/ipvx.h>
 #include <ci/net/ethernet.h>
 #include <ci/internal/ip_shared_types.h>
 #include <ci/internal/ip_log.h>
@@ -74,6 +75,7 @@
 #include <onload/pktq.h>
 #include <onload/atomics.h>
 #include <onload/drv/dump_to_user.h>
+#include <onload/hash.h>
 #endif
 
 #if CI_CFG_TIMESTAMPING
@@ -234,9 +236,6 @@ extern void ci_ip_timer_poll(ci_netif* netif) CI_HF;
 */
 extern void ci_ip_timer_state_init(ci_netif* netif, unsigned cpu_khz) CI_HF;
 
-/*! Initialise user-level timer related stuff in netif (not shared state) */
-extern void ci_ip_timer_state_init_ul(ci_netif *ni);
-
 /*! Dump out state of timers
 **  \param netif  A pointer to the netif to initialise
 */
@@ -307,7 +306,7 @@ do {                                                            \
   (ipcache)->hwport = CI_HWPORT_ID_BAD;                         \
   (ipcache)->ether_type = CI_ETHERTYPE_IP;                      \
   (ipcache)->flags = 0;                                         \
-  (ipcache)->nexthop = 0;                                       \
+  (ipcache)->nexthop = addr_any;                                \
 } while (0)
 #define ci_ip_cache_init(ipcache) ci_ip_cache_init_common(ipcache)
 
@@ -367,7 +366,7 @@ ci_ip_cache_invalidate(ci_ip_cached_hdrs*  ipcache)
 
 /* TODO: replace PKT_UDP_HDR and PKT_IOVEC_UDP_PFX by TX-specific and
  * generic function; see oo_tx_ip_hdr() performance notes. */
-#define PKT_UDP_HDR(pkt)       ((ci_udp_hdr*)&(oo_ip_hdr(pkt))[1])
+#define PKT_UDP_HDR(pkt)       ((ci_udp_hdr*)oo_ip_data(pkt))
 
 
 /**********************************************************************
@@ -383,7 +382,7 @@ typedef struct {
   /* [flags] can take any of the following values, or any of the tcp
   ** options flags (e.g. CI_TCPT_FLAG_*). */
 #define CI_TCP_PAWS_FAILED       0x80000000
-#define CI_TCP_SACKED            0x20000000 /* Something is really SACKed */
+#define CI_TCP_SACKED            0x20000000 /* Something is newly SACKed */
 #define CI_TCP_DSACK             0x10000000 /* First SACK block is duplicate */
 
   ci_uint32     flags;
@@ -458,6 +457,8 @@ extern void ci_netif_error_detected(ci_netif*, unsigned error_flag,
 
 extern int  ci_netif_poll_intf_fast(ci_netif*, int intf_i, ci_uint64 now_frc)
   CI_HF;
+extern int  ci_netif_poll_intf_future(ci_netif*, int intf_i, ci_uint64 now_frc)
+  CI_HF;
 extern int  ci_netif_poll_n(ci_netif*, int max_evs) CI_HF;
 #define     ci_netif_poll(ni)  ci_netif_poll_n((ni), 0x7fffffff)
 extern void ci_netif_tx_pkt_complete(ci_netif*, struct ci_netif_poll_state*,
@@ -469,7 +470,7 @@ extern void ci_netif_rx_post(ci_netif* netif, int nic_index) CI_HF;
 extern int  ci_netif_set_rxq_limit(ci_netif*) CI_HF;
 extern int  ci_netif_init_fill_rx_rings(ci_netif*) CI_HF;
 #endif
-extern unsigned ci_netif_purge_deferred_socket_list(ci_netif* ni) CI_HF;
+extern ci_uint64 ci_netif_purge_deferred_socket_list(ci_netif* ni) CI_HF;
 extern void ci_netif_merge_atomic_counters(ci_netif* ni) CI_HF;
 extern void ci_netif_mem_pressure_pkt_pool_fill(ci_netif*) CI_HF;
 extern int  ci_netif_mem_pressure_try_exit(ci_netif*) CI_HF;
@@ -600,8 +601,10 @@ extern int ci_netif_pktset_best(ci_netif* ni) CI_HF;
 extern void ci_netif_pkt_free(ci_netif* ni, ci_ip_pkt_fmt* pkt
                               CI_KERNEL_ARG(int* p_netif_is_locked)) CI_HF;
 
-extern ci_ip_pkt_fmt* ci_netif_pkt_alloc_slow(ci_netif*,
-                                              int for_tx, int use_nonb) CI_HF;
+#define CI_PKT_ALLOC_FOR_TCP_TX 1
+#define CI_PKT_ALLOC_USE_NONB   2
+#define CI_PKT_ALLOC_NO_REAP    4
+extern ci_ip_pkt_fmt* ci_netif_pkt_alloc_slow(ci_netif*, int flags) CI_HF;
 extern int ci_netif_pkt_try_to_free(ci_netif* ni, int desperation,
                                     int stop_once_freed_n) CI_HF;
 extern void ci_netif_try_to_reap(ci_netif* ni, int stop_once_freed_n) CI_HF;
@@ -711,6 +714,10 @@ extern void ci_sock_cmn_dump(ci_netif*, ci_sock_cmn*, const char* pf,
   (!CI_SOCK_EXPLICIT_BIND((s)) && sock_lport_be16((s)))
 #define CI_SOCK_NOT_BOUND(s)     (!sock_lport_be16((s)))
 
+void ci_sock_set_laddr(ci_sock_cmn* s, ci_addr_t addr, ci_uint16 port);
+void ci_sock_set_raddr(ci_sock_cmn* s, ci_addr_t addr, ci_uint16 port);
+ci_addr_t sock_laddr(ci_sock_cmn* s);
+ci_addr_t sock_raddr(ci_sock_cmn* s);
 
 /**********************************************************************
  ****************************** so_error ******************************
@@ -780,6 +787,10 @@ extern int __ci_icmp_send_error(ci_netif* ni, ci_ip4_hdr* rx_ip,
 #define udp_rport_be16(us)      (sock_rport_be16(&us->s))
 #define udp_raddr_be32(us)      (sock_raddr_be32(&us->s))
 
+#if CI_CFG_IPV6
+#define udp_ip6_laddr(us)       (sock_ip6_laddr(&us->s))
+#define udp_ip6_raddr(us)       (sock_ip6_raddr(&us->s))
+#endif
 
 #define UDP_RX_DONE(us)         (SOCK_RX_ERRNO(&(us)->s) & ~CI_SHUT_WR)
 #define UDP_TX_ERRNO(us)        (SOCK_TX_ERRNO(&(us)->s))
@@ -797,7 +808,7 @@ extern void ci_udp_state_dump(ci_netif*, ci_udp_state*, const char* pf,
                               oo_dump_log_fn_t logger, void* log_arg) CI_HF;
 
 /* Set the source IP address & UDP port */
-extern void ci_udp_set_laddr(citp_socket*, unsigned laddr_be32, 
+extern void ci_udp_set_laddr(citp_socket*, ci_addr_t addr,
                              int lport_be16) CI_HF;
 
 /* Set the IP TOS */
@@ -812,7 +823,7 @@ extern void ci_udp_ep_assert_valid(citp_socket* ep,
 
 /*** udp_rx.c ***/
 extern void ci_udp_handle_rx(ci_netif*, ci_ip_pkt_fmt* pkt, ci_udp_hdr*,
-                             int ip_paylen) CI_HF;
+                             int ip_paylen, ci_uint16 ether_type) CI_HF;
 
 
 ci_inline 
@@ -837,6 +848,11 @@ void ci_pkt_init_from_ipcache(ci_ip_pkt_fmt *pkt,
   ci_pkt_init_from_ipcache_len(pkt, ipcache,
                                sizeof(ci_ip4_hdr) + sizeof(ci_tcp_hdr));
 }
+
+
+#if CI_CFG_IPV6
+void ci_init_ipcache_ip6_hdr(ci_sock_cmn* s);
+#endif
 
 
 /*
@@ -1207,13 +1223,41 @@ extern int ci_pipe_list_to_iovec(ci_netif* ni, struct oo_pipe* p,
 /* macros for getting source and dest addresses and ports */
 #define sock_laddr_be32(s)	((s)->pkt.ip.ip_saddr_be32)
 #define sock_raddr_be32(s)	((s)->pkt.ip.ip_daddr_be32)
+
+#if CI_CFG_IPV6
+#define sock_ip6_laddr(s)   ((s)->pkt.ip6.saddr)
+#define sock_ip6_raddr(s)   ((s)->pkt.ip6.daddr)
+#endif
+
+#if CI_CFG_IPV6
+#define sock_protocol(s)    (*(ipcache_is_ipv6((s)->pkt) ? \
+  ((&(s)->pkt.ip6.next_hdr)) : (&(s)->pkt.ip.ip_protocol)))
+#define sock_lport_be16(s)  ((ipcache_is_ipv6((s)->pkt) ? \
+  ((ci_uint16*) (&(s)->pkt.ip6 + 1)) : ((ci_uint16*) (&(s)->pkt.ip + 1)) )[0])
+#define sock_rport_be16(s)  ((ipcache_is_ipv6((s)->pkt) ? \
+  ((ci_uint16*) (&(s)->pkt.ip6 + 1)) : ((ci_uint16*) (&(s)->pkt.ip + 1)) )[1])
+#else
 #define sock_protocol(s)	((s)->pkt.ip.ip_protocol)
 #define sock_lport_be16(s)	(((ci_uint16*) (&(s)->pkt.ip + 1))[0])
 #define sock_rport_be16(s)	(((ci_uint16*) (&(s)->pkt.ip + 1))[1])
 /* NB. Above two assume no IP options (which is true for now). */
+#endif
+
+#if CI_CFG_IPV6
+#define sock_af_space(s)  ((ipcache_is_ipv6((s)->pkt)) ? \
+  AF_SPACE_FLAG_IP6 : AF_SPACE_FLAG_IP4)
+#else
+#define sock_af_space(s)  AF_SPACE_FLAG_IP4
+#endif
 
 #define tcp_laddr_be32(ts)	sock_laddr_be32(&(ts)->s)
 #define tcp_raddr_be32(ts)	sock_raddr_be32(&(ts)->s)
+
+#if CI_CFG_IPV6
+#define tcp_ip6_laddr(ts)   sock_ip6_laddr(&(ts)->s)
+#define tcp_ip6_raddr(ts)   sock_ip6_raddr(&(ts)->s)
+#endif
+
 #define tcp_protocol(ts)	sock_protocol(&(ts)->s)
 #define tcp_lport_be16(ts)	sock_lport_be16(&(ts)->s)
 #define tcp_rport_be16(ts)	sock_rport_be16(&(ts)->s)
@@ -1246,6 +1290,8 @@ extern ci_tcp_state* ci_tcp_get_state_buf_from_cache(ci_netif*) CI_HF;
 extern ci_udp_state* ci_udp_get_state_buf(ci_netif*) CI_HF;
 extern void ci_tcp_state_init(ci_netif* netif, ci_tcp_state* ts,
                               int from_cache) CI_HF;
+extern void ci_tcp_state_tcb_reinit_minimal(ci_netif* netif,
+                                            ci_tcp_state* ts) CI_HF;
 extern void ci_tcp_state_reinit(ci_netif* netif, ci_tcp_state* ts) CI_HF;
 extern void ci_tcp_init_rcv_wnd(ci_tcp_state*, const char* caller) CI_HF;
 extern void ci_tcp_drop(ci_netif*, ci_tcp_state*, int so_error) CI_HF;
@@ -1263,6 +1309,7 @@ extern void ci_tcp_all_fds_gone(ci_netif* netif, ci_tcp_state*,
 extern void ci_tcp_all_fds_gone_common(ci_netif* netif, ci_tcp_state*) CI_HF;
 extern void ci_tcp_rx_reap_rxq_bufs(ci_netif* netif, ci_tcp_state* ts) CI_HF;
 extern void ci_tcp_rx_reap_rxq_last_buf(ci_netif* netif, ci_tcp_state* ts) CI_HF;
+
 static inline void
 ci_tcp_rx_reap_rxq_bufs_socklocked(ci_netif* netif, ci_tcp_state* ts)
 {
@@ -1337,6 +1384,9 @@ ci_tcp_sock_clear_scalable_filter(ci_netif *ni, ci_tcp_state* ts);
 extern int /*bool*/ ci_tcp_active_wild_sharer_is_cacheable(ci_tcp_state*);
 extern int /*bool*/ ci_tcp_is_cacheable_active_wild_sharer(ci_sock_cmn*);
 #endif
+
+extern void ci_tcp_prev_seq_remember(ci_netif*, ci_tcp_state*);
+extern ci_uint32 ci_tcp_prev_seq_lookup(ci_netif*, const ci_tcp_state*);
 
 /*********************************************************************
 ****************************** PIPE ***********************************
@@ -1430,11 +1480,16 @@ extern int ci_tcp_synrecv_send(ci_netif* netif, ci_tcp_socket_listen* tls,
                                ci_tcp_state_synrecv* tsr, 
                                ci_ip_pkt_fmt* pkt, ci_uint8 tcp_flags,
                                ci_ip_cached_hdrs* ipcache_opt) CI_HF;
+extern int ci_tcp_unsacked_segments_in_flight(ci_netif*, ci_tcp_state*) CI_HF;
 extern int ci_tcp_retrans_one(ci_tcp_state* ts, ci_netif* netif,
                               ci_ip_pkt_fmt* pkt) CI_HF;
+extern int ci_tcp_retrans(ci_netif* ni, ci_tcp_state* ts, int seq_limit,
+                          int before_sacked_only, int* seq_used) CI_HF;
 extern void ci_tcp_retrans_recover(ci_netif* ni, ci_tcp_state* ts,
                                    int force_retrans_first) CI_HF;
-extern void ci_tcp_enter_fast_recovery(ci_netif* ni, ci_tcp_state* ts) CI_HF;
+extern int /*bool*/
+ci_tcp_maybe_enter_fast_recovery(ci_netif* ni, ci_tcp_state* ts) CI_HF;
+
 extern void ci_tcp_recovered(ci_netif* ni, ci_tcp_state* ts) CI_HF;
 
 extern void ci_tcp_clear_sacks(ci_netif* ni, ci_tcp_state* ts) CI_HF;
@@ -1458,8 +1513,8 @@ extern int ci_tcp_tx_split(ci_netif* ni, ci_tcp_state* ts, ci_ip_pkt_queue* qu,
 
 
 extern void ci_tcp_tx_advance(ci_tcp_state* ts, ci_netif* netif) CI_HF;
-extern void ci_tcp_tx_free_prequeue(ci_netif* ni, ci_tcp_state* ts,
-                                    int netif_locked) CI_HF;
+extern void ci_tcp_tx_advance_to(ci_netif* ni, ci_tcp_state* ts,
+                            unsigned right_edge, ci_uint32* p_stop_cntr) CI_HF;
 extern void ci_tcp_send_rst_with_flags(ci_netif*, ci_tcp_state*,
                                        ci_uint8 extra_flags) CI_HF;
 extern void ci_tcp_send_rst(ci_netif* netif, ci_tcp_state* ts) CI_HF;
@@ -1481,10 +1536,15 @@ extern int ci_tcp_parse_options(ci_netif*, ciip_tcp_rx_pkt*,
 extern void ci_ip_hdr_init_fixed(ci_ip4_hdr* ip, int protocol, unsigned ttl,
                                  unsigned tos) CI_HF;
 
-extern void ci_tcp_send_ack(ci_netif*, ci_tcp_state*, ci_ip_pkt_fmt*,
-                            int sock_locked) CI_HF;
-extern void ci_tcp_send_ack_loopback(ci_netif* netif, ci_tcp_state* ts,
-                                     int sock_locked) CI_HF;
+extern void ci_tcp_send_ack_rx(ci_netif*, ci_tcp_state*, ci_ip_pkt_fmt*,
+                               int sock_locked, int update_wnd) CI_HF;
+ci_inline void ci_tcp_send_ack(ci_netif* netif, ci_tcp_state* ts,
+                               ci_ip_pkt_fmt* pkt, int sock_locked)
+{
+  ci_tcp_send_ack_rx(netif, ts, pkt, sock_locked, 1);
+}
+
+extern void ci_tcp_send_ack_loopback(ci_netif* netif, ci_tcp_state* ts) CI_HF;
 extern int  ci_tcp_send_wnd_update(ci_netif*, ci_tcp_state*,
                                    int sock_locked) CI_HF;
 
@@ -1492,6 +1552,11 @@ extern int  ci_tcp_send_wnd_update(ci_netif*, ci_tcp_state*,
 /* TCP/UDP filter insertion */
 extern void ci_netif_filter_init(ci_netif_filter_table* tbl,
 				 int size_lg2) CI_HF;
+
+#if CI_CFG_IPV6
+void ci_ip6_netif_filter_init(ci_ip6_netif_filter_table* tbl,
+                              int size_lg2) CI_HF;
+#endif
 
 extern ci_sock_cmn*
 __ci_netif_filter_lookup(ci_netif* netif, unsigned daddr, unsigned dport,
@@ -1519,16 +1584,24 @@ ci_netif_filter_for_each_match(ci_netif*, unsigned laddr, unsigned lport,
                                int (*callback)(ci_sock_cmn*, void*),
                                void* callback_arg, ci_uint32* hash_out) CI_HF;
 
+extern int
+ci_netif_filter_for_each_match_ip6(ci_netif* ni,
+                                   ci_addr_t laddr, unsigned lport,
+                                   ci_addr_t raddr, unsigned rport,
+                                   unsigned protocol, int intf_i, int vlan,
+                                   int (*callback)(ci_sock_cmn*, void*),
+                                   void* callback_arg, ci_uint32* hash_out) CI_HF;
+
 extern ci_uint32
 ci_netif_filter_hash(ci_netif* ni, unsigned laddr, unsigned lport,
                      unsigned raddr, unsigned rport,
                      unsigned protocol) CI_HF;
 
 extern int
-ci_netif_filter_insert(ci_netif* netif, oo_sp sock_id,
-		       unsigned laddr, unsigned lport,
-		       unsigned raddr, unsigned rport, 
-		       unsigned protocol) CI_HF;
+ci_netif_filter_insert(ci_netif* netif, oo_sp sock_id, int af_space,
+                       const ci_addr_t laddr, unsigned lport,
+                       const ci_addr_t raddr, unsigned rport, 
+                       unsigned protocol) CI_HF;
 
 extern int
 ci_netif_filter_check(ci_netif* netif,
@@ -1537,10 +1610,10 @@ ci_netif_filter_check(ci_netif* netif,
 		      unsigned protocol) CI_HF;
 
 extern void 
-ci_netif_filter_remove(ci_netif* netif, oo_sp tcp_id,
-		       unsigned laddr, unsigned lport,
-		       unsigned raddr, unsigned rport,
-		       unsigned protocol) CI_HF;
+ci_netif_filter_remove(ci_netif* netif, oo_sp tcp_id, int af_space,
+                       const ci_addr_t laddr, unsigned lport,
+                       const ci_addr_t raddr, unsigned rport,
+                       unsigned protocol) CI_HF;
 
 #define CI_NETIF_FILTER_ID_TO_SOCK_ID(ni, filter_id)            \
   OO_SP_FROM_INT((ni), (ni)->filter_table->table[filter_id].id)
@@ -1595,11 +1668,7 @@ extern ci_int32 ci_tcp_max_rcvbuf(ci_netif* ni, ci_uint16 amss) CI_HF;
 
 /* timer handlers */
 #define ci_tcp_time_now(ni) ci_ip_time_now(ni)
-#ifndef __KERNEL__
-# define ci_tcp_time_ms2ticks(ni, x) ci_ip_time_ms2ticks_fast(ni, (x))
-#else
-# define ci_tcp_time_ms2ticks(ni, x) ci_ip_time_ms2ticks_slow(ni, (x))
-#endif 
+#define ci_tcp_time_ms2ticks(ni, x) ci_ip_time_ms2ticks(ni, (x))
 extern void ci_tcp_timer_init(ci_netif* netif) CI_HF;
 extern void ci_tcp_timeout_listen(ci_netif* netif,
 				  ci_tcp_socket_listen* tls) CI_HF;
@@ -1610,9 +1679,6 @@ extern void ci_tcp_timeout_rto(ci_netif* netif, ci_tcp_state* ts) CI_HF;
 extern void ci_tcp_timeout_cork(ci_netif* netif, ci_tcp_state* ts) CI_HF;
 extern void ci_tcp_stop_timers(ci_netif* netif, ci_tcp_state* ts) CI_HF;
 extern void ci_tcp_send_corked_packets(ci_netif* netif, ci_tcp_state* ts) CI_HF;
-#if CI_CFG_TAIL_DROP_PROBE
-extern void ci_tcp_timeout_taildrop(ci_netif *netif, ci_tcp_state *ts) CI_HF;
-#endif
 
 extern void ci_tcp_tx_pkt_assert_valid(ci_netif* ni, ci_tcp_state* ts,
                                        ci_ip_pkt_fmt*,
@@ -1692,6 +1758,9 @@ extern int ci_tcp_sendmsg(ci_netif* ni, ci_tcp_state* ts,
                           CI_KERNEL_ARG(ci_addr_spc_t addr_spc)) CI_HF;
 extern void ci_tcp_sendmsg_enqueue_prequeue_deferred(ci_netif*,
 						     ci_tcp_state*) CI_HF;
+extern void ci_tcp_sendmsg_enqueue_prequeue(ci_netif* ni,
+                                            ci_tcp_state* ts,
+                                            int/*bool*/ shutdown) CI_HF;
 extern void ci_tcp_perform_deferred_socket_work(ci_netif*, ci_tcp_state*)CI_HF;
 
 /* Guarantees that deferred work will be performed at some point in the
@@ -1724,6 +1793,8 @@ extern int ci_tcp_connect_lo_toconn(ci_netif *c_ni, oo_sp c_id, ci_uint32 dst,
 extern ci_uint16 ci_tcp_limit_mss(ci_uint16 mss, ci_netif* ni,
                                   const char* caller) CI_HF;
 #endif
+extern unsigned ci_tcp_amss(ci_netif* ni, const ci_tcp_socket_cmn* c,
+                            unsigned mtu, const char* caller) CI_HF;
 
 
 /**********************************************************************
@@ -2080,7 +2151,7 @@ ci_inline int oo_bit_array_get(ci_uint32* array, int id)
 *********************************************************************/
 
 ci_inline ci_udp_state* SOCK_TO_UDP(ci_sock_cmn* s) {
-  ci_assert(s->b.state == CI_TCP_STATE_UDP);
+  ci_assert_equal(s->b.state, CI_TCP_STATE_UDP);
   return CI_CONTAINER(ci_udp_state, s, s);
 }
 
@@ -2154,6 +2225,15 @@ ci_inline int ci_udp_recv_q_reapable(ci_udp_recv_q* q)
 ci_inline ci_iptime_t ci_ip_time_now(ci_netif *ni)
 { return IPTIMER_STATE(ni)->ci_ip_time_real_ticks; }
 
+
+/* Returns true if [a] is before [b]. */
+ci_inline int /*bool*/
+ci_ip_time_before(ci_iptime_t a, ci_iptime_t b)
+{
+  return ci_seq_lt(a, b, sizeof(a) * 8);
+}
+
+
 /*! This function sets the initial current free cycle counter time in ticks 
 **  \param its  A pointer to the ci_ip_timer_state management block
 */
@@ -2213,105 +2293,70 @@ ci_inline void ci_ip_time_get_us(ci_ip_timer_state* its, ci_iptime_t* t) {
 #endif  
 }
 
-#ifndef __KERNEL__
-
 /*! Convert a time measure in ms to the number of ticks
 **  \param ni   A pointer to the netif 
 **  \param t    The time in ms
 **  \return     The time t in ticks
-**
-**  This function uses a floating point field ci_ip_time_tick2ms and floating
-**  point calculations (note: floating point may not be available in the
-**  kernel).
 */
-ci_inline ci_iptime_t ci_ip_time_ms2ticks_fast(ci_netif *ni, ci_uint32 t) 
+ci_inline ci_iptime_t ci_ip_time_ms2ticks(ci_netif *ni, ci_uint32 t)
 {
-  /* Only call this function from userland */
-  
-  /* uses floating point arithmetic to ease overflow worries */
-  t = (ci_iptime_t) (((double)t)/ni->ci_ip_time_tick2ms); 
+  ci_ip_timer_state *its = IPTIMER_STATE(ni);
+  t = (ci_iptime_t) ( (((ci_uint64)t) * its->ci_ip_time_ms2tick_fxp) >> 32 );
   /* rounds up 0 timers... */
   return t ? t : 1;
 }
 
-#endif
-
-/*! Convert a time measure in ms to the number of ticks
-**  \param ni   The netif
-**  \param t    The time in ms
-**  \return     The time t in ticks
-**
-**  This function uses only the field ci_ip_time_frc2tick and only integer
-**  calculations (floating point may not be available in the kernel).
-*/
-ci_inline ci_iptime_t ci_ip_time_ms2ticks_slow(ci_netif* ni, ci_uint32 t)
-{
-  ci_ip_timer_state *its = IPTIMER_STATE(ni);
-  /* 
-   * cycles
-   * ------ x t
-   *   ms
-   * ----------
-   *   cycles
-   *   ------
-   *    tick
-   *
-   */
-  
-  unsigned high, middle1, middle2, low;
-  low=(its->khz&0x0000ffff) * (t&0x0000ffff);
-  middle1=((its->khz&0xffff0000)>>16) * (t&0x0000ffff);
-  middle2=(its->khz&0x0000ffff) * ((t&0xffff0000)>>16);
-  high=((its->khz&0xffff0000)>>16) * ((t&0xffff0000)>>16);
-  low=low>>its->ci_ip_time_frc2tick;
-  
-  if ( its->ci_ip_time_frc2tick > 16 ) {
-    low+=middle1>>(its->ci_ip_time_frc2tick-16);
-    low+=middle2>>(its->ci_ip_time_frc2tick-16);
-  }
-  else {
-    low+=middle1<<(16-its->ci_ip_time_frc2tick);
-    low+=middle2<<(16-its->ci_ip_time_frc2tick);
-  }
-  ci_assert( its->ci_ip_time_frc2tick<=32 );
-  low+=high>>(32-its->ci_ip_time_frc2tick);
-  return low ? low : 1;
-}
-
-#ifndef __KERNEL__
 /*! Convert a time measure in ticks to ms
 **  \param its  A pointer to the ci_ip_timer_state management block
 **  \param t    The time in ticks
 **  \return     The time t in ms
 */
 ci_inline ci_uint32 ci_ip_time_ticks2ms(ci_netif* ni, ci_iptime_t t) {
-  return (ci_uint32) (t*ni->ci_ip_time_tick2ms);
-}
-#else
-
-/* TODO FIXME HACK to get kernel version working */
-
-/*! Convert a time measure in ticks to ms
-**  \param its  A pointer to the ci_ip_timer_state management block
-**  \param t    The time in ticks
-**  \return     The time t in ms
-*/
-ci_inline ci_uint32 ci_ip_time_ticks2ms(ci_netif* ni, ci_iptime_t t)
-{
   ci_ip_timer_state *its = IPTIMER_STATE(ni);
-  return (ci_uint32)((t * 
-		      (1u<<its->ci_ip_time_frc2tick))/its->khz);
+  /* As for now the function is not used on fast path should this change
+   * then use of multiplication and inversed factor to be considered */
+  t = (ci_iptime_t) ( (((ci_uint64)t << 32) / its->ci_ip_time_ms2tick_fxp) );
+  return t;
 }
-#endif
 
-#ifndef __KERNEL__
-/*! Get the current time in mS */
-ci_inline ci_uint32 ci_ip_time_now_ms(ci_netif *ni) 
-{ 
-  return ci_ip_time_ticks2ms(ni, ci_ip_time_now(ni));
+
+#if CI_CFG_TCP_METRICS
+ci_inline oo_metrics_tstamp oo_metrics_frc2tstamp(const ci_netif* ni,
+                                                  ci_uint64 frc)
+{
+  ci_uint64 now;
+  ci_frc64(&now);
+  return frc >> IPTIMER_STATE(ni)->ci_ip_time_frc2us;
 }
-#endif
 
+
+ci_inline oo_metrics_tstamp oo_metrics_now(const ci_netif* ni)
+{
+  return oo_metrics_frc2tstamp(ni, ci_frc64_get());
+}
+
+
+ci_inline oo_metrics_tstamp oo_metrics_stack_now(const ci_netif* ni)
+{
+  return oo_metrics_frc2tstamp(ni, IPTIMER_STATE(ni)->frc);
+}
+
+
+ci_inline ci_uint64 oo_metrics_intvl2frc(const ci_netif* ni,
+                                         oo_metrics_intvl intvl)
+{
+  return (ci_uint64) intvl << IPTIMER_STATE(ni)->ci_ip_time_frc2us;
+}
+
+
+# ifndef __KERNEL__
+ci_inline unsigned oo_metrics_intvl2us(const ci_netif* ni, oo_metrics_intvl i)
+{
+  ci_uint64 approx_frc = (ci_uint64) i << IPTIMER_STATE(ni)->ci_ip_time_frc2us;
+  return approx_frc * 1000 / IPTIMER_STATE(ni)->khz;
+}
+# endif
+#endif
 
 
 ci_inline const cicp_hwport_mask_t ci_netif_get_hwport_mask(ci_netif* ni)
@@ -2419,6 +2464,69 @@ ci_inline int ci_netif_has_many_events(ci_netif* ni, int lookahead) {
       break;
     }
   return rc;
+}
+
+/* "Poison" value written to the start of a packet buffer to detect when
+ * a packet from the future is incoming.
+ *
+ * This must not match the first four bytes of the packet. Anything that does
+ * not match our OUI or multicast addresses will do. If we add support for
+ * third-party NICs, we may want a per-NIC poison value to ensure a mismatch.
+ * If we add support for detecting subsequent cache
+ * lines, there will be the possibility of deciding falsely that a packet is
+ * still poisonous when in fact it is not, but there is very little that we can
+ * do about that. It would not cause a functional problem in any case.
+ */
+#define CI_PKT_RX_POISON 0xFEA0C09Cu
+ci_inline volatile uint32_t* ci_netif_poison_location(ci_ip_pkt_fmt* pkt)
+{
+  return (volatile uint32_t*)oo_ether_hdr(pkt);
+}
+ci_inline void ci_netif_poison_rx_pkt(ci_ip_pkt_fmt* pkt)
+{
+  *ci_netif_poison_location(pkt) = CI_PKT_RX_POISON;
+}
+ci_inline int ci_netif_rx_pkt_is_poisoned(ci_ip_pkt_fmt* pkt)
+{
+  return *ci_netif_poison_location(pkt) == CI_PKT_RX_POISON;
+}
+
+
+ci_inline int ci_netif_intf_may_poll_future(ci_netif* ni, int intf_i)
+{
+  return intf_i >= 0 && intf_i < oo_stack_intf_max(ni) &&
+    (~ef_vi_flags(&ni->nic_hw[intf_i].vi) & EF_VI_RX_EVENT_MERGE);
+}
+
+
+ci_inline ci_ip_pkt_fmt* ci_netif_intf_next_rx_pkt(ci_netif* ni, int intf_i)
+{
+  int id;
+  oo_pkt_p pp;
+
+  ci_assert_ge(intf_i, 0);
+  ci_assert_lt(intf_i, oo_stack_intf_max(ni));
+
+  id = ef_vi_next_rx_rq_id(&ni->nic_hw[intf_i].vi);
+  OO_PP_INIT(ni, pp, id);
+  return OO_PP_IS_NULL(pp) ? NULL : PKT_CHK(ni, pp);
+}
+
+
+ci_inline int ci_netif_intf_has_rx_future(ci_netif* ni, int intf_i)
+{
+  ci_ip_pkt_fmt* pkt = ci_netif_intf_next_rx_pkt(ni, intf_i);
+  return pkt && ! ci_netif_rx_pkt_is_poisoned(pkt);
+}
+
+
+ci_inline int ci_netif_has_rx_future(ci_netif* ni)
+{
+  int intf_i;
+  OO_STACK_FOR_EACH_INTF_I(ni, intf_i)
+    if( ci_netif_intf_has_rx_future(ni, intf_i) )
+      return 1;
+  return 0;
 }
 
 
@@ -2577,7 +2685,7 @@ ci_inline void ci_netif_pkt_put(ci_netif* ni, ci_ip_pkt_fmt* pkt)
 ci_inline int/*bool*/
 ci_netif_pkt_set_is_underfilled(ci_netif* ni, int bufset_id)
 {
-  return ni->packets->set[bufset_id].n_free < PKTS_PER_SET / 2;
+  return ni->packets->set[bufset_id].n_free < CI_CFG_PKT_SET_LOW_WATER;
 }
 
 /* Set new current_pkt_set.
@@ -2604,7 +2712,7 @@ ci_inline void ci_netif_pkt_set_change(ci_netif* ni, int bufset_id,
   ci_assert(OO_PP_NOT_NULL(ni->packets->set[bufset_id].free));
 }
 
-ci_inline ci_ip_pkt_fmt* ci_netif_pkt_alloc(ci_netif* ni) {
+ci_inline ci_ip_pkt_fmt* ci_netif_pkt_alloc(ci_netif* ni, int flags) {
   ci_ip_pkt_fmt* pkt;
   int bufset_id;
   ci_assert( ci_netif_is_locked(ni) );
@@ -2612,7 +2720,7 @@ ci_inline ci_ip_pkt_fmt* ci_netif_pkt_alloc(ci_netif* ni) {
   if(CI_LIKELY( ni->packets->set[bufset_id].n_free > 0 ))
     pkt = ci_netif_pkt_get(ni, bufset_id);
   else
-    pkt = ci_netif_pkt_alloc_slow(ni, 0, 0);
+    pkt = ci_netif_pkt_alloc_slow(ni, flags);
   return pkt;
 }
 
@@ -2627,6 +2735,17 @@ ci_inline int ci_netif_pkt_nonb_pool_not_empty(ci_netif* ni)
 
 #define CI_NETIF_PKT_POOL_MIN_LEVEL  512
 
+/* Number of packet either allocated to rx or reserved to rx */
+ci_inline int ci_netif_pkt_rx_n(ci_netif* ni) {
+  return ni->state->n_rx_pkts + ni->state->reserved_pktbufs;
+}
+
+/* Number of packet bufs that can get allocated */
+ci_inline int ci_netif_pkt_free_n(ci_netif* ni) {
+  return
+    ((ni->packets->sets_max - ni->packets->sets_n) << CI_CFG_PKTS_PER_SET_S) +
+    ni->packets->n_free;
+}
 
 /* Number of packet bufs currently allocated to TX paths.  Packets in the
  * non-blocking free pool count as being allocated to TX.
@@ -2688,7 +2807,8 @@ ci_netif_pkt_tx_tcp_alloc(ci_netif* ni, ci_tcp_state* ts) {
     /* TCP TX path is always allowed to allocate from the non-blocking pool
      * because those packet buffers are already allocated to TX.
      */
-    return ci_netif_pkt_alloc_slow(ni, 1, 1);
+    return ci_netif_pkt_alloc_slow(ni, CI_PKT_ALLOC_FOR_TCP_TX |
+                                   CI_PKT_ALLOC_USE_NONB);
   }
 }
 
@@ -2796,6 +2916,85 @@ ci_inline int ci_netif_pkt_release_check_keep(ci_netif* ni, ci_ip_pkt_fmt* pkt)
 }
 
 /*********************************************************************
+*************************** pktbuf reserve accounting ****************
+*********************************************************************/
+
+ci_inline unsigned
+__ci_tcp_rx_buf_count(ci_netif* netif, ci_tcp_state* ts)
+{
+  return ts->recv1.num + ts->recv2.num + ts->rob.num;
+}
+
+ci_inline unsigned
+__ci_tcp_rx_reserved_bufs(ci_netif* netif, ci_tcp_state* ts, int allocated_pkts)
+{
+  int reserved_bufs = ts->s.b.state != CI_TCP_ESTABLISHED ? 0 :
+                      NI_OPTS(netif).endpoint_packet_reserve;
+  reserved_bufs -= allocated_pkts;
+  /* this many buffers of this socket should have been added to
+   * ns->reserved_pktbufs already */
+  return CI_MAX(0, reserved_bufs);
+}
+
+ci_inline unsigned
+ci_tcp_rx_reserved_bufs(ci_netif* netif, ci_tcp_state* ts)
+{
+  return __ci_tcp_rx_reserved_bufs(netif, ts, __ci_tcp_rx_buf_count(netif, ts));
+}
+
+/* adjusts per-nic count of reserved buffers
+ * needs to be called BEFORE any of tcp recv queues gets to be modified */
+ci_inline void
+ci_tcp_rx_buf_adjust(ci_netif* netif, ci_tcp_state* ts, ci_ip_pkt_queue* q, int delta)
+{
+  int m, n;
+
+  ci_assert(q == &ts->rob || q == &ts->recv1 || q == &ts->recv2);
+  ci_assert_nflags(netif->state->flags, CI_NETIF_FLAG_PKT_ACCOUNT_PENDING);
+
+  if( ts->s.b.state != CI_TCP_ESTABLISHED )
+    return;
+
+  m = ci_tcp_rx_reserved_bufs(netif, ts);
+  n = __ci_tcp_rx_reserved_bufs(netif, ts, __ci_tcp_rx_buf_count(netif, ts) + delta);
+
+  netif->state->reserved_pktbufs += n - m;
+  ci_assert(ci_netif_is_locked(netif));
+}
+
+ci_inline void
+ci_tcp_rx_queue_drop(ci_netif* ni, ci_tcp_state* ts, ci_ip_pkt_queue* q)
+{
+  ci_tcp_rx_buf_adjust(ni, ts, q, -q->num);
+  ci_ip_queue_drop(ni, q);
+}
+
+ci_inline void
+ci_tcp_rx_buf_account_begin(ci_netif* netif, ci_tcp_state* ts)
+{
+  ci_assert( ci_netif_is_locked(netif) );
+  ci_assert_nflags(netif->state->flags, CI_NETIF_FLAG_PKT_ACCOUNT_PENDING);
+  CI_DEBUG(netif->state->flags |= CI_NETIF_FLAG_PKT_ACCOUNT_PENDING);
+
+  /* now lets remove the previously accounted buffers, they will be
+   * readded (if still there) in ci_tcp_recv_buf_account_end() */
+
+  netif->state->reserved_pktbufs -= ci_tcp_rx_reserved_bufs(netif, ts);
+  ci_assert_ge(netif->state->reserved_pktbufs, 0);
+}
+
+ci_inline void
+ci_tcp_rx_buf_account_end(ci_netif* netif, ci_tcp_state* ts)
+{
+  ci_assert( ci_netif_is_locked(netif) );
+  ci_assert_flags(netif->state->flags, CI_NETIF_FLAG_PKT_ACCOUNT_PENDING);
+  CI_DEBUG(netif->state->flags &= ~CI_NETIF_FLAG_PKT_ACCOUNT_PENDING);
+
+  netif->state->reserved_pktbufs += ci_tcp_rx_reserved_bufs(netif, ts);
+  ci_assert_le(netif->state->reserved_pktbufs, NI_OPTS(netif).max_rx_packets);
+}
+
+/*********************************************************************
 *************************** ci_ip_pkt_queue **************************
 *********************************************************************/
 
@@ -2878,6 +3077,14 @@ ci_inline void __ci_ip_queue_enqueue(ci_netif* netif, ci_ip_pkt_queue* qu,
 }
 
 
+ci_inline void __ci_tcp_rx_queue_enqueue(ci_netif* netif, ci_tcp_state* ts,
+                                         ci_ip_pkt_queue* qu, ci_ip_pkt_fmt* pkt)
+{
+  ci_tcp_rx_buf_adjust(netif, ts, qu, 1);
+  __ci_ip_queue_enqueue(netif, qu, pkt);
+}
+
+
 ci_inline void ci_ip_queue_enqueue(ci_netif* netif, ci_ip_pkt_queue* qu,
                                    ci_ip_pkt_fmt* pkt)
 {
@@ -2897,6 +3104,14 @@ ci_inline void ci_ip_queue_dequeue(ci_netif* netif, ci_ip_pkt_queue* qu,
   --qu->num;
 
   ci_assert_equiv(qu->num, OO_PP_NOT_NULL(qu->head));
+}
+
+
+ci_inline void ci_tcp_rx_queue_dequeue(ci_netif* netif, ci_tcp_state* ts,
+                                       ci_ip_pkt_queue* qu, ci_ip_pkt_fmt* head)
+{
+  ci_tcp_rx_buf_adjust(netif, ts, qu, -1);
+  ci_ip_queue_dequeue(netif, qu, head);
 }
 
 /* Move [num] packets from the start of [from] to the tail of [to].  [last]
@@ -2969,6 +3184,11 @@ ci_inline ci_uint16 ci_ip_get_ipid( ci_netif* ni, ci_fd_t fd ) {
                            
 #endif
 
+/* Return true if ip options contain badness.
+ * Badness: Unknown option, source routing, invalid option lengths.
+ */
+extern int ci_ip_options_parse(ci_netif* netif, ci_ip4_hdr* ip,
+                               const int hdr_size);
 
 /**********************************************************************
 **************************** citp_waitable ****************************
@@ -3162,13 +3382,23 @@ ci_inline int ci_udp_recv_q_bytes2packets(int bytes_limit)
 
 
 /* RTO handlers */
+static inline int ci_tcp_retransq_is_empty(ci_tcp_state* ts)
+{
+  return ci_ip_queue_is_empty(&ts->retrans) &&
+         ! (ts->tcpflags & CI_TCPT_FLAG_FIN_PENDING);
+}
+
 ci_inline void ci_tcp_rto_check_and_set(ci_netif* netif, ci_tcp_state* ts) {
   /* shouldn't set an RTO if no data to send */
-  ci_assert(!ci_ip_queue_is_empty(&ts->retrans)); 
+  ci_assert(!ci_tcp_retransq_is_empty(ts)); 
   /* shouldn't set an RTO timer in a state that doesn't allow them */
   ci_assert(!(ts->s.b.state & CI_TCP_STATE_NO_TIMERS));
-  if( !ci_ip_timer_pending(netif, &ts->rto_tid) )
+  if( ! ci_ip_timer_pending(netif, &ts->rto_tid) ) {
+#if CI_CFG_TAIL_DROP_PROBE
+    ts->tcpflags &=~ CI_TCPT_FLAG_TAIL_DROP_TIMING;
+#endif
     ci_ip_timer_set(netif, &ts->rto_tid, ci_tcp_time_now(netif) + ts->rto);
+  }
 }
 
 ci_inline void ci_tcp_rto_clear(ci_netif* netif, ci_tcp_state* ts)
@@ -3176,16 +3406,19 @@ ci_inline void ci_tcp_rto_clear(ci_netif* netif, ci_tcp_state* ts)
 
 ci_inline void ci_tcp_rto_restart(ci_netif* netif, ci_tcp_state* ts) {
   /* shouldn't set an RTO if retrans queue is empty */
-  ci_assert(!ci_ip_queue_is_empty(&ts->retrans)); 
+  ci_assert(!ci_tcp_retransq_is_empty(ts));
   /* shouldn't set an RTO timer in a state that doesn't allow them */
   ci_assert(!(ts->s.b.state & CI_TCP_STATE_NO_TIMERS));
+#if CI_CFG_TAIL_DROP_PROBE
+  ts->tcpflags &=~ CI_TCPT_FLAG_TAIL_DROP_TIMING;
+#endif
   ci_ip_timer_modify(netif, &ts->rto_tid, ci_tcp_time_now(netif) + ts->rto);
 }
 
 ci_inline void ci_tcp_rto_set_with_timeout(ci_netif* netif, ci_tcp_state* ts,
                                            ci_iptime_t timeout) {
   /* shouldn't set an RTO if retrans queue is empty */
-  ci_assert(!ci_ip_queue_is_empty(&ts->retrans)); 
+  ci_assert(!ci_tcp_retransq_is_empty(ts));
   /* shouldn't set an RTO timer in a state that doesn't allow them */
   ci_assert(!(ts->s.b.state & CI_TCP_STATE_NO_TIMERS));
   ci_ip_timer_set(netif, &ts->rto_tid, ci_tcp_time_now(netif) + timeout);
@@ -3228,31 +3461,50 @@ ci_inline void ci_tcp_delack_soon(ci_netif* netif, ci_tcp_state* ts)
 #endif
 
 #if CI_CFG_TAIL_DROP_PROBE
-/* tail drop timers */
-ci_inline void ci_tcp_taildrop_check_and_set(ci_netif* netif, 
-                                             ci_tcp_state* ts) {
+
+ci_inline int ci_tcp_taildrop_probe_enabled(const ci_netif* ni,
+                                            const ci_tcp_state* ts)
+{
+  return NI_OPTS(ni).tail_drop_probe &&
+         (ts->tcpflags & CI_TCPT_FLAG_SACK) &&
+         ts->congstate == CI_TCP_CONG_OPEN &&
+         (ts->s.b.state & CI_TCP_STATE_SYNCHRONISED);
+}
+
+ci_inline unsigned ci_tcp_taildrop_timeout(const ci_netif* netif,
+                                           const ci_tcp_state* ts )
+{
   unsigned offset;
-
-  ci_assert(!(ts->s.b.state & CI_TCP_STATE_NO_TIMERS));
-  ci_assert(NI_OPTS(netif).tail_drop_probe);
-
-  offset = tcp_srtt(ts) << 1;
-  offset = CI_MAX(offset, 2);
-
-  if ( !ci_ip_timer_pending(netif, &ts->taildrop_tid))
-    ci_ip_timer_set(netif, &ts->taildrop_tid, ci_tcp_time_now(netif) 
-                    + offset);
+  /* We follow Linux instead of the spec */
+  if( ts->sa ) {
+    offset = tcp_srtt(ts) * 2;
+    if( ts->retrans.num == 1 )
+      /* Wait long enough to ensure a delayed ack will be returned. */
+      offset += NI_CONF(netif).tconst_rto_min;
+    else
+      offset += 1; /* guarantee that it is non-0 */
+  }
+  else {
+    offset =  NI_CONF(netif).tconst_rto_initial;
+  }
+  return CI_MIN(offset, ts->rto);
 }
 
-ci_inline void ci_tcp_taildrop_clear(ci_netif* netif, ci_tcp_state* ts)
-{ ci_ip_timer_clear(netif, &ts->taildrop_tid); }
+#else
 
-ci_inline void ci_tcp_taildrop_restart(ci_netif *netif, ci_tcp_state *ts) {
-  ci_assert(ci_ip_timer_pending(netif, &ts->taildrop_tid));
-
-  ci_tcp_taildrop_clear(netif, ts);
-  ci_tcp_taildrop_check_and_set(netif, ts);
+ci_inline int ci_tcp_taildrop_probe_enabled(const ci_netif* ni,
+                                            const ci_tcp_state* ts)
+{
+  return 0;
 }
+
+ci_inline unsigned ci_tcp_taildrop_timeout(const ci_netif* netif,
+                                           const ci_tcp_state* ts )
+{
+  ci_assert(0);
+  return 0;
+}
+
 #endif
 
 /* keep alive timers */
@@ -3389,6 +3641,19 @@ ci_inline void ci_tcp_sendq_drop(ci_netif* ni, ci_tcp_state* ts)
 ci_inline void ci_tcp_retrans_drop(ci_netif* ni, ci_tcp_state* ts)
 { ci_ip_queue_drop(ni, &ts->retrans); }
 
+extern int ci_tcp_add_fin(ci_tcp_state* ts, ci_netif* netif) CI_HF;
+/* Try to re-send pending FIN, return true in success. */
+static inline int ci_tcp_resend_fin(ci_tcp_state* ts, ci_netif* netif)
+{
+  tcp_enq_nxt(ts) -= 1;
+  if( ci_tcp_add_fin(ts, netif) == 0 ) {
+    ts->tcpflags &=~ CI_TCPT_FLAG_FIN_PENDING;
+    CITP_STATS_NETIF_INC(netif, tcp_cant_fin_resolved);
+    return 1;
+  }
+  tcp_enq_nxt(ts) += 1;
+  return 0;
+}
 
 
 /**********************************************************************
@@ -3443,13 +3708,44 @@ ci_inline int ci_tcp_recv_not_blocked(ci_tcp_state* ts)
 }
 
 
-/* Use cycle-counter to generate ISN.  Byte swap so that fast moving bits
- * are used for the most-significant bits of the ISN.
+ci_inline
+ci_iptime_t ci_tcp_isn2tick(ci_netif* ni, ci_uint32 isn)
+{
+  ci_uint64 ticks = isn;
+  ticks <<= IPTIMER_STATE(ni)->ci_ip_time_frc2isn; /* isn -> frc */
+  ticks >>= IPTIMER_STATE(ni)->ci_ip_time_frc2tick; /* frc -> tick */
+  return ticks;
+}
+
+
+/* Use cycle-counter to generate ISN.  We take a similar approach to the Linux
+ * kernel, which hashes the four-tuple and then adds in a monotonically
+ * increasing value.  This gives compatibility with peers (such as Windows)
+ * that use the sequence number to decide whether a SYN matching a TIME_WAIT is
+ * acceptable.
  */
-ci_inline unsigned ci_tcp_initial_seqno(ci_netif* ni) {
+ci_inline unsigned
+ci_tcp_future_isn(ci_netif* ni, ci_uint32 laddr_be, ci_uint16 lport_be,
+                  ci_uint32 raddr_be, ci_uint16 rport_be,
+                  ci_uint64 future_delta_ticks)
+{
   ci_uint64 frc;
+  ci_uint32 hash = onload_hash3(AF_INET, &laddr_be, lport_be, &raddr_be,
+                                rport_be, IPPROTO_TCP);
   ci_frc64(&frc);
-  return CI_BSWAP_32((ci_uint32) frc);
+  frc += future_delta_ticks << IPTIMER_STATE(ni)->ci_ip_time_frc2tick;
+
+  /* For the monotonic part, the Linux kernel uses a timer that ticks every
+   * 64 ns.  RFC 793 prescribes a granularity of 4 us, but this assumed 2 Mb/s
+   * links.  We follow Linux. */
+  return hash + (frc >> IPTIMER_STATE(ni)->ci_ip_time_frc2isn);
+}
+
+ci_inline unsigned
+ci_tcp_initial_seqno(ci_netif* ni, ci_uint32 laddr_be, ci_uint16 lport_be,
+                     ci_uint32 raddr_be, ci_uint16 rport_be)
+{
+  return ci_tcp_future_isn(ni, laddr_be, lport_be, raddr_be, rport_be, 0);
 }
 
 /* Returns non-scaled value of the receive window. */
@@ -3547,16 +3843,18 @@ ci_inline unsigned int ci_tcp_wnd_from_hdr(ci_tcp_hdr* tcphdr, unsigned wscl) {
 
 
 /*!
- * Set dupack threshold based on reorder length.
+ * Get the number of dupacks required to enter fast recovery in the spirit of
+ * the classical three-dupacks algorithm.  More recent RFCs give other ways to
+ * enter fast recovery, but these are not accounted for here.
  *
- * \param ts        TCP state to set dupack threshold
- * \param reord     reorder length ro use
+ * \param ts        TCP state
  */
-ci_inline void ci_tcp_set_dupack_thresh(ci_tcp_state *ts, unsigned reord) {
-  unsigned thresh = reord + 1;
-  thresh = CI_MAX(thresh, CI_CFG_TCP_DUPACK_THRESH_BASE);
-  thresh = CI_MIN(thresh, CI_CFG_TCP_DUPACK_THRESH_MAX);
-  ts->dup_thresh = thresh;
+ci_inline ci_uint32 ci_tcp_base_dupack_thresh(ci_tcp_state *ts) {
+#if CI_CFG_PORT_STRIPING
+  if( ts->tcpflags & CI_TCPT_FLAG_STRIPE )
+    return NI_OPTS(ni).stripe_dupack_threshold;
+#endif
+  return CI_CFG_TCP_DUPACK_THRESH_BASE;
 }
 
 /* congestion control functions */
@@ -3591,7 +3889,13 @@ ci_inline void ci_tcp_set_initialcwnd(ci_netif* ni, ci_tcp_state* ts) {
     ts->cwnd = CI_MAX(tcp_eff_mss(ts),NI_OPTS(ni).initial_cwnd);
   }
   ts->cwnd = CI_MAX(ts->cwnd, NI_OPTS(ni).min_cwnd);
-  ts->ssthresh = 65535;
+  /* RFC5681 suggests using the maximum possible send window as the initial
+   * value for ssthresh.  N.B.: There are calls to this function before
+   * [ts->snd_wscl] is set from the peer's TCP options (in which case it will
+   * be zero), but the function is then always called again after we've
+   * processed the options, so this is OK. */
+  ci_assert_le(ts->snd_wscl, CI_TCP_WSCL_MAX);
+  ts->ssthresh = 65535 << ts->snd_wscl;
 }
 
 /*! ?? \TODO should we use fackets to make things more exact ? */ 
@@ -4132,59 +4436,119 @@ ci_inline ci_uint32 ci_get_ip4_addr(int family, const struct sockaddr* sa)
 #endif
 }
 
-/* Make a sockaddr structure from a given port/ip4address. */
-ci_inline void
-ci_make_sockaddr(struct sockaddr_in *sin,
-                 sa_family_t domain, ci_uint16 port_be16, ci_uint32 addr_be32)
+#if CI_CFG_IPV6
+ci_inline int ci_tcp_ipv6_is_addr_any(const struct sockaddr* sa)
 {
-  sin->sin_family = domain;
+  return CI_IP6_IS_ADDR_ANY(&CI_SIN6(sa)->sin6_addr) ? 1 : 0;
+}
+#endif
+
+ci_inline ci_addr_t ci_get_addr(const struct sockaddr* sa)
+{
+  ci_addr_t addr;
+
+  ci_assert(sa->sa_family == AF_INET || sa->sa_family == AF_INET6);
+
+  if( sa->sa_family == AF_INET6 ) {
+#if CI_CFG_IPV6
+    memcpy(addr.ip6, &CI_SIN6(sa)->sin6_addr, sizeof(addr.ip6));
+#else
+    ci_assert(ci_tcp_ipv6_is_ipv4(sa));
+    addr.ip4 = ((unsigned*)(&CI_SIN6(sa)->sin6_addr))[3];
+#endif
+  }
+  else {
+    addr = CI_ADDR_FROM_IP4(CI_SIN(sa)->sin_addr.s_addr);
+  }
+  return addr;
+}
+
+
+ci_inline ci_uint16 ci_get_port(const struct sockaddr* sa)
+{
+  if( sa->sa_family == AF_INET6 )
+    return CI_SIN6(sa)->sin6_port;
+  return CI_SIN(sa)->sin_port;
+}
+
+/* Functions to make a sockaddr structure from a given port/ip: */
+/* Get an IPv4 address addr_be32 and fill it into sockaddr_in. */
+ci_inline void
+ci_make_sockaddr_from_ip4(struct sockaddr_in *sin,
+                          ci_uint16 port_be16, ci_uint32 addr_be32)
+{
+  sin->sin_family = AF_INET;
   sin->sin_port = port_be16;
   sin->sin_addr.s_addr = addr_be32;
 }
 
 #if CI_CFG_FAKE_IPV6
+/* Get an IPv4 address addr_be32 and fill an mapped address
+ * into sockaddr_in6. */
 ci_inline void
-ci_make_sockaddr6(struct sockaddr_in6 *sin,
-                  sa_family_t domain, ci_uint16 port_be16, ci_uint32 addr_be32)
+ci_make_sockaddr_in6_from_ip4(struct sockaddr_in6 *sin,
+                              ci_uint16 port_be16, ci_uint32 addr_be32)
 {
-  sin->sin6_family = domain;
+  sin->sin6_family = AF_INET6;
   sin->sin6_port = port_be16;
   CI_IP_TO_IP6_MAPPED(&sin->sin6_addr, addr_be32);
+}
+/* Get an IPv6 address pointed by addr_be32_p and fill it
+ * into sockaddr_in6. */
+ci_inline void
+ci_make_sockaddr_in6_from_ip6(struct sockaddr_in6 *sin, ci_uint16 port_be16,
+                              const ci_uint32* addr_be32_p)
+{
+  sin->sin6_family = AF_INET6;
+  sin->sin6_port = port_be16;
+  memcpy(&sin->sin6_addr, addr_be32_p, sizeof(sin->sin6_addr));
 }
 #endif
 
 /* Minimum IPv6 address size. It may be included from <net/ipv6.h> */
 #define SIN6_LEN_RFC2133 24
 
-/* Copy sockaddr structure to user-supplied pointer and update its length. */
+/* Copy sockaddr structure to user-supplied pointer and update its length.
+ * - domain_in defines the kind of addr_be32_p address;
+ * - domain_out defines the type for the resulting sockaddr structure;
+ * - addr_be32_p is the pointer to IPv4 or IPv6 address, depending on
+ *   domain_in parameter. */
 ci_inline void
 ci_addr_to_user(struct sockaddr *sa, socklen_t *sa_len,
-                sa_family_t domain, ci_uint16 port_be16, ci_uint32 addr_be32)
+                sa_family_t domain_in, sa_family_t domain_out,
+                ci_uint16 port_be16, const ci_uint32* addr_be32_p)
 {
   socklen_t len_min, len_max;
   len_min = len_max = sizeof(struct sockaddr_in);
 
 #if CI_CFG_FAKE_IPV6
-  ci_assert(domain == AF_INET || domain == AF_INET6);
+  ci_assert(domain_in == AF_INET || domain_in == AF_INET6);
+  ci_assert(domain_out == AF_INET || domain_out == AF_INET6);
 
-  if (domain == AF_INET6) {
+  if (domain_out == AF_INET6) {
     len_min = SIN6_LEN_RFC2133;
     len_max = sizeof(struct sockaddr_in6);
   }
+  else {
+    ci_assert_equal(domain_in, AF_INET);
+  }
 #else 
-  ci_assert(domain == AF_INET);
+  ci_assert_equal(domain_in, AF_INET);
+  ci_assert_equal(domain_out, AF_INET);
 #endif
 
   if (CI_LIKELY(*sa_len >= len_min)) {
     *sa_len = CI_MIN(*sa_len, len_max);
     memset(sa, 0, *sa_len);
 #if CI_CFG_FAKE_IPV6
-    if (domain == AF_INET)
-      ci_make_sockaddr(CI_SIN(sa), domain, port_be16, addr_be32);
-    else 
-      ci_make_sockaddr6(CI_SIN6(sa), domain, port_be16, addr_be32);
+    if (domain_out == AF_INET)
+      ci_make_sockaddr_from_ip4(CI_SIN(sa), port_be16, *addr_be32_p);
+    else if( domain_in == AF_INET )
+      ci_make_sockaddr_in6_from_ip4(CI_SIN6(sa), port_be16, *addr_be32_p);
+    else
+      ci_make_sockaddr_in6_from_ip6(CI_SIN6(sa), port_be16, addr_be32_p);
 #else
-    ci_make_sockaddr(CI_SIN(sa), domain, port_be16, addr_be32);
+    ci_make_sockaddr_from_ip4(CI_SIN(sa), port_be16, *addr_be32_p);
 #endif
   } 
   else {
@@ -4197,12 +4561,14 @@ ci_addr_to_user(struct sockaddr *sa, socklen_t *sa_len,
 
     memset(&ss_u.sa, 0, len_min);
 #if CI_CFG_FAKE_IPV6
-    if (domain == AF_INET)
-      ci_make_sockaddr(&ss_u.sin, domain, port_be16, addr_be32);
+    if (domain_out == AF_INET)
+      ci_make_sockaddr_from_ip4(&ss_u.sin, port_be16, *addr_be32_p);
+    else if( domain_in == AF_INET )
+      ci_make_sockaddr_in6_from_ip4(&ss_u.sin6, port_be16, *addr_be32_p);
     else
-      ci_make_sockaddr6(&ss_u.sin6, domain, port_be16, addr_be32);
+      ci_make_sockaddr_in6_from_ip6(CI_SIN6(sa), port_be16, addr_be32_p);
 #else
-    ci_make_sockaddr(&ss_u.sin, domain, port_be16, addr_be32);
+    ci_make_sockaddr_from_ip4(&ss_u.sin, port_be16, *addr_be32_p);
 #endif
 
     memcpy(sa, &ss_u.sa, *sa_len);
@@ -4232,78 +4598,56 @@ ci_inline void ci_tcp_recvmsg_args_init(ci_tcp_recvmsg_args* a,
 *********************************************************************/
 #if CI_CFG_TCPDUMP
 /** Current length of dump queue. */
-ci_inline int oo_tcpdump_queue_len(ci_netif *ni)
+ci_inline ci_uint16 oo_tcpdump_queue_len(ci_netif* ni)
 {
-  return (ci_uint8)(ni->state->dump_write_i - ni->state->dump_read_i);
+  return ni->state->dump_write_i - ni->state->dump_read_i;
 }
+
 /* Should we dump this packet? */
 ci_inline int oo_tcpdump_check(ci_netif *ni, ci_ip_pkt_fmt *pkt, int intf_i)
 {
-  return (ni->state->dump_intf[intf_i] == OO_INTF_I_DUMP_ALL) &&
-      oo_tcpdump_queue_len(ni) < CI_CFG_DUMPQUEUE_LEN - 1;
+  if( ni->state->dump_intf[intf_i] == OO_INTF_I_DUMP_ALL ) {
+    if( oo_tcpdump_queue_len(ni) < CI_CFG_DUMPQUEUE_LEN - 1 )
+      return 1;
+    else
+      CITP_STATS_NETIF_INC(ni, tcpdump_missed);
+  }
+  return 0;
 }
 
 /* Should we dump this no_match */
-ci_inline int oo_tcpdump_check_no_match(ci_netif *ni, ci_ip_pkt_fmt *pkt, int intf_i)
+ci_inline int oo_tcpdump_check_no_match(ci_netif *ni, ci_ip_pkt_fmt *pkt,
+                                        int intf_i)
 {
-  return (ni->state->dump_intf[intf_i] == OO_INTF_I_DUMP_NO_MATCH) &&
-      oo_tcpdump_queue_len(ni) < CI_CFG_DUMPQUEUE_LEN - 1;
+  if( ni->state->dump_intf[intf_i] == OO_INTF_I_DUMP_NO_MATCH ) {
+    if( oo_tcpdump_queue_len(ni) < CI_CFG_DUMPQUEUE_LEN - 1 )
+      return 1;
+    else
+      CITP_STATS_NETIF_INC(ni, tcpdump_missed);
+  }
+  return 0;
 }
 
 /* Release all the packets up to dump_read_i */
-ci_inline void oo_tcpdump_free_pkts(ci_netif *ni, ci_uint8 i)
-{
-  oo_pkt_p id;
-  ci_uint8 read_i = ni->state->dump_read_i;
-
-  ci_assert(ci_netif_is_locked(ni));
-
-  do {
-    id = ni->state->dump_queue[i % CI_CFG_DUMPQUEUE_LEN];
-    if( id != OO_PP_NULL ) {
-      ci_ip_pkt_fmt *pkt = PKT_CHK(ni, id);
-      ni->state->dump_queue[i % CI_CFG_DUMPQUEUE_LEN] = OO_PP_NULL;
-      ci_wmb();
-      ci_netif_pkt_release(ni, pkt);
-    }
-    i++;
-  } while( (ci_uint8)(i - read_i) < CI_CFG_DUMPQUEUE_LEN  );
-}
-
-/* Release the packet we are going to overwrite and, possibly, some others.
- * Return 1 if we can dump one more packet. */
-ci_inline int oo_tcpdump_free_pkts_4write(ci_netif *ni)
-{
-  ci_uint8 i = ni->state->dump_write_i;
-
-  /* If reader is too slow, do not dump anything */
-  if( i - ni->state->dump_read_i >= CI_CFG_DUMPQUEUE_LEN )
-    return 0;
-
-  /* Free this packet */
-  if( ni->state->dump_queue[i % CI_CFG_DUMPQUEUE_LEN] == OO_PP_NULL )
-    return 1;
-
-  /* If we are going to free something, let's free everything possible */
-  oo_tcpdump_free_pkts(ni, i);
-  return 1;
-}
+extern void oo_tcpdump_free_pkts(ci_netif* ni, ci_uint16 i);
 
 /* Dump this packet */
 ci_inline void oo_tcpdump_dump_pkt(ci_netif *ni, ci_ip_pkt_fmt *pkt)
 {
-  if( !oo_tcpdump_free_pkts_4write(ni) ||
-      (pkt->flags & CI_PKT_FLAG_MSG_WARM) )
+  ci_uint16 write_i = ni->state->dump_write_i;
+  oo_pkt_p* dq = ni->state->dump_queue;
+
+  if(CI_UNLIKELY( pkt->flags & CI_PKT_FLAG_MSG_WARM ))
     return;
 
-  ci_assert_equal(ni->state->dump_queue[ni->state->dump_write_i %
-                  CI_CFG_DUMPQUEUE_LEN], OO_PP_NULL);
-  ci_netif_pkt_hold(ni, pkt);
-  ni->state->dump_queue[ni->state->dump_write_i %
-                        CI_CFG_DUMPQUEUE_LEN] = OO_PKT_P(pkt);
-  ci_wmb();
-  ni->state->dump_write_i++;
+  if( dq[write_i % CI_CFG_DUMPQUEUE_LEN] != OO_PP_NULL )
+    oo_tcpdump_free_pkts(ni, write_i);
 
+  ci_assert_equal(dq[write_i % CI_CFG_DUMPQUEUE_LEN], OO_PP_NULL);
+  ci_netif_pkt_hold(ni, pkt);
+  dq[write_i % CI_CFG_DUMPQUEUE_LEN] = OO_PKT_P(pkt);
+  ci_wmb();
+  ni->state->dump_write_i = write_i + 1;
 }
 #else
 #define oo_tcpdump_check(ni, pkt, intf_i) 0

@@ -188,14 +188,10 @@ static int efx_ethtool_phys_id_loop(struct net_device *net_dev, u32 count)
 }
 #endif
 
+#if defined(EFX_USE_KCOMPAT) && !defined(EFX_HAVE_ETHTOOL_LINKSETTINGS)
 /* This must be called with rtnl_lock held. */
-#ifdef EFX_NOT_UPSTREAM
-int efx_ethtool_get_settings(struct net_device *net_dev,
-			     struct ethtool_cmd *ecmd)
-#else
 static int efx_ethtool_get_settings(struct net_device *net_dev,
 				    struct ethtool_cmd *ecmd)
-#endif
 {
 	struct efx_nic *efx = netdev_priv(net_dev);
 	struct efx_link_state *link_state = &efx->link_state;
@@ -216,13 +212,8 @@ static int efx_ethtool_get_settings(struct net_device *net_dev,
 }
 
 /* This must be called with rtnl_lock held. */
-#ifdef EFX_NOT_UPSTREAM
-int efx_ethtool_set_settings(struct net_device *net_dev,
-			     struct ethtool_cmd *ecmd)
-#else
 static int efx_ethtool_set_settings(struct net_device *net_dev,
 				    struct ethtool_cmd *ecmd)
-#endif
 {
 	struct efx_nic *efx = netdev_priv(net_dev);
 	int rc;
@@ -240,6 +231,7 @@ static int efx_ethtool_set_settings(struct net_device *net_dev,
 	mutex_unlock(&efx->mac_lock);
 	return rc;
 }
+#endif
 
 static void efx_ethtool_get_drvinfo(struct net_device *net_dev,
 				    struct ethtool_drvinfo *info)
@@ -901,27 +893,46 @@ static int efx_ethtool_set_ringparam(struct net_device *net_dev,
 				     struct ethtool_ringparam *ring)
 {
 	struct efx_nic *efx = netdev_priv(net_dev);
-	u32 txq_entries;
+	int rc;
 
-	if (ring->rx_mini_pending || ring->rx_jumbo_pending ||
-	    ring->rx_pending > EFX_MAX_DMAQ_SIZE ||
-	    ring->tx_pending > EFX_TXQ_MAX_ENT(efx))
+	if (ring->rx_mini_pending || ring->rx_jumbo_pending)
 		return -EINVAL;
 
-	if (ring->rx_pending < EFX_RXQ_MIN_ENT) {
+	if (ring->rx_pending == efx->rxq_entries &&
+	    ring->tx_pending == efx->txq_entries)
+		/* Nothing to do */
+		return 0;
+
+	/* Validate range and rounding of RX queue. */
+	rc = efx_check_queue_size(efx, &ring->rx_pending,
+				  EFX_RXQ_MIN_ENT, EFX_MAX_DMAQ_SIZE, false);
+	if (rc == -ERANGE)
 		netif_err(efx, drv, efx->net_dev,
-			  "RX queues cannot be smaller than %u\n",
-			  EFX_RXQ_MIN_ENT);
-		return -EINVAL;
-	}
+			  "Rx queue length must be between %u and %lu\n",
+			  EFX_RXQ_MIN_ENT, EFX_MAX_DMAQ_SIZE);
+	else if (rc == -EINVAL)
+		netif_err(efx, drv, efx->net_dev,
+			  "Rx queue length must be power of two\n");
 
-	txq_entries = max(ring->tx_pending, EFX_TXQ_MIN_ENT(efx));
-	if (txq_entries != ring->tx_pending)
-		netif_warn(efx, drv, efx->net_dev,
-			   "increasing TX queue size to minimum of %u\n",
-			   txq_entries);
+	if (rc)
+		return rc;
 
-	return efx_realloc_channels(efx, ring->rx_pending, txq_entries);
+	/* Validate range and rounding of TX queue. */
+	rc = efx_check_queue_size(efx, &ring->tx_pending,
+				  efx->txq_min_entries, EFX_TXQ_MAX_ENT(efx),
+				  false);
+	if (rc == -ERANGE)
+		netif_err(efx, drv, efx->net_dev,
+			  "Tx queue length must be between %u and %lu\n",
+			  efx->txq_min_entries, EFX_TXQ_MAX_ENT(efx));
+	else if (rc == -EINVAL)
+		netif_err(efx, drv, efx->net_dev,
+			  "Tx queue length must be power of two\n");
+
+	if (rc)
+		return rc;
+
+	return efx_realloc_channels(efx, ring->rx_pending, ring->tx_pending);
 }
 
 static int efx_ethtool_set_pauseparam(struct net_device *net_dev,
@@ -2110,8 +2121,8 @@ static int efx_ethtool_get_module_info(struct net_device *net_dev,
 }
 
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_ETHTOOL_CHANNELS) || defined(EFX_HAVE_ETHTOOL_EXT_CHANNELS)
-void efx_ethtool_get_channels(struct net_device *net_dev,
-			      struct ethtool_channels *channels)
+static void efx_ethtool_get_channels(struct net_device *net_dev,
+				     struct ethtool_channels *channels)
 {
 	struct efx_nic *efx = netdev_priv(net_dev);
 	unsigned int i, j;
@@ -2243,8 +2254,10 @@ int efx_sfctool_set_fecparam(struct efx_nic *efx,
 }
 
 const struct ethtool_ops efx_ethtool_ops = {
+#if defined(EFX_USE_KCOMPAT) && !defined(EFX_HAVE_ETHTOOL_LINKSETTINGS)
 	.get_settings		= efx_ethtool_get_settings,
 	.set_settings		= efx_ethtool_set_settings,
+#endif
 	.get_drvinfo		= efx_ethtool_get_drvinfo,
 	.get_regs_len		= efx_ethtool_get_regs_len,
 	.get_regs		= efx_ethtool_get_regs,

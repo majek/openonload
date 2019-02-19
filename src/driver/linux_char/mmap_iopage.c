@@ -21,8 +21,8 @@
 #include <driver/linux_resource/compat_pat_wc.h>
 
 
-#ifdef __PPC64__
-/* HACK FIXME: PPC kernels that we support do have pgprot_writecombine(),
+#if defined(__PPC64__) || defined(__aarch64__)
+/* HACK FIXME: PPC and ARM64 kernels that we support do have pgprot_writecombine(),
  * but kernel-compat doesn't detect (I think because it is a macro).
  */
 #ifndef EFRM_HAVE_PGPROT_WRITECOMBINE

@@ -31,8 +31,10 @@ usage() {
   exit 1
 }
 
-onload_opts=""
-tcpdump_opts=""
+onload_opts=
+tcpdump_opts=
+both_opts=
+w_opt=
 # stack names, ids have to be positional
 stack_names_or_ids=""
 
@@ -42,13 +44,11 @@ while [ -n "$1" ]; do
       usage
       ;;
     -s)
-      onload_opts+=" $1 $2"
-      tcpdump_opts+=" $1 $2"
+      both_opts+=" $1 $2"
       shift 2
       ;;
     -s*)
-      onload_opts+=" $1"
-      tcpdump_opts+=" $1"
+      both_opts+=" $1"
       shift
       ;;
     -i)
@@ -67,6 +67,14 @@ while [ -n "$1" ]; do
       stack_names_or_ids+=" ${1:2}"
       shift
       ;;
+    -w)
+      w_opt="-w$2"
+      shift 2
+      ;;
+    -w*)
+      w_opt="$1"
+      shift
+      ;;
     --no-match*)
       onload_opts+=" $1"
       shift
@@ -75,9 +83,12 @@ while [ -n "$1" ]; do
       onload_opts+=" $1"
       shift
       ;;
-    --time-stamp-precision*)
-      onload_opts+=" $1"
-      tcpdump_opts+=" $1"
+    --time-stamp-precision)
+      both_opts+=" $1=$2"
+      shift 2
+      ;;
+    --time-stamp-precision=*)
+      both_opts+=" $1"
       shift
       ;;
     *)
@@ -94,13 +105,18 @@ else
   PATH=$PATH:/usr/sbin:/sbin
 fi
 
-# Exit scenarios:
-# - onload_tcpdump.bin finishes; tcpdump gets EOF; exit
-# - onload_tcpdump.bin killed by signal (^C or whatever);
-#   tcpdump gets EOF; exit:
-#   * take care that tcpdump is not killed by ^C: use setsid
-# - tcpdump prints error (incorrect pcap expression or anything);
-#   onload_tcpdump.bin is killed by SIGHUP.
-onload_tcpdump.bin $onload_opts $stack_names_or_ids | \
-    ( setsid tcpdump -r - $tcpdump_opts || kill -HUP $$ )
-
+if [ -n "$w_opt" ] && [ -z "$tcpdump_opts" ]; then
+    # Writing to a file and no tcpdump options: Don't spawn tcpdump.
+    exec onload_tcpdump.bin $both_opts $onload_opts $stack_names_or_ids \
+         >${w_opt:2}
+else
+    # Exit scenarios:
+    # - onload_tcpdump.bin finishes; tcpdump gets EOF; exit
+    # - onload_tcpdump.bin killed by signal (^C or whatever);
+    #   tcpdump gets EOF; exit:
+    #   * take care that tcpdump is not killed by ^C: use setsid
+    # - tcpdump prints error (incorrect pcap expression or anything);
+    #   onload_tcpdump.bin is killed by SIGHUP.
+    onload_tcpdump.bin $both_opts $onload_opts $stack_names_or_ids | \
+        ( setsid tcpdump -r- $w_opt $both_opts $tcpdump_opts || kill -HUP $$ )
+fi

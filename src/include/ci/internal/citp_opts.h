@@ -45,6 +45,7 @@ typedef struct {
 #define _CI_CFG_BITFIELD3  :3
 #define _CI_CFG_BITFIELD4  :4
 #define _CI_CFG_BITFIELD8  :8
+#define _CI_CFG_BITFIELD12 :12
 #define _CI_CFG_BITFIELD16 :16
 #define _CI_CFG_BITFIELDA8 CI_ALIGN(8)
     

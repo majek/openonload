@@ -1,0 +1,14 @@
+#
+# Tuning profile for environments involving TCP traffic travelling over
+# unreliable or high-latency networks, such as the public Internet.
+# For use within another profile only.
+#
+
+# Tune TCP socket parameters.
+onload_set EF_TCP_SYNRECV_MAX 10000
+
+# Adjustments for potentially-lossy network environment
+onload_set EF_TCP_INITIAL_CWND 14600
+onload_set EF_DYNAMIC_ACK_THRESH 4
+onload_set EF_TCP_RCVBUF_MODE 1
+onload_set EF_TCP_RCVBUF_STRICT 1

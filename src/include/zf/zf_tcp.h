@@ -34,6 +34,7 @@ struct zftl;
 struct zft;
 struct zft_msg;
 struct timespec;
+struct zf_pkt_report;
 
 /*
  * ------------------------------------------------------------------------
@@ -568,16 +569,24 @@ zft_pkt_get_timestamp(struct zft* ts, const struct zft_msg* msg,
 ** \param iov_cnt  The length of iov.
 ** \param flags    Flags. 0 or MSG_MORE.
 **
-** Sends the supplied data or its part.
-** MSG_MORE flag will prevent sending packet that is not filled up to MSS.
+** This function adds the supplied data (as indicated by the iov
+** argument) to the zocket's send queue and if possible will send it
+** (or part of it) on the wire.  To prevent a small packet being sent
+** the MSG_MORE flag can be used: it will prevent a packet that is not
+** filled up to MSS from being sent.
 **
-** Provided buffers may be re-used on successful return from this function.
+** There is no guarantee that separate calls to this function, or
+** separate entries in the iovec array, will result in separate
+** packets.  To achieve control over packet boundaries the delegated
+** sends API can be used instead.
+**
+** Provided buffers may be re-used on return from this function.
 **
 ** \return Number of bytes sent on success.
 ** \return -EINVAL    Incorrect arguments supplied.
 ** \return -ENOTCONN  Zocket is not in a valid TCP state for sending.
 ** \return -EAGAIN    Not enough space (either bytes or buffers) in the send
-**                    queue.
+**                    queue to send any portion of the data.
 ** \return -ENOMEM    Not enough packet buffers available.
 **
 ** \note This function does not support sending zero-length data,
@@ -585,6 +594,11 @@ zft_pkt_get_timestamp(struct zft* ts, const struct zft_msg* msg,
 ** must have length greater than 0, and iov_cnt must also be greater than 0.
 **
 ** \note The flags argument must be set to 0 or MSG_MORE.
+**
+** \note This function will send only part of the data provided if there is
+** insufficient space in the send queue to send all of it (and there are
+** no error conditions). Use zft_send_space() immediately before this call
+** to determine in advance whether only part of the data would be sent.
 **
 ** \note Notes on current implementation:
 ** 1. Currently, this function will return `-ENOMEM` without sending any data
@@ -616,22 +630,36 @@ zft_send(struct zft *ts, const struct iovec* iov, int iov_cnt, int flags);
 ** \param buflen   The length of buffer.
 ** \param flags    Flags. 0 or MSG_MORE.
 **
-** Sends the supplied data or its part.
-** MSG_MORE flag will prevent sending packet that is not filled up to MSS.
+** This function adds the supplied data (as indicated by the buf
+** argument) to the zocket's send queue and if possible will send it
+** (or part of it) on the wire.  To prevent a small packet being sent
+** the MSG_MORE flag can be used: it will prevent a packet that is not
+** filled up to MSS from being sent.
 **
-** Provided buffer may be re-used on successful return from this function.
+** There is no guarantee that separate calls to this function will
+** result in separate packets.  To achieve control over packet
+** boundaries the delegated sends API can be used instead.  The
+** "single" in the name of the function refers to it taking a single
+** buffer rather than an iovec of buffers.
+**
+** Provided buffer may be re-used on return from this function.
 **
 ** \return Number of bytes sent on success.
 ** \return -EINVAL    Incorrect arguments supplied.
 ** \return -ENOTCONN  Zocket is not in a valid TCP state for sending.
 ** \return -EAGAIN    Not enough space (either bytes or buffers) in the send
-**                    queue.
+**                    queue to send any portion of the data.
 ** \return -ENOMEM    Not enough packet buffers available.
 **
 ** \note This function does not support sending zero-length data,
 ** and does not raise an error if you do so.
 **
 ** \note The flags argument must be set to 0 or MSG_MORE.
+**
+** \note This function will send only part of the data provided if there is
+** insufficient space in the send queue to send all of it (and there are
+** no error conditions). Use zft_send_space() immediately before this call
+** to determine in advance whether only part of the data would be sent.
 **
 ** \note Notes on current implementation:
 ** 1. Currently, this function will return `-ENOMEM` without sending any data
@@ -729,6 +757,29 @@ zft_get_mss(struct zft *ts);
 */
 ZF_LIBENTRY unsigned
 zft_get_header_size(struct zft *ts);
+
+
+/*! \brief Retrieve timestamp reports from previously sent data
+**
+** \param ts           TCP zocket.
+** \param reports      Array to fill with timestamp reports
+** \param count_in_out IN: size of array, OUT: number of reports
+**
+** \return 0 on success, or negative error code.
+**
+** If transmit timestamps are enabled, then one report will be generated for
+** each segment. The segment can be identified by the "start" field of the
+** report, which begins at 0 and increments for each byte sent on this zocket.
+** Retransmission will cause multiple reports for that segment, and is
+** indicated by the ZF_PKT_REPORT_TCP_RETRANS flag as well as discontinuities
+** in the reported location. Timestamps are also reported for the packets sent
+** to open and close the stream, indicated by the ZF_PKT_REPORT_TCP_SYN and
+** ZF_PKT_REPORT_TCP_FIN flags.
+*/
+ZF_LIBENTRY int
+zft_get_tx_timestamps(struct zft* ts,
+                      struct zf_pkt_report* reports,
+                      int* count_in_out);
 
 
 #endif /* __ZF_TCP_H__ */

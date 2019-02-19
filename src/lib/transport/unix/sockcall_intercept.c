@@ -97,6 +97,37 @@
 #endif
 
 
+#if CI_CFG_USERSPACE_SYSCALL
+
+# define raw_syscall6 syscall6
+
+/* This function should be moved in to ci/internal/syscall.h, and be
+ * implemented for other architectures. Note that the implementations in
+ * syscall.h do not modify errno, so the uses in this file will need to
+ * account for that. This cleanup is bug 83618.
+ */
+static long syscall6(long call, long a, long b, long c, long d, long e, long f)
+{
+  long res;
+  asm volatile ("movq %[d],%%r10 ; movq %[e],%%r8 ; movq %[f],%%r9 ; syscall"
+    : "=a" (res)
+    : "0" (call), "D" (a), "S" (b), "d" (c),
+      [d] "g" (d), [e] "g" (e), [f] "g" (f)
+    : "r11", "rcx", "r8", "r10", "r9", "memory");
+  if (res < 0) {
+    errno = -res;
+    res = -1;
+  }
+  return res;
+}
+
+#else
+
+# define raw_syscall6 syscall
+
+#endif
+
+
 /* Bug 22074: we use address space for purposes which application do not
  * expect.  Add following value to RLIMIT_AS:
  *
@@ -817,7 +848,8 @@ int ci_sys_recvmmsg(int fd, struct mmsghdr* mmsg, unsigned vlen,
                     int flags, const struct timespec* timeout)
 {
 #  ifdef __NR_recvmmsg 
-  return syscall(__NR_recvmmsg, fd, mmsg, vlen, flags, timeout);
+  return raw_syscall6(__NR_recvmmsg, fd, (long)mmsg, vlen, flags,
+                                     (long)timeout, 0);
 #  else
   int rc;
   CI_SET_ERROR(rc, ENOSYS);
@@ -1001,7 +1033,7 @@ int ci_sys_sendmmsg(int fd, struct mmsghdr* mmsg, unsigned vlen,
                     int flags)
 {
 #  ifdef __NR_sendmmsg
-  return syscall(__NR_sendmmsg, fd, mmsg, vlen, flags);
+  return raw_syscall6(__NR_sendmmsg, fd, (long)mmsg, vlen, flags, 0, 0);
 #  else
   int rc;
   CI_SET_ERROR(rc, ENOSYS);
@@ -1998,6 +2030,9 @@ ci_uint32 onload___vfork_r31 = 0;
 ci_uint32 onload___vfork_r3  = 0;
 #endif
 #endif
+#ifdef __aarch64__
+ci_uint64 onload__vfork_retval = 0;
+#endif
 
 OO_INTERCEPT(int, __vfork_is_vfork, (void))
 {
@@ -2628,6 +2663,92 @@ OO_INTERCEPT(int, bproc_move,
   Log_CALL_RESULT(rc);
   return rc;
 }
+
+#if CI_CFG_USERSPACE_SYSCALL
+OO_INTERCEPT(long, syscall,
+             (long nr, ...))
+{
+  va_list va;
+  va_start(va, nr);
+  long a = va_arg(va, long);
+  long b = va_arg(va, long);
+  long c = va_arg(va, long);
+  long d = va_arg(va, long);
+  long e = va_arg(va, long);
+  long f = va_arg(va, long);
+  va_end(va);
+
+#define NR(sc)               \
+  case __NR_##sc: {          \
+    void* p = onload_##sc;   \
+    return ((syscall_t)p)(a, b, c, d, e, f); \
+  }
+
+  typedef long (*syscall_t)(long, long, long, long, long, long);
+  switch( nr ) {
+    NR(setrlimit)   /* NB: libc's setrlimit() calls SYS_prlimit */
+    NR(socket)
+    NR(bind)
+    NR(listen)
+    NR(accept)
+    NR(accept4)
+    NR(connect)
+    NR(shutdown)
+    NR(getsockname)
+    NR(getpeername)
+    NR(getsockopt)
+    NR(setsockopt)
+    NR(recvfrom)
+    NR(recvmsg)
+#if CI_CFG_RECVMMSG
+#ifdef __NR_recvmmsg
+    NR(recvmmsg)
+#endif
+#endif
+    NR(sendto)
+    NR(sendmsg)
+#if CI_CFG_SENDMMSG
+#ifdef __NR_sendmmsg
+    NR(sendmmsg)
+#endif
+#endif
+    NR(select)
+    NR(poll)
+    NR(ppoll)
+    NR(splice)
+    NR(read)
+    NR(write)
+    NR(readv)
+    NR(writev)
+    NR(close)
+    NR(fcntl)
+    NR(ioctl)
+    NR(dup)
+    NR(dup2)
+    NR(dup3)
+    NR(vfork)
+    NR(open)
+    NR(creat)
+    NR(socketpair)
+    NR(pipe)
+    NR(pipe2)
+    NR(setuid)
+    NR(chroot)
+    NR(execve)
+    NR(epoll_create)
+    NR(epoll_create1)
+    NR(epoll_ctl)
+    NR(epoll_wait)
+    NR(epoll_pwait)
+    /* When adding new syscalls here, make sure to check that the libc API
+    matches the kernel API. It does for almost everything (on x86-64) but
+    there are a few exceptions.  */
+    default:
+      return syscall6(nr, a, b, c, d, e, f);
+  }
+#undef NR
+}
+#endif
 
 
 

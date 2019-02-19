@@ -143,12 +143,12 @@ int __ci_tcp_bind(ci_netif *ni, ci_sock_cmn *s, ci_fd_t fd,
 #if CI_CFG_FAKE_IPV6
       ci_assert(s->domain == AF_INET || s->domain == AF_INET6);
       if( s->domain == AF_INET )
-        ci_make_sockaddr(&sa_u.sin, s->domain, user_port, ip_addr_be32);
+        ci_make_sockaddr_from_ip4(&sa_u.sin, user_port, ip_addr_be32);
       else
-        ci_make_sockaddr6(&sa_u.sin6, s->domain, user_port, ip_addr_be32);
+        ci_make_sockaddr_in6_from_ip4(&sa_u.sin6, user_port, ip_addr_be32);
 #else
       ci_assert(s->domain == AF_INET);
-      ci_make_sockaddr(&sa_u.sin, s->domain, user_port, ip_addr_be32);
+      ci_make_sockaddr_from_ip4(&sa_u.sin, user_port, ip_addr_be32);
 #endif
 
 #ifdef __ci_driver__
@@ -261,8 +261,6 @@ found:
 }
 
 
-
-
 #ifndef __KERNEL__
 /* check that we can handle this destination */
 static int ci_tcp_connect_check_dest(citp_socket* ep, ci_ip_addr_t dst_be32,
@@ -286,8 +284,8 @@ static int ci_tcp_connect_check_dest(citp_socket* ep, ci_ip_addr_t dst_be32,
       ci_ip_cache_invalidate(ipcache);
     if( ipcache->ip.ip_saddr_be32 == 0 ) {
       /* Control plane has selected a source address for us -- remember it. */
-      ipcache->ip.ip_saddr_be32 = ipcache->ip_saddr_be32;
-      ep->s->cp.ip_laddr_be32 = ipcache->ip_saddr_be32;
+      ipcache->ip.ip_saddr_be32 = ipcache->ip_saddr.ip4;
+      ep->s->cp.ip_laddr_be32 = ipcache->ip_saddr.ip4;
     }
     return 0;
   }
@@ -313,7 +311,7 @@ static int ci_tcp_connect_check_dest(citp_socket* ep, ci_ip_addr_t dst_be32,
         ep->s->cp.ip_laddr_be32 = dst_be32;
       }
       ipcache->ether_offset = 4; /* lo is non-VLAN */
-      ipcache->ip_saddr_be32 = dst_be32;
+      ipcache->ip_saddr.ip4 = dst_be32;
       ipcache->dport_be16 = dport_be16;
       return 0;
     }
@@ -331,6 +329,7 @@ cicp_check_ipif_ifindex(struct oo_cplane_handle* cp,
 {
   return ipif->ifindex == *(ci_ifid_t*)data;
 }
+
 
 int
 ci_tcp_use_mac_filter_listen(ci_netif* ni, ci_sock_cmn* s, ci_ifid_t ifindex)
@@ -434,6 +433,8 @@ int ci_tcp_can_set_filter_in_ul(ci_netif *ni, ci_sock_cmn* s)
 int ci_tcp_sock_set_scalable_filter(ci_netif *ni, ci_sock_cmn* s)
 {
   int rc;
+  ci_addr_t laddr, raddr;
+
   LOG_TC(log( NSS_FMT " %s", NSS_PRI_ARGS(ni, s), __FUNCTION__));
   ci_assert((s->s_flags & CI_SOCK_FLAG_MAC_FILTER) == 0);
 
@@ -444,8 +445,10 @@ int ci_tcp_sock_set_scalable_filter(ci_netif *ni, ci_sock_cmn* s)
   if( rc >= 0 )
     return -EADDRINUSE;
 
-  rc = ci_netif_filter_insert(ni, SC_ID(s), sock_laddr_be32(s),
-                              sock_lport_be16(s), sock_raddr_be32(s),
+  laddr = CI_ADDR_FROM_IP4(sock_laddr_be32(s));
+  raddr = CI_ADDR_FROM_IP4(sock_raddr_be32(s));
+  rc = ci_netif_filter_insert(ni, SC_ID(s), AF_SPACE_FLAG_IP4, laddr,
+                              sock_lport_be16(s), raddr,
                               sock_rport_be16(s), sock_protocol(s));
   if( rc == 0 ) {
     s->s_flags |= CI_SOCK_FLAG_MAC_FILTER;
@@ -457,14 +460,345 @@ int ci_tcp_sock_set_scalable_filter(ci_netif *ni, ci_sock_cmn* s)
 
 void ci_tcp_sock_clear_scalable_filter(ci_netif *ni, ci_tcp_state* ts)
 {
+  ci_addr_t laddr, raddr;
+
   LOG_TC(log( LNT_FMT " %s", LNT_PRI_ARGS(ni, ts), __FUNCTION__));
   ci_assert((ts->s.s_flags & CI_SOCK_FLAG_MAC_FILTER) != 0);
-  ci_netif_filter_remove(ni, S_ID(ts), tcp_laddr_be32(ts),
-                         tcp_lport_be16(ts), tcp_raddr_be32(ts),
+  laddr = CI_ADDR_FROM_IP4(tcp_laddr_be32(ts));
+  raddr = CI_ADDR_FROM_IP4(tcp_raddr_be32(ts));
+  ci_netif_filter_remove(ni, S_ID(ts), AF_SPACE_FLAG_IP4, laddr,
+                         tcp_lport_be16(ts), raddr,
                          tcp_rport_be16(ts), tcp_protocol(ts));
   ts->s.s_flags &= ~CI_SOCK_FLAG_MAC_FILTER;
 }
 
+
+/* Returns true if [a] is older than (i.e. was last used before) [b]. */
+ci_inline int /*bool*/
+ci_tcp_prev_seq_older(const ci_tcp_prev_seq_t* a, const ci_tcp_prev_seq_t* b)
+{
+  return ci_ip_time_before(a->expiry, b->expiry);
+}
+
+
+ci_inline ci_uint32
+ci_tcp_prev_seq_initial_seqno(ci_netif* ni, const ci_tcp_prev_seq_t* prev_seq)
+{
+  return ci_tcp_initial_seqno(ni, prev_seq->laddr, prev_seq->lport,
+                                  prev_seq->raddr, prev_seq->rport);
+}
+
+
+ci_inline ci_uint32
+ci_tcp_prev_seq_future_isn(ci_netif* ni, const ci_tcp_prev_seq_t* prev_seq,
+                           ci_iptime_t ticks)
+{
+  return ci_tcp_future_isn(ni, prev_seq->laddr, prev_seq->lport,
+                               prev_seq->raddr, prev_seq->rport, ticks);
+}
+
+
+ci_inline ci_uint32
+ci_tcp_prev_seq_hash1(ci_netif* ni, const ci_tcp_prev_seq_t* prev_seq)
+{
+  return
+    onload_hash1(AF_INET, ni->state->seq_table_entries_n - 1,
+                 &prev_seq->laddr, prev_seq->lport,
+                 &prev_seq->raddr, prev_seq->rport, IPPROTO_TCP);
+}
+
+
+ci_inline ci_uint32
+ci_tcp_prev_seq_hash2(ci_netif* ni, const ci_tcp_prev_seq_t* prev_seq)
+{
+  return
+    onload_hash2(AF_INET, &prev_seq->laddr, prev_seq->lport,
+                 &prev_seq->raddr, prev_seq->rport, IPPROTO_TCP);
+}
+
+
+/* Given [prev_seq], which records the last sequence number used by a
+ * four-tuple, return whether it would be safe to use the clock-based ISN for
+ * a reuse of that four-tuple at all times from now until the peer is
+ * guaranteed to have exited TIME_WAIT. */
+ci_inline int /*bool*/
+ci_tcp_clock_isn_safe(ci_netif* ni, const ci_tcp_prev_seq_t* prev_seq)
+{
+  ci_uint32 isn_now = ci_tcp_prev_seq_initial_seqno(ni, prev_seq);
+  ci_uint32 prev_seq_no = prev_seq->seq_no;
+  /* We assume that all peers have 2 MSL <= 240 s.  The argument to this
+   * function is in ticks, but a tick is between one and two milliseconds. */
+  ci_uint32 isn_after_2msl = ci_tcp_prev_seq_future_isn
+    (ni, prev_seq, NI_CONF(ni).tconst_peer2msl_time);
+  return SEQ_GT(isn_now, prev_seq_no) && SEQ_GT(isn_after_2msl, prev_seq_no);
+}
+
+
+
+ci_inline void ci_tcp_prev_seq_from_ts(ci_netif* ni, const ci_tcp_state* ts,
+                                       ci_tcp_prev_seq_t* prev_seq /* out */)
+{
+  prev_seq->laddr = tcp_laddr_be32(ts);
+  prev_seq->raddr = tcp_raddr_be32(ts);
+  prev_seq->lport = tcp_lport_be16(ts);
+  prev_seq->rport = tcp_rport_be16(ts);
+  prev_seq->seq_no = tcp_enq_nxt(ts) + NI_OPTS(ni).tcp_isn_offset;
+  if( prev_seq->seq_no == 0 )
+    prev_seq->seq_no = 1;
+}
+
+
+/* Insert [prev_seq_from] (copy 4-tuple and seq_no)
+ * into the table at location [prev_seq]. */
+ci_inline void ci_tcp_prev_seq_remember_at(ci_netif* ni,
+                                           const ci_tcp_prev_seq_t* prev_seq_from,
+                                           ci_tcp_prev_seq_t* prev_seq)
+{
+  ci_uint32 isn_now;
+  prev_seq->laddr = prev_seq_from->laddr;
+  prev_seq->raddr = prev_seq_from->raddr;
+  prev_seq->lport = prev_seq_from->lport;
+  prev_seq->rport = prev_seq_from->rport;
+  prev_seq->seq_no = prev_seq_from->seq_no;
+
+  prev_seq->expiry = ci_tcp_time_now(ni) +
+                     NI_CONF(ni).tconst_peer2msl_time;
+
+  /* In many cases clock based ISN catches with entry's seq_no sooner
+   * then nominal expiry time.  Once this happen clock based ISN would be
+   * good to use and the entry will no longer be needed */
+  /*
+                   \/ now                 \/ after_2msl(=4mins)
+  isnclock  <------------------------9minutes----------------------->
+              /\ after_2msl-0x80000000          /\ now-0x80000000
+
+  possible seq_no locations, where Xs mark the no-go areas:
+            XXXX|                            XXXXXXXXXXXXXXXXXXXXXXXX
+                  good: new connection created at any time between 'now' and
+                  after_2msl will be in the future
+            X|                            XXXXXXXXXXXXXXXXXXXXXXXXXXX
+               bad: peer might still be in time_wait after the wrap point,
+               cannot expire before after_2msl
+                                                        XXXXXXXXXXXXX
+            XXXXXXXXXXXXXX| bad: mustn't expire until isnclock catches up to
+                            here (i.e. in about 30 seconds)
+                  XXXXXXXXXXXXXXXXXXXXXXXXXXXX| bad: similar to previous case,
+                                                but can expire at after_2msl
+                          XXXXXXXXXXXXXXXXXXXXXXXXXXXX| bad: same as case 2
+  */
+  isn_now = ci_tcp_initial_seqno(ni, prev_seq->laddr, prev_seq->lport,
+                                 prev_seq->raddr, prev_seq->rport);
+  if( SEQ_GT(prev_seq->seq_no, isn_now) ) {
+    ci_uint32 isn_after_2msl = ci_tcp_future_isn
+      (ni, prev_seq->laddr, prev_seq->lport, prev_seq->raddr, prev_seq->rport,
+       NI_CONF(ni).tconst_peer2msl_time);
+    if( SEQ_GT(isn_after_2msl, prev_seq->seq_no) ) {
+      /* The clock based ISN will catch up with entry between 0 and 2msl.
+       * Let's calculate exactly how much earlier this will happen
+       * and adjust expiry time accordingly */
+      ci_iptime_t expiry_reduce = ci_tcp_isn2tick
+          (ni, isn_after_2msl - prev_seq->seq_no);
+      ci_assert_ge(NI_CONF(ni).tconst_peer2msl_time, expiry_reduce);
+      prev_seq->expiry -= expiry_reduce;
+
+      ni->state->stats.tcp_seq_table_short_expiry++;
+    }
+  }
+
+  ni->state->stats.tcp_seq_table_insertions++;
+}
+
+
+#define TCP_PREV_SEQ_DEPTH_LIMIT 16
+
+
+/* Function removes route_count indexes along the look-up path.
+ * [prev_seq_val] is used to generate hashes,
+ * [prev_seq_entry] is pointer to the hash table entry, we'd got match with
+ * [prev_seq_val] 4 tuple. */
+static void
+__ci_tcp_prev_seq_free(ci_netif* ni, const ci_tcp_prev_seq_t* prev_seq_val,
+                                     const ci_tcp_prev_seq_t* prev_seq_entry)
+{
+  unsigned hash;
+  unsigned hash2 = 0;
+  int depth = 0;
+
+  hash = ci_tcp_prev_seq_hash1(ni, prev_seq_val);
+
+  do {
+    ci_tcp_prev_seq_t* prev_seq = &ni->seq_table[hash];
+    ci_assert_lt(hash, ni->state->seq_table_entries_n);
+
+    ci_assert_gt(prev_seq->route_count, 0);
+    --prev_seq->route_count;
+
+    if( prev_seq == prev_seq_entry )
+      return;
+    if( hash2 == 0 )
+      hash2 = ci_tcp_prev_seq_hash2(ni, prev_seq_val);
+    hash = (hash + hash2) & (ni->state->seq_table_entries_n - 1);
+    depth++;
+    ci_assert_le(depth, TCP_PREV_SEQ_DEPTH_LIMIT);
+    if(CI_UNLIKELY( depth > TCP_PREV_SEQ_DEPTH_LIMIT )) {
+      LOG_U(ci_log("%s: reached search depth", __FUNCTION__));
+      break;
+    }
+  } while( 1 );
+}
+
+
+static void
+ci_tcp_prev_seq_free(ci_netif* ni, ci_tcp_prev_seq_t* prev_seq) {
+  __ci_tcp_prev_seq_free(ni, prev_seq, prev_seq);
+  prev_seq->laddr = 0;
+}
+
+
+/* Add the final sequence number of [ts] to a hash table so that, when reusing
+ * the four-tuple, we can avoid using sequence numbers that overlap with the
+ * old connection.  Some peers are more tolerant than others of such apparent
+ * overlap -- Linux, for example, will consider TCP timestamps -- but we have
+ * to target the lowest common denominator, as it were, meaning that we can't
+ * avoid tracking the sequence number in such cases. */
+static int /*bool*/
+__ci_tcp_prev_seq_remember(ci_netif* ni, const ci_tcp_prev_seq_t* ts_prev_seq)
+{
+  unsigned hash;
+  unsigned hash2 = 0;
+  /* Oldest amongst the entries that we've traversed. */
+  ci_tcp_prev_seq_t* oldest_seq = NULL;
+  ci_tcp_prev_seq_t* prev_seq;
+  
+  int depth;
+
+  /* If the clock ISN is safe, no need to remember the sequence number. */
+  if( ci_tcp_clock_isn_safe(ni, ts_prev_seq) ) {
+    ni->state->stats.tcp_seq_table_avoided++;
+    return 0;
+  }
+
+  hash = ci_tcp_prev_seq_hash1(ni, ts_prev_seq);
+
+  for( depth = 0; depth < TCP_PREV_SEQ_DEPTH_LIMIT; ++depth ) {
+    prev_seq = &ni->seq_table[hash];
+    ci_assert_lt(hash, ni->state->seq_table_entries_n);
+
+    ci_assert_impl(CI_TCP_PREV_SEQ_IS_TERMINAL(*prev_seq),
+                   CI_TCP_PREV_SEQ_IS_FREE(*prev_seq));
+    ++prev_seq->route_count;
+    ni->state->stats.tcp_seq_table_steps++;
+
+    if( CI_TCP_PREV_SEQ_IS_FREE(*prev_seq) ) {
+      /* Free entry.  Use it. */
+      ci_tcp_prev_seq_remember_at(ni, ts_prev_seq, prev_seq);
+      break;
+    }
+    else if( ci_ip_time_before(prev_seq->expiry, ci_ip_time_now(ni)) ) {
+      /* Expired entry.  Free it and reuse it. */
+      ci_tcp_prev_seq_free(ni, prev_seq);
+      ci_tcp_prev_seq_remember_at(ni, ts_prev_seq, prev_seq);
+      ni->state->stats.tcp_seq_table_expiries++;
+      break;
+    }
+    else if( depth == 0 || ci_tcp_prev_seq_older(prev_seq, oldest_seq) ) {
+      /* Entry is live and in use, and the oldest that we've seen so far.
+       * Remember it so that we can purge the oldest if we don't find any free
+       * or expired entries. */
+      oldest_seq = prev_seq;
+    }
+
+    if( hash2 == 0 )
+      hash2 = ci_tcp_prev_seq_hash2(ni, ts_prev_seq);
+    hash = (hash + hash2) & (ni->state->seq_table_entries_n - 1);
+  }
+
+  /* If we didn't find any free entries, use the oldest up to the search
+   * depth. */
+  if( depth >= TCP_PREV_SEQ_DEPTH_LIMIT ) {
+    ci_assert_equal(depth, TCP_PREV_SEQ_DEPTH_LIMIT);
+    ci_assert(oldest_seq);
+    /* rollback all route count updates we made above */
+    __ci_tcp_prev_seq_free(ni, ts_prev_seq, prev_seq);
+    /* purge the oldest entry */
+    ci_tcp_prev_seq_free(ni, oldest_seq);
+    ni->state->stats.tcp_seq_table_purgations++;
+    /* redo insertion, now it will succeed with free entry */
+    __ci_tcp_prev_seq_remember(ni, ts_prev_seq);
+  }
+
+  return 1;
+}
+
+
+static ci_tcp_prev_seq_t*
+__ci_tcp_prev_seq_lookup(ci_netif* ni, const ci_tcp_prev_seq_t* ts_prev_seq)
+{
+  unsigned hash = ci_tcp_prev_seq_hash1(ni, ts_prev_seq);
+  unsigned hash2 = 0;
+  int depth;
+
+  for( depth = 0; depth < TCP_PREV_SEQ_DEPTH_LIMIT; ++depth ) {
+    ci_tcp_prev_seq_t* prev_seq = &ni->seq_table[hash];
+    ci_assert_lt(hash, ni->state->seq_table_entries_n);
+
+    if( CI_TCP_PREV_SEQ_IS_TERMINAL(*prev_seq) ) {
+      return NULL;
+    }
+    if( prev_seq->laddr == ts_prev_seq->laddr &&
+        prev_seq->lport == ts_prev_seq->lport &&
+        prev_seq->raddr == ts_prev_seq->raddr &&
+        prev_seq->rport == ts_prev_seq->rport )
+      return prev_seq;
+
+    if( hash2 == 0 )
+      hash2 = ci_tcp_prev_seq_hash2(ni, ts_prev_seq);
+    hash = (hash + hash2) & (ni->state->seq_table_entries_n - 1);
+  }
+
+  return NULL;
+}
+
+
+ci_uint32 ci_tcp_prev_seq_lookup(ci_netif* ni, const ci_tcp_state* ts)
+{
+  ci_tcp_prev_seq_t ts_prev_seq;
+  ci_tcp_prev_seq_t* prev_seq;
+  ci_uint32 seq_no;
+  ci_tcp_prev_seq_from_ts(ni, ts, &ts_prev_seq);
+  prev_seq = __ci_tcp_prev_seq_lookup(ni, &ts_prev_seq);
+  if( prev_seq == NULL )
+    return 0;
+  seq_no = prev_seq->seq_no;
+  ci_tcp_prev_seq_free(ni, prev_seq);
+  ni->state->stats.tcp_seq_table_hits++;
+  return seq_no;
+}
+
+
+void ci_tcp_prev_seq_remember(ci_netif* ni, ci_tcp_state* ts)
+{
+  ci_tcp_prev_seq_t ts_prev_seq;
+
+  if( NI_OPTS(ni).tcp_isn_mode != 1 )
+    return;
+  if( ! NI_OPTS(ni).tcp_isn_include_passive &&
+      ts->tcpflags & CI_TCPT_FLAG_PASSIVE_OPENED )
+    return;
+
+  /* We record the final sequence number, so we must have sent a FIN.  If the
+   * peer is not in TIME_WAIT, then we don't need to bother remembering the
+   * sequence number.  As such, we should call this function precisely when
+   * entering LAST_ACK or CLOSING. */
+  if( ts->s.b.state != CI_TCP_CLOSING )
+    ci_assert_equal(ts->s.b.state, CI_TCP_LAST_ACK);
+
+  ci_tcp_prev_seq_from_ts(ni, ts, &ts_prev_seq);
+
+  if( __ci_tcp_prev_seq_remember(ni, &ts_prev_seq) )
+    ts->tcpflags |= CI_TCPT_FLAG_SEQNO_REMEMBERED;
+
+}
 
 
 /* Return codes from ci_tcp_connect_ul_start(). */
@@ -483,6 +817,7 @@ static int ci_tcp_connect_ul_start(ci_netif *ni, ci_tcp_state* ts, ci_fd_t fd,
   int rc = 0;
   oo_sp active_wild = OO_SP_NULL;
   ci_uint32 prev_seq = 0;
+  int added_scalable = 0;
 
   ci_assert(ts->s.pkt.mtu);
 
@@ -492,10 +827,7 @@ static int ci_tcp_connect_ul_start(ci_netif *ni, ci_tcp_state* ts, ci_fd_t fd,
    * Note, even these values are speculative since the real MTU
    * could change between now and passing the packet to the lower layers
    */
-  ts->amss = ts->s.pkt.mtu - sizeof(ci_tcp_hdr) - sizeof(ci_ip4_hdr);
-#if CI_CFG_LIMIT_AMSS
-  ts->amss = ci_tcp_limit_mss(ts->amss, ni, __FUNCTION__);
-#endif
+  ts->amss = ci_tcp_amss(ni, &ts->c, ts->s.pkt.mtu, __func__);
 
   /* Default smss until discovered by MSS option in SYN - RFC1122 4.2.2.6 */
   ts->smss = CI_CFG_TCP_DEFAULT_MSS;
@@ -520,6 +852,11 @@ static int ci_tcp_connect_ul_start(ci_netif *ni, ci_tcp_state* ts, ci_fd_t fd,
    */
   ci_assert_nequal(ts->s.pkt.ip.ip_saddr_be32, INADDR_ANY);
 
+  /* socket can only could have gotten scalative on prior
+   * implicit bind */
+  ci_assert_impl(ts->s.s_flags & CI_SOCK_FLAG_SCALACTIVE,
+                 ~ts->s.s_flags & CI_SOCK_FLAG_CONNECT_MUST_BIND);
+
   if( ts->s.s_flags & CI_SOCK_FLAG_CONNECT_MUST_BIND ) {
     ci_uint16 source_be16 = 0;
     ci_sock_cmn* s = &ts->s;
@@ -530,50 +867,38 @@ static int ci_tcp_connect_ul_start(ci_netif *ni, ci_tcp_state* ts, ci_fd_t fd,
                                            dport_be16, &source_be16, &prev_seq);
 #endif
 
-    if( active_wild != OO_SP_NULL ) {
-      ts->s.s_flags &= ~(CI_SOCK_FLAG_DEFERRED_BIND |
-                         CI_SOCK_FLAG_CONNECT_MUST_BIND);
+    /* Defer active_wild related state update to after potential lock drops
+     * (pkt wait) */
+    if( active_wild == OO_SP_NULL ) {
+      if( NI_OPTS(ni).tcp_shared_local_no_fallback )
+        /* error matching exhaustion of ephemeral ports */
+        CI_SET_ERROR(rc, EADDRNOTAVAIL);
+      else if( s->s_flags & CI_SOCK_FLAG_ADDR_BOUND )
+        rc = __ci_tcp_bind(ni, &ts->s, fd, ts->s.pkt.ip.ip_saddr_be32,
+                           &source_be16, 0);
+      else
+        rc = __ci_tcp_bind(ni, &ts->s, fd, INADDR_ANY, &source_be16, 0);
 
-      /* If we're in scalable-active mode, then sharing an active-wild gives us
-       * the last ingredient that allows the socket to be scalable. */
-      if( ~s->s_flags & CI_SOCK_FLAG_TPROXY &&
-          NI_OPTS(ni).scalable_filter_enable == CITP_SCALABLE_FILTERS_ENABLE &&
-          NI_OPTS(ni).scalable_filter_mode & CITP_SCALABLE_MODE_ACTIVE &&
-          (NI_OPTS(ni).scalable_filter_ifindex_active == ts->s.pkt.ifindex ||
-           NI_OPTS(ni).scalable_filter_ifindex_active ==
-           CITP_SCALABLE_FILTERS_ALL) ) {
-        s->s_flags |= CI_SOCK_FLAG_SCALACTIVE;
+      if(CI_UNLIKELY( rc != 0 )) {
+        LOG_U(ci_log("__ci_tcp_bind returned %d at %s:%d", rc,
+                     __FILE__, __LINE__));
+        *fail_rc = rc;
+        return CI_CONNECT_UL_FAIL;
       }
-
-      rc = 0;
+      if(CI_UNLIKELY( ts->s.pkt.ip.ip_saddr_be32 == 0 )) {
+        /* FIXME is this an impossible branch? */
+        CI_SET_ERROR(*fail_rc, EINVAL);
+        return CI_CONNECT_UL_FAIL;
+      }
     }
-    else if( NI_OPTS(ni).tcp_shared_local_no_fallback ) {
-      /* error matching exhaustion of ephemeral ports */
-      CI_SET_ERROR(rc, EADDRNOTAVAIL);
-    }
-    else if( s->s_flags & CI_SOCK_FLAG_ADDR_BOUND )
-      rc = __ci_tcp_bind(ni, &ts->s, fd, ts->s.pkt.ip.ip_saddr_be32,
-                         &source_be16, 0);
-    else 
-      rc = __ci_tcp_bind(ni, &ts->s, fd, INADDR_ANY, &source_be16, 0);
-    if(CI_LIKELY( rc == 0 )) {
-      TS_TCP(ts)->tcp_source_be16 = source_be16;
-      ts->s.cp.lport_be16 = source_be16;
-      LOG_TC(log(LNT_FMT "connect: our bind returned %s:%u", 
-                 LNT_PRI_ARGS(ni, ts),
-                 ip_addr_str(INADDR_ANY),
-                 (unsigned) CI_BSWAP_BE16(TS_TCP(ts)->tcp_source_be16)));
-    }
-    else {
-      LOG_U(ci_log("__ci_tcp_bind returned %d at %s:%d", rc,
-                   __FILE__, __LINE__));
-      *fail_rc = rc;
-      return CI_CONNECT_UL_FAIL;
-    }
-    if(CI_UNLIKELY( ts->s.pkt.ip.ip_saddr_be32 == 0 )) {
-      CI_SET_ERROR(*fail_rc, EINVAL);
-      return CI_CONNECT_UL_FAIL;
-    }
+    /* Commit source port now.  In case of failure down the lane, an implicit port
+     * might be overwritten by following attempt */
+    TS_TCP(ts)->tcp_source_be16 = source_be16;
+    ts->s.cp.lport_be16 = source_be16;
+    LOG_TC(log(LNT_FMT "connect: our bind returned %s:%u",
+               LNT_PRI_ARGS(ni, ts),
+               ip_addr_str(ts->s.pkt.ip.ip_saddr_be32),
+               (unsigned) CI_BSWAP_BE16(TS_TCP(ts)->tcp_source_be16)));
   }
 
   /* In the normal case, we only install filters for IP addresses configured on
@@ -582,12 +907,12 @@ static int ci_tcp_connect_ul_start(ci_netif *ni, ci_tcp_state* ts, ci_fd_t fd,
    * limitation, however. */
   if( (ts->s.s_flags & CI_SOCK_FLAG_BOUND_ALIEN) &&
       ! (ts->s.pkt.flags & CI_IP_CACHE_IS_LOCALROUTE ||
-         ts->s.s_flags & (CI_SOCK_FLAG_TPROXY | CI_SOCK_FLAG_SCALACTIVE)) )
+         ts->s.s_flags & (CI_SOCK_FLAG_TPROXY | CI_SOCK_FLAG_SCALACTIVE)) ) {
+    ci_assert_equal(active_wild, OO_SP_NULL);
     return CI_CONNECT_UL_ALIEN_BOUND;
+  }
 
-  /* Any failures below this point might need to clear the SCALACTIVE flag, and
-   * so should jump to the "fail" label. */
-
+  /* Commit peer now - these are OK to be overwritten by following attempt */
   ci_tcp_set_peer(ts, dst_be32, dport_be16);
 
   /* Make sure we can get a buffer before we change state. */
@@ -626,6 +951,20 @@ static int ci_tcp_connect_ul_start(ci_netif *ni, ci_tcp_state* ts, ci_fd_t fd,
     ts->s.ofe_code_start = OFE_ADDR_NULL;
 #endif
 
+  if( active_wild != OO_SP_NULL &&
+    /* If we're in scalable-active mode, then sharing an active-wild gives us
+     * the last ingredient that allows the socket to be scalable. */
+     ~ts->s.s_flags & CI_SOCK_FLAG_TPROXY &&
+      NI_OPTS(ni).scalable_filter_enable == CITP_SCALABLE_FILTERS_ENABLE &&
+      NI_OPTS(ni).scalable_filter_mode & CITP_SCALABLE_MODE_ACTIVE &&
+      (NI_OPTS(ni).scalable_filter_ifindex_active == ts->s.pkt.ifindex ||
+       NI_OPTS(ni).scalable_filter_ifindex_active == CITP_SCALABLE_FILTERS_ALL)
+      && (~ts->s.s_flags & CI_SOCK_FLAG_SCALACTIVE) ) {
+    /* Need to set the flag now for consumption by ci_tcp_ep_set_filters */
+    added_scalable = 1;
+    ts->s.s_flags |= CI_SOCK_FLAG_SCALACTIVE;
+  }
+
   rc = ci_tcp_ep_set_filters(ni, S_SP(ts), ts->s.cp.so_bindtodevice,
                              active_wild);
   if( rc < 0 ) {
@@ -641,15 +980,22 @@ static int ci_tcp_connect_ul_start(ci_netif *ni, ci_tcp_state* ts, ci_fd_t fd,
       /* Either a different error, or our efforts to free a filter did not
        * work.
        */
-      if( ! (ts->s.s_flags & CI_SOCK_FLAG_ADDR_BOUND) ) {
-        ts->s.pkt.ip.ip_saddr_be32 = 0;
-        ts->s.cp.ip_laddr_be32 = 0;
-      }
+      if( added_scalable )
+        ts->s.s_flags &= ~CI_SOCK_FLAG_SCALACTIVE; /* rollback scalactive flag */
       ci_netif_pkt_release(ni, pkt);
       CI_SET_ERROR(*fail_rc, -rc);
       rc = CI_CONNECT_UL_FAIL;
       goto fail;
     }
+  }
+
+  /* Point of no failure */
+
+  /* Commit active_wild related flags */
+  if( active_wild != OO_SP_NULL ) {
+    ts->tcpflags |= CI_TCPT_FLAG_ACTIVE_WILD;
+    ts->s.s_flags &= ~(CI_SOCK_FLAG_DEFERRED_BIND |
+                       CI_SOCK_FLAG_CONNECT_MUST_BIND);
   }
 
   LOG_TC(log(LNT_FMT "CONNECT %s:%u->%s:%u", LNT_PRI_ARGS(ni, ts),
@@ -659,16 +1005,37 @@ static int ci_tcp_connect_ul_start(ci_netif *ni, ci_tcp_state* ts, ci_fd_t fd,
 	     (unsigned) CI_BSWAP_BE16(TS_TCP(ts)->tcp_dest_be16)));
 
   /* We are going to send the SYN - set states appropriately */
-  if( active_wild != OO_SP_NULL )
-    ts->tcpflags |= CI_TCPT_FLAG_ACTIVE_WILD;
 
-  tcp_snd_nxt(ts) = ci_tcp_initial_seqno(ni);
+  /* We test prev_seq in a moment, which is always zero in the kernel, but
+   * that's OK, because this function is only called in the kernel for loopback
+   * connections. */
+
+  if( NI_OPTS(ni).tcp_isn_mode == 1 ) {
+    if( prev_seq == 0 ) {
+      prev_seq = ci_tcp_prev_seq_lookup(ni, ts);
+    }
+    else {
+#ifndef NDEBUG
+      /* If we got a sequence number from TIME_WAIT-reuse, the table should not
+       * have an entry for this four-tuple, as any such entry would now
+       * necessarily be stale.  Assert this.  Use an intermediate variable to
+       * avoid calling the function more than once. */
+      ci_uint32 table_seq = ci_tcp_prev_seq_lookup(ni, ts);
+      ci_assert_equal(table_seq, 0);
+#endif
+    }
+  }
+
   if( prev_seq )
-    /* We're reusing a TIME_WAIT.  Set top two bits of ISN to NOT of top
-     * bits of the previous sequence number used by this 4-tuple to ensure
-     * that the new sequence space is a long way away from before.
+    /* We're reusing a TIME_WAIT.  We do the same as Linux, and choose the new
+     * sequence number a little way from the old.
      */
-    tcp_snd_nxt(ts) = (tcp_snd_nxt(ts) & 0x3fffffff) | (~prev_seq & 0xc0000000);
+    tcp_snd_nxt(ts) = prev_seq;
+  else
+    tcp_snd_nxt(ts) = ci_tcp_initial_seqno(ni, ts->s.pkt.ip.ip_saddr_be32,
+                                           TS_TCP(ts)->tcp_source_be16,
+                                           ts->s.pkt.ip.ip_daddr_be32,
+                                           TS_TCP(ts)->tcp_dest_be16);
   tcp_snd_una(ts) = tcp_enq_nxt(ts) = tcp_snd_up(ts) = tcp_snd_nxt(ts);
   ts->snd_max = tcp_snd_nxt(ts) + 1;
 
@@ -739,7 +1106,11 @@ static int ci_tcp_connect_ul_start(ci_netif *ni, ci_tcp_state* ts, ci_fd_t fd,
   return CI_CONNECT_UL_OK;
 
  fail:
-  ts->s.s_flags &= ~CI_SOCK_FLAG_SCALACTIVE;
+  /* Linux clears implicit address on connect failure */
+  if( ! (ts->s.s_flags & CI_SOCK_FLAG_ADDR_BOUND) ) {
+    ts->s.pkt.ip.ip_saddr_be32 = 0;
+    ts->s.cp.ip_laddr_be32 = 0;
+  }
   return rc;
 }
 
@@ -1182,7 +1553,7 @@ int ci_tcp_connect_lo_samestack(ci_netif *ni, ci_tcp_state *ts, oo_sp tls_id,
   *stack_locked = 1;
 
   ts->local_peer = tls_id;
-  crc = ci_tcp_connect_ul_start(ni, ts, CI_FD_BAD, ts->s.pkt.ip_saddr_be32,
+  crc = ci_tcp_connect_ul_start(ni, ts, CI_FD_BAD, ts->s.pkt.ip_saddr.ip4,
                                 ts->s.pkt.dport_be16, &rc);
 
   /* The connect is really finished, but we should return EINPROGRESS
@@ -1854,8 +2225,8 @@ int ci_tcp_getpeername(citp_socket* ep, struct sockaddr* name,
   else {
     rc = 0;
     if( s->b.state != CI_TCP_LISTEN ) {
-      ci_addr_to_user(name, namelen, s->domain, 
-                      S_TCP_HDR(s)->tcp_dest_be16, s->pkt.ip.ip_daddr_be32);
+      ci_addr_to_user(name, namelen, AF_INET, s->domain, 
+                      S_TCP_HDR(s)->tcp_dest_be16, &s->pkt.ip.ip_daddr_be32);
     }
   }
 

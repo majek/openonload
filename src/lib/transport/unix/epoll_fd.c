@@ -568,6 +568,7 @@ citp_protocol_impl citp_epoll_protocol_impl = {
 #endif
     .zc_send     = citp_nonsock_zc_send,
     .zc_recv     = citp_nonsock_zc_recv,
+    .zc_recv_filter = citp_nonsock_zc_recv_filter,
     .recvmsg_kernel = citp_nonsock_recvmsg_kernel,
     .tmpl_alloc     = citp_nonsock_tmpl_alloc,
     .tmpl_update    = citp_nonsock_tmpl_update,
@@ -859,8 +860,9 @@ static int citp_epoll_can_rehome_on_scalable(ci_netif* ni)
     ci_cfg_opts.netif_opts.scalable_filter_enable ==
       CITP_SCALABLE_FILTERS_ENABLE_WORKER &&
     NI_OPTS(ni).scalable_filter_enable == CITP_SCALABLE_FILTERS_ENABLE &&
-    (NI_OPTS(ni).scalable_filter_mode & (CITP_SCALABLE_MODE_ACTIVE |
-      CITP_SCALABLE_MODE_TPROXY_ACTIVE)) != -1 &&
+    /* Fixme, Sasha2Maciej: it was
+     *      s_f_mode & (ACTIVE | TPROXY_ACTIVE)) != -1
+     * which is always true */
     (NI_OPTS(ni).scalable_filter_mode & CITP_SCALABLE_MODE_RSS) != 0;
 }
 
@@ -1973,7 +1975,8 @@ no_events:
       struct oo_epoll1_block_on_arg op = {};
       op.epoll_fd = fdi->fd;
       /* do not spend too much time spinning in kernel */
-      op.timeout_ms = CI_MAX(timeout, 100) * 1000 + 1;
+      /* NB: timeout_ms field is being abused to store us */
+      op.timeout_ms = CI_MIN(timeout, 100u) * 1000 + 1;
       op.sleep_iter_us = CITP_OPTS.sleep_spin_usec;
       rc = ci_sys_ioctl(ep->epfd_os, OO_EPOLL1_IOC_SPIN_ON, &op);
       Log_POLL(ci_log("%s(%d): SPIN ON %d ", __FUNCTION__, fdi->fd, op.flags));

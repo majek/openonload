@@ -107,9 +107,8 @@ static int efx_ef10_sriov_assign_vf_vport(struct efx_nic *efx,
 	if (WARN_ON_ONCE(nic_data->vf == NULL))
 		return -EOPNOTSUPP;
 
-	rc = efx_ef10_vport_alloc(efx, EVB_PORT_ID_ASSIGNED,
-				  MC_CMD_VPORT_ALLOC_IN_VPORT_TYPE_NORMAL,
-				  vf->vlan, vf->vlan_restrict, &vf->vport_id);
+	rc = efx_ef10_vport_alloc(efx, vf->vlan, vf->vlan_restrict,
+				  &vf->vport_id);
 	if (rc)
 		return rc;
 
@@ -177,15 +176,14 @@ fail:
 
 static int efx_ef10_vadaptor_alloc_set_features(struct efx_nic *efx)
 {
-	struct efx_ef10_nic_data *nic_data = efx->nic_data;
 	int rc;
 	u32 port_flags;
 
-	rc = efx_ef10_vadaptor_alloc(efx, nic_data->vport_id);
+	rc = efx_ef10_vadaptor_alloc(efx, efx->vport.vport_id);
 	if (rc)
 		goto fail_vadaptor_alloc;
 
-	rc = efx_ef10_vadaptor_query(efx, nic_data->vport_id,
+	rc = efx_ef10_vadaptor_query(efx, efx->vport.vport_id,
 				     &port_flags, NULL, NULL);
 	if (rc)
 		goto fail_vadaptor_query;
@@ -231,17 +229,12 @@ int efx_ef10_vswitching_probe_pf(struct efx_nic *efx)
 	if (rc)
 		goto fail1;
 
-	rc = efx_ef10_vport_alloc(efx, EVB_PORT_ID_ASSIGNED,
-				  MC_CMD_VPORT_ALLOC_IN_VPORT_TYPE_NORMAL,
-				  EFX_FILTER_VID_UNSPEC, false,
-				  &nic_data->vport_id);
+	rc = efx_ef10_vport_alloc(efx, EFX_FILTER_VID_UNSPEC, false,
+				  &efx->vport.vport_id);
 	if (rc)
 		goto fail2;
-#ifdef EFX_NOT_UPSTREAM
-	efx->ef10_resources.vport_id = nic_data->vport_id;
-#endif
 
-	rc = efx_ef10_vport_add_mac(efx, nic_data->vport_id, net_dev->dev_addr);
+	rc = efx_ef10_vport_add_mac(efx, efx->vport.vport_id, net_dev->dev_addr);
 	if (rc)
 		goto fail3;
 	ether_addr_copy(nic_data->vport_mac, net_dev->dev_addr);
@@ -252,11 +245,11 @@ int efx_ef10_vswitching_probe_pf(struct efx_nic *efx)
 
 	return 0;
 fail4:
-	efx_ef10_vport_del_mac(efx, nic_data->vport_id, nic_data->vport_mac);
+	efx_ef10_vport_del_mac(efx, efx->vport.vport_id, nic_data->vport_mac);
 	eth_zero_addr(nic_data->vport_mac);
 fail3:
-	efx_ef10_vport_free(efx, nic_data->vport_id);
-	nic_data->vport_id = EVB_PORT_ID_ASSIGNED;
+	efx_ef10_vport_free(efx, efx->vport.vport_id);
+	efx->vport.vport_id = EVB_PORT_ID_ASSIGNED;
 fail2:
 	efx_ef10_vswitch_free(efx, EVB_PORT_ID_ASSIGNED);
 fail1:
@@ -340,25 +333,25 @@ void efx_ef10_vswitching_remove_pf(struct efx_nic *efx)
 
 	efx_ef10_sriov_free_vf_vswitching(efx);
 
-	efx_ef10_vadaptor_free(efx, nic_data->vport_id);
+	efx_ef10_vadaptor_free(efx, efx->vport.vport_id);
 
-	if (nic_data->vport_id == EVB_PORT_ID_ASSIGNED)
+	if (efx->vport.vport_id == EVB_PORT_ID_ASSIGNED)
 		return; /* No vswitch was ever created */
 
 	if (!is_zero_ether_addr(nic_data->vport_mac)) {
-		efx_ef10_vport_del_mac(efx, nic_data->vport_id,
+		efx_ef10_vport_del_mac(efx, efx->vport.vport_id,
 				       efx->net_dev->dev_addr);
 		eth_zero_addr(nic_data->vport_mac);
 	}
 
-	efx_ef10_vport_free(efx, nic_data->vport_id);
-	nic_data->vport_id = EVB_PORT_ID_ASSIGNED;
+	efx_ef10_vport_free(efx, efx->vport.vport_id);
+	efx->vport.vport_id = EVB_PORT_ID_ASSIGNED;
 
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_PCI_DEV_FLAGS_ASSIGNED)
 	/* Only free the vswitch if no VFs are assigned */
 	if (!pci_vfs_assigned(efx->pci_dev))
 #endif
-		efx_ef10_vswitch_free(efx, nic_data->vport_id);
+		efx_ef10_vswitch_free(efx, efx->vport.vport_id);
 #endif
 }
 
@@ -822,9 +815,8 @@ int efx_ef10_sriov_set_vf_vlan(struct efx_nic *efx, int vf_i, u16 vlan,
 	vf->vlan = new_vlan;
 
 	/* Restore everything in reverse order */
-	rc = efx_ef10_vport_alloc(efx, EVB_PORT_ID_ASSIGNED,
-			MC_CMD_VPORT_ALLOC_IN_VPORT_TYPE_NORMAL,
-			vf->vlan, vf->vlan_restrict, &vf->vport_id);
+	rc = efx_ef10_vport_alloc(efx, vf->vlan, vf->vlan_restrict,
+				  &vf->vport_id);
 	if (rc)
 		goto reset_nic_up_write;
 

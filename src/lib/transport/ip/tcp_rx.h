@@ -86,11 +86,11 @@ ci_inline void ci_tcp_rx_post_poll(ci_netif* ni, ci_tcp_state* ts)
 
     if( OO_SP_NOT_NULL(ts->local_peer) ) {
       if( ts->acks_pending )
-        ci_tcp_send_ack_loopback(ni, ts, CI_FALSE);
+        ci_tcp_send_ack_loopback(ni, ts);
       return;
     }
     if( ci_tcp_need_ack(ni, ts) ) {
-      ci_ip_pkt_fmt* pkt = ci_netif_pkt_alloc(ni);
+      ci_ip_pkt_fmt* pkt = ci_netif_pkt_alloc(ni, 0);
       if(CI_LIKELY( pkt != NULL )) {
         ci_tcp_send_ack(ni, ts, pkt, CI_FALSE);
         return;
@@ -134,6 +134,86 @@ ci_inline void ci_tcp_set_snd_max(ci_tcp_state *ts, ci_uint32 seq,
   ts->snd_wl1 = seq;
 #endif
   ts->snd_max = ack + wnd;
+}
+
+struct ci_tcp_rx_future {
+  ci_sock_cmn* socket;
+  ciip_tcp_rx_pkt rxp;
+};
+
+
+ci_inline int ci_tcp_rx_deliver_to_future(ci_sock_cmn* s, void* opaque_arg)
+{
+  struct ci_tcp_rx_future* future = opaque_arg;
+  future->socket = s;
+  return 1;
+}
+
+
+ci_inline void ci_tcp_handle_rx_pre_future(ci_netif* netif, ci_ip_pkt_fmt* pkt,
+                                           ci_tcp_hdr* tcp, int ip_paylen,
+                                           struct ci_tcp_rx_future* future)
+{
+  ci_ip4_hdr* ip = oo_ip_hdr(pkt);
+  future->socket = NULL;
+
+  ci_assert_nequal(pkt->intf_i, OO_INTF_I_LOOPBACK);
+
+  if( ip->ip_frag_off_be16 != CI_IP4_FRAG_DONT &&
+      ip->ip_frag_off_be16 != 0 ) {
+    return;
+  }
+
+  if( OO_PP_NOT_NULL(pkt->frag_next) )
+    return;
+
+  future->rxp.ni = netif;
+  future->rxp.pkt = pkt;
+  future->rxp.tcp = tcp;
+  pkt->pf.tcp_rx.pay_len = ip_paylen;
+
+  future->rxp.seq = CI_BSWAP_BE32(tcp->tcp_seq_be32);
+  future->rxp.ack = CI_BSWAP_BE32(tcp->tcp_ack_be32);
+
+  ci_netif_filter_for_each_match(netif,
+                                 ip->ip_daddr_be32, tcp->tcp_dest_be16,
+                                 ip->ip_saddr_be32, tcp->tcp_source_be16,
+                                 IPPROTO_TCP, pkt->intf_i, pkt->vlan,
+                                 ci_tcp_rx_deliver_to_future, future,
+                                 &future->rxp.hash);
+
+  if( future->socket != NULL )
+    CI_TCP_STATS_INC_IN_SEGS( netif );
+}
+
+
+ci_inline void ci_tcp_rollback_rx_future(ci_netif* netif,
+                                         struct ci_tcp_rx_future* future)
+{
+  if( future->socket != NULL )
+    __CI_NETIF_STATS_DEC(netif, tcp, tcp_in_segs);
+  future->socket = NULL;
+}
+
+/* We might consider inlining this, or a simplified version */
+extern int ci_tcp_rx_deliver_to_conn(ci_sock_cmn* s, void* opaque_arg) CI_HF;
+
+ci_inline void ci_tcp_handle_rx_post_future(ci_netif* netif,
+                                            struct ci_netif_poll_state* ps,
+                                            ci_ip_pkt_fmt* pkt,
+                                            ci_tcp_hdr* tcp,
+                                            int ip_paylen,
+                                            struct ci_tcp_rx_future* future)
+{
+  if( future->socket != NULL ) {
+    future->rxp.poll_state = ps;
+    ci_assert_gt(pkt->pay_len, pkt->pf.tcp_rx.pay_len);
+    ci_tcp_rx_deliver_to_conn(future->socket, &future->rxp);
+    ci_assert(future->rxp.pkt == NULL);
+  }
+  else {
+    ci_tcp_handle_rx(netif, ps, pkt, tcp, ip_paylen);
+  }
 }
 
 

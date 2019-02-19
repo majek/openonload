@@ -195,7 +195,6 @@ extern int ci_format_ip4_addr(char* buf, unsigned addr_be32) CI_HF;
   ** must be at least 16 bytes long.
   */
 
-
 /**********************************************************************
  * Error checking.
  */

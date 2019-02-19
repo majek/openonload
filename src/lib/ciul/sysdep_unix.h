@@ -41,12 +41,27 @@
  */
 
 #if defined(__i386__) || defined(__x86_64__)
-
 # define PAGE_SHIFT            12u
 # define PAGE_SIZE             (1lu << PAGE_SHIFT)
 #elif defined(__PPC__)
 # define PAGE_SHIFT            16u
 # define PAGE_SIZE             (1lu << PAGE_SHIFT)
+#elif defined(__aarch64__)
+#define PAGE_SIZE              (AARCH64_PAGE_SIZE)
+/* There is no simple way to do ffs at compile time,
+ * and sysconf returns PAGE_SIZE, not page shift, so just
+ * check the sizes that are known to be supported on Linux/arm64
+ */
+#if PAGE_SIZE == (4 * 1024)
+#define PAGE_SHIFT             12u
+#elif PAGE_SIZE == (16 * 1024)
+#define PAGE_SHIFT             14u
+#elif PAGE_SIZE == (64 * 1024)
+#define PAGE_SHIFT             16u
+#else
+#error "Unsupported PAGE_SIZE"
+#endif
+
 #endif
 
 
@@ -84,13 +99,23 @@ typedef uint64_t ef_vi_dma_addr_t;
 #  define wmb()       __asm__ __volatile__("": : :"memory")
 #  define wmb_wc()    __builtin_ia32_sfence()
 #  define mmiowb()    do{}while(0)
+#  define dma_wmb()   __asm__ __volatile__("": : :"memory")
 #  define smp_rmb()   __asm__ __volatile__("lfence": : :"memory")
 
 # elif defined(__PPC__)
 #  define wmb()       __asm__ __volatile__("sync" : : :"memory")
 #  define wmb_wc()    __asm__ __volatile__("sync" : : :"memory")
 #  define mmiowb()    __asm__ __volatile__("sync" : : :"memory")
+#  define dma_wmb()   __asm__ __volatile__("sync" : : :"memory")
 #  define smp_rmb()   __asm__ __volatile__("lwsync": : :"memory")
+
+# elif defined(__aarch64__)
+#  define wmb()      __asm__ __volatile__ ("dsb st" : : : "memory")
+#  define wmb_wc()   __asm__ __volatile__ ("dsb oshst" : : : "memory")
+#  define mmiowb()    do{}while(0)
+#  define dma_wmb()   __asm__ __volatile__ ("dsb oshst" : : : "memory")
+#  define smp_rmb()  __asm__ __volatile__ ("dmb ishld" : : : "memory")
+
 
 # else
 #  error Unknown processor architecture
@@ -186,6 +211,12 @@ ef_vi_inline void writel(uint32_t data, volatile void *addr)
                        : "memory");
 }
 #define noswap_writel  writel
+
+#elif defined(__aarch64__)
+
+#define writel(data, addr)  do{dma_wmb(); __raw_writel(cpu_to_le32(data), addr);}while(0)
+#define unordered_writel(data, addr)  __raw_writel(cpu_to_le32(data), (addr))
+#define noswap_writel(data, addr)     writel(le32_to_cpu(data), (addr))
 
 #else
 

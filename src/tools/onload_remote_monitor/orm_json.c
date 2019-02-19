@@ -44,7 +44,6 @@
 #include <onload/version.h>
 
 #include "ftl_defs.h"
-#include <jansson.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -272,6 +271,45 @@ static void dump_buf_cat(const char* fmt, ...)
   va_end(va);
 }
 
+static const char hex_digits[] = "0123456789ABCDEF";
+
+/* Append to dump_buf a correctly-quoted and -escaped string literal */
+static void dump_buf_str(const char *str)
+{
+  const char* begin = str;
+  const char* p;
+  __dump_buf_cat0("\"", 1);
+  for( p = str; *p; ++p ) {
+    if( *p == '"' || *p == '\\' || *p < ' ' ) {
+      char esc[6];
+      int len = 2;
+      __dump_buf_cat0(begin, p - begin);
+      esc[0] = '\\';
+      switch( *p ) {
+        case '"':  esc[1] = '"'; break;
+        case '\\': esc[1] = '\\'; break;
+        case '\b': esc[1] = 'b'; break;
+        case '\f': esc[1] = 'f'; break;
+        case '\n': esc[1] = 'n'; break;
+        case '\r': esc[1] = 'r'; break;
+        case '\t': esc[1] = 't'; break;
+        default:
+          /* JSON does not officially support \x00 encoding */
+          esc[1] = 'u';
+          esc[2] = '0';
+          esc[3] = '0';
+          esc[4] = hex_digits[(*p >> 4) & 15];
+          esc[5] = hex_digits[*p & 15];
+          len = 6;
+          break;
+      }
+      __dump_buf_cat0(esc, len);
+      begin = p + 1;
+    }
+  }
+  __dump_buf_cat0(begin, p - begin);
+  __dump_buf_cat0("\"", 1);
+}
 
 static void dump_buf_cleanup(void)
 {
@@ -430,23 +468,30 @@ static void orm_oo_more_stats_sum(more_stats_t* stats_sum, more_stats_t* stats)
 #define OO_STAT(desc, datatype, name, kind)     \
   OO_STAT_##kind(name, (desc))
 #define OO_STAT_count_zero(name, desc) /* ignore always 0 counters */
-#define OO_STAT_count(name, desc) \
-  dump_buf_cat( " { "          \
+#define OO_STAT_count(name, desc)  \
+  dump_buf_cat( " { "              \
 "\"name\": \"%s%s%s\", "           \
-"\"pointer\": \"%s/%s/%s\", " \
-"\"type\": \"integer\", "      \
-"\"units\": \"count\", "       \
-"\"semantics\": \"counter\", "  \
-"\"description\": \"%s\" "     \
-"}, ", (cfg_flat ? "" : OO_STAT_key), (cfg_flat ? "": "."), #name, xpath, OO_STAT_key, #name, desc);
-#define OO_STAT_val(name, desc) \
-  dump_buf_cat( " { "          \
+"\"pointer\": \"%s/%s/%s\", "      \
+"\"type\": \"integer\", "          \
+"\"units\": \"count\", "           \
+"\"semantics\": \"counter\", "     \
+"\"description\": ",               \
+  (cfg_flat ? "" : OO_STAT_key), (cfg_flat ? "": "."), #name, xpath, \
+   OO_STAT_key, #name);            \
+  dump_buf_str(desc);              \
+  __dump_buf_cat0(" }, ", 4);
+
+#define OO_STAT_val(name, desc)    \
+  dump_buf_cat( " { "              \
 "\"name\": \"%s%s%s\", "           \
-"\"pointer\": \"%s/%s/%s\", " \
-"\"type\": \"integer\", "      \
-"\"semantics\": \"instant\", "  \
-"\"description\": \"%s\" "     \
-"}, ", (cfg_flat ? "" : OO_STAT_key), (cfg_flat ? "": "."), #name, xpath, OO_STAT_key, #name, desc);
+"\"pointer\": \"%s/%s/%s\", "      \
+"\"type\": \"integer\", "          \
+"\"semantics\": \"instant\", "     \
+"\"description\": ",               \
+  (cfg_flat ? "" : OO_STAT_key), (cfg_flat ? "": "."), #name, xpath, \
+   OO_STAT_key, #name);      \
+  dump_buf_str(desc);              \
+  __dump_buf_cat0(" }, ", 4);
 
 static int orm_oo_stats_meta_dump(const char* xpath)
 {
@@ -548,6 +593,9 @@ static void orm_dump_struct_ci_netif_config_opts(char* label, ci_netif_config_op
 
 #define FTL_TFIELD_IPADDR(ctx, uname, flags) \
     FTL_TFIELD_INTBE(ctx, ci_uint32, uname, "\"" OOF_IP4 "\"", OOFA_IP4, flags)
+
+#define FTL_TFIELD_IPXADDR(ctx, uname, flags) \
+    FTL_TFIELD_INT2(ctx, ci_addr_t, uname, "\"" OOF_IPX "\"", OOFA_IPX, flags)
 
 #define FTL_TFIELD_PORT(ctx, name, flags) \
     FTL_TFIELD_INTBE(ctx, ci_uint16, name, OOF_PORT, OOFA_PORT, flags) \
@@ -896,10 +944,7 @@ static void orm_oo_stats_meta_all(int output_flags, const char* xpath)
 int main(int argc, char* argv[])
 {
   int i;
-  char* json_buf;
   const char* buf;
-  json_t* root;
-  json_error_t error;
   int output_flags = ORM_OUTPUT_NONE;
 
   ci_app_standard_opts = 0;
@@ -939,7 +984,7 @@ int main(int argc, char* argv[])
   }
 
   if( cfg_meta ) {
-    const char* xpath = cfg_flat ? "/all" : "/json/all/0";
+    const char* xpath = cfg_flat ? "/all" : "/json/0/all";
     dump_buf_cat("{");
     dump_buf_cat("\"metrics\": [");
     orm_oo_stats_meta_all(output_flags, xpath);
@@ -1057,21 +1102,7 @@ int main(int argc, char* argv[])
 done:
 
   buf = dump_buf_get();
-  if( (root = json_loads(buf, 0, &error)) == NULL ) {
-    /* This should only fail if we're out of memory or we passed an
-     * buf. */
-    fprintf(stderr, "%s: json_loads(%s) failed.\n", __func__, buf);
-    fprintf(stderr, "\terror: source:%s:%d:%d: text:%s position:%d\n",
-            error.source, error.line, error.column, error.text, error.position);
-    return -1;
-  }
-
-  /* This should only fail if we're out of memory. */
-  json_buf = json_dumps(root, 0);
-  TEST(json_buf);
-  printf("%s\n", json_buf);
-  free(json_buf);
-  json_decref(root);
+  printf("%s\n", buf);
 
   return 0;
 }

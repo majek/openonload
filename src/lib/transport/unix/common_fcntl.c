@@ -239,6 +239,16 @@ int citp_sock_fcntl(citp_sock_fdi *epi, int fd, int cmd, long arg)
     if( rc < 0 )
       break;
 
+    if( cmd == F_GETFD ) {
+      arg = rc;
+      if( ! (arg & FD_CLOEXEC) !=
+          ! (s->b.sb_aflags & CI_SB_AFLAG_O_CLOEXEC) ) {
+        Log_U(ci_log("F_GETFD: unexpected CLOEXEC settings: "
+                     "expecting %s, got %s",
+                     s->b.sb_aflags & CI_SB_AFLAG_O_CLOEXEC ? "on" : "off",
+                     arg & FD_CLOEXEC ? "on" : "off"));
+      }
+    }
     ci_atomic32_merge(&s->b.sb_aflags,
                       arg & FD_CLOEXEC ? CI_SB_AFLAG_O_CLOEXEC : 0,
                       CI_SB_AFLAG_O_CLOEXEC);

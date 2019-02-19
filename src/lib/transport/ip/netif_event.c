@@ -34,6 +34,7 @@
 #include <etherfabric/vi.h>
 #include <ci/internal/pio_buddy.h>
 
+#include <linux/ip.h>
 #ifdef __KERNEL__
 #include <linux/time.h>
 #else
@@ -43,6 +44,26 @@
 #define SAMPLE(n) (n)
 
 #define LPF "netif: "
+
+enum {
+  FUTURE_DROP = 0x01,
+  FUTURE_IP4  = 0x02,
+  FUTURE_IP6  = 0x04,
+  FUTURE_TCP  = 0x08, /* else TCP */
+
+  FUTURE_NONE = 0,
+  FUTURE_UDP4 = FUTURE_IP4,
+  FUTURE_UDP6 = FUTURE_IP6,
+  FUTURE_TCP4 = FUTURE_IP4 | FUTURE_TCP, /* TCP/IP6 is not accelerated yet */
+};
+
+
+struct oo_rx_future {
+  union {
+    /* Protocol-specific states of partially handled packet go here */
+    struct ci_tcp_rx_future tcp;
+  };
+};
 
 
 struct oo_rx_state {
@@ -121,6 +142,165 @@ static void ci_parse_rx_vlan(ci_ip_pkt_fmt* pkt)
 }
 
 
+#if CI_CFG_PROC_DELAY
+
+# if ! CI_CFG_TIMESTAMPING
+#  error CI_CFG_PROC_DELAY requires CI_CFG_TIMESTAMPING
+# endif
+
+
+#ifndef __KERNEL__
+static void frc_resync(ci_netif* ni)
+{
+  uint64_t after_frc, cost;
+  struct timespec ts;
+
+  if( ni->state->sync_cost == 0 ) {
+    /* First time: Measure sync_cost and set other params. */
+    int i;
+    ni->state->max_frc_diff = (ci_int64) IPTIMER_STATE(ni)->khz * 1000;
+    for( i = 0; i < 10; ++i ) {
+      ci_frc64(&ni->state->sync_frc);
+      clock_gettime(CLOCK_REALTIME, &ts);
+      ci_frc64(&after_frc);
+      cost = after_frc - ni->state->sync_frc;
+      if( i == 0 )
+        ni->state->sync_cost = cost;
+      else
+        ni->state->sync_cost = CI_MIN(ni->state->sync_cost, cost);
+    }
+  }
+
+  /* Determine correspondence between frc and host clock. */
+  do {
+    ci_frc64(&ni->state->sync_frc);
+    clock_gettime(CLOCK_REALTIME, &ts);
+    ci_frc64(&after_frc);
+  } while( after_frc - ni->state->sync_frc > ni->state->sync_cost * 3 );
+
+  ni->state->sync_ns = ts.tv_sec * 1000000000 + ts.tv_nsec;
+}
+#endif
+
+
+static void measure_processing_delay(ci_netif* ni, struct timespec pkt_ts,
+                                     unsigned sync_flags)
+{
+  const ci_ip_timer_state* its = IPTIMER_STATE(ni);
+  const unsigned in_sync =
+    EF_VI_SYNC_FLAG_CLOCK_IN_SYNC | EF_VI_SYNC_FLAG_CLOCK_SET;
+  ci_uint64 pkt_ns, stack_ns;
+  ci_int64 frc_diff;
+
+  if(CI_UNLIKELY( (sync_flags & in_sync) != in_sync ))
+    return;
+
+  frc_diff = its->frc - ni->state->sync_frc;
+  if( frc_diff > ni->state->max_frc_diff ) {
+    /* Ensure we keep a reasonable correspondence between frc and real
+     * time.  We only do this in user-space because that is convenient.
+     */
+#ifdef __KERNEL__
+    return;
+#else
+    frc_resync(ni);
+    frc_diff = its->frc - ni->state->sync_frc;
+#endif
+  }
+
+  stack_ns = ni->state->sync_ns + frc_diff * 1000000 / its->khz;
+  pkt_ns = (ci_uint64) pkt_ts.tv_sec * 1000000000 + pkt_ts.tv_nsec;
+
+  if( stack_ns >= pkt_ns ) {
+    ci_uint64 delay_ns = stack_ns - pkt_ns;
+    ci_uint64 delay = delay_ns >> CI_CFG_PROC_DELAY_NS_SHIFT;
+    if( delay == 0 ) {
+      ++(ni->state->proc_delay_hist[0]);
+    }
+    else {
+      int n_buckets = (sizeof(ni->state->proc_delay_hist) /
+                       sizeof(ni->state->proc_delay_hist[0]));
+      int bucket_i = 63 - __builtin_clzll(delay);
+      if( bucket_i < n_buckets )
+        ++(ni->state->proc_delay_hist[bucket_i]);
+      else
+        ++(ni->state->proc_delay_hist[n_buckets - 1]);
+      if( delay > ni->state->proc_delay_max )
+        ni->state->proc_delay_max = delay;
+    }
+  }
+  else {
+    ci_uint64 delay_ns = pkt_ns - stack_ns;
+    ci_uint64 delay = delay_ns >> CI_CFG_PROC_DELAY_NS_SHIFT;
+    ++(ni->state->proc_delay_negative);
+    if( delay > ni->state->proc_delay_min )
+      ni->state->proc_delay_min = delay;
+  }
+}
+
+#else
+
+static inline void measure_processing_delay(ci_netif* ni,
+                                            struct timespec pkt_ts,
+                                            unsigned sync_flags)
+{
+}
+
+#endif
+
+
+int ci_ip_options_parse(ci_netif* netif, ci_ip4_hdr* ip, const int hdr_size)
+{
+  int error = 0;
+
+  char* options = (char*) ip + sizeof(ci_ip4_hdr);
+  char* opt_end = (char*) ip + hdr_size;
+  while( *options != IPOPT_EOL && options < opt_end && ! error ) {
+    switch( (ci_uint8) *options ) {
+    case IPOPT_NOP:
+      ++options;
+      break;
+    case IPOPT_RR: /* Record Packet Route */
+    case IPOPT_TS: /* Time-stamp */
+    case IPOPT_SEC: /* Security */
+    case IPOPT_SID: /* Stream ID */
+      if( options[1] < IPOPT_MINOFF || options[1] > opt_end - options ) {
+        LOG_U( log(LPF "[%d] IP Option invalid offset; type=%u(op:%u), "
+                   "offset=%u", netif->state->stack_id, (ci_uint8) *options,
+                   (ci_uint8) (0x1f & *options), (ci_uint8) options[1]) );
+        error = 1;
+      }
+      else {
+        options += options[1];
+      }
+      break;
+    case IPOPT_SSRR: /* Strict Source Routing */
+    case IPOPT_LSRR: /* Loose Source Routing */
+      LOG_U( log(LPF "[%d] IP Options: Source Routing unsupported; "
+                 "type=%u(op:%u)", netif->state->stack_id, (ci_uint8) *options,
+                 (ci_uint8) (0x1f & *options)) );
+      error = 1;
+      break;
+    default:
+      LOG_U( log(LPF "[%d] IP Option unsupported; type=%u(op:%u)",
+                 netif->state->stack_id, (ci_uint8) *options,
+                 (ci_uint8) (0x1f & *options)) );
+      error = 1;
+      break;
+    }
+  }
+
+  if( error ) {
+    CITP_STATS_NETIF_INC(netif, rx_discard_ip_options_bad);
+    CI_IPV4_STATS_INC_IN_HDR_ERRS(netif);
+  }
+  else {
+    CITP_STATS_NETIF_INC(netif, ip_options);
+  }
+
+  return error;
+}
+
 static void handle_rx_pkt(ci_netif* netif, struct ci_netif_poll_state* ps,
                           ci_ip_pkt_fmt* pkt)
 {
@@ -129,23 +309,27 @@ static void handle_rx_pkt(ci_netif* netif, struct ci_netif_poll_state* ps,
    * length of the whole frame.  Each scatter fragment has its [buf] field
    * initialised with the delivered frame payload.
    */
-  int not_fast, ip_paylen, ip_tot_len;
-  ci_ip4_hdr *ip;
+  int not_fast, ip_paylen, hdr_size;
+
   ci_uint16 ether_type = *((ci_uint16*)oo_l3_hdr(pkt) - 1);
 
   ci_assert_nequal(pkt->pkt_eth_payload_off, 0xff);
-
-  ip = oo_ip_hdr(pkt);
-  LOG_NR(log(LPF "RX id=%d ip_proto=0x%x", OO_PKT_FMT(pkt),
-             (unsigned) ip->ip_protocol));
-  LOG_AR(ci_analyse_pkt(PKT_START(pkt), pkt->pay_len));
 
 #if CI_CFG_RANDOM_DROP && !defined(__KERNEL__)
   if( CI_UNLIKELY(rand() < NI_OPTS(netif).rx_drop_rate) )  goto drop;
 #endif
 
+  pkt->tstamp_frc = IPTIMER_STATE(netif)->frc;
+
   /* Is this an IP packet? */
   if(CI_LIKELY( ether_type == CI_ETHERTYPE_IP )) {
+    int ip_tot_len;
+    ci_ip4_hdr *ip = oo_ip_hdr(pkt);
+
+    LOG_NR(log(LPF "RX id=%d ip_proto=0x%x", OO_PKT_FMT(pkt),
+               (unsigned) ip->ip_protocol));
+    LOG_AR(ci_analyse_pkt(PKT_START(pkt), pkt->pay_len));
+
     CI_IPV4_STATS_INC_IN_RECVS( netif );
 
     /* Do the byte-swap just once! */
@@ -157,14 +341,20 @@ static void handle_rx_pkt(ci_netif* netif, struct ci_netif_poll_state* ps,
     if( oo_tcpdump_check(netif, pkt, pkt->intf_i) )
       oo_tcpdump_dump_pkt(netif, pkt);
 
-    /* Hardware will not deliver us fragments.  Check for IP options and
-    ** valid IP length. */
-    not_fast = ((ip->ip_ihl_version-CI_IP4_IHL_VERSION(sizeof(*ip))) |
-                (ip_tot_len > pkt->pay_len - oo_pre_l3_len(pkt)));
+    /* Hardware will not deliver us fragments.  Check for valid IP length.*/
+    not_fast = ip_tot_len > pkt->pay_len - oo_pre_l3_len(pkt);
+
     /* NB. If you want to check for fragments, add this:
     **
     **  (ip->ip_frag_off_be16 & ~CI_IP4_FRAG_DONT)
     */
+
+    hdr_size = CI_IP4_IHL(ip);
+    /* Accepting but ignoring IP options.
+    ** Quick parse to check there is no badness
+     */
+    if(CI_UNLIKELY( hdr_size > sizeof(ci_ip4_hdr) && ! not_fast ))
+      not_fast = ci_ip_options_parse(netif, ip, hdr_size);
 
     /* We are not checking for certain other illegalities here (invalid
     ** source address and short IP length).  That's because in some cases
@@ -173,13 +363,13 @@ static void handle_rx_pkt(ci_netif* netif, struct ci_netif_poll_state* ps,
     */
 
     if( CI_LIKELY(not_fast == 0) ) {
-      char* payload = (char*) ip + sizeof(ci_ip4_hdr);
+      char* payload = (char*) ip + hdr_size;
 #if CI_CFG_TIMESTAMPING
       ci_netif_state_nic_t* nsn = &netif->state->nic[pkt->intf_i];
       struct timespec stamp;
 #endif
 
-      ip_paylen = (int) ip_tot_len - sizeof(ci_ip4_hdr);
+      ip_paylen = ip_tot_len - hdr_size;
       /* This will go negative if the ip_tot_len was too small even
       ** for the IP header.  The ULP is expected to notice...
       */
@@ -201,6 +391,8 @@ static void handle_rx_pkt(ci_netif* netif, struct ci_netif_poll_state* ps,
           nsn->last_rx_timestamp.tv_sec = stamp.tv_sec;
           nsn->last_rx_timestamp.tv_nsec = stamp.tv_nsec;
           nsn->last_sync_flags = sync_flags;
+
+          measure_processing_delay(netif, stamp, sync_flags);
 
           LOG_NR(log(LPF "RX id=%d timestamp: %lu.%09lu sync %d",
               OO_PKT_FMT(pkt), stamp.tv_sec, stamp.tv_nsec, sync_flags));
@@ -232,25 +424,28 @@ static void handle_rx_pkt(ci_netif* netif, struct ci_netif_poll_state* ps,
         pkt->pf.udp.rx_hw_stamp.tv_sec = stamp.tv_sec;
         pkt->pf.udp.rx_hw_stamp.tv_nsec = stamp.tv_nsec;
 #endif
-        ci_udp_handle_rx(netif, pkt, (ci_udp_hdr*) payload, ip_paylen);
+        ci_udp_handle_rx(netif, pkt, (ci_udp_hdr*) payload, ip_paylen,
+                         CI_ETHERTYPE_IP);
         CI_IPV4_STATS_INC_IN_DELIVERS( netif );
         return;
       }
 #endif
 
-      LOG_U(log(LPF "IGNORE IP protocol=%d", (int) ip->ip_protocol));
-      return;
+      LOG_U(CI_RLLOG(10, LPF "IGNORE IP protocol=%d",
+                     (int) ip->ip_protocol));
+    }
+    else {
+      /*! \todo IP slow path.  Don't want to deal with this yet. */
+      LOG_U(CI_RLLOG(10, LPF "[%d] IP HARD "
+                     "(ihl_ver=%x ihl=%d frag=%x ip_len=%d frame_len=%d)"
+                     PKT_DBG_FMT,
+                     netif->state->stack_id,
+                     (int) ip->ip_ihl_version, (int) CI_IP4_IHL(ip),
+                     (unsigned) ip->ip_frag_off_be16,
+                     ip_tot_len, pkt->pay_len, PKT_DBG_ARGS(pkt)));
+      LOG_DU(ci_hex_dump(ci_log_fn, PKT_START(pkt), 64, 0));
     }
 
-    /*! \todo IP slow path.  Don't want to deal with this yet. */
-    LOG_U(log(LPF "[%d] IP HARD "
-              "(ihl_ver=%x ihl=%d frag=%x ip_len=%d frame_len=%d)"
-              PKT_DBG_FMT,
-              netif->state->stack_id,
-              (int) ip->ip_ihl_version, (int) CI_IP4_IHL(ip),
-              (unsigned) ip->ip_frag_off_be16,
-              ip_tot_len, pkt->pay_len, PKT_DBG_ARGS(pkt)));
-    LOG_DU(ci_hex_dump(ci_log_fn, PKT_START(pkt), 64, 0));
     CI_IPV4_STATS_INC_IN_DISCARDS( netif );
     if( ci_netif_pkt_pass_to_kernel(netif, pkt) )
       CITP_STATS_NETIF_INC(netif, no_match_pass_to_kernel_ip_other);
@@ -258,13 +453,33 @@ static void handle_rx_pkt(ci_netif* netif, struct ci_netif_poll_state* ps,
       ci_netif_pkt_release_rx_1ref(netif, pkt);
     return;
   }
+#if CI_CFG_IPV6
+  else
+  {
+    if(CI_LIKELY( ether_type == CI_ETHERTYPE_IP6 )) {
+      ci_ip6_hdr *ip6_hdr = oo_ip6_hdr(pkt);
+      void *payload = ip6_hdr + 1;
+
+      LOG_NR(log(LPF "RX id=%d ip6_proto=0x%x", OO_PKT_FMT(pkt),
+                 ip6_hdr->next_hdr));
+
+      if( ip6_hdr->next_hdr == IPPROTO_UDP ) {
+        ci_udp_handle_rx(netif, pkt, (ci_udp_hdr*) payload,
+                         CI_BSWAP_BE16(ip6_hdr->payload_len),
+                         CI_ETHERTYPE_IP6);
+        return;
+      }
+    }
+  }
+#endif
 
   if( ci_netif_pkt_pass_to_kernel(netif, pkt) ) {
     CITP_STATS_NETIF_INC(netif, no_match_pass_to_kernel_non_ip);
   }
   else {
-    LOG_U(log(LPF "UNEXPECTED ether_type "PKT_DBG_FMT, PKT_DBG_ARGS(pkt));
-          ci_hex_dump(ci_log_fn, PKT_START(pkt), 64, 0));
+    LOG_U(CI_RLLOG(10, LPF "UNEXPECTED ether_type "PKT_DBG_FMT,
+                   PKT_DBG_ARGS(pkt)));
+    LOG_DU(ci_hex_dump(ci_log_fn, PKT_START(pkt), 64, 0));
     ci_netif_pkt_release_rx_1ref(netif, pkt);
   }
   return;
@@ -276,6 +491,235 @@ static void handle_rx_pkt(ci_netif* netif, struct ci_netif_poll_state* ps,
   ci_netif_pkt_release_rx_1ref(netif, pkt);
   return;
 #endif
+}
+
+
+/* Partially handle an incoming packet before its completion event. */
+ci_inline int handle_rx_pre_future(ci_netif* ni, ci_ip_pkt_fmt* pkt,
+                                   struct oo_rx_future* future)
+{
+  /* On entry: [pkt] contains the first cache line of an incoming packet.
+   * [pkt->frag_next] and [pkt->pay_len] may be invalid.
+   */
+  ci_uint16 ether_type;
+  int valid_bytes = CI_CACHE_LINE_SIZE - pkt->pkt_start_off;
+
+#if CI_CFG_RANDOM_DROP && !defined(__KERNEL__)
+  if(CI_UNLIKELY( rand() < NI_OPTS(ni).rx_drop_rate )) {
+    LOG_NR(log(LPF "DROP"));
+    LOG_DR(ci_hex_dump(ci_log_fn, pkt, 40, 0));
+    return FUTURE_DROP;
+  }
+#endif
+
+  ci_assert_le(ETH_HLEN + ETH_VLAN_HLEN, valid_bytes);
+  ci_parse_rx_vlan(pkt);
+  ci_assert_le(pkt->pkt_eth_payload_off, valid_bytes);
+
+  ether_type = *((ci_uint16*)oo_l3_hdr(pkt) - 1);
+  pkt->tstamp_frc = IPTIMER_STATE(ni)->frc;
+
+  if( ether_type == CI_ETHERTYPE_IP ) {
+    ci_ip4_hdr *ip = oo_ip_hdr(pkt);
+    int hdr_size = CI_IP4_IHL(ip);
+    int ip_tot_len = CI_BSWAP_BE16(ip->ip_tot_len_be16);
+    int ip_paylen = ip_tot_len - hdr_size;
+    int ip_payload_offset = pkt->pkt_eth_payload_off + hdr_size;
+    void* payload = (char*)ip + hdr_size;
+#if CI_CFG_TIMESTAMPING
+    ci_netif_state_nic_t* nsn = &ni->state->nic[pkt->intf_i];
+    struct timespec stamp;
+#endif
+
+    if( ip_payload_offset > valid_bytes ||
+        (hdr_size > sizeof(ci_ip4_hdr) &&
+         ci_ip_options_parse(ni, ip, hdr_size)) )
+      goto no_future;
+
+    CI_IPV4_STATS_INC_IN_RECVS( ni );
+
+#if CI_CFG_TIMESTAMPING
+    if( nsn->oo_vi_flags & OO_VI_FLAGS_RX_HW_TS_EN ) {
+      unsigned sync_flags;
+      int rc = ef_vi_receive_get_timestamp_with_sync_flags
+        (&ni->nic_hw[pkt->intf_i].vi,
+         PKT_START(pkt) - nsn->rx_prefix_len, &stamp, &sync_flags);
+      if( rc == 0 ) {
+        int tsf = (NI_OPTS(ni).timestamping_reporting &
+                   CITP_TIMESTAMPING_RECORDING_FLAG_CHECK_SYNC) ?
+                  EF_VI_SYNC_FLAG_CLOCK_IN_SYNC :
+                  EF_VI_SYNC_FLAG_CLOCK_SET;
+        stamp.tv_nsec =
+                  (stamp.tv_nsec & ~CI_IP_PKT_HW_STAMP_FLAG_IN_SYNC) |
+                  ((sync_flags & tsf) ? CI_IP_PKT_HW_STAMP_FLAG_IN_SYNC : 0);
+        nsn->last_rx_timestamp.tv_sec = stamp.tv_sec;
+        nsn->last_rx_timestamp.tv_nsec = stamp.tv_nsec;
+        nsn->last_sync_flags = sync_flags;
+
+        measure_processing_delay(ni, stamp, sync_flags);
+
+        LOG_NR(log(LPF "RX id=%d timestamp: %lu.%09lu sync %d",
+                   OO_PKT_FMT(pkt), stamp.tv_sec, stamp.tv_nsec, sync_flags));
+      } else {
+        LOG_NR(log(LPF "RX id=%d missing timestamp", OO_PKT_FMT(pkt)));
+        stamp.tv_sec = 0;
+      }
+    }
+    else {
+      stamp.tv_sec = 0;
+      /* no need to set tv_nsec to 0 here as socket layer ignores
+       * timestamps when tv_sec is 0
+       */
+    }
+#endif
+
+    if( ip->ip_protocol == IPPROTO_TCP ) {
+#if CI_CFG_TIMESTAMPING
+      pkt->pf.tcp_rx.rx_hw_stamp.tv_sec = stamp.tv_sec;
+      pkt->pf.tcp_rx.rx_hw_stamp.tv_nsec = stamp.tv_nsec;
+#endif
+      CI_IPV4_STATS_INC_IN_DELIVERS( ni );
+      if( ip_payload_offset + sizeof(ci_tcp_hdr) <= valid_bytes )
+        ci_tcp_handle_rx_pre_future(ni, pkt, payload, ip_paylen, &future->tcp);
+      else
+        future->tcp.socket = NULL;
+      return FUTURE_TCP4;
+    }
+#if CI_CFG_UDP
+    if(CI_LIKELY( ip->ip_protocol == IPPROTO_UDP )) {
+#if CI_CFG_TIMESTAMPING
+      pkt->pf.udp.rx_hw_stamp.tv_sec = stamp.tv_sec;
+      pkt->pf.udp.rx_hw_stamp.tv_nsec = stamp.tv_nsec;
+#endif
+      /* We should also do some protocol handling now */
+      CI_IPV4_STATS_INC_IN_DELIVERS( ni );
+      return FUTURE_UDP4;
+    }
+#endif
+    LOG_U(log(LPF "IGNORE IP protocol=%d", (int) ip->ip_protocol));
+    return FUTURE_DROP;
+  }
+#if CI_CFG_IPV6
+  if(CI_LIKELY( ether_type == CI_ETHERTYPE_IP6 )) {
+    ci_ip6_hdr *ip6_hdr = oo_ip6_hdr(pkt);
+    if( ip6_hdr->next_hdr == IPPROTO_UDP ) {
+      /* We should also do some protocol handling now */
+      return FUTURE_UDP6;
+    }
+  }
+#endif
+no_future:
+  CI_DEBUG(pkt->pkt_eth_payload_off = 0xff);
+  return FUTURE_NONE;
+}
+
+
+/* Undo partial handling of a packet which did not complete successfully. */
+ci_inline void rollback_rx_future(ci_netif* ni, ci_ip_pkt_fmt* pkt, int status,
+                                  struct oo_rx_future* future)
+{
+  CITP_STATS_NETIF_INC(ni, rx_future_rollback);
+
+  ci_assert_nequal(status, FUTURE_NONE);
+  CI_DEBUG(pkt->pkt_eth_payload_off = 0xff);
+
+  /* Should we add official macros to decrease these counters? */
+  CITP_STATS_NETIF_ADD(ni, rx_evs, -1);
+  if( status & FUTURE_IP4 ) {
+    __CI_NETIF_STATS_DEC(ni, ipv4, in_recvs);
+    __CI_NETIF_STATS_DEC(ni, ipv4, in_delivers);
+  }
+  if( status & FUTURE_TCP )
+    ci_tcp_rollback_rx_future(ni, &future->tcp);
+}
+
+
+/* Finish handling a partially handled packet after its completion event. */
+ci_inline void handle_rx_post_future(ci_netif* ni,
+                                     struct ci_netif_poll_state* ps,
+                                     ci_ip_pkt_fmt* pkt, int status,
+                                     struct oo_rx_future* future)
+{
+  /* On entry: see handle_rx_pkt */
+  ci_assert_nequal(status, FUTURE_NONE);
+
+  if(CI_LIKELY( status & FUTURE_IP4 )) {
+    int ip_tot_len;
+    ci_ip4_hdr *ip = oo_ip_hdr(pkt);
+
+    LOG_NR(log(LPF "RX id=%d ip_proto=0x%x", OO_PKT_FMT(pkt),
+               (unsigned) ip->ip_protocol));
+    LOG_AR(ci_analyse_pkt(PKT_START(pkt), pkt->pay_len));
+
+    /* Do the byte-swap just once! */
+    ip_tot_len = CI_BSWAP_BE16(ip->ip_tot_len_be16);
+
+    LOG_DR(ci_hex_dump(ci_log_fn, PKT_START(pkt),
+                       ip_pkt_dump_len(ip_tot_len), 0));
+
+    if( oo_tcpdump_check(ni, pkt, pkt->intf_i) )
+      oo_tcpdump_dump_pkt(ni, pkt);
+
+    /* Hardware will not deliver us fragments.  Check for valid IP length.*/
+    /* NB. If you want to check for fragments, add this:
+    **
+    **  (ip->ip_frag_off_be16 & ~CI_IP4_FRAG_DONT)
+    **
+    ** We are not checking for certain other illegalities here (invalid
+    ** source address and short IP length).  That's because in some cases
+    ** they can be checked for free in the transport.  It is the
+    ** transport's responsibility to check these as necessary.
+    */
+    if(CI_LIKELY( ip_tot_len <= pkt->pay_len - oo_pre_l3_len(pkt) )) {
+      int hdr_size = CI_IP4_IHL(ip);
+      void* payload = (char*) ip + hdr_size;
+      int len = ip_tot_len - hdr_size;
+      /* This will go negative if the ip_tot_len was too small even
+      ** for the IP header.  The ULP is expected to notice...
+      */
+
+      /* Demux to appropriate protocol. */
+      if(CI_LIKELY( status & FUTURE_TCP ))
+        ci_tcp_handle_rx_post_future(ni, ps, pkt, payload, len, &future->tcp);
+#if CI_CFG_UDP
+      else
+        ci_udp_handle_rx(ni, pkt, payload, len, CI_ETHERTYPE_IP);
+#endif
+    }
+    else {
+      rollback_rx_future(ni, pkt, status, future);
+      LOG_U(log(LPF "[%d] IP HARD "
+                "(ihl_ver=%x ihl=%d frag=%x ip_len=%d frame_len=%d)"
+                PKT_DBG_FMT,
+                ni->state->stack_id,
+                (int) ip->ip_ihl_version, (int) CI_IP4_IHL(ip),
+                (unsigned) ip->ip_frag_off_be16,
+                ip_tot_len, pkt->pay_len, PKT_DBG_ARGS(pkt)));
+      LOG_DU(ci_hex_dump(ci_log_fn, PKT_START(pkt), 64, 0));
+      CI_IPV4_STATS_INC_IN_DISCARDS( ni );
+      if( ci_netif_pkt_pass_to_kernel(ni, pkt) )
+        CITP_STATS_NETIF_INC(ni, no_match_pass_to_kernel_ip_other);
+      else
+        ci_netif_pkt_release_rx_1ref(ni, pkt);
+    }
+  }
+#if CI_CFG_IPV6
+  else if(CI_LIKELY( status == FUTURE_UDP6 )) {
+    ci_ip6_hdr *ip6_hdr = oo_ip6_hdr(pkt);
+    void *payload = ip6_hdr + 1;
+
+    LOG_NR(log(LPF "RX id=%d ip6_proto=0x%x", OO_PKT_FMT(pkt),
+               ip6_hdr->next_hdr));
+
+    ci_udp_handle_rx(ni, pkt, (ci_udp_hdr*) payload,
+                     CI_BSWAP_BE16(ip6_hdr->payload_len),
+                     CI_ETHERTYPE_IP6);
+  }
+#endif
+  else {
+    ci_assert_equal(status, FUTURE_DROP);
+    ci_netif_pkt_release_rx_1ref(ni, pkt);
+  }
 }
 
 
@@ -363,13 +807,15 @@ static void handle_rx_scatter(ci_netif* ni, struct oo_rx_state* s,
  */
 static void handle_rx_scatter_merge(ci_netif* ni, struct oo_rx_state* s,
                                     ci_ip_pkt_fmt* pkt, int prefix_bytes,
-                                    int pkt_bytes, unsigned flags)
+                                    ef_vi* vi, unsigned flags)
 {
-  int full_buffer = CI_CFG_PKT_BUF_SIZE -
-                    CI_MEMBER_OFFSET(ci_ip_pkt_fmt, dma_start);
+  int full_buffer = ef_vi_receive_buffer_len(vi);
+  uint16_t pkt_bytes;
 
   s->rx_pkt = NULL;
   if( flags & EF_EVENT_FLAG_SOP ) {
+    ef_vi_receive_get_bytes(vi, pkt->dma_start, &pkt_bytes);
+
     /* First fragment. */
     ci_assert(s->frag_pkt == NULL);
     ci_assert_gt(pkt_bytes, full_buffer - prefix_bytes);
@@ -382,7 +828,7 @@ static void handle_rx_scatter_merge(ci_netif* ni, struct oo_rx_state* s,
   }
   else {
     ci_assert(s->frag_pkt != NULL);
-    ci_assert_gt(pkt_bytes, full_buffer - prefix_bytes);
+    ci_assert_gt(s->frag_bytes, full_buffer - prefix_bytes);
 
     if( flags & EF_EVENT_FLAG_CONT ) {
       /* Middle fragment. */
@@ -435,7 +881,7 @@ static int handle_rx_csum_bad(ci_netif* ni, struct ci_netif_poll_state* ps,
 
   ip = oo_ip_hdr(pkt);
   ip_len = CI_BSWAP_BE16(ip->ip_tot_len_be16);
-  ip_paylen = ip_len - sizeof(ci_ip4_hdr);
+  ip_paylen = ip_len - CI_IP4_IHL(ip);
   /* Strictly speaking, we should validate the IP checksum before relying on
    * the protocol field, but nothing will go wrong in the event that it's
    * invalid. */
@@ -443,7 +889,7 @@ static int handle_rx_csum_bad(ci_netif* ni, struct ci_netif_poll_state* ps,
                                                    sizeof(ci_tcp_hdr);
 
   /* Check that we have a full-length transport-layer header. */
-  if( pkt->pay_len < oo_pre_l3_len(pkt) + sizeof(ci_ip4_hdr) + min_ip_paylen ) {
+  if( pkt->pay_len < oo_pre_l3_len(pkt) + CI_IP4_IHL(ip) + min_ip_paylen ) {
     CI_IPV4_STATS_INC_IN_HDR_ERRS(ni);
     LOG_U(log(FN_FMT "BAD min_ip_paylen=%d frame_len=%d",
               FN_PRI_ARGS(ni), min_ip_paylen, pkt->pay_len));
@@ -754,7 +1200,6 @@ static void ci_netif_tx_pkt_complete_udp(ci_netif* netif,
 {
   ci_udp_state* us;
   oo_pkt_p frag_next;
-  int n_buffers = pkt->n_buffers;
 
   ci_assert(oo_ip_hdr(pkt)->ip_protocol == IPPROTO_UDP);
 
@@ -798,11 +1243,6 @@ static void ci_netif_tx_pkt_complete_udp(ci_netif* netif,
     if( OO_PP_IS_NULL(frag_next) )
       break;
     pkt = PKT_CHK(netif, frag_next);
-    /* Is it next IP fragment? */
-    if( n_buffers == 1 )
-      n_buffers = pkt->n_buffers;
-    else
-      n_buffers--;
   }
 }
 
@@ -892,14 +1332,14 @@ void ci_netif_tx_pkt_complete(ci_netif* ni, struct ci_netif_poll_state* ps,
 
 
 static int ci_netif_poll_evq(ci_netif* ni, struct ci_netif_poll_state* ps,
-                             int intf_i)
+                             int intf_i, int n_evs)
 {
   struct oo_rx_state s;
   ef_vi* evq = &ni->nic_hw[intf_i].vi;
   unsigned total_evs = 0;
   ci_ip_pkt_fmt* pkt;
   ef_event *ev = ni->events;
-  int i, n_evs;
+  int i;
   oo_pkt_p pp;
   int completed_tx = 0;
 
@@ -914,11 +1354,15 @@ static int ci_netif_poll_evq(ci_netif* ni, struct ci_netif_poll_state* ps,
     CI_DEBUG(pkt->pay_len = -1);
   }
 
+  if( n_evs != 0 )
+    goto have_events;
+
   do {
     n_evs = ef_eventq_poll(evq, ev, sizeof(ni->events) / sizeof(ev[0]));
     if( n_evs == 0 )
       break;
 
+have_events:
     s.rx_pkt = NULL;
     for( i = 0; i < n_evs; ++i ) {
       /* Look for RX events first to minimise latency. */
@@ -967,7 +1411,6 @@ static int ci_netif_poll_evq(ci_netif* ni, struct ci_netif_poll_state* ps,
       else if( EF_EVENT_TYPE(ev[i]) == EF_EVENT_TYPE_RX_MULTI ) {
         ef_request_id *ids = ni->rx_events;
         int n_ids, j;
-        uint16_t len;
         ef_vi* vi = CI_NETIF_RX_VI(ni, intf_i, ev[i].rx.q_id);
         CITP_STATS_NETIF_INC(ni, rx_evs);
         n_ids = ef_vi_receive_unbundle(vi, &ev[i], ids);
@@ -983,16 +1426,16 @@ static int ci_netif_poll_evq(ci_netif* ni, struct ci_netif_poll_state* ps,
             ci_parse_rx_vlan(s.rx_pkt);
             handle_rx_pkt(ni, ps, s.rx_pkt);
           }
-          ef_vi_receive_get_bytes(vi, pkt->dma_start, &len);
           if( (ev[i].rx_multi.flags & (EF_EVENT_FLAG_SOP | EF_EVENT_FLAG_CONT))
                == EF_EVENT_FLAG_SOP ) {
             /* Whole packet in a single buffer. */
-            pkt->pay_len = len;
+            ef_vi_receive_get_bytes(vi, pkt->dma_start,
+                                    (uint16_t*)&pkt->pay_len);
             oo_offbuf_init(&pkt->buf, PKT_START(pkt), pkt->pay_len);
             s.rx_pkt = pkt;
           }
           else {
-            handle_rx_scatter_merge(ni, &s, pkt, evq->rx_prefix_len, len,
+            handle_rx_scatter_merge(ni, &s, pkt, evq->rx_prefix_len, vi,
                                     ev[i].rx_multi.flags);
           }
         }
@@ -1036,7 +1479,7 @@ static int ci_netif_poll_evq(ci_netif* ni, struct ci_netif_poll_state* ps,
       }
 
       else if( EF_EVENT_TYPE(ev[i]) == EF_EVENT_TYPE_OFLOW ) {
-        LOG_E(log(LPF "***** EVENT QUEUE OVERFLOW *****"));
+        LOG_E(CI_RLLOG(1, LPF "***** EVENT QUEUE OVERFLOW *****"));
         return 0;
       }
 
@@ -1120,7 +1563,7 @@ static int ci_netif_poll_intf(ci_netif* ni, int intf_i, int max_evs)
   ps.tx_pkt_free_list_n = 0;
 
   do {
-    rc = ci_netif_poll_evq(ni, &ps, intf_i);
+    rc = ci_netif_poll_evq(ni, &ps, intf_i, 0);
     if( rc > 0 ) {
       total_evs += rc;
       process_post_poll_list(ni);
@@ -1161,7 +1604,7 @@ int ci_netif_poll_intf_fast(ci_netif* ni, int intf_i, ci_uint64 now_frc)
     ps.tx_pkt_free_list_insert = &ps.tx_pkt_free_list;
     ps.tx_pkt_free_list_n = 0;
     ++ni->state->in_poll;
-    if( (rc = ci_netif_poll_evq(ni, &ps, intf_i)) ) {
+    if( (rc = ci_netif_poll_evq(ni, &ps, intf_i, 0)) ) {
       process_post_poll_list(ni);
       ni->state->poll_work_outstanding = 1;
     }
@@ -1175,6 +1618,80 @@ int ci_netif_poll_intf_fast(ci_netif* ni, int intf_i, ci_uint64 now_frc)
    * interleaves each fast one.
    */
   return ci_netif_poll_n(ni, NI_OPTS(ni).evs_per_poll);
+}
+
+
+int ci_netif_poll_intf_future(ci_netif* ni, int intf_i, ci_uint64 start_frc)
+{
+  int i, rc = 0, n_evs, status;
+  struct oo_rx_future future;
+  ci_uint64 now_frc, max_spin;
+  ef_vi* evq = &ni->nic_hw[intf_i].vi;
+  ef_event* ev = ni->events;
+  struct ci_netif_poll_state ps;
+  ci_ip_pkt_fmt* pkt;
+
+  ci_assert(ci_netif_is_locked(ni));
+  ci_assert(ni->state->in_poll == 0);
+
+  pkt = ci_netif_intf_next_rx_pkt(ni, intf_i);
+  if( pkt == NULL || ci_netif_rx_pkt_is_poisoned(pkt) )
+    return 0;
+
+  ci_assert_equal(pkt->intf_i, intf_i);
+
+  status = handle_rx_pre_future(ni, pkt, &future);
+  if( status == FUTURE_NONE )
+    return 0;
+
+  CITP_STATS_NETIF_INC(ni, rx_future);
+
+  ps.tx_pkt_free_list_insert = &ps.tx_pkt_free_list;
+  ps.tx_pkt_free_list_n = 0;
+
+  /* We expect the completion event within a microsecond or so. The timeout
+   * of 100us is to avoid wedging the stack in the case of hardware
+   * failure/removal or a bug which prevents us getting the event.
+   */
+  max_spin = IPTIMER_STATE(ni)->khz / 10000;
+  while( (n_evs = ef_eventq_poll(evq, ev, EF_VI_EVENT_POLL_MIN_EVS)) == 0 ) {
+    ci_frc64(&now_frc);
+    if( now_frc - start_frc > max_spin ) {
+      rollback_rx_future(ni, pkt, status, &future);
+      return 0;
+    }
+  }
+
+  ++ni->state->in_poll;
+  if( EF_EVENT_TYPE(ev[0]) == EF_EVENT_TYPE_RX ) {
+    ci_assert_equal(OO_PP_ID(OO_PKT_P(pkt)), EF_EVENT_RX_RQ_ID(ev[0]));
+    if( (ev[0].rx.flags & (EF_EVENT_FLAG_SOP | EF_EVENT_FLAG_CONT))
+                                                       == EF_EVENT_FLAG_SOP ) {
+      pkt->pay_len = EF_EVENT_RX_BYTES(ev[0]) - evq->rx_prefix_len;
+      oo_offbuf_init(&pkt->buf, PKT_START(pkt), pkt->pay_len);
+      handle_rx_post_future(ni, &ps, pkt, status, &future);
+      for( i = 1; i < n_evs; ++i )
+        ev[i - 1] = ev[i];
+      --n_evs;
+      rc = 1;
+      goto handled;
+    }
+  }
+  /* maybe handle other simple events like TX? */
+
+  rollback_rx_future(ni, pkt, status, &future);
+
+handled:
+  if( n_evs != 0 )
+    rc += ci_netif_poll_evq(ni, &ps, intf_i, n_evs);
+  if( rc != 0 ) {
+    process_post_poll_list(ni);
+    ni->state->poll_work_outstanding = 1;
+  }
+  --ni->state->in_poll;
+  if( ps.tx_pkt_free_list_n )
+    ci_netif_poll_free_pkts(ni, &ps);
+  return rc;
 }
 
 
@@ -1221,11 +1738,12 @@ static void ci_netif_loopback_pkts_send(ci_netif* ni)
     oo_offbuf_init(&pkt->buf, PKT_START(pkt), pkt->buf_len);
     pkt->intf_i = OO_INTF_I_LOOPBACK;
     pkt->flags &= CI_PKT_FLAG_NONB_POOL;
+    pkt->tstamp_frc = IPTIMER_STATE(ni)->frc;
     if( oo_tcpdump_check(ni, pkt, OO_INTF_I_LOOPBACK) )
       oo_tcpdump_dump_pkt(ni, pkt);
     pkt->next = OO_PP_NULL;
     ci_tcp_handle_rx(ni, NULL, pkt, (ci_tcp_hdr*)(ip + 1),
-                     CI_BSWAP_BE16(ip->ip_tot_len_be16) - sizeof(ci_ip4_hdr));
+                     CI_BSWAP_BE16(ip->ip_tot_len_be16) - CI_IP4_IHL(ip));
   }
 }
 

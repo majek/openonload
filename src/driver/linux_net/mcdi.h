@@ -119,17 +119,20 @@ struct efx_mcdi_cmd {
 
 /**
  * struct efx_mcdi_iface - MCDI protocol context
- * @efx: The associated NIC.
+ * @efx: The associated NIC
  * @iface_lock: Serialise access to this structure
- * @mode: Poll for mcdi completion, or wait for an mcdi_event.
- * @new_epoch: Indicates start of day or start of MC reboot recovery
  * @cmd_list: List of outstanding and running commands
+ * @workqueue: Workqueue used for delayed processing
+ * @outstanding_cleanups: Count of cleanups
+ * @cmd_complete_wq: Waitqueue for command completion
  * @db_held_by: Command the MC doorbell is in use by
  * @seq_held_by: Command each sequence number is in use by
  * @prev_seq: The last used sequence number
- * @workqueue: Workqueue used for delayed processing
- * @logging_buffer: buffer that may be used to build MCDI tracing messages
- * @logging_enabled: whether to trace MCDI
+ * @prev_handle: The last used command handle
+ * @mode: Poll for mcdi completion, or wait for an mcdi_event
+ * @new_epoch: Indicates start of day or start of MC reboot recovery
+ * @logging_buffer: Buffer that may be used to build MCDI tracing messages
+ * @logging_enabled: Whether to trace MCDI
  */
 struct efx_mcdi_iface {
 	struct efx_nic *efx;
@@ -334,6 +337,70 @@ void efx_mcdi_sensor_event(struct efx_nic *efx, efx_qword_t *ev);
 			     MC_CMD_ ## _name5, _value5,		\
 			     MC_CMD_ ## _name6, _value6,		\
 			     MC_CMD_ ## _name7, _value7)
+#define MCDI_POPULATE_DWORD_8(_buf, _field, _name1, _value1,		\
+			      _name2, _value2, _name3, _value3,		\
+			      _name4, _value4, _name5, _value5,		\
+			      _name6, _value6, _name7, _value7,		\
+			      _name8, _value8)		\
+	EFX_POPULATE_DWORD_8(*_MCDI_DWORD(_buf, _field),		\
+			     MC_CMD_ ## _name1, _value1,		\
+			     MC_CMD_ ## _name2, _value2,		\
+			     MC_CMD_ ## _name3, _value3,		\
+			     MC_CMD_ ## _name4, _value4,		\
+			     MC_CMD_ ## _name5, _value5,		\
+			     MC_CMD_ ## _name6, _value6,		\
+			     MC_CMD_ ## _name7, _value7,		\
+			     MC_CMD_ ## _name8, _value8)
+#define MCDI_POPULATE_DWORD_9(_buf, _field, _name1, _value1,		\
+			      _name2, _value2, _name3, _value3,		\
+			      _name4, _value4, _name5, _value5,		\
+			      _name6, _value6, _name7, _value7,		\
+			      _name8, _value8, _name9, _value9)		\
+	EFX_POPULATE_DWORD_9(*_MCDI_DWORD(_buf, _field),		\
+			     MC_CMD_ ## _name1, _value1,		\
+			     MC_CMD_ ## _name2, _value2,		\
+			     MC_CMD_ ## _name3, _value3,		\
+			     MC_CMD_ ## _name4, _value4,		\
+			     MC_CMD_ ## _name5, _value5,		\
+			     MC_CMD_ ## _name6, _value6,		\
+			     MC_CMD_ ## _name7, _value7,		\
+			     MC_CMD_ ## _name8, _value8,		\
+			     MC_CMD_ ## _name9, _value9)
+#define MCDI_POPULATE_DWORD_10(_buf, _field, _name1, _value1,		\
+			       _name2, _value2, _name3, _value3,	\
+			       _name4, _value4, _name5, _value5,	\
+			       _name6, _value6, _name7, _value7,	\
+			       _name8, _value8, _name9, _value9,	\
+			       _name10, _value10)			\
+	EFX_POPULATE_DWORD_10(*_MCDI_DWORD(_buf, _field),		\
+			      MC_CMD_ ## _name1, _value1,		\
+			      MC_CMD_ ## _name2, _value2,		\
+			      MC_CMD_ ## _name3, _value3,		\
+			      MC_CMD_ ## _name4, _value4,		\
+			      MC_CMD_ ## _name5, _value5,		\
+			      MC_CMD_ ## _name6, _value6,		\
+			      MC_CMD_ ## _name7, _value7,		\
+			      MC_CMD_ ## _name8, _value8,		\
+			      MC_CMD_ ## _name9, _value9,		\
+			      MC_CMD_ ## _name10, _value10)
+#define MCDI_POPULATE_DWORD_11(_buf, _field, _name1, _value1,		\
+			       _name2, _value2, _name3, _value3,	\
+			       _name4, _value4, _name5, _value5,	\
+			       _name6, _value6, _name7, _value7,	\
+			       _name8, _value8, _name9, _value9,	\
+			       _name10, _value10, _name11, _value11)	\
+	EFX_POPULATE_DWORD_11(*_MCDI_DWORD(_buf, _field),		\
+			      MC_CMD_ ## _name1, _value1,		\
+			      MC_CMD_ ## _name2, _value2,		\
+			      MC_CMD_ ## _name3, _value3,		\
+			      MC_CMD_ ## _name4, _value4,		\
+			      MC_CMD_ ## _name5, _value5,		\
+			      MC_CMD_ ## _name6, _value6,		\
+			      MC_CMD_ ## _name7, _value7,		\
+			      MC_CMD_ ## _name8, _value8,		\
+			      MC_CMD_ ## _name9, _value9,		\
+			      MC_CMD_ ## _name10, _value10,		\
+			      MC_CMD_ ## _name11, _value11)
 #define MCDI_SET_QWORD(_buf, _field, _value)				\
 	do {								\
 		EFX_POPULATE_DWORD_1(_MCDI_DWORD(_buf, _field)[0],	\

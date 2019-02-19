@@ -20,6 +20,7 @@
 #include <onload/oof_interface.h>
 #include <onload/drv/dump_to_user.h>
 #include <ci/tools.h>
+#include <ci/net/ipvx.h>
 
 
 struct efab_tcp_driver_s;
@@ -44,9 +45,9 @@ extern struct oo_filter_ns* oo_filter_ns_lookup(struct efab_tcp_driver_s*,
 extern void oo_filter_ns_put_atomic(struct efab_tcp_driver_s* drv,
                                     struct oo_filter_ns* fns);
 
-extern void oof_onload_on_cplane_ipadd(unsigned net_ip, ci_ifid_t ifindex,
+extern void oof_onload_on_cplane_ipadd(int af, ci_addr_t net_ip, ci_ifid_t ifindex,
                                        struct net* netns, void* arg);
-extern void oof_onload_on_cplane_ipdel(unsigned net_ip, ci_ifid_t ifindex,
+extern void oof_onload_on_cplane_ipdel(int af, ci_addr_t net_ip, ci_ifid_t ifindex,
                                        struct net* netns, void* arg);
 extern void
 oof_onload_mcast_update_interface(ci_ifid_t ifindex, ci_uint16 flags,

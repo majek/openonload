@@ -538,7 +538,7 @@ void ci_netif_mem_pressure_pkt_pool_fill(ci_netif* ni)
   OO_STACK_FOR_EACH_INTF_I(ni, intf_i)
     n += (2*CI_CFG_RX_DESC_BATCH);
   while( ni->state->mem_pressure_pkt_pool_n < n &&
-         (pkt = ci_netif_pkt_alloc(ni)) != NULL ) {
+         (pkt = ci_netif_pkt_alloc(ni, 0)) != NULL ) {
     pkt->flags |= CI_PKT_FLAG_RX;
     ++ni->state->n_rx_pkts;
     ++ni->state->mem_pressure_pkt_pool_n;
@@ -666,6 +666,7 @@ static int __ci_netif_rx_post(ci_netif* ni, ef_vi* vi, int intf_i,
       pkt->flags |= CI_PKT_FLAG_RX;
       pkt->intf_i = intf_i;
       pkt->pkt_start_off = ef_vi_receive_prefix_len(vi);
+      ci_netif_poison_rx_pkt(pkt);
       ef_vi_receive_init(vi, pkt->dma_addr[pkt->intf_i], OO_PKT_ID(pkt));
 #ifdef __powerpc__
       {
@@ -971,7 +972,7 @@ static void ci_netif_perform_deferred_socket_work(ci_netif* ni,
 }
 
 
-unsigned ci_netif_purge_deferred_socket_list(ci_netif* ni)
+ci_uint64 ci_netif_purge_deferred_socket_list(ci_netif* ni)
 {
   ci_uint64 l;
 
@@ -1008,6 +1009,54 @@ void ci_netif_merge_atomic_counters(ci_netif* ni)
 #define KERNEL_DL_CONTEXT
 #endif
 
+
+/* Handling for lock flags that is common to UL and kernel paths. */
+ci_uint64 ci_netif_unlock_slow_common(ci_netif* ni, ci_uint64 lock_val)
+{
+  const ci_uint64 ALL_HANDLED_FLAGS = CI_EPLOCK_NETIF_IS_PKT_WAITER |
+                                      CI_EPLOCK_NETIF_NEED_POLL |
+                                      CI_EPLOCK_NETIF_MERGE_ATOMIC_COUNTERS;
+  ci_uint64 set_flags = 0;
+
+  /* Do this first, because ci_netif_purge_deferred_socket_list() acts on the
+   * lock directly. */
+  if( lock_val & CI_EPLOCK_NETIF_SOCKET_LIST ) {
+    CITP_STATS_NETIF_INC(ni, unlock_slow_socket_list);
+    lock_val = ci_netif_purge_deferred_socket_list(ni);
+  }
+  ci_assert(! (lock_val & CI_EPLOCK_NETIF_SOCKET_LIST));
+
+  /* Clear all flags before we handle them, to avoid racing against other
+   * threads that set those flags. */
+  lock_val = ef_eplock_clear_flags(&ni->state->lock, ALL_HANDLED_FLAGS);
+
+  if( lock_val & CI_EPLOCK_NETIF_IS_PKT_WAITER ) {
+    if( ci_netif_pkt_tx_can_alloc_now(ni) ) {
+      set_flags |= CI_EPLOCK_NETIF_PKT_WAKE;
+      CITP_STATS_NETIF_INC(ni, unlock_slow_pkt_waiter);
+    }
+    else {
+      set_flags |= CI_EPLOCK_NETIF_IS_PKT_WAITER;
+    }
+  }
+
+  if( lock_val & CI_EPLOCK_NETIF_NEED_POLL ) {
+    CITP_STATS_NETIF(++ni->state->stats.deferred_polls);
+    ci_netif_poll(ni);
+  }
+
+  if( lock_val & CI_EPLOCK_NETIF_MERGE_ATOMIC_COUNTERS )
+    ci_netif_merge_atomic_counters(ni);
+
+  ef_eplock_holder_set_flags(&ni->state->lock, set_flags);
+
+  /* Caveat: there is nothing to stop the flags in ALL_HANDLED_FLAGS from being
+   * re-added to the lock.  As such, clearing them in the value that we return
+   * is valid, but we mustn't clear them from the lock itself. */
+  return (lock_val | set_flags) & ~ALL_HANDLED_FLAGS;
+}
+
+
 static void ci_netif_unlock_slow(ci_netif* ni KERNEL_DL_CONTEXT_DECL)
 {
 #ifndef __KERNEL__
@@ -1016,48 +1065,24 @@ static void ci_netif_unlock_slow(ci_netif* ni KERNEL_DL_CONTEXT_DECL)
   ** efab_eplock_unlock_and_wake() path, so no need to do this stuff if
   ** already in kernel.
   */
-  ci_uint64 l = ni->state->lock.lock;
+  ci_uint64 l;
   int intf_i;
   ci_uint64 after_unlock_flags;
 
   ci_assert(ci_netif_is_locked(ni));  /* double unlock? */
 
-  if( l & CI_EPLOCK_NETIF_IS_PKT_WAITER )
-    if( ci_netif_pkt_tx_can_alloc_now(ni) ) {
-      ef_eplock_clear_flags(&ni->state->lock, CI_EPLOCK_NETIF_IS_PKT_WAITER);
-      ef_eplock_holder_set_flag(&ni->state->lock, CI_EPLOCK_NETIF_PKT_WAKE);
-      l = ni->state->lock.lock;
-      CITP_STATS_NETIF_INC(ni, unlock_slow_pkt_waiter);
-    }
+  after_unlock_flags = ci_netif_unlock_slow_common(ni, ni->state->lock.lock);
 
-  if( l & CI_EPLOCK_NETIF_SOCKET_LIST ) {
-    CITP_STATS_NETIF_INC(ni, unlock_slow_socket_list);
-    l = ci_netif_purge_deferred_socket_list(ni);
-  }
-  ci_assert(! (l & CI_EPLOCK_NETIF_SOCKET_LIST));
   /* OK to clear this before dropping the lock here, as not in a loop */
   ni->state->defer_work_count = 0;
-
-  if( l & CI_EPLOCK_NETIF_NEED_POLL ) {
-    CITP_STATS_NETIF(++ni->state->stats.deferred_polls);
-    ef_eplock_clear_flags(&ni->state->lock, CI_EPLOCK_NETIF_NEED_POLL);
-    ci_netif_poll(ni);
-    l = ni->state->lock.lock;
-  }
-
-  if( l & CI_EPLOCK_NETIF_MERGE_ATOMIC_COUNTERS ) {
-    ef_eplock_clear_flags(&ni->state->lock,
-                          CI_EPLOCK_NETIF_MERGE_ATOMIC_COUNTERS);
-    ci_netif_merge_atomic_counters(ni);
-    l = ni->state->lock.lock;
-  }
 
   /* Store NEED_PRIME flag and clear it - we'll handle it if set,
    * either below or by dropping to the kernel 
    */
-  after_unlock_flags = l;
   if( after_unlock_flags & CI_EPLOCK_NETIF_NEED_PRIME )
     ef_eplock_clear_flags(&ni->state->lock, CI_EPLOCK_NETIF_NEED_PRIME);
+
+  l = ni->state->lock.lock;
 
   /* Could loop here if flags have been set again, but to keep things
    * simple just drop to the kernel unless we've already done
@@ -1072,6 +1097,7 @@ static void ci_netif_unlock_slow(ci_netif* ni KERNEL_DL_CONTEXT_DECL)
       /* If the NEED_PRIME flag was set, handle it here */
       if( after_unlock_flags & CI_EPLOCK_NETIF_NEED_PRIME ) {
         CITP_STATS_NETIF_INC(ni, unlock_slow_need_prime);
+        CITP_STATS_NETIF_INC(ni, unlock_slow_prime_ul);
         ci_assert(NI_OPTS(ni).int_driven);
         /* TODO: When interrupt driven, evq_primed is never cleared, so we
          * don't know here which subset of interfaces needs to be primed.
@@ -1087,6 +1113,9 @@ static void ci_netif_unlock_slow(ci_netif* ni KERNEL_DL_CONTEXT_DECL)
       return;
     }
   }
+
+  /* N.B. We don't update [l] to reflect subsequent changes in the lock flags.
+   */
 
   /* We cleared NEED_PRIME above, but haven't handled it - restore setting */
   if( after_unlock_flags & CI_EPLOCK_NETIF_NEED_PRIME )
@@ -1121,6 +1150,7 @@ void ci_netif_unlock(ci_netif* ni)
 #elif ! defined(NDEBUG)
   int saved_errno = errno;
 #endif
+  ci_assert_nflags(ni->state->flags, CI_NETIF_FLAG_PKT_ACCOUNT_PENDING);
 
   ci_assert_equal(ni->state->in_poll, 0);
   if(CI_LIKELY( ni->state->lock.lock == CI_EPLOCK_LOCKED &&
@@ -1240,7 +1270,7 @@ int ci_netif_raw_send(ci_netif* ni, int intf_i,
   int i;
 
   ci_netif_lock(ni);
-  pkt = ci_netif_pkt_alloc(ni);
+  pkt = ci_netif_pkt_alloc(ni, 0);
   if( pkt == NULL )
     return -ENOBUFS;
 
@@ -1263,6 +1293,11 @@ int ci_netif_raw_send(ci_netif* ni, int intf_i,
     pkt->buf_len += CI_IOVEC_LEN(iov);
     iov++;
   }
+
+  if( oo_ether_hdr(pkt)->ether_type != CI_ETHERTYPE_8021Q )
+    pkt->pkt_eth_payload_off = pkt->pkt_start_off + ETH_HLEN;
+  else
+    pkt->pkt_eth_payload_off = pkt->pkt_start_off + ETH_HLEN + ETH_VLAN_HLEN;
 
   pkt->pay_len = pkt->buf_len;
   ci_netif_pkt_hold(ni, pkt);
@@ -1541,13 +1576,38 @@ static oo_sp __ci_netif_active_wild_pool_get(ci_netif* ni, int aw_pool,
     if( rc >= 0 ) {
       ci_sock_cmn* s = ID_TO_SOCK(ni, ni->filter_table->table[rc].id);
       if( s->b.state == CI_TCP_TIME_WAIT ) {
+        ci_uint32 seq;
         /* This 4-tuple is in use as TIME_WAIT, but it is safe to re-use
          * TIME_WAIT for active open.  We ensure we use an initial sequence
          * number that is a long way from the one used by the old socket.
          */
         ci_tcp_state* ts = SOCK_TO_TCP(s);
         CITP_STATS_NETIF_INC(ni, tcp_shared_local_ports_reused_tw);
-        *prev_seq_out = ts->snd_nxt;
+        /* Setting *prev_seq_out to zero indicates to the caller that it should
+         * fall back to the clock-driven ISN.  However, sometimes we really do
+         * want to report a previous sequence number of zero.  To work around
+         * this, report a value of 1 in such cases.  This is valid in practice,
+         * as the purpose of this is to allow the selection of an ISN for the
+         * next connection that is greater in sequence space than the old one.
+         */
+        seq = ts->snd_nxt + NI_OPTS(ni).tcp_isn_offset;
+        if( seq == 0 )
+          seq = 1;
+
+        /* If this socket's final sequence number has already been stored in
+         * the table (which only happens when we reached TIME_WAIT via
+         * CLOSING), we need to do a lookup to ensure that the entry gets
+         * removed. */
+        if( ts->tcpflags & CI_TCPT_FLAG_SEQNO_REMEMBERED ) {
+          ci_uint32 table_seq = ci_tcp_prev_seq_lookup(ni, ts);
+          /* The entry might already have been purged, in which case
+           * [table_seq] will be zero.  But otherwise, the table entry should
+           * agree with the socket. */
+          if( table_seq != 0 )
+            ci_assert_equal(seq, table_seq);
+        }
+
+        *prev_seq_out = seq;
         ci_netif_timeout_leave(ni, ts);
         *port_out = lport;
         return SC_SP(&aw->s);
@@ -1624,6 +1684,9 @@ oo_sp ci_netif_active_wild_get(ci_netif* ni, unsigned laddr,
       active_wild = __ci_netif_active_wild_get(ni, laddr, raddr, rport,
                                                port_out, prev_seq_out);
     }
+    else if( rc == -ENOBUFS ) {
+      break;
+    }
     else {
       LOG_TC(ci_log(FN_FMT "Alloc active wild for %s:0 %s:%u FAILED - rc %d",
                     FN_PRI_ARGS(ni), ip_addr_str(laddr), ip_addr_str(raddr),
@@ -1672,5 +1735,25 @@ void ci_netif_active_wild_sharer_closed(ci_netif* ni, ci_sock_cmn* s)
   }
 }
 
+
+void oo_tcpdump_free_pkts(ci_netif* ni, ci_uint16 i)
+{
+  ci_uint16 read_i = ni->state->dump_read_i;
+
+  ci_assert(ci_netif_is_locked(ni));
+
+  /* Ensure reader has finished reading before we free packets. */
+  ci_mb();
+
+  do {
+    oo_pkt_p id = ni->state->dump_queue[i % CI_CFG_DUMPQUEUE_LEN];
+    if( id != OO_PP_NULL ) {
+      ci_ip_pkt_fmt* pkt = PKT_CHK(ni, id);
+      ni->state->dump_queue[i % CI_CFG_DUMPQUEUE_LEN] = OO_PP_NULL;
+      ci_wmb();
+      ci_netif_pkt_release(ni, pkt);
+    }
+  } while( (++i - read_i) % CI_CFG_DUMPQUEUE_LEN );
+}
 
 /*! \cidoxg_end */

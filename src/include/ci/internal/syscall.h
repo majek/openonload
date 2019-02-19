@@ -127,6 +127,26 @@ my_do_syscall3(int num, long a1, long a2, long a3)
    return (int) __sc_ret;
 }
 
+#elif defined(__aarch64__)
+
+ci_inline int my_do_syscall3(int num, long a1, long a2, long a3)
+{
+  register long r0 __asm__("x0") = a1;
+  register long r1 __asm__("x1") = a2;
+  register long r2 __asm__("x2") = a3;
+  register long r8 __asm__("x8") = num;
+
+  __asm__ __volatile__ (
+      "svc 0\n"
+
+      : "=r" (r0)
+      : "r" (r8), "r" (r0), "r" (r1), "r" (r2)
+      : "memory"
+  );
+
+  return (int) r0;
+}
+
 #else
 
 # error my_do_syscall3() unimplemented

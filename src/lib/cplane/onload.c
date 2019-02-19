@@ -39,8 +39,13 @@ oo_cp_create(int fd, struct oo_cplane_handle* cp, enum cp_sync_mode mode)
   if( rc != 0 )
     return rc;
 
-  /* Wait for the control plane server to start if necessary. */
-  rc = cp_ioctl(fd, OO_IOC_CP_WAIT_FOR_SERVER, &op);
+  /* Wait for the control plane server to start if necessary.  This ioctl does
+   * an interruptible sleep while waiting.  If a non-fatal signal is received
+   * while we're asleep, the ioctl will fail with EINTR, and we want to try
+   * again. */
+  do {
+    rc = cp_ioctl(fd, OO_IOC_CP_WAIT_FOR_SERVER, &op);
+  } while( rc == -EINTR );
   if( rc != 0 )
     return rc;
 
@@ -70,7 +75,7 @@ oo_cp_create(int fd, struct oo_cplane_handle* cp, enum cp_sync_mode mode)
           CI_ROUND_UP((mibs[0].dim->fwd_mask + 1) * sizeof(mibs[0].fwd_rw[0]),
                       CI_PAGE_SIZE),
           PROT_READ | PROT_WRITE, MAP_SHARED, fd,
-#ifdef CP_UNIT
+#ifdef CP_SYSUNIT
           /* see server.c init_memory() */
           CI_ROUND_UP(cp->bytes, CI_PAGE_SIZE) +
 #endif
@@ -199,6 +204,25 @@ oo_cp_get_hwport_properties(struct oo_cplane_handle* cp, ci_hwport_id_t hwport,
   CP_VERLOCK_STOP(version, mib)
   return rc;
 }
+
+
+ci_ifid_t
+oo_cp_get_hwport_ifindex(struct oo_cplane_handle* cp, ci_hwport_id_t hwport)
+{
+  struct cp_mibs* mib;
+  cp_version_t version;
+  ci_ifid_t ifindex;
+
+  ci_assert(cp);
+
+  CP_VERLOCK_START(version, mib, cp)
+  ifindex = cp_get_hwport_ifindex(mib, hwport);
+  CP_VERLOCK_STOP(version, mib)
+
+  return ifindex;
+}
+
+
 #ifdef __KERNEL__
 
 /* Retrieves all hwports with a licence that allows Onload to run.  The return
@@ -258,4 +282,5 @@ int oo_cp_get_acceleratable_ifindices(struct oo_cplane_handle* cp,
 
   return llap_count;
 }
+
 #endif

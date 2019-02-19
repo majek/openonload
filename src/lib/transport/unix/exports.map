@@ -88,6 +88,7 @@
     epoll_ctl;
     epoll_wait;
     epoll_pwait;
+    syscall;
 
     onload_fd_stat;
     onload_is_present;
@@ -103,6 +104,7 @@
     onload_zc_send;
     onload_zc_release_buffers;
     onload_zc_alloc_buffers;
+    onload_set_recv_filter;
     onload_recvmsg_kernel;
     onload_thread_set_spin;
     onload_thread_get_spin;

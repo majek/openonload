@@ -1,6 +1,6 @@
 /****************************************************************************
  * Copyright 2004-2005: Level 5 Networks Inc.
- * Copyright 2005-2017: Solarflare Communications Inc,
+ * Copyright 2005-2018: Solarflare Communications Inc,
  *                      7505 Irvine Center Drive, Suite 100
  *                      Irvine, CA 92618, USA
  *
@@ -27,8 +27,8 @@
 *//*! \file
 ** \author    Solarflare Communications, Inc.
 ** \brief     Additional Doxygen-format documentation for ef_vi.
-** \date      2017/02/21
-** \copyright Copyright &copy; 2017 Solarflare Communications, Inc. All
+** \date      2018/11/06
+** \copyright Copyright &copy; 2018 Solarflare Communications, Inc. All
 **            rights reserved. Solarflare, OpenOnload and EnterpriseOnload
 **            are trademarks of Solarflare Communications, Inc.
 *//*
@@ -506,6 +506,10 @@ RX event merging can merge multiple events into a single
 - When an `EF_EVENT_TYPE_RX_MULTI` event occurs, ef_vi_receive_unbundle() 
   must always be used to find the individual buffers.
 
+- When an `EF_EVENT_TYPE_RX_MULTI_DISCARD` event occurs,
+  ef_vi_receive_unbundle() must also always be called, even if the application
+  is unconcerned with the detailed discard information.
+
 - When the first buffer of a packet is found, ef_vi_receive_get_bytes() can 
   then give the length of the packet:
 
@@ -565,8 +569,7 @@ direct received packets to a given virtual interface.
   already exists, an error is returned.
 
 - By default the 'all' filters are sending everything to the kernel. They
-  are equivalent to setting promiscuous mode on the NIC, and super-user
-  rights (specifically `CAP_NET_ADMIN`) are needed to use this filter.
+  are equivalent to setting promiscuous mode on the NIC.
 
 - On SFN5000 and SFN6000 series NICs each filter can only exist for one
   virtual interface, and so each packet which arrives can be forwarded
@@ -668,6 +671,20 @@ int ef_vi_set_filter_del(ef_vi_set*, ef_driver_handle dh,
                          ef_filter_cookie* filter_cookie);
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 __Figure: Creating Filters__
+
+\subsection filters_permission Filter permission requirements
+
+Super-user rights (specifically `CAP_NET_ADMIN`) are needed to use the following 
+filters:
+
+- IP proto (and the VLAN variant)
+- Ethertype (and the VLAN variant)
+- Unicast-mismatch (and the VLAN variant)
+- Multicast-mismatch (and the VLAN variant)
+- Unicast-all
+- Multicast-all
+- Kernel block
+- Sniff.
 
 \subsection filters_variant Filters available per Firmware Variant
 

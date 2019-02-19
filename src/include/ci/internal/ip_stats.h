@@ -56,54 +56,9 @@
 
 /** IPv4 group of statistics reported in /proc/net/snmp */
 typedef struct {
-  /** the total number of recieved datagrams */
-  CI_IP_STATS_TYPE in_recvs;
-  
-  /** the number of datagrams discarded due to errors in their IP headers */
-  CI_IP_STATS_TYPE in_hdr_errs;
-  
-  /** the number of datagrams discarded due to value of IP destination 
-   * adress */
-  CI_IP_STATS_TYPE in_addr_errs;
-  
-  /** the number of forwarded datagrams */
-  CI_IP_STATS_TYPE forw_dgrams;
-  
-  /** the number of datagrams destined to unknown or unsupported 
-   * protocols */
-  CI_IP_STATS_TYPE in_unknown_protos;
-  
-  /** the number of input IP datagrams for which no problems were 
-   * encountered to prevent their continued processing, but which 
-   * were discarded (e.g., for lack of buffer space) */
-  CI_IP_STATS_TYPE in_discards;
-  
-  /** the total numver of input datagrams successfully delivered to IP 
-   * user-protocols */
-  CI_IP_STATS_TYPE in_delivers;
-  
-  /** the total numver of IP datagrams which local IP user-protocols 
-   * (including ICMP) supplied to IP in request for transmission */
-  CI_IP_STATS_TYPE out_requests;
-  
-  /** the number of output IP datagrams for which no problems
-   * were ecountered to prevent their countinued processing, but
-   * which were discarded (e.g., for lack of buffer space */
-  CI_IP_STATS_TYPE out_discards;
-
-  /** the number of IP datagrams discarded because no route could
-   * be found to transmit them to their destination */
-  CI_IP_STATS_TYPE out_no_routes;
-
-  /** this set of counters deal with IP fragmentation, which is not
-   * supported, so they should be zero [RFC1213]*/
-  CI_IP_STATS_TYPE reasm_timeout;
-  CI_IP_STATS_TYPE reasm_reqds;
-  CI_IP_STATS_TYPE reasm_oks;
-  CI_IP_STATS_TYPE reasm_fails;
-  CI_IP_STATS_TYPE frag_oks;
-  CI_IP_STATS_TYPE frag_fails;
-  CI_IP_STATS_TYPE frag_creates;
+#define OO_STAT(desc, type, name, kind)  type name CI_ALIGN(sizeof(type));
+#include <ci/internal/ipv4_stats_count_def.h>
+#undef OO_STAT
 } ci_ipv4_stats_count;
 /** this macro is used to get the number of fields in
  * @e ci_ipv4_stats_count structure */
@@ -182,20 +137,9 @@ typedef struct {
 
 /** UDP group of statistics reported in /proc/net/snmp */
 typedef struct {
-  /** the total number of UDP datagrams delivered to UDP users */
-  CI_IP_STATS_TYPE udp_in_dgrams;
-  
-  /** the total number of received UDP datagrams for which
-   * there was no application at the destination port */
-  CI_IP_STATS_TYPE udp_no_ports;
-
-  /** the number of received UDP datagrams that could not be delivered
-   * for reason other than the lack of an application at the destination 
-   * port */
-  CI_IP_STATS_TYPE udp_in_errs;
-
-  /** the total number of UDP datagrams sent from this entity */
-  CI_IP_STATS_TYPE udp_out_dgrams;
+#define OO_STAT(desc, type, name, kind)  type name CI_ALIGN(sizeof(type));
+#include <ci/internal/udp_stats_count_def.h>
+#undef OO_STAT
 } ci_udp_stats_count;
 /** this macro is used to get the number of fields in
  * @p ci_udp_stats_count structure */

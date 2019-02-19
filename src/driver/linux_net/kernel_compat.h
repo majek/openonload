@@ -364,21 +364,6 @@
 	#define __bitwise
 #endif
 
-#ifndef cpumask_of
-	/* This is an absolute nightmare. In old kernels, cpumask_of_cpu() is
-	 * a macro closure, so we can't use &cpumask_of_cpu(). This should
-	 * always be safe, and should provide some protection against
-	 * inter-file use of cpumask_of()
-	 */
-	static inline cpumask_t *cpumask_of(int cpu)
-	{
-		static cpumask_t var;
-
-		var = cpumask_of_cpu(cpu);
-		return &var;
-	}
-#endif
-
 #ifndef VLAN_PRIO_MASK
 	#define VLAN_PRIO_MASK          0xe000
 #endif
@@ -1034,11 +1019,6 @@
 	}
 #endif
 
-#ifdef EFX_HAVE_OLD_IP_FAST_CSUM
-	#include <net/checksum.h>
-	#define ip_fast_csum(iph, ihl) ip_fast_csum((unsigned char *)iph, ihl)
-#endif
-
 #ifdef EFX_NEED_HEX_DUMP
 	enum {
 		DUMP_PREFIX_NONE,
@@ -1617,12 +1597,6 @@ static inline struct tcphdr *inner_tcp_hdr(const struct sk_buff *skb)
  * work with both this and a real link_mode_mask.
  */
 #define __ETHTOOL_DECLARE_LINK_MODE_MASK(name)  unsigned long name[1]
-#endif
-
-#ifdef EFX_HAVE_XDP_TX
-#ifndef EFX_HAVE_XDP_FRAME_API
-#define xdp_frame	xdp_buff
-#endif
 #endif
 
 /**************************************************************************
@@ -2210,6 +2184,9 @@ static inline unsigned long __attribute_const__ rounddown_pow_of_two(unsigned lo
 	#define timespec_to_timespec64(t) (t)
 	#define timespec64_to_timespec(t) (t)
 #endif // EFX_HAVE_TIMESPEC64
+#ifdef EFX_NEED_KTIME_GET_REAL_TS64
+	#define ktime_get_real_ts64	ktime_get_real_ts
+#endif // EFX_NEED_KTIME_GET_REAL_TS64
 
 #ifdef EFX_HAVE_OLD_SKB_LINEARIZE
 	static inline int efx_skb_linearize(struct sk_buff *skb)
@@ -2249,16 +2226,6 @@ static inline unsigned long __attribute_const__ rounddown_pow_of_two(unsigned lo
 #define remap_pfn_range remap_page_range
 #endif
 
-#ifdef EFX_HAVE_PARAM_BOOL_INT
-	#define param_ops_bool efx_param_ops_bool
-	int efx_param_set_bool(const char *val, struct kernel_param *kp);
-	#define param_set_bool efx_param_set_bool
-	int efx_param_get_bool(char *buffer, struct kernel_param *kp);
-	#define param_get_bool efx_param_get_bool
-	#undef param_check_bool
-	#define param_check_bool(name, p) __param_check(name, p, bool)
-#endif
-
 #if defined(EFX_HAVE_OLD___VLAN_PUT_TAG)
 	static inline struct sk_buff *
 	efx___vlan_put_tag(struct sk_buff *skb, __be16 vlan_proto, u16 vlan_tci)
@@ -2275,70 +2242,6 @@ static inline unsigned long __attribute_const__ rounddown_pow_of_two(unsigned lo
 		return __vlan_put_tag(skb, vlan_proto, vlan_tci);
 	}
 #endif
-
-#ifdef EFX_NEED_PCI_VPD_LRDT
-
-#define PCI_VPD_LRDT                    0x80    /* Large Resource Data Type */
-#define PCI_VPD_LRDT_ID(x)              (x | PCI_VPD_LRDT)
-
-/* Large Resource Data Type Tag Item Names */
-#define PCI_VPD_LTIN_ID_STRING          0x02    /* Identifier String */
-#define PCI_VPD_LTIN_RO_DATA            0x10    /* Read-Only Data */
-#define PCI_VPD_LTIN_RW_DATA            0x11    /* Read-Write Data */
-
-#define PCI_VPD_LRDT_ID_STRING          PCI_VPD_LRDT_ID(PCI_VPD_LTIN_ID_STRING)
-#define PCI_VPD_LRDT_RO_DATA            PCI_VPD_LRDT_ID(PCI_VPD_LTIN_RO_DATA)
-#define PCI_VPD_LRDT_RW_DATA            PCI_VPD_LRDT_ID(PCI_VPD_LTIN_RW_DATA)
-
-/* Small Resource Data Type Tag Item Names */
-#define PCI_VPD_STIN_END                0x78    /* End */
-
-#define PCI_VPD_SRDT_END                PCI_VPD_STIN_END
-
-#define PCI_VPD_SRDT_TIN_MASK           0x78
-#define PCI_VPD_SRDT_LEN_MASK           0x07
-
-#define PCI_VPD_LRDT_TAG_SIZE           3
-#define PCI_VPD_SRDT_TAG_SIZE           1
-
-#define PCI_VPD_INFO_FLD_HDR_SIZE       3
-
-#define PCI_VPD_RO_KEYWORD_PARTNO       "PN"
-#define PCI_VPD_RO_KEYWORD_MFR_ID       "MN"
-#define PCI_VPD_RO_KEYWORD_VENDOR0      "V0"
-#define PCI_VPD_RO_KEYWORD_CHKSUM       "RV"
-
-static inline u16 efx_pci_vpd_lrdt_size(const u8 *lrdt)
-{
-	return (u16)lrdt[1] + ((u16)lrdt[2] << 8);
-}
-#undef pci_vpd_lrdt_size
-#define pci_vpd_lrdt_size efx_pci_vpd_lrdt_size
-
-static inline u8 efx_pci_vpd_srdt_size(const u8 *srdt)
-{
-	return (*srdt) & PCI_VPD_SRDT_LEN_MASK;
-}
-#undef pci_vpd_srdt_size
-#define pci_vpd_srdt_size efx_pci_vpd_srdt_size
-
-static inline u8 efx_pci_vpd_info_field_size(const u8 *info_field)
-{
-	return info_field[2];
-}
-#undef pci_vpd_info_field_size
-#define pci_vpd_info_field_size efx_pci_vpd_info_field_size
-
-int efx_pci_vpd_find_tag(const u8 *buf, unsigned int off, unsigned int len, u8 rdt);
-#undef pci_vpd_find_tag
-#define pci_vpd_find_tag efx_pci_vpd_find_tag
-
-int efx_pci_vpd_find_info_keyword(const u8 *buf, unsigned int off,
-				  unsigned int len, const char *kw);
-#undef pci_vpd_find_info_keyword
-#define pci_vpd_find_info_keyword efx_pci_vpd_find_info_keyword
-
-#endif /* EFX_NEED_PCI_VPD_LRDT */
 
 #if defined(EFX_HAVE_FDTABLE_PARTIAL_ACCESSORS) && !defined(EFX_HAVE_FDTABLE_FULL_ACCESSORS)
 #include <linux/fdtable.h>
@@ -2786,6 +2689,27 @@ struct EFX_HWMON_DEVICE_REGISTER_TYPE *hwmon_device_register_with_info(
 #endif
 #endif
 
+#if defined(EFX_HAVE_XDP_EXT)
+/* RHEL 7 adds the XDP related NDOs in the net_device_ops_extended area.
+ * The XDP interfaces in RHEL 7 are merely stubs intended to make Red Hat's
+ * backporting easier, and XDP is not functional. So we can just not build
+ * XDP in this case.
+ * It's unlikely that anybody else will have a net_device_ops_extended in
+ * this way.
+ */
+#undef EFX_HAVE_XDP
+#undef EFX_HAVE_XDP_HEAD
+#undef EFX_HAVE_XDP_OLD
+#undef EFX_HAVE_XDP_REDIR
+#undef EFX_HAVE_XDP_TX
+#endif
+
+#ifdef EFX_HAVE_XDP_TX
+#ifndef EFX_HAVE_XDP_FRAME_API
+#define xdp_frame	xdp_buff
+#endif
+#endif
+
 #if defined(EFX_HAVE_XDP_OLD)
 /* ndo_xdp and netdev_xdp were renamed in 4.15 */
 #define ndo_bpf	ndo_xdp
@@ -2797,7 +2721,7 @@ struct EFX_HWMON_DEVICE_REGISTER_TYPE *hwmon_device_register_with_info(
 #define trace_xdp_exception(dev, prog, act)
 #endif
 
-#if !defined(EFX_HAVE_XDP_HEAD)
+#if !defined(EFX_HAVE_XDP_HEAD) && !defined(XDP_PACKET_HEADROOM)
 #define XDP_PACKET_HEADROOM 0
 #endif
 

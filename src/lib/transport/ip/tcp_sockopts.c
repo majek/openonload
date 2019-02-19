@@ -310,6 +310,9 @@ static int ci_tcp_setsockopt_lk(citp_socket* ep, ci_fd_t fd, int level,
     optlen = sizeof(zeroval);
   }
 
+  if( ! optval )
+    RET_WITH_ERRNO(EFAULT);
+
   /* If you're adding to this please remember to look in common_sockopts.c
    * and decide if the option is common to all protocols. */
 
@@ -407,13 +410,13 @@ static int ci_tcp_setsockopt_lk(citp_socket* ep, ci_fd_t fd, int level,
 
     case TCP_KEEPIDLE:
       /* idle time for keepalives  */
-      c->t_ka_time = ci_ip_time_ms2ticks_slow(netif, *(unsigned*)optval*1000);
+      c->t_ka_time = ci_ip_time_ms2ticks(netif, *(unsigned*)optval*1000);
       c->t_ka_time_in_secs = *(unsigned*)optval;
       break;
 
     case TCP_KEEPINTVL:
       /* time between keepalives */
-      c->t_ka_intvl = ci_ip_time_ms2ticks_slow(netif, *(unsigned*)optval*1000);
+      c->t_ka_intvl = ci_ip_time_ms2ticks(netif, *(unsigned*)optval*1000);
       c->t_ka_intvl_in_secs = *(unsigned*)optval;
       break;
 
@@ -425,7 +428,7 @@ static int ci_tcp_setsockopt_lk(citp_socket* ep, ci_fd_t fd, int level,
       if( *(int*) optval > 0 ) {
         /* Value is timeout in seconds.  Convert to a number of retries. */
         int timeo = CI_MIN(*(int*) optval, 100000) * 1000;
-        timeo = ci_ip_time_ms2ticks_slow(netif, timeo);
+        timeo = ci_ip_time_ms2ticks(netif, timeo);
         timeo = CI_MIN(timeo, NI_CONF(netif).tconst_rto_max);
         c->tcp_defer_accept = 1;
         while( timeo > ((int) NI_CONF(netif).tconst_rto_initial *
@@ -444,7 +447,7 @@ static int ci_tcp_setsockopt_lk(citp_socket* ep, ci_fd_t fd, int level,
             CITP_TCP_FASTSTART(ts->faststart_acks = 
                                NI_OPTS(netif).tcp_faststart_idle);
             if( ts->acks_pending ) {
-              ci_ip_pkt_fmt* pkt = ci_netif_pkt_alloc(netif);
+              ci_ip_pkt_fmt* pkt = ci_netif_pkt_alloc(netif, 0);
               if( CI_LIKELY(pkt != NULL) )
                 ci_tcp_send_ack(netif, ts, pkt, CI_FALSE);
             }
@@ -516,6 +519,12 @@ int ci_tcp_setsockopt(citp_socket* ep, ci_fd_t fd, int level,
         goto unlock_out;
       }
       rc = 0;
+    }
+    else if(CI_UNLIKELY( optval == NULL )) {
+      /* ci_sys_setsockopt() is used to sanity-test parameters; do it
+       * manually if there is no OS socket */
+      ci_netif_unlock(ni);
+      RET_WITH_ERRNO(EFAULT);
     }
   }
 

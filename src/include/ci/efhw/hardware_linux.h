@@ -90,6 +90,8 @@
 	#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,18)
 	#define mmiowb() __asm__ __volatile__ ("sync" ::: "memory")
 	#endif
+	#elif defined(__aarch64__)
+		#define mmiowb()  
 	#else
 	#error "Need definition for mmiowb()"
 	#endif

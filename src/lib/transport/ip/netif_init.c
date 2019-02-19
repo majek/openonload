@@ -72,6 +72,7 @@ void ci_netif_state_init(ci_netif* ni, int cpu_khz, const char* name)
 {
   ci_netif_state_nic_t* nn;
   ci_netif_state* nis = ni->state;
+  struct timespec timetemp;
   int nic_i;
   int i;
 
@@ -115,6 +116,10 @@ void ci_netif_state_init(ci_netif* ni, int cpu_khz, const char* name)
    */
   ci_netif_filter_init(ni->filter_table,
                        ci_log2_le(NI_OPTS(ni).max_ep_bufs) + 1);
+#if CI_CFG_IPV6
+  ci_ip6_netif_filter_init(ni->ip6_filter_table,
+                           ci_log2_le(NI_OPTS(ni).max_ep_bufs) + 1);
+#endif
 
   ci_ni_dllist_init(ni, &nis->timeout_q[OO_TIMEOUT_Q_TIMEWAIT], 
                     oo_ptr_to_statep(ni, &nis->timeout_q[OO_TIMEOUT_Q_TIMEWAIT]),
@@ -198,6 +203,8 @@ void ci_netif_state_init(ci_netif* ni, int cpu_khz, const char* name)
   nis->pid = task_pid_vnr(current);
 #endif
 
+  getnstimeofday(&timetemp);
+  nis->creation_time_sec = timetemp.tv_sec;
 #if CI_CFG_FD_CACHING
   nis->passive_cache_avail_stack = nis->opts.sock_cache_max;
 #endif
@@ -226,6 +233,10 @@ void ci_netif_state_init(ci_netif* ni, int cpu_khz, const char* name)
                       oo_ptr_to_statep(ni, &ni->active_wild_table[i]),
                       "active_wild");
   }
+
+  for( i = 0; i < nis->seq_table_entries_n; ++i )
+    assert_zero(ni->seq_table[i].route_count);
+
   nis->active_wild_n = 0;
   nis->packet_alloc_numa_nodes = 0;
   nis->sock_alloc_numa_nodes = 0;
@@ -288,6 +299,8 @@ static ci_uint32 citp_keepalive_time = CI_TCP_TCONST_KEEPALIVE_TIME;
 static ci_uint32 citp_keepalive_intvl = CI_TCP_TCONST_KEEPALIVE_INTVL;
 static ci_uint32 citp_syn_opts = CI_TCPT_SYN_FLAGS;
 static ci_uint32 citp_tcp_dsack = CI_CFG_TCP_DSACK;
+static ci_uint32 citp_tcp_time_wait_assassinate = 1;
+static ci_uint32 citp_tcp_early_retransmit = 3;  /* default as of 3.10 */
 
 #ifndef __KERNEL__
 static int try_get_hp_sz(const char* line, unsigned* hp_sz)
@@ -430,9 +443,10 @@ ci_setup_ipstack_params(void)
   if (ci_sysctl_get_values("net/ipv4/tcp_max_syn_backlog", opt, 1) == 0)
     citp_tcp_backlog_max = opt[0];
 
-  /* We should not use non-zero winscale if tcp_adv_win_scale == 0 */
-  if (ci_sysctl_get_values("net/ipv4/tcp_adv_win_scale", opt, 1) == 0)
-    citp_tcp_adv_win_scale_max = CI_MIN(CI_TCP_WSCL_MAX, 3 * opt[0]);
+  /* We should not use non-zero winscale if tcp_window_scaling == 0 */
+  if (ci_sysctl_get_values("net/ipv4/tcp_window_scaling", opt, 1) == 0 &&
+      opt[0] == 0)
+    citp_tcp_adv_win_scale_max = 0;
 
   /* Get fin_timeout value from Linux if it is possible */
   if (ci_sysctl_get_values("net/ipv4/tcp_fin_timeout", opt, 1) == 0)
@@ -484,6 +498,12 @@ ci_setup_ipstack_params(void)
 
   if (ci_sysctl_get_values("net/ipv4/tcp_dsack", opt, 1) == 0)
     citp_tcp_dsack = opt[0];
+
+  if (ci_sysctl_get_values("net/ipv4/tcp_rfc1337", opt, 1) == 0)
+    citp_tcp_time_wait_assassinate = ! opt[0];
+
+  if (ci_sysctl_get_values("net/ipv4/tcp_early_retrans", opt, 1) == 0)
+    citp_tcp_early_retransmit = opt[0];
 
   citp_ipstack_params_inited = 1;
   return 0;
@@ -549,6 +569,12 @@ void ci_netif_config_opts_defaults(ci_netif_config_opts* opts)
 
     opts->syn_opts = citp_syn_opts;
     opts->use_dsack = citp_tcp_dsack;
+    opts->time_wait_assassinate = citp_tcp_time_wait_assassinate;
+    /* Early retransmit itself has gone from modern kernels, so look in an
+     * old kernel's ip-sysctl.txt for the meaning of these values. */
+    opts->tcp_early_retransmit = citp_tcp_early_retransmit > 0 &&
+                                 citp_tcp_early_retransmit < 4;
+    opts->tail_drop_probe = citp_tcp_early_retransmit >= 3;
     opts->inited = CI_TRUE;
   }
 }
@@ -577,6 +603,7 @@ void ci_netif_config_opts_rangecheck(ci_netif_config_opts* opts)
 #define _CI_CFG_BITVAL3  3
 #define _CI_CFG_BITVAL4  4
 #define _CI_CFG_BITVAL8  8
+#define _CI_CFG_BITVAL12 12
 #define _CI_CFG_BITVAL16 16
 #define _CI_CFG_BITVALA8 _CI_CFG_BITVAL
 
@@ -847,6 +874,10 @@ void ci_netif_config_opts_getenv(ci_netif_config_opts* opts)
 #endif
   if( (s = getenv("EF_URG_RFC")) )
     opts->urg_rfc = atoi(s);
+
+  static const char* const urgent_opts[] = { "allow", "ignore", 0 };
+  opts->urg_mode = parse_enum(opts, "EF_TCP_URG_MODE", urgent_opts, "allow");
+
 #if CI_CFG_UDP
   if( (s = getenv("EF_MCAST_RECV")) )
     opts->mcast_recv = atoi(s);
@@ -913,18 +944,20 @@ void ci_netif_config_opts_getenv(ci_netif_config_opts* opts)
     opts->prefault_packets = atoi(s);
   if ( (s = getenv("EF_MAX_ENDPOINTS")) )
     opts->max_ep_bufs = atoi(s);
+  if ( (s = getenv("EF_ENDPOINT_PACKET_RESERVE")) )
+    opts->endpoint_packet_reserve = atoi(s);
   if ( (s = getenv("EF_SHARE_WITH")) )
     opts->share_with = atoi(s);
 #if CI_CFG_PKTS_AS_HUGE_PAGES
-  if( !check_hp(opts) ){
-    if( (s = getenv("EF_USE_HUGE_PAGES")) ) {
-      opts->huge_pages = atoi(s);
-    }
-    if( opts->huge_pages != 0 && opts->share_with != 0 ) {
-      CONFIG_LOG(opts, CONFIG_WARNINGS, "Turning huge pages off because the "
-                 "stack is going to be used by multiple users");
-      opts->huge_pages = 0;
-    }
+  if( (s = getenv("EF_USE_HUGE_PAGES")) )
+    opts->huge_pages = atoi(s);
+
+  if( opts->huge_pages && check_hp(opts) )
+    opts->huge_pages = 0;
+  if( opts->huge_pages != 0 && opts->share_with != 0 ) {
+    CONFIG_LOG(opts, CONFIG_WARNINGS, "Turning huge pages off because the "
+               "stack is going to be used by multiple users");
+    opts->huge_pages = 0;
   }
 #endif
   if ( (s = getenv("EF_COMPOUND_PAGES_MODE")) )
@@ -1235,6 +1268,9 @@ void ci_netif_config_opts_getenv(ci_netif_config_opts* opts)
     opts->cong_avoid_scale_back = atoi(s);
 #endif
 
+  if ( (s = getenv("EF_TCP_TIME_WAIT_ASSASSINATION")))
+    opts->time_wait_assassinate = atoi(s);
+
   /* Get our netifs to inherit flags if the O/S is being forced to */
   if (CITP_OPTS.accept_force_inherit_nonblock)
     opts->accept_inherit_nonblock = 1;
@@ -1308,6 +1344,10 @@ void ci_netif_config_opts_getenv(ci_netif_config_opts* opts)
       opts->tcp_shared_local_ports > 0;
   if( (s = getenv("EF_TCP_SHARED_LOCAL_PORTS_PER_IP")) )
     opts->tcp_shared_local_ports_per_ip = atoi(s);
+  if( (s = getenv("EF_TCP_SHARED_LOCAL_PORTS_PER_IP_MAX")) )
+    opts->tcp_shared_local_ports_per_ip_max = atoi(s);
+  if( (s = getenv("EF_TCP_SHARED_LOCAL_PORTS_STEP")) )
+    opts->tcp_shared_local_ports_step = atoi(s);
 
   if( (s = getenv("EF_HIGH_THROUGHPUT_MODE")) )
     opts->rx_merge_mode = atoi(s);
@@ -1322,6 +1362,18 @@ void ci_netif_config_opts_getenv(ci_netif_config_opts* opts)
 
   if( (s = getenv("EF_KERNEL_PACKETS_TIMER_USEC")) )
     opts->kernel_packets_timer_usec = atoi(s);
+
+  static const char* const tcp_isn_opts[] = { "clocked", "clocked+cache", 0 };
+  opts->tcp_isn_mode =
+    parse_enum(opts, "EF_TCP_ISN_MODE", tcp_isn_opts, "clocked+cache");
+  if( (s = getenv("EF_TCP_ISN_2MSL")) )
+    opts->tcp_isn_2msl = atoi(s);
+  if( (s = getenv("EF_TCP_ISN_CACHE_SIZE")) )
+    opts->tcp_isn_cache_size = atoi(s);
+  if( (s = getenv("EF_TCP_ISN_INCLUDE_PASSIVE")) )
+    opts->tcp_isn_include_passive = atoi(s);
+  if( (s = getenv("EF_TCP_ISN_OFFSET")) )
+    opts->tcp_isn_offset = atoi(s);
 
   ci_netif_config_opts_getenv_ef_scalable_filters(opts);
 
@@ -1343,6 +1395,9 @@ void ci_netif_config_opts_getenv(ci_netif_config_opts* opts)
   if( (s = getenv("EF_CTPIO_SWITCH_BYPASS")) )
     opts->ctpio_switch_bypass = atoi(s);
 #endif
+
+  if( (s = getenv("EF_TCP_EARLY_RETRANSMIT")) )
+    opts->tcp_early_retransmit = atoi(s);
 }
 
 static int
@@ -1750,8 +1805,14 @@ static void netif_tcp_helper_build2(ci_netif* ni)
 {
   ni->active_wild_table =
     (ci_ni_dllist_t*) ((char*) ni->state + ni->state->active_wild_ofs);
+  ni->seq_table =
+    (ci_tcp_prev_seq_t*) ((char*) ni->state + ni->state->seq_table_ofs);
   ni->filter_table =
     (ci_netif_filter_table*) ((char*) ni->state + ni->state->table_ofs);
+#if CI_CFG_IPV6
+  ni->ip6_filter_table =
+    (ci_ip6_netif_filter_table*) ((char*) ni->state + ni->state->ip6_table_ofs);
+#endif
   ni->packets = (oo_pktbuf_manager*) ((char*) ni->state + ni->state->buf_ofs);
 }
 
@@ -1865,7 +1926,7 @@ static int netif_tcp_helper_mmap(ci_netif* ni)
     rc = oo_resource_mmap(ci_netif_get_driver_handle(ni),
                           OO_MMAP_TYPE_NETIF,
                           CI_NETIF_MMAP_ID_TIMESYNC, ns->timesync_bytes,
-                          OO_MMAP_FLAG_READONLY, &p);
+                          OO_MMAP_FLAG_READONLY | OO_MMAP_FLAG_POPULATE, &p);
     if( rc < 0 ) {
       LOG_NV(ci_log("%s: oo_resource_mmap timesync %d", __FUNCTION__, rc));
       goto fail1;
@@ -1881,7 +1942,7 @@ static int netif_tcp_helper_mmap(ci_netif* ni)
     rc = oo_resource_mmap(ci_netif_get_driver_handle(ni),
                           OO_MMAP_TYPE_NETIF,
                           CI_NETIF_MMAP_ID_IO, ns->io_mmap_bytes,
-                          OO_MMAP_FLAG_DEFAULT, &p);
+                          OO_MMAP_FLAG_POPULATE, &p);
     if( rc < 0 ) {
       LOG_NV(ci_log("%s: oo_resource_mmap io %d", __FUNCTION__, rc));
       goto fail1;
@@ -1897,7 +1958,7 @@ static int netif_tcp_helper_mmap(ci_netif* ni)
     rc = oo_resource_mmap(ci_netif_get_driver_handle(ni),
                           OO_MMAP_TYPE_NETIF,
                           CI_NETIF_MMAP_ID_PIO, ns->pio_mmap_bytes,
-                          OO_MMAP_FLAG_DEFAULT, &p);
+                          OO_MMAP_FLAG_POPULATE, &p);
     if( rc < 0 ) {
       LOG_NV(ci_log("%s: oo_resource_mmap pio %d", __FUNCTION__, rc));
       goto fail2;
@@ -1917,7 +1978,7 @@ static int netif_tcp_helper_mmap(ci_netif* ni)
     rc = oo_resource_mmap(ci_netif_get_driver_handle(ni),
                           OO_MMAP_TYPE_NETIF,
                           CI_NETIF_MMAP_ID_CTPIO, ns->ctpio_mmap_bytes,
-                          OO_MMAP_FLAG_DEFAULT, &p);
+                          OO_MMAP_FLAG_POPULATE, &p);
     if( rc < 0 ) {
       LOG_NV(ci_log("%s: oo_resource_mmap ctpio %d", __FUNCTION__, rc));
       goto fail2;
@@ -1936,7 +1997,7 @@ static int netif_tcp_helper_mmap(ci_netif* ni)
     rc = oo_resource_mmap(ci_netif_get_driver_handle(ni),
                           OO_MMAP_TYPE_NETIF,
                           CI_NETIF_MMAP_ID_IOBUFS, ns->buf_mmap_bytes,
-                          OO_MMAP_FLAG_DEFAULT, &p);
+                          OO_MMAP_FLAG_POPULATE, &p);
     if( rc < 0 ) {
       LOG_NV(ci_log("%s: oo_resource_mmap iobufs %d", __FUNCTION__, rc));
       goto fail2;
@@ -2001,7 +2062,7 @@ static void init_ef_vi(ci_netif* ni, int nic_i, int vi_state_offset,
   unsigned vi_bar_off = vi_instance * 8192;
 
   ef_vi_init(vi, ef_vi_arch_from_efhw_arch(nsn->vi_arch), nsn->vi_variant,
-             nsn->vi_revision, nsn->vi_flags, state);
+             nsn->vi_revision, nsn->vi_flags, nsn->vi_nic_flags, state);
   ef_vi_init_out_flags(vi, nsn->vi_out_flags);
   vi_io_offset += vi_bar_off & (CI_PAGE_SIZE - 1);
   ef_vi_init_io(vi, ni->io_ptr + vi_io_offset);
@@ -2014,9 +2075,9 @@ static void init_ef_vi(ci_netif* ni, int nic_i, int vi_state_offset,
   ids += nsn->vi_rxq_size;
   ef_vi_init_txq(vi, txq_size, ni->buf_ptr + *vi_mem_offset, ids);
   vi->vi_i = vi_instance;
+  ef_vi_set_ts_format(vi, nsn->ts_format);
   ef_vi_init_rx_timestamping(vi, nsn->rx_ts_correction);
   ef_vi_init_tx_timestamping(vi, nsn->tx_ts_correction);
-  ef_vi_set_ts_format(vi, nsn->ts_format);
   *vi_mem_offset += (ef_vi_tx_ring_bytes(vi) + CI_PAGE_SIZE-1) & CI_PAGE_MASK;
   ef_vi_add_queue(vi, vi);
   ef_vi_set_stats_buf(vi, vi_stats);
@@ -2048,7 +2109,8 @@ static int netif_tcp_helper_build(ci_netif* ni)
    * Do other mmaps.
    */
   rc = netif_tcp_helper_mmap(ni);
-  if( rc < 0 )  return rc;
+  if( rc < 0 )
+    goto fail1;
 
   /****************************************************************************
    * Breakout the VIs.
@@ -2072,7 +2134,7 @@ static int netif_tcp_helper_build(ci_netif* ni)
                                      NULL, NULL, NULL, &pio_len_shift,
                                      &ctpio_start_offset);
     if( rc < 0 )
-      return rc;
+      goto fail1;
 
     LOG_NV(ci_log("%s: ni->io_ptr=%p io_offset=%d mem_offset=%d "
                   "state_offset=%d", __FUNCTION__, ni->io_ptr,
@@ -2148,12 +2210,13 @@ static int netif_tcp_helper_build(ci_netif* ni)
 
   ci_assert_equal(ctpio_io_offset, ns->ctpio_mmap_bytes);
 
-  /* Initialise timer related stuff that is only used at user level */
-  ci_ip_timer_state_init_ul(ni);
-
   /* Set up ni->packets->sets_max */
   netif_tcp_helper_build2(ni);
   ni->pkt_bufs = CI_ALLOC_ARRAY(char*, ni->packets->sets_max);
+  if( ni->pkt_bufs == NULL ) {
+    rc = -ENOMEM;
+    goto fail1;
+  }
   CI_ZERO_ARRAY(ni->pkt_bufs, ni->packets->sets_max);
 
   /* sets_max may be smaller than the space the kernel reserved for
@@ -2180,11 +2243,15 @@ static int netif_tcp_helper_build(ci_netif* ni)
     ci_log("a: %d != 0", size % sizeof(oo_pktbuf_set) != 0);
     ci_log("b: 1 <= %zd <= %d ", size / sizeof(oo_pktbuf_set), 
            ni->packets->sets_max);
-    return -EINVAL;
+    rc = -EINVAL;
+    goto fail2;
   }
 
-  /* FIXME check error, free - why ni->pkt_bufs does not do this */
   ni->eps = CI_ALLOC_ARRAY(typeof(*ni->eps), ni->state->max_ep_bufs);
+  if( ni->eps == NULL ) {
+    rc = -ENOMEM;
+    goto fail2;
+  }
   {
     int i;
     struct ci_extra_ep ref = { CI_FD_BAD };
@@ -2192,6 +2259,11 @@ static int netif_tcp_helper_build(ci_netif* ni)
       ni->eps[i] = ref;
   }
   return 0;
+
+fail2:
+  CI_FREE_OBJ(ni->pkt_bufs);
+fail1:
+  return rc;
 }
 
 #endif
@@ -2240,6 +2312,10 @@ ci_inline void netif_tcp_helper_free(ci_netif* ni)
 #else
   if( ni->state != NULL )
     netif_tcp_helper_munmap(ni);
+  if( ni->eps != NULL )
+    CI_FREE_OBJ(ni->eps);
+  if( ni->pkt_bufs != NULL )
+    CI_FREE_OBJ(ni->pkt_bufs);
   ci_netif_deinit(ni);
 #endif
 }
@@ -2353,7 +2429,11 @@ netif_tcp_helper_alloc_u(ef_driver_handle fd, ci_netif* ni,
    */
   init_resource_alloc(&ra, opts, flags, stack_name);
 
-  rc = oo_resource_alloc(fd, &ra);
+  /* oo_resource_alloc's ioctl does an interruptible sleep while waiting for
+   * the cplane. If a non-fatal signal is received while we're asleep,
+   * we get an EINTR and want to try again. */
+  while( (rc = oo_resource_alloc(fd, &ra)) == -EINTR );
+
   if( rc < 0 ) {
     switch( rc ) {
     case -ELIBACC: {
@@ -2448,8 +2528,8 @@ netif_tcp_helper_alloc_u(ef_driver_handle fd, ci_netif* ni,
 
   return 0;
 
- fail:
-  netif_tcp_helper_free(ni);
+fail:
+  netif_tcp_helper_munmap(ni);
   return rc;
 }
 
@@ -2494,16 +2574,16 @@ netif_tcp_helper_alloc_k(ci_netif** ni_out, const ci_netif_config_opts* opts,
 static void ci_netif_sanity_checks(void)
 {
   /* These had better be true, or there'll be trouble! */
-  ci_assert_le(sizeof(citp_waitable_obj), CI_PAGE_SIZE);
-  ci_assert_equal(EP_BUF_SIZE * EP_BUF_PER_PAGE, CI_PAGE_SIZE);
-  ci_assert_le(sizeof(citp_waitable_obj), EP_BUF_SIZE);
-  ci_assert_equal((1u << CI_SB_FLAG_WAKE_RX_B), CI_SB_FLAG_WAKE_RX);
-  ci_assert_equal((1u << CI_SB_FLAG_WAKE_TX_B), CI_SB_FLAG_WAKE_TX);
-  ci_assert_equal(sizeof(ci_ni_aux_mem), CI_AUX_MEM_SIZE);
+  CI_BUILD_ASSERT( sizeof(citp_waitable_obj) <= CI_PAGE_SIZE );
+  CI_BUILD_ASSERT( sizeof(citp_waitable_obj) <= EP_BUF_SIZE );
+  CI_BUILD_ASSERT( EP_BUF_SIZE * EP_BUF_PER_PAGE == CI_PAGE_SIZE );
+  CI_BUILD_ASSERT( (1u << CI_SB_FLAG_WAKE_RX_B) == CI_SB_FLAG_WAKE_RX );
+  CI_BUILD_ASSERT( (1u << CI_SB_FLAG_WAKE_TX_B) == CI_SB_FLAG_WAKE_TX );
+  CI_BUILD_ASSERT( sizeof(ci_ni_aux_mem) == CI_AUX_MEM_SIZE );
 
   /* AUX_PER_BUF aux buffers + header = ep buffer, where header has
    * the same size as the aux buffer fitting to a cache line. */
-  ci_assert_equal( CI_AUX_MEM_SIZE * (AUX_PER_BUF + 1), EP_BUF_SIZE);
+  CI_BUILD_ASSERT( CI_AUX_MEM_SIZE * (AUX_PER_BUF + 1) == EP_BUF_SIZE );
 
 #ifndef NDEBUG
   {
@@ -2517,8 +2597,8 @@ static void ci_netif_sanity_checks(void)
 
   /* Warn if we're wasting memory. */
   if( sizeof(citp_waitable_obj) * 2 <= EP_BUF_SIZE )
-    ci_log("%s: EP_BUF_SIZE=%d larger than necessary (%d)", __FUNCTION__,
-           (int) sizeof(citp_waitable_obj), EP_BUF_SIZE);
+    ci_log("%s: EP_BUF_SIZE=%d larger than necessary (citp_waitable_obj=%zu)",
+           __FUNCTION__, EP_BUF_SIZE, sizeof(citp_waitable_obj));
 }
 
 
@@ -2528,7 +2608,7 @@ static int ci_netif_pkt_reserve(ci_netif* ni, int n, oo_pkt_p* p_pkt_list)
   int i;
 
   for( i = 0; i < n; ++i ) {
-    if( (pkt = ci_netif_pkt_alloc(ni)) == NULL )
+    if( (pkt = ci_netif_pkt_alloc(ni, 0)) == NULL )
       break;
     *p_pkt_list = OO_PKT_P(pkt);
     p_pkt_list = &pkt->next;
@@ -2709,7 +2789,6 @@ int ci_netif_ctor(ci_netif* ni, ef_driver_handle fd, const char* stack_name,
 
   ci_netif_pkt_prefault_reserve(ni);
   ci_netif_pkt_prefault(ni);
-  oo_atomic_set(&ni->ref_count, 0);
 
   NI_LOG(ni, BANNER,
          "Using "ONLOAD_PRODUCT" "ONLOAD_VERSION" "ONLOAD_COPYRIGHT" [%s]",

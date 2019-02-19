@@ -321,17 +321,27 @@ onload_import() {
   local pf1="$HOME/.openonload/profiles/$profile.opf"
   local pf2="$profile_d/$profile.opf"
   local pf3="$profile"
+  # *.opf-fragment files are searched only for secondary imports, i.e. use of
+  # onload_import within another profile. This is to prevent fragments being
+  # accidentally used as full-fledged profiles by themselves
+  local pf_frag1="$HOME/.openonload/profiles/$profile.opf-fragment"
+  local pf_frag2="$profile_d/$profile.opf-fragment"
   local pf="$pf1"
+  $toplevelimport || [ -f "$pf" ] || pf="$pf_frag1"
   [ -f "$pf" ] || pf="$pf2"
+  $toplevelimport || [ -f "$pf" ] || pf="$pf_frag2"
   [ -f "$pf" ] || pf="$pf3"
   if ! [ -f "$pf" ]; then
     log "ERROR: Cannot find profile '$profile'"
     log "I looked in these places:"
     log "  $pf1"
+    $toplevelimport || log "  $pf_frag1"
     log "  $pf2"
+    $toplevelimport || log "  $pf_frag1"
     log "  $pf3"
     exit 3
   fi
+  toplevelimport=false
   vlog "onload_import: $profile ($pf)"
   # Source profile, with $@ representing the application and its options
   shift
@@ -414,6 +424,7 @@ keepwrapper=false
 onload="$bin/$me"
 onload_args=
 usehandler=true
+toplevelimport=true
 [ -z "$ONLOAD_DRIVERCHECK" ] && ONLOAD_DRIVERCHECK=true
 test=false
 os=$(uname -s | tr '[A-Z]' '[a-z]')

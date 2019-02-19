@@ -145,3 +145,85 @@ void ci_sock_cmn_dump(ci_netif* ni, ci_sock_cmn* s, const char* pf,
   }
 }
 
+
+void ci_sock_set_laddr(ci_sock_cmn* s, ci_addr_t addr, ci_uint16 port)
+{
+#if CI_CFG_IPV6
+  if( ipcache_is_ipv6(s->pkt) ) {
+    memcpy(sock_ip6_laddr(s), addr.ip6, sizeof(ci_ip6_addr_t));
+  } else
+#endif
+  {
+    sock_laddr_be32(s) = addr.ip4;
+  }
+  sock_lport_be16(s) = port;
+}
+
+
+void ci_sock_set_raddr(ci_sock_cmn* s, ci_addr_t addr, ci_uint16 port)
+{
+#if CI_CFG_IPV6
+  if( ipcache_is_ipv6(s->pkt) ) {
+    memcpy(sock_ip6_raddr(s), addr.ip6, sizeof(ci_ip6_addr_t));
+  } else
+#endif
+  {
+    sock_raddr_be32(s) = addr.ip4;
+  }
+  sock_rport_be16(s) = s->pkt.dport_be16 = port;
+}
+
+
+ci_addr_t sock_laddr(ci_sock_cmn* s)
+{
+#if CI_CFG_IPV6
+  if( ipcache_is_ipv6(s->pkt) ) {
+    ci_addr_t addr;
+    memcpy(addr.ip6, sock_ip6_laddr(s), sizeof(addr.ip6));
+    return addr;
+  }
+  else
+#endif
+  {
+    return CI_ADDR_FROM_IP4(sock_laddr_be32(s));
+  }
+}
+
+
+ci_addr_t sock_raddr(ci_sock_cmn* s)
+{
+#if CI_CFG_IPV6
+  if( ipcache_is_ipv6(s->pkt) ) {
+    ci_addr_t addr;
+    memcpy(addr.ip6, sock_ip6_raddr(s), sizeof(addr.ip6));
+    return addr;
+  }
+  else
+#endif
+  {
+    return CI_ADDR_FROM_IP4(sock_raddr_be32(s));
+  }
+}
+
+
+#if CI_CFG_IPV6
+void ci_init_ipcache_ip6_hdr(ci_sock_cmn* s)
+{
+  ci_uint8 protocol, ttl;
+
+  ci_assert_equal(ipcache_is_ipv6(s->pkt), 0);
+
+  protocol = sock_protocol(s);
+  ttl = s->pkt.ip.ip_ttl;
+
+  s->pkt.ether_type = CI_ETHERTYPE_IP6;
+
+  /* Move source and destination ports */
+  memmove(&s->pkt.ip6 + 1, &s->pkt.ip + 1, sizeof(ci_uint16) * 2);
+
+  memset(&s->pkt.ip6, 0, sizeof(s->pkt.ip6));
+
+  sock_protocol(s) = protocol;
+  s->pkt.ip6.hop_limit = ttl;
+}
+#endif

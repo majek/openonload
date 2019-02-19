@@ -48,12 +48,28 @@
 
 #include <ci/efrm/resource.h>
 #include <ci/efrm/vi_allocation.h>
+#include <ci/efrm/efrm_filter.h>
 
 /* EFRM_RSS_MODE_ID_MAX needs to be large engough
  * to accomodate all modes.
  * See EFRM_RSS_MODE_ID in vi_set.h
  */
 #define EFRM_RSS_MODE_ID_MAX 1
+
+struct efrm_rss_context {
+	/* Driverlink ID for this RSS context. */
+	uint32_t rss_context_id;
+	/* An EFRM_RSS_MODE_ID_* constant indicating the intended purpose of
+	 * this RSS context. */
+	uint32_t rss_mode;
+	/* Bitmap indicating the VIs in the set that are referenced by the
+	 * indirection table. */
+	uint64_t indirected_vis;
+	/* The indirection table programmed to the NIC for this RSS context. */
+	uint32_t indirection_table[EFRM_RSS_INDIRECTION_TABLE_LEN];
+	/* The hash key programmed to the NIC for this RSS context. */
+	uint8_t rss_hash_key[EFRM_RSS_KEY_LEN];
+};
 
 struct efrm_vi_set {
 	struct efrm_resource      rs;
@@ -62,7 +78,7 @@ struct efrm_vi_set {
 	spinlock_t                allocation_lock;
 	struct completion         allocation_completion;
 	uint64_t                  free;
-	int                       rss_context[EFRM_RSS_MODE_ID_MAX + 1];
+	struct efrm_rss_context   rss_context[EFRM_RSS_MODE_ID_MAX + 1];
 	int                       n_vis;
 	int                       n_vis_flushing;
 	int                       n_flushing_waiters;

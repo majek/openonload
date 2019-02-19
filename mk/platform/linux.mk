@@ -19,6 +19,10 @@ ifdef CONFIG_IA64
 CFLAGS_KERNEL :=
 endif
 
+ifdef CONFIG_ARM64
+EXTRA_CFLAGS += -mcmodel=large
+endif
+
 # To build without -g set CONFIG_DEBUG_INFO to empty string
 # (-g does make kernel modules quite big, but only on disk).
 ifdef NO_DEBUG_INFO

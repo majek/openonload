@@ -24,10 +24,12 @@ static void citp_passthrough_dtor(citp_fdinfo* fdi, int fdt_locked)
 {
   citp_alien_fdi* epi = fdi_to_alien_fdi(fdi);
 
-  CITP_FDTABLE_LOCK();
+  if( ! fdt_locked )
+    CITP_FDTABLE_LOCK();
   ci_tcp_helper_close_no_trampoline(epi->os_socket);
   __citp_fdtable_reserve(epi->os_socket, 0);
-  CITP_FDTABLE_UNLOCK();
+  if( ! fdt_locked )
+    CITP_FDTABLE_UNLOCK();
   citp_netif_release_ref(fdi_to_alien_fdi(fdi)->netif, fdt_locked);
 }
 
@@ -194,6 +196,7 @@ citp_protocol_impl citp_passthrough_protocol_impl = {
 
     .zc_send     = citp_nonsock_zc_send,
     .zc_recv     = citp_nonsock_zc_recv,
+    .zc_recv_filter = citp_nonsock_zc_recv_filter,
     .recvmsg_kernel = citp_nonsock_recvmsg_kernel,
     .tmpl_alloc     = citp_nonsock_tmpl_alloc,
     .tmpl_update    = citp_nonsock_tmpl_update,

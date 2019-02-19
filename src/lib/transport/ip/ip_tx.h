@@ -49,6 +49,18 @@ extern int ci_ip_send_pkt(ci_netif* ni,
                           const struct oo_sock_cplane* sock_cp_opt,
                           ci_ip_pkt_fmt* pkt) CI_HF;
 
+
+/* Defer send to the OS.
+ *
+ * This function is used when onload is missing the necessary information
+ * to send this packet.
+ */
+extern void ci_ip_send_pkt_defer(ci_netif *ni,
+                                 cicpos_retrieve_rc_t retrieve_rc,
+                                 ci_uerr_t *ref_os_rc, ci_ip_pkt_fmt* pkt,
+                                 const ci_ip_cached_hdrs *ipcache);
+
+
 /* Do control plane lookup to send [pkt], but don't actually send it.  This
  * is a subset of ci_ip_send_pkt(), and is needed when information from the
  * control plane lookup is needed before sending.

@@ -122,12 +122,10 @@ EFRM_HAVE_SET_RESTORE_SIGMASK1	symbol	set_restore_sigmask	include/linux/sched/si
 
 EFRM_ALLOC_FILE_TAKES_STRUCT_PATH	symtype	alloc_file	include/linux/file.h struct file *(struct path *, fmode_t, const struct file_operations *)
 EFRM_ALLOC_FILE_TAKES_CONST_STRUCT_PATH	symtype	alloc_file	include/linux/file.h struct file *(const struct path *, fmode_t, const struct file_operations *)
-EFRM_HAVE_D_DNAME			member	struct_dentry_operations d_dname	include/linux/dcache.h
-EFRM_HAVE_CONST_D_OP			memtype	struct_dentry_operations d_op	include/linux/dcache.h	const struct dentry_operations *
 EFRM_FSTYPE_HAS_MOUNT			member	struct_file_system_type	mount	include/linux/fs.h
 EFRM_NEED_VFSMOUNT_PARAM_IN_GET_SB	memtype	struct_file_system_type	get_sb	include/linux/fs.h	int (*)(struct file_system_type *, int, const char *, void *, struct vfsmount *)
 EFRM_HAVE_KERN_UMOUNT			symbol	kern_unmount		include/linux/fs.h
-EFRM_HAVE_ALLOC_FILE			symbol	alloc_file	include/linux/file.h
+EFRM_HAVE_ALLOC_FILE_PSEUDO		symbol	alloc_file_pseudo	include/linux/file.h
 
 # Note this is the only place where the first test is needed to perform the subsequent kcompat tests
 EFRM_HAVE_KMEM_CACHE_S			custom

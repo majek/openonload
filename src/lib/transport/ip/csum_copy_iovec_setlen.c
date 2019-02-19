@@ -118,10 +118,10 @@ ssize_t
 __ci_ip_copy_pkt_to_user(ci_netif* ni, ci_iovec* iov,
                          ci_ip_pkt_fmt* pkt, int peek_off)
 {
-  int len;
+  size_t len;
 
   len = oo_offbuf_left(&pkt->buf) - peek_off;
-  len = CI_MIN(len, (int) CI_IOVEC_LEN(iov));
+  len = CI_MIN(len, CI_IOVEC_LEN(iov));
 
   memcpy(CI_IOVEC_BASE(iov), oo_offbuf_ptr(&pkt->buf) + peek_off, len);
 

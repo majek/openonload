@@ -169,8 +169,7 @@ static void ci_ip_send_udp_slow(ci_netif* ni, ci_ip_pkt_fmt* pkt,
   ci_assert_gt(pkt->refcount, 1);
   --pkt->refcount;
 
-  cicp_user_defer_send(ni, retrrc_nomac, &os_rc, OO_PKT_P(pkt), 
-                       ipcache->ifindex, ipcache->nexthop);
+  ci_ip_send_pkt_defer(ni, retrrc_nomac, &os_rc, pkt, ipcache);
 
   /* Update size of transmit queue now, because we do not have any callback
    * when the packet will go out or dropped.
@@ -196,7 +195,7 @@ static int ci_udp_sendmsg_loop(ci_sock_cmn* s, void* opaque_arg)
      */
     frag_head = state->pkt;
     udp = (ci_udp_hdr*) (oo_ip_hdr(frag_head) + 1);
-    frag_head->pf.udp.rx_stamp  = IPTIMER_STATE(state->ni)->frc;
+    frag_head->tstamp_frc  = IPTIMER_STATE(state->ni)->frc;
     frag_head->pf.udp.pay_len = CI_BSWAP_BE16(udp->udp_len_be16) - sizeof(*udp);
     buf_pkt = frag_head;
     seg_i = 0;
@@ -299,7 +298,7 @@ ci_inline void prep_send_pkt(ci_netif* ni, ci_udp_state* us,
   ci_ip4_hdr *ip = oo_tx_ip_hdr(pkt);
   ni->state->n_async_pkts -= pkt->n_buffers;
 
-  ip->ip_saddr_be32 = ipcache->ip_saddr_be32;
+  ip->ip_saddr_be32 = ipcache->ip_saddr.ip4;
   ip->ip_daddr_be32 = ipcache->ip.ip_daddr_be32;
   ip->ip_ttl = ipcache->ip.ip_ttl;
   ci_ip_set_mac_and_port(ni, ipcache, pkt);
@@ -419,9 +418,11 @@ static int ci_udp_sendmsg_os_get_binding(citp_socket *ep, ci_fd_t fd,
   ci_netif* ni = ep->netif;
   ci_udp_state* us = SOCK_TO_UDP(ep->s);
   int ret, rc, err;
-  struct sockaddr_in sa;
-  socklen_t salen = sizeof(sa);
+  union ci_sockaddr_u sa_u;
+  socklen_t salen = sizeof(sa_u.sa);
   ci_fd_t os_sock = (ci_fd_t)ci_get_os_sock_fd(fd);
+  ci_addr_t laddr;
+  ci_uint16 lport;
 
   ci_assert( !udp_lport_be16(us));
 
@@ -461,7 +462,7 @@ static int ci_udp_sendmsg_os_get_binding(citp_socket *ep, ci_fd_t fd,
   err = CI_GET_ERROR(ret);
 
   /* see what the kernel did - we'll do just the same */
-  rc = ci_sys_getsockname( os_sock, (struct sockaddr*)&sa, &salen);
+  rc = ci_sys_getsockname( os_sock, &sa_u.sa, &salen);
 
   /* Must release the os_sock fd before we can take the stack lock, as the
    * citp_dup2_lock is held until we do so, and lock ordering does not allow
@@ -472,12 +473,13 @@ static int ci_udp_sendmsg_os_get_binding(citp_socket *ep, ci_fd_t fd,
   /* get out if getsockname fails or returns a non INET family
     * or a sockaddr struct that's too darned small */
   if( CI_UNLIKELY( rc || (!rc &&
-			  ( sa.sin_family != AF_INET || 
-			    salen < sizeof(struct sockaddr_in))))) {
+			  ( sa_u.sa.sa_family != us->s.domain ||
+			    /* FIXME case when sa_family is AF_INET and us->s.domain is AF_INET6 */
+			    salen < IPX_SOCKADDR_SIZE(sa_u.sa.sa_family))))) {
     LOG_UV(log("%s: "NT_FMT" sys_getsockname prob. (rc:%d err:%d, fam:%d, "
 		"len:%d - exp %u)",
-		__FUNCTION__, NT_PRI_ARGS(ni,us), rc, errno, sa.sin_family, 
-		salen, (unsigned)sizeof(struct sockaddr_in)));
+		__FUNCTION__, NT_PRI_ARGS(ni,us), rc, errno, sa_u.sa.sa_family,
+		salen, (unsigned)IPX_SOCKADDR_SIZE(sa_u.sa.sa_family)));
     errno = err;
     return ret;
   }
@@ -485,12 +487,13 @@ static int ci_udp_sendmsg_os_get_binding(citp_socket *ep, ci_fd_t fd,
   ci_netif_lock(ni);
   if( udp_lport_be16(us) == 0 ) {
     us->udpflags |= CI_UDPF_IMPLICIT_BIND;
-    ci_udp_set_laddr(ep, sa.sin_addr.s_addr, sa.sin_port);
+    laddr = ci_get_addr(&sa_u.sa);
+    lport = ci_get_port(&sa_u.sa);
+    ci_udp_set_laddr(ep, laddr, lport);
 
     /* Add a filter if the local addressing is appropriate. */
-    if( sa.sin_port != 0 &&
-        (sa.sin_addr.s_addr == INADDR_ANY ||
-         cicp_user_addr_is_local_efab(ni, sa.sin_addr.s_addr)) ) {
+    if( lport != 0 && (!CI_IPX_ADDR_CMP_ANY(laddr) ||
+         cicp_user_addr_is_local_efab(ni, laddr.ip4)) ) {
       ci_assert( ! (us->udpflags & CI_UDPF_FILTERED) );
 
 #ifdef ONLOAD_OFE
@@ -515,9 +518,11 @@ static int ci_udp_sendmsg_os_get_binding(citp_socket *ep, ci_fd_t fd,
   }
   ci_netif_unlock(ni);
 
-  LOG_UV(ci_log("%s: "NT_FMT"Unbound: first send via OS got L:[%s:%u]",
-		__FUNCTION__, NT_PRI_ARGS(ni,us), 
-		ip_addr_str( udp_laddr_be32(us)), udp_lport_be16(us)));
+  laddr = sock_laddr(&us->s);
+  LOG_UV(ci_log("%s: "NT_FMT"Unbound: first send via OS got L:[" IPX_PORT_FMT "]",
+                __FUNCTION__, NT_PRI_ARGS(ni,us),
+                IPX_ARG(AF_IP(laddr)), udp_lport_be16(us)));
+
   errno = err;
   return ret;
 }
@@ -1268,7 +1273,8 @@ void ci_udp_sendmsg_onload(ci_netif* ni, ci_udp_state* us,
                            const ci_msghdr* msg, int flags,
                            struct udp_send_info* sinf)
 {
-  int rc, i, bytes_to_send;
+  int rc, i;
+  unsigned long bytes_to_send;
   struct oo_pkt_filler pf;
   ci_iovec_ptr piov;
   int was_locked;
@@ -1298,22 +1304,51 @@ void ci_udp_sendmsg_onload(ci_netif* ni, ci_udp_state* us,
   pf.alloc_pkt = NULL;
 
   if( ! UDP_HAS_SENDQ_SPACE(us, bytes_to_send)         |
-      (bytes_to_send > (int) CI_UDP_MAX_PAYLOAD_BYTES) )
+      (bytes_to_send > (unsigned long) CI_UDP_MAX_PAYLOAD_BYTES) )
     goto no_space_or_too_big;
 
  back_to_fast_path:
   was_locked = sinf->stack_locked;
   if( bytes_to_send > sinf->ipcache.mtu - sizeof(ci_ip4_hdr) -
       sizeof(ci_udp_hdr) &&
-      (us->s.s_flags & CI_SOCK_FLAG_ALWAYS_DF) ) {
-    /* Linux does not set SO_ERROR if non-connected && !IP_RECVERR */
+      (us->s.s_flags & CI_SOCK_FLAG_ALWAYS_DF ) ) {
+    /* We are trying to send too large a datagram with DontFragment bit */
+    if( us->s.so.so_debug & CI_SOCKOPT_FLAG_IP_RECVERR ) {
+      /* We have to add an error message to the error queue.
+       * Let OS do it! */
+      if( sinf->stack_locked ) {
+        ci_netif_unlock(ni);
+        sinf->stack_locked = 0;
+      }
+      sinf->rc = ci_udp_sendmsg_os(ni, us, msg, flags, 1, 0);
+      return;
+    }
+    if( us->s.s_flags & CI_SOCK_FLAG_PMTU_DO ) {
+      /* IP_PMTUDISC_DO */
+      sinf->rc = -EMSGSIZE;
+      return;
+    }
+    else
 #ifndef __KERNEL__
-    if( msg->msg_namelen == 0 ||
-        (us->s.so.so_debug & CI_SOCKOPT_FLAG_IP_RECVERR) )
+        if( msg->msg_namelen == 0 )
 #endif
+    {
+      /* IP_PMTUDISC_PROBE connected case.
+       * Linux does following:
+       * - try to send the large packet with DF bit;
+       * - IP subsytem finds out that it does not fit into current PMTU;
+       * - IP subsystem sends a sort of ICMP Too Big message;
+       * - socket gets the error.
+       *
+       * So we return bytes_to_send to user, pretending that "we tried to
+       * send it", but set SO_ERROR so that the next socket call will tell
+       * the caller about this error.
+       */
+      sinf->rc = bytes_to_send;
       us->s.so_error = EMSGSIZE;
-    sinf->rc = -EMSGSIZE;
-    return;
+      return;
+    }
+    /* IP_PMTUDISC_PROBE does not do anything in non-connected case */
   }
   rc = ci_udp_sendmsg_fill(ni, us, &piov, bytes_to_send, flags, &pf, sinf);
 #if CI_CFG_TIMESTAMPING

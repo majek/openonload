@@ -163,6 +163,40 @@ ef10_mcdi_check_response(const char* caller, const char* failed_cmd,
 				 (actual_len), (rate_limit))
 
 
+#define EFX_DL_PRE(efx_dev, nic, rc) \
+{ \
+	(efx_dev) = efhw_nic_acquire_dl_device((nic)); \
+		\
+	EFHW_ASSERT(!in_atomic()); \
+		\
+	/* [nic->resetting] means we have detected that we are in a reset.
+	 * There is potentially a period after [nic->resetting] is cleared
+	 * but before driverlink is re-enabled, during which time [efx_dev]
+	 * will be NULL. */ \
+	if ((nic)->resetting || (efx_dev) == NULL) { \
+		/* user should not handle any errors */ \
+		rc = 0; \
+	} \
+	else { \
+		/* Driverlink handle is valid and we're not resetting, so issue
+		 * the call. */ \
+
+
+#define EFX_DL_POST(efx_dev, nic, rc) \
+		\
+		/* If we see ENETDOWN here, we must be in the window between
+		 * hardware being removed and being informed about this fact by
+		 * the kernel. */ \
+		if ((rc) == -ENETDOWN) \
+			ci_atomic32_or(&(nic)->resetting, \
+				       NIC_RESETTING_FLAG_VANISHED); \
+	} \
+		\
+	/* This is safe even if [efx_dev] is NULL. */ \
+	efhw_nic_release_dl_device((nic), (efx_dev)); \
+}
+
+
 /*----------------------------------------------------------------------------
  *
  * Initialisation and configuration discovery
@@ -604,6 +638,10 @@ static int _ef10_nic_check_capabilities(struct efhw_nic *nic,
 	if (flags & (1u <<
 		     MC_CMD_GET_CAPABILITIES_V3_OUT_RX_BATCHING_LBN))
 		*capability_flags |= NIC_FLAG_RX_MERGE;
+	if (flags & (1u <<
+		     MC_CMD_GET_CAPABILITIES_V3_OUT_RX_FORCE_EVENT_MERGING_LBN)) {
+		*capability_flags |= NIC_FLAG_RX_FORCE_EVENT_MERGING;
+	}
 
 	/* If MAC filters are policed then check we've got the right privileges
 	 * before saying we can do MAC spoofing.
@@ -643,6 +681,9 @@ static int _ef10_nic_check_capabilities(struct efhw_nic *nic,
 	}
 
 	if (out_size >= MC_CMD_GET_CAPABILITIES_V3_OUT_LEN) {
+		const uint32_t MEDFORD2_BYTES_PER_BUFFER = 1024;
+		const uint32_t MEDFORD_BYTES_PER_BUFFER  =  512;
+
 		/* If TX alternatives are not supported, these can still be
 		 * set to non-zero values based on whatever MCFW reports.
 		 */
@@ -650,10 +691,16 @@ static int _ef10_nic_check_capabilities(struct efhw_nic *nic,
 						GET_CAPABILITIES_V3_OUT_VFIFO_STUFFING_NUM_VFIFOS);
 		nic->tx_alts_cp_bufs = EFHW_MCDI_WORD(out,
 						GET_CAPABILITIES_V3_OUT_VFIFO_STUFFING_NUM_CP_BUFFERS);
+		/* The firmware doesn't report the size of the common-pool
+		 * buffers, so we infer it from the NIC-type. */
+		nic->tx_alts_cp_buf_size = nic->devtype.variant >= 'C' ?
+			                   MEDFORD2_BYTES_PER_BUFFER :
+					   MEDFORD_BYTES_PER_BUFFER;
 	}
 	else {
 		nic->tx_alts_vfifos = 0;
 		nic->tx_alts_cp_bufs = 0;
+		nic->tx_alts_cp_buf_size = 0;
 	}
 
         nic->rx_variant = EFHW_MCDI_WORD(out, GET_CAPABILITIES_OUT_RX_DPCPU_FW_ID);
@@ -1102,29 +1149,14 @@ static void
 ef10_nic_wakeup_request(struct efhw_nic *nic, volatile void __iomem* io_page,
 			int rptr)
 {
-	u32 rptr_lo, rptr_hi;
 	__DWCHCK(ERF_DZ_EVQ_RPTR);
 	__RANGECHCK(rptr, ERF_DZ_EVQ_RPTR_WIDTH);
 
 	if( nic->flags & NIC_FLAG_BUG35388_WORKAROUND ) {
-		/* Workaround for the lockup issue: bug35981,
-		 * bug35887, bug35388, bug36064.
-		 */
-
-#define REV0_OP_RPTR_HI 0x800
-#define REV0_OP_RPTR_LO 0x900
-
-		rptr_hi = REV0_OP_RPTR_HI | ((rptr >> 8) & 0xff);
-		rptr_lo = REV0_OP_RPTR_LO | (rptr & 0xff);
-		writel(rptr_hi, (char *)io_page + ER_DZ_TX_DESC_UPD_REG + 8);
-		wmb();
-		writel(rptr_lo, (char *)io_page + ER_DZ_TX_DESC_UPD_REG + 8);
-		mmiowb();
+		ef10_update_evq_rptr_bug35388_workaround(io_page, rptr);
 	}
 	else {
-		writel(rptr << ERF_DZ_EVQ_RPTR_LBN,
-		       io_page + ER_DZ_EVQ_RPTR_REG);
-		mmiowb();
+		ef10_update_evq_rptr(io_page, rptr);
 	}
 }
 
@@ -1252,12 +1284,18 @@ _ef10_mcdi_cmd_enable_multicast_loopback(struct efhw_nic *nic,
 	return rc;
 }
 
+#if EFX_DRIVERLINK_API_VERSION < 25
+static uint32_t ef10_gen_port_id(uint vport_id, uint stack_id)
+{
+	return ! stack_id ? vport_id : (vport_id | EVB_STACK_ID( stack_id ));
+}
+
 
 static int
 _ef10_mcdi_cmd_set_multicast_loopback_suppression
 		(struct efhw_nic *nic,
 		 int suppress_self_transmission,
-		 uint32_t port_id )
+		 uint32_t port_id, uint8_t stack_id )
 {
 	int rc;
 	size_t out_size;
@@ -1265,7 +1303,8 @@ _ef10_mcdi_cmd_set_multicast_loopback_suppression
 	EFHW_MCDI_INITIALISE_BUF(in);
 	EFHW_MCDI_SET_DWORD(in, SET_PARSER_DISP_CONFIG_IN_TYPE,
 			MC_CMD_SET_PARSER_DISP_CONFIG_IN_VADAPTOR_SUPPRESS_SELF_TX);
-	EFHW_MCDI_SET_DWORD(in, SET_PARSER_DISP_CONFIG_IN_ENTITY, port_id);
+	EFHW_MCDI_SET_DWORD(in, SET_PARSER_DISP_CONFIG_IN_ENTITY,
+			    ef10_gen_port_id(port_id, stack_id));
 	EFHW_MCDI_SET_DWORD(in, SET_PARSER_DISP_CONFIG_IN_VALUE,
 			    suppress_self_transmission ? 1 : 0);
 	rc = ef10_mcdi_rpc(nic, MC_CMD_SET_PARSER_DISP_CONFIG, sizeof(in), 0,
@@ -1273,6 +1312,23 @@ _ef10_mcdi_cmd_set_multicast_loopback_suppression
 	MCDI_CHECK(MC_CMD_SET_PARSER_DISP_CONFIG, rc, out_size, 0);
 	return rc;
 }
+#else
+static int
+_ef10_mcdi_cmd_set_multicast_loopback_suppression
+		(struct efhw_nic *nic,
+		 int suppress_self_transmission,
+		 uint32_t port_id, uint8_t stack_id )
+{
+	int rc;
+	struct efx_dl_device *efx_dev;
+	EFX_DL_PRE(efx_dev, nic, rc)
+		rc = efx_dl_set_multicast_loopback_suppression(
+			efx_dev, suppress_self_transmission,
+			port_id, stack_id);
+	EFX_DL_POST(efx_dev, nic, rc)
+	return rc;
+}
+#endif
 
 
 
@@ -1292,7 +1348,7 @@ ef10_mcdi_common_pool_alloc(struct efhw_nic *nic, unsigned txq_id,
 	EFHW_MCDI_DECLARE_BUF(in, MC_CMD_ALLOCATE_TX_VFIFO_CP_IN_LEN);
 	EFHW_MCDI_DECLARE_BUF(out, MC_CMD_ALLOCATE_TX_VFIFO_CP_OUT_LEN);
 
-	unsigned buf_size = 512;
+	unsigned buf_size = nic->tx_alts_cp_buf_size;
 	unsigned num_bufs = (num_32b_words * 32 + buf_size - 1) / buf_size;
 
 	/* Up to two buffers get allocated per VFIFO by the hardware,
@@ -1419,10 +1475,11 @@ ef10_tx_alt_free(struct efhw_nic *nic, int num_alt, unsigned cp_id,
  * DMAQ low-level register interface - MCDI cmds
  *
  *---------------------------------------------------------------------------*/
-
+#if EFX_DRIVERLINK_API_VERSION < 25
 static int
 _ef10_mcdi_cmd_init_txq(struct efhw_nic *nic, dma_addr_t *dma_addrs,
-			int n_dma_addrs, uint32_t port_id, uint32_t owner_id,
+			int n_dma_addrs, uint32_t port_id, uint8_t stack_id,
+			uint32_t owner_id,
 			int flag_timestamp, int crc_mode, int flag_tcp_udp_only,
 			int flag_tcp_csum_dis, int flag_ip_csum_dis,
 			int flag_buff_mode, int flag_pacer_bypass,
@@ -1439,7 +1496,8 @@ _ef10_mcdi_cmd_init_txq(struct efhw_nic *nic, dma_addr_t *dma_addrs,
 	EFHW_MCDI_SET_DWORD(in, INIT_TXQ_EXT_IN_LABEL, label);
 	EFHW_MCDI_SET_DWORD(in, INIT_TXQ_EXT_IN_INSTANCE, instance);
 	EFHW_MCDI_SET_DWORD(in, INIT_TXQ_EXT_IN_OWNER_ID, owner_id);
-	EFHW_MCDI_SET_DWORD(in, INIT_TXQ_EXT_IN_PORT_ID, port_id);
+	EFHW_MCDI_SET_DWORD(in, INIT_TXQ_EXT_IN_PORT_ID,
+			    ef10_gen_port_id(port_id, stack_id));
 
 	inner = nic->devtype.arch == EFHW_ARCH_EF10 &&
 		nic->devtype.variant == 'B';
@@ -1466,7 +1524,33 @@ _ef10_mcdi_cmd_init_txq(struct efhw_nic *nic, dma_addr_t *dma_addrs,
         MCDI_CHECK(MC_CMD_INIT_TXQ, rc, out_size, 0);
         return rc;
 }
-
+#else
+static int
+_ef10_mcdi_cmd_init_txq(struct efhw_nic *nic, dma_addr_t *dma_addrs,
+			int n_dma_addrs, uint32_t port_id, uint8_t stack_id,
+			uint32_t owner_id,
+			int flag_timestamp, int crc_mode, int flag_tcp_udp_only,
+			int flag_tcp_csum_dis, int flag_ip_csum_dis,
+			int flag_buff_mode, int flag_pacer_bypass,
+			int flag_ctpio, int flag_ctpio_uthresh,
+			uint32_t instance, uint32_t label,
+			uint32_t target_evq, uint32_t numentries)
+{
+	int rc;
+	struct efx_dl_device *efx_dev;
+	int inner = nic->devtype.arch == EFHW_ARCH_EF10 &&
+		nic->devtype.variant == 'B';
+	EFX_DL_PRE(efx_dev, nic, rc)
+		rc = efx_dl_init_txq(
+			efx_dev, dma_addrs, n_dma_addrs, port_id, stack_id, owner_id,
+			!!flag_timestamp, crc_mode, !!flag_tcp_udp_only, !!flag_tcp_csum_dis,
+			!!flag_ip_csum_dis, inner, inner, !!flag_buff_mode, !!flag_pacer_bypass,
+			!!flag_ctpio, !!flag_ctpio_uthresh, instance, label, target_evq,
+			numentries);
+	EFX_DL_POST(efx_dev, nic, rc)
+	return rc;
+}
+#endif
 
 static int ps_buf_size_to_mcdi_buf_size(int ps_buf_size)
 {
@@ -1486,10 +1570,30 @@ static int ps_buf_size_to_mcdi_buf_size(int ps_buf_size)
 	}
 }
 
-
+static int
+_ef10_get_ps_buf_size_mcdi(uint32_t numentries, int ps_buf_size)
+{
+	int ps_buf_size_mcdi;
+	/* Bug45759: This should really be checked in the fw or 2048
+	 * should be exposed via mcdi headers. */
+	if (numentries > 2048) {
+		EFHW_ERR("%s: ERROR: rxq_size=%d > 2048 in packed stream mode",
+			 __FUNCTION__, numentries);
+	return -EINVAL;
+	}
+	ps_buf_size_mcdi = ps_buf_size_to_mcdi_buf_size(ps_buf_size);
+	if (ps_buf_size_mcdi < 0) {
+		EFHW_ERR("%s: ERROR: ps_buf_size=%d is invalid",
+			 __FUNCTION__, ps_buf_size);
+		return -EINVAL;
+	}
+	return ps_buf_size_mcdi;
+}
+#if EFX_DRIVERLINK_API_VERSION < 25
 static int
 _ef10_mcdi_cmd_init_rxq(struct efhw_nic *nic, dma_addr_t *dma_addrs,
-			int n_dma_addrs, uint32_t port_id, uint32_t owner_id,
+			int n_dma_addrs, uint32_t port_id, uint8_t stack_id,
+			uint32_t owner_id,
 			int crc_mode, int flag_timestamp, int flag_hdr_split,
 			int flag_buff_mode, int flag_rx_prefix,
 			int flag_packed_stream, uint32_t instance,
@@ -1499,27 +1603,15 @@ _ef10_mcdi_cmd_init_rxq(struct efhw_nic *nic, dma_addr_t *dma_addrs,
 {
 	int i, rc;
 	size_t out_size;
-	int ps_buf_size_mcdi;
+	int ps_buf_size_mcdi = 0;
 	EFHW_MCDI_DECLARE_BUF(in, MC_CMD_INIT_RXQ_EXT_IN_LEN);
 	EFHW_MCDI_INITIALISE_BUF(in);
 
 	if (flag_packed_stream) {
-		/* Bug45759: This should really be checked in the fw or 2048
-		 * should be exposed via mcdi headers. */
-		if (numentries > 2048) {
-			EFHW_ERR("%s: ERROR: rxq_size=%d > 2048 in packed stream mode",
-				 __FUNCTION__, numentries);
-			return -EINVAL;
-		}
-
-		ps_buf_size_mcdi = ps_buf_size_to_mcdi_buf_size(ps_buf_size);
-		if (ps_buf_size_mcdi < 0) {
-			EFHW_ERR("%s: ERROR: ps_buf_size=%d is invalid",
-				 __FUNCTION__, ps_buf_size);
-			return -EINVAL;
-		}
-	} else {
-		ps_buf_size_mcdi = 0;
+		rc = _ef10_get_ps_buf_size_mcdi(numentries, ps_buf_size);
+		if( rc < 0 )
+			return rc;
+		ps_buf_size_mcdi = rc;
 	}
 
 	EFHW_MCDI_SET_DWORD(in, INIT_RXQ_EXT_IN_SIZE, numentries);
@@ -1527,7 +1619,8 @@ _ef10_mcdi_cmd_init_rxq(struct efhw_nic *nic, dma_addr_t *dma_addrs,
 	EFHW_MCDI_SET_DWORD(in, INIT_RXQ_EXT_IN_LABEL, label);
 	EFHW_MCDI_SET_DWORD(in, INIT_RXQ_EXT_IN_INSTANCE, instance);
 	EFHW_MCDI_SET_DWORD(in, INIT_RXQ_EXT_IN_OWNER_ID, owner_id);
-	EFHW_MCDI_SET_DWORD(in, INIT_RXQ_EXT_IN_PORT_ID, port_id);
+	EFHW_MCDI_SET_DWORD(in, INIT_RXQ_EXT_IN_PORT_ID,
+			    ef10_gen_port_id(port_id, stack_id));
 
 	EFHW_MCDI_POPULATE_DWORD_8(in, INIT_RXQ_EXT_IN_FLAGS,
 		INIT_RXQ_EXT_IN_FLAG_BUFF_MODE, flag_buff_mode ? 1 : 0,
@@ -1554,6 +1647,39 @@ _ef10_mcdi_cmd_init_rxq(struct efhw_nic *nic, dma_addr_t *dma_addrs,
 	MCDI_CHECK(MC_CMD_INIT_RXQ, rc, out_size, 0);
         return rc;
 }
+#else
+static int
+_ef10_mcdi_cmd_init_rxq(struct efhw_nic *nic, dma_addr_t *dma_addrs,
+			int n_dma_addrs, uint32_t port_id, uint8_t stack_id,
+			uint32_t owner_id,
+			int crc_mode, int flag_timestamp, int flag_hdr_split,
+			int flag_buff_mode, int flag_rx_prefix,
+			int flag_packed_stream, uint32_t instance,
+			uint32_t label, uint32_t target_evq,
+			uint32_t numentries, int ps_buf_size,
+			int flag_force_rx_merge)
+{
+	int rc;
+	struct efx_dl_device *efx_dev;
+	int ps_buf_size_mcdi = 0;
+	int dma_mode = MC_CMD_INIT_RXQ_EXT_IN_SINGLE_PACKET;
+	if( flag_packed_stream ) {
+		dma_mode = MC_CMD_INIT_RXQ_EXT_IN_PACKED_STREAM;
+		rc = _ef10_get_ps_buf_size_mcdi(numentries, ps_buf_size);
+		if( rc < 0 )
+			return rc;
+		ps_buf_size_mcdi = rc;
+	}
+	EFX_DL_PRE(efx_dev, nic, rc)
+		rc = efx_dl_init_rxq(
+			efx_dev, dma_addrs, n_dma_addrs, port_id, stack_id, owner_id,
+			crc_mode, !!flag_timestamp, !!flag_hdr_split, !!flag_buff_mode,
+			!!flag_rx_prefix, dma_mode, instance, label, target_evq,
+			numentries, ps_buf_size_mcdi, !!flag_force_rx_merge);
+	EFX_DL_POST(efx_dev, nic, rc)
+	return rc;
+}
+#endif
 
 
 /*----------------------------------------------------------------------------
@@ -1561,11 +1687,6 @@ _ef10_mcdi_cmd_init_rxq(struct efhw_nic *nic, dma_addr_t *dma_addrs,
  * DMAQ low-level register interface
  *
  *---------------------------------------------------------------------------*/
-
-static uint32_t ef10_gen_port_id(uint vport_id, uint stack_id)
-{
-	return vport_id | EVB_STACK_ID( stack_id );
-}
 
 
 static int
@@ -1603,13 +1724,10 @@ ef10_dmaq_tx_q_init(struct efhw_nic *nic, uint dmaq, uint evq_id, uint own_id,
 	if (flag_ctpio && ~nic->flags & NIC_FLAG_TX_CTPIO)
 		return -EOPNOTSUPP;
 
-	if (stack_id)
-		vport_id = ef10_gen_port_id(vport_id, stack_id);
-
 	if (flag_loopback) {
 		if (nic->flags & NIC_FLAG_MCAST_LOOP_HW) {
 			rc = _ef10_mcdi_cmd_set_multicast_loopback_suppression
-				(nic, 1, vport_id);
+				(nic, 1, vport_id, stack_id);
 			if (rc == -EPERM) {
 				/* Few notes:
 				 *
@@ -1639,7 +1757,7 @@ ef10_dmaq_tx_q_init(struct efhw_nic *nic, uint dmaq, uint evq_id, uint own_id,
 	 * if so we retry without it. */
 	for (flag_pacer_bypass = 1; 1; flag_pacer_bypass = 0) {
 		rc = _ef10_mcdi_cmd_init_txq
-			(nic, dma_addrs, n_dma_addrs, vport_id,
+			(nic, dma_addrs, n_dma_addrs, vport_id, stack_id,
 			 REAL_OWNER_ID(own_id), flag_timestamp,
 			 QUEUE_CRC_MODE_NONE, flag_tcp_udp_only,
 			 flag_tcp_csum_dis, flag_ip_csum_dis,
@@ -1673,7 +1791,8 @@ ef10_dmaq_rx_q_init(struct efhw_nic *nic, uint dmaq, uint evq_id, uint own_id,
 	int flag_hdr_split = (flags & EFHW_VI_RX_HDR_SPLIT) != 0;
 	int flag_buff_mode = (flags & EFHW_VI_RX_PHYS_ADDR_EN) == 0;
 	int flag_packed_stream = (flags & EFHW_VI_RX_PACKED_STREAM) != 0;
-	int flag_force_rx_merge = (flags & EFHW_VI_NO_RX_CUT_THROUGH) != 0;
+	int flag_force_rx_merge = ((flags & EFHW_VI_NO_RX_CUT_THROUGH) != 0) &&
+				(nic->flags & NIC_FLAG_RX_FORCE_EVENT_MERGING);
 	if (flag_packed_stream) {
 		if (!(nic->flags & NIC_FLAG_PACKED_STREAM))
 			return -EOPNOTSUPP;
@@ -1681,11 +1800,9 @@ ef10_dmaq_rx_q_init(struct efhw_nic *nic, uint dmaq, uint evq_id, uint own_id,
 		     && !(nic->flags & NIC_FLAG_VAR_PACKED_STREAM)))
 			return -EOPNOTSUPP;
 	}
-	if (stack_id)
-		vport_id = ef10_gen_port_id(vport_id, stack_id);
 
 	rc = _ef10_mcdi_cmd_init_rxq
-		(nic, dma_addrs, n_dma_addrs, vport_id,
+		(nic, dma_addrs, n_dma_addrs, vport_id, stack_id,
 		 REAL_OWNER_ID(own_id), QUEUE_CRC_MODE_NONE, flag_timestamp,
 		 flag_hdr_split, flag_buff_mode, flag_rx_prefix,
 		 flag_packed_stream, dmaq, tag, evq_id, dmaq_size, ps_buf_size,
@@ -2112,7 +2229,7 @@ int ef10_nic_piobuf_unlink(struct efhw_nic *nic, unsigned txq)
  * RSS
  *
  *--------------------------------------------------------------------*/
-
+#if EFX_DRIVERLINK_API_VERSION < 25
 static int
 ef10_nic_rss_context_alloc(struct efhw_nic *nic, uint vport_id,
 			   int num_qs, int shared, int *handle_out)
@@ -2279,6 +2396,7 @@ ef10_nic_rss_context_set_flags(struct efhw_nic *nic, int handle,
 	rc = __ef10_nic_rss_context_set_flags(nic, handle, final_flags);
 	return rc;
 }
+#endif
 
 /*--------------------------------------------------------------------
  *
@@ -2472,11 +2590,15 @@ struct efhw_func_ops ef10_char_functional_units = {
 	ef10_nic_buffer_table_clear,
 	ef10_nic_set_port_sniff,
 	ef10_nic_set_tx_port_sniff,
+#if EFX_DRIVERLINK_API_VERSION < 25
 	ef10_nic_rss_context_alloc,
 	ef10_nic_rss_context_free,
 	ef10_nic_rss_context_set_table,
 	ef10_nic_rss_context_set_key,
 	ef10_nic_rss_context_set_flags,
+#else
+	NULL, NULL, NULL, NULL, NULL,
+#endif
 	ef10_nic_license_challenge,
 	ef10_nic_license_check,
 	ef10_nic_v3_license_challenge,

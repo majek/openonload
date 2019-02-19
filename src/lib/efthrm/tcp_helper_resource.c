@@ -127,6 +127,24 @@ MODULE_PARM_DESC(oo_avoid_wakeup_under_pressure,
                  "\"stall on CPU\" messages when this value is set to 0.");
 DEFINE_PER_CPU(unsigned long, oo_budget_limit_last_ts);
 
+#if HZ < 100
+# error FIXME: Not able to cope with low HZ at the moment.
+#endif
+  /* Periodic timer fires roughly 100 times per sec. */
+#define CI_TCP_HELPER_PERIODIC_BASE_T  ((unsigned long)(HZ*9/100))
+#define CI_TCP_HELPER_PERIODIC_FLOAT_T ((unsigned long)(HZ*1/100))
+unsigned long periodic_poll = CI_TCP_HELPER_PERIODIC_BASE_T;
+unsigned long periodic_poll_skew = CI_TCP_HELPER_PERIODIC_FLOAT_T;
+module_param(periodic_poll, ulong, S_IRUGO | S_IWUSR);
+MODULE_PARM_DESC(periodic_poll,
+                 "Number of jiffies between periodic polls of "
+                 "any Onload stack.  Defaults to 90ms.");
+module_param(periodic_poll_skew, ulong, S_IRUGO | S_IWUSR);
+MODULE_PARM_DESC(periodic_poll_skew,
+                 "Allowed time skew for periodic polls.  "
+                 "Defaults to 10ms.");
+
+
 /* Global structure for onload driver */
 efab_tcp_driver_t efab_tcp_driver;
 
@@ -547,13 +565,21 @@ int efab_thr_get_inaccessible_stack_info(unsigned id, uid_t* uid, uid_t* euid,
     match = thr->id == id;
 
     if( match ) {
-      /* Translate the share_with uid from the target stack's user_ns
-       * to the kernel space.
-       */
-      uid_t kshare_with = ci_make_kuid(tcp_helper_get_user_ns(thr),
-                                       NI_OPTS(&thr->netif).share_with);
-      /* Then translate that into the user_ns of the requestor */
-      *share_with = ci_current_from_kuid_munged(kshare_with);
+      if( NI_OPTS(&thr->netif).share_with > 0 ) {
+        /* Translate the share_with uid from the target stack's user_ns
+         * to the kernel space.
+         */
+        uid_t kshare_with = ci_make_kuid(tcp_helper_get_user_ns(thr),
+                                         NI_OPTS(&thr->netif).share_with);
+        /* Then translate that into the user_ns of the requestor */
+        *share_with = ci_current_from_kuid_munged(kshare_with);
+      }
+      else {
+        /* Special value indicating either none (0) or all (-1) doesn't need
+         * translation.
+         */
+        *share_with = NI_OPTS(&thr->netif).share_with;
+      }
       *uid = ci_current_from_kuid_munged(thr->netif.kuid);
       *euid = ci_current_from_kuid_munged(thr->netif.keuid);
       memcpy(name, thr->name, sizeof(thr->name));
@@ -582,7 +608,7 @@ int efab_thr_user_can_access_stack(uid_t uid, uid_t euid,
   if( /* Owner does not allow other users to map this stack. */
       kshare_with == 0 ||
       /* Stack can be shared with another user, but not this user. */
-      (kshare_with > 0 && euid != kshare_with) )
+      (NI_OPTS(&thr->netif).share_with > 0 && euid != kshare_with) )
     return 0;
 
   /* By default we don't allow setuid processes to map other users' stacks,
@@ -663,7 +689,9 @@ int efab_thr_table_lookup(const char* name, struct net* netns,
                  thr->id, thr->name,
                  ci_current_from_kuid_munged(thr->netif.kuid),
                  ci_current_from_kuid_munged(thr->netif.keuid),
-                 ci_current_from_kuid_munged(kshare_with));
+                 NI_OPTS(&thr->netif).share_with > 0 ?
+                 ci_current_from_kuid_munged(kshare_with) :
+                 NI_OPTS(&thr->netif).share_with);
         }
         rc = -EACCES;
       }
@@ -1421,6 +1449,7 @@ static int allocate_vi(ci_netif* ni, struct vi_allocate_info* info)
 static void initialise_vi(ci_netif* ni, struct ef_vi* vi, struct efrm_vi* vi_rs,
                           struct efrm_vi_mappings* vm, void* vi_state,
                           int vi_arch, int vi_variant, int vi_revision,
+                          unsigned char vi_nic_flags,
                           struct vi_allocate_info* alloc_info,
                           unsigned* vi_out_flags, ef_vi_stats* vi_stats)
 {
@@ -1430,7 +1459,7 @@ static void initialise_vi(ci_netif* ni, struct ef_vi* vi, struct efrm_vi* vi_rs,
   efrm_vi_get_mappings(vi_rs, vm);
 
   ef_vi_init(vi, vi_arch, vi_variant, vi_revision, alloc_info->ef_vi_flags,
-             (ef_vi_state*) vi_state);
+             vi_nic_flags, (ef_vi_state*) vi_state);
   *vi_out_flags = (vm->out_flags & EFHW_VI_CLOCK_SYNC_STATUS) ?
                         EF_VI_OUT_CLOCK_SYNC_STATUS : 0;
 
@@ -1461,9 +1490,9 @@ static void initialise_vi(ci_netif* ni, struct ef_vi* vi, struct efrm_vi* vi_rs,
 
   if( NI_OPTS(ni).tx_push )
     ef_vi_set_tx_push_threshold(vi, NI_OPTS(ni).tx_push_thresh);
+  ef_vi_set_ts_format(vi, vm->ts_format);
   ef_vi_init_rx_timestamping(vi, vm->rx_ts_correction);
   ef_vi_init_tx_timestamping(vi, vm->tx_ts_correction);
-  ef_vi_set_ts_format(vi, vm->ts_format);
 }
 
 
@@ -1614,8 +1643,8 @@ static int allocate_vis(tcp_helper_resource_t* trs,
 
     initialise_vi(ni, &(ni->nic_hw[intf_i].vi), trs_nic->thn_vi_rs, vm,
                   vi_state, nic->devtype.arch, nic->devtype.variant,
-                  nic->devtype.revision, &alloc_info, &vi_out_flags,
-                  &ni->state->vi_stats);
+                  nic->devtype.revision, efhw_vi_nic_flags(nic), &alloc_info,
+                  &vi_out_flags, &ni->state->vi_stats);
 
     nsn->oo_vi_flags = alloc_info.oo_vi_flags;
     nsn->vi_io_mmap_bytes = alloc_info.vi_io_mmap_bytes;
@@ -1634,6 +1663,7 @@ static int allocate_vis(tcp_helper_resource_t* trs,
     nsn->vi_arch = (ci_uint8) nic->devtype.arch;
     nsn->vi_variant = (ci_uint8) nic->devtype.variant;
     nsn->vi_revision = (ci_uint8) nic->devtype.revision;
+    nsn->vi_nic_flags = efhw_vi_nic_flags(nic);
     nsn->vi_channel = (ci_uint8)efrm_vi_get_channel(trs_nic->thn_vi_rs);
     nsn->vi_flags = alloc_info.ef_vi_flags;
     nsn->vi_out_flags = vi_out_flags;
@@ -1693,7 +1723,7 @@ static int allocate_vis(tcp_helper_resource_t* trs,
       initialise_vi(ni, &(ni->nic_hw[intf_i].udp_rxq_vi),
                     trs_nic->thn_udp_rxq_vi_rs, vm, vi_state,
                     nic->devtype.arch, nic->devtype.variant,
-                    nic->devtype.revision, alloc_info,
+                    nic->devtype.revision, efhw_vi_nic_flags(nic), alloc_info,
                     &vi_out_flags, &ni->state->udp_rxq_vi_stats);
 
       nsn->udp_rxq_vi_evq_bytes =
@@ -1790,7 +1820,8 @@ static void release_pkts(tcp_helper_resource_t* trs)
                                    trs->intfs_suspended & (1 << intf_i));
   }
 #ifndef NDEBUG
-  ci_assert_equal(ni->packets->n_free, n_free);
+  if( ~trs->netif.flags & CI_NETIF_FLAG_WEDGED )
+    ci_assert_equal(ni->packets->n_free, n_free);
 #endif
 
   /* Now release everything allocated in allocate_netif_hw_resources. */
@@ -1828,8 +1859,8 @@ static void release_vi(tcp_helper_resource_t* trs)
 
   /* Now do the rest of vi release */
   OO_STACK_FOR_EACH_INTF_I(&trs->netif, intf_i) {
-#if CI_CFG_PIO
     struct tcp_helper_nic* trs_nic = &trs->nic[intf_i];
+#if CI_CFG_PIO
     ci_netif_nic_t *netif_nic = &trs->netif.nic_hw[intf_i];
     if( NI_OPTS(&trs->netif).pio &&
         (efrm_client_get_nic(trs_nic->thn_oo_nic->efrm_client)->devtype.arch ==
@@ -1866,6 +1897,8 @@ static int tcp_helper_is_expecting_events(ci_netif* ni)
 {
   int intf_i;
 
+  if(  ni->state->poll_work_outstanding || OO_PP_NOT_NULL(ni->state->looppkts) )
+    return 1;
   OO_STACK_FOR_EACH_INTF_I(ni, intf_i) {
     ci_netif_state_nic_t* nic = &ni->state->nic[intf_i];
     if( ci_netif_intf_has_event(ni, intf_i) || 
@@ -1941,6 +1974,8 @@ static void tcp_helper_leak_check(tcp_helper_resource_t* trs)
       ! (trs->netif.state->lock.lock & CI_EPLOCK_NETIF_SWF_UPDATE) )
     ci_log("%s[%d]: leaked %d software filters", __func__, NI_ID(ni),
            ni->state->stats.table_n_entries);
+
+  ci_assert_equal(ni->state->reserved_pktbufs, 0);
 }
 
 
@@ -1952,9 +1987,14 @@ allocate_netif_resources(ci_resource_onload_alloc_t* alloc,
   ci_netif_state* ns;
   int i, sz, rc, no_table_entries, no_active_wild_pools;
   int no_active_wild_table_entries;
+  int no_seq_table_entries;
   unsigned vi_state_bytes;
 #if CI_CFG_PIO
   unsigned pio_bufs_ofs = 0;
+#endif
+  ci_uint32 filter_table_size;
+#if CI_CFG_IPV6
+  ci_uint32 ip6_filter_table_size;
 #endif
 
   OO_DEBUG_SHM(ci_log("%s:", __func__));
@@ -1973,6 +2013,18 @@ allocate_netif_resources(ci_resource_onload_alloc_t* alloc,
    * used for aux buffers and pipe endpoints.  How many real sockets are
    * we going to create?  Do we need a separate option? */
   no_table_entries = NI_OPTS(ni).max_ep_bufs * 2;
+
+  if( NI_OPTS(ni).tcp_isn_mode == 1 ) {
+    /* FIXME: Reconsider the size of this table. */
+    ci_uint32 entries = NI_OPTS(ni).tcp_isn_cache_size;
+    if( entries == 0 )
+      /* FIXME: Reconsider the size of this table. */
+      entries = NI_OPTS(ni).max_ep_bufs * 2;
+    no_seq_table_entries = 1u << ci_log2_ge(entries, 1);
+  }
+  else {
+    no_seq_table_entries = 0;
+  }
 
   /* pkt_sets_n should be zeroed before possible NIC reset */
   if( NI_OPTS(ni).max_packets > max_packets_per_stack ) {
@@ -1997,9 +2049,14 @@ allocate_netif_resources(ci_resource_onload_alloc_t* alloc,
   if( ci_netif_should_allocate_tcp_shared_local_ports(ni) ) {
     no_active_wild_pools = is_power_of_2(cluster_size) ? cluster_size :
                                                          RSS_HASH_SIZE;
+    /* Max active wilds is bounded by the number of local IPs and
+     * shared local ports. */
     no_active_wild_table_entries =
-      CI_MAX(NI_OPTS(ni).tcp_shared_local_ports,
-             NI_OPTS(ni).tcp_shared_local_ports_max);
+      CI_MIN(CI_CFG_MAX_LOCAL_IPADDRS,
+             CI_MAX(NI_OPTS(ni).tcp_shared_local_ports,
+                    NI_OPTS(ni).tcp_shared_local_ports_max));
+    /* Quadruple the size to ensure the hash table does not get too full. */
+    no_active_wild_table_entries <<= 2;
     /* Round up to a power of two. */
     if( no_active_wild_table_entries > 1 )
       no_active_wild_table_entries =
@@ -2010,14 +2067,24 @@ allocate_netif_resources(ci_resource_onload_alloc_t* alloc,
     no_active_wild_table_entries = 0;
   }
 
+  filter_table_size = sizeof(ci_netif_filter_table) +
+    sizeof(ci_netif_filter_table_entry) * (no_table_entries - 1);
+#if CI_CFG_IPV6
+  ip6_filter_table_size = sizeof(ci_ip6_netif_filter_table) +
+    sizeof(ci_ip6_netif_filter_table_entry) * (no_table_entries - 1);
+#endif
+
   /* allocate shmbuf for netif state */
   ci_assert_le(NI_OPTS(ni).max_ep_bufs, CI_CFG_NETIF_MAX_ENDPOINTS_MAX);
   sz = sizeof(ci_netif_state) + vi_state_bytes * trs->netif.nic_n +
     sizeof(oo_pktbuf_manager) + sizeof(oo_pktbuf_set) * ni->pkt_sets_max +
-    sizeof(ci_netif_filter_table) +
     sizeof(ci_ni_dllist_t) * no_active_wild_table_entries *
                              no_active_wild_pools +
-    sizeof(ci_netif_filter_table_entry) * (no_table_entries - 1);
+    sizeof(ci_tcp_prev_seq_t) * no_seq_table_entries + filter_table_size;
+
+#if CI_CFG_IPV6
+  sz += ip6_filter_table_size;
+#endif
 
 #if CI_CFG_PIO
   /* Allocate shmbuf for pio regions.  We haven't tried to allocate
@@ -2041,8 +2108,7 @@ allocate_netif_resources(ci_resource_onload_alloc_t* alloc,
   memset(ci_contig_shmbuf_ptr(&ni->state_buf), 0,
          ci_contig_shmbuf_size(&ni->state_buf));
 
-  i = (NI_OPTS(ni).max_ep_bufs + EP_BUF_PER_PAGE - 1) / EP_BUF_PER_PAGE *
-    CI_PAGE_SIZE;
+  i = (NI_OPTS(ni).max_ep_bufs + EP_BUF_PER_PAGE - 1) / EP_BUF_PER_PAGE;
   rc = ci_shmbuf_alloc(&ni->pages_buf, i);
   if( rc < 0 ) {
     OO_DEBUG_ERR(ci_log("tcp_helper_alloc: failed to alloc pages buf (%d)", rc));
@@ -2080,14 +2146,26 @@ allocate_netif_resources(ci_resource_onload_alloc_t* alloc,
                         sizeof(oo_pktbuf_set) * ni->pkt_sets_max;
   ns->active_wild_table_entries_n = no_active_wild_table_entries;
   ns->active_wild_pools_n = no_active_wild_pools;
-  ns->table_ofs = ns->active_wild_ofs +
-                  (sizeof(ci_ni_dllist_t) *
-                   ns->active_wild_table_entries_n * ns->active_wild_pools_n);
+  ns->seq_table_ofs = ns->active_wild_ofs + (sizeof(ci_ni_dllist_t) *
+                                             ns->active_wild_table_entries_n *
+                                             ns->active_wild_pools_n);
+  ns->seq_table_entries_n = no_seq_table_entries;
+  ns->table_ofs = ns->seq_table_ofs +
+                  (sizeof(ci_tcp_prev_seq_t) * ns->seq_table_entries_n);
   ns->vi_state_bytes = vi_state_bytes;
+
+#if CI_CFG_IPV6
+  ns->ip6_table_ofs = ns->table_ofs + filter_table_size;
+#endif
 
   ni->packets = (void*) ((char*) ns + ns->buf_ofs);
   ni->active_wild_table = (void*) ((char*) ns + ns->active_wild_ofs);
+  ni->seq_table = (void*) ((char*) ns + ns->seq_table_ofs);
   ni->filter_table = (void*) ((char*) ns + ns->table_ofs);
+
+#if CI_CFG_IPV6
+  ni->ip6_filter_table = (void*) ((char*) ns + ns->ip6_table_ofs);
+#endif
 
   ni->packets->sets_max = ni->pkt_sets_max;
   ni->packets->sets_n = 0;
@@ -2768,7 +2846,7 @@ static void tcp_helper_rm_alloc_ofe(tcp_helper_resource_t* trs)
   if( ni->opts.ofe_size == 0 )
     return;
   orc = ofe_engine_alloc(&(ni->opts.ofe_size),
-                         ci_ip_time_ms2ticks_slow(ni, 1000),
+                         ci_ip_time_ms2ticks(ni, 1000),
                          trs->nic[0].thn_vi_rs, &(ni->ofe));
   if( orc != OFE_OK ) {
     ci_log("ERROR: [%d] failed to allocate filter engine size=%d (orc=%d)",
@@ -2811,11 +2889,12 @@ tcp_helper_rm_alloc_proxy(ci_resource_onload_alloc_t* alloc,
     /* Create stack that will be part of a cluster,
      * Cluster will be created if needed.
      */
-    alloc->in_flags &= ~CI_NETIF_FLAG_DO_ALLOCATE_SCALABLE_FILTERS_RSS;
+    ci_uint16 in_flags =
+      alloc->in_flags & ~CI_NETIF_FLAG_DO_ALLOCATE_SCALABLE_FILTERS_RSS;
     rc = tcp_helper_cluster_alloc_thr(alloc->in_name,
                                       alloc->in_cluster_size,
                                       alloc->in_cluster_restart,
-                                      alloc->in_flags,
+                                      in_flags,
                                       opts,
                                       &rs);
     if ( rc != 0 )
@@ -2841,13 +2920,25 @@ tcp_helper_free_ephemeral_ports(struct efab_ephemeral_port_head* table,
   ci_uint32 i;
   for( i = 0; i < entries; ++i ) {
     struct efab_ephemeral_port_keeper* keeper = table[i].head;
+
+    /* Special case: when EF_TCP_SHARED_LOCAL_PORTS_PER_IP is set, the global
+     * list of ephemeral ports is kept at the INADDR_ANY entry in the table.
+     * These entries are also kept at the locations for their respective IP
+     * addresses, so to avoid double-freeing, we detect the global list by
+     * checking for an IP-address mismatch. */
+    if( keeper != NULL && keeper->laddr_be32 != table[i].laddr_be32 ) {
+      ci_assert_equal(table[i].laddr_be32, INADDR_ANY);
+      continue;
+    }
+
     while( keeper != NULL ) {
       struct efab_ephemeral_port_keeper* next = keeper->next;
+      ci_assert_equal(table[i].laddr_be32, keeper->laddr_be32);
       efab_free_ephemeral_port(keeper);
       keeper = next;
     }
   }
-  kfree(table);
+  vfree(table);
 }
 
 
@@ -2856,56 +2947,170 @@ tcp_helper_free_ephemeral_ports(struct efab_ephemeral_port_head* table,
  * and
  *     new_head -> ... -> new_tail
  * into
- *     list_head -> new_head -> ... -> new_tail -> LIST
+ *     list_head -> LIST -> new_head -> ... -> new_tail
  * in a thread-safe manner. */
-void
-tcp_helper_donate_ephemeral_ports(struct efab_ephemeral_port_head* list_head,
-                                  struct efab_ephemeral_port_keeper* new_head,
-                                  struct efab_ephemeral_port_keeper* new_tail)
+static void
+donate_ephemeral_ports(struct efab_ephemeral_port_head* list_head,
+                       struct efab_ephemeral_port_keeper* new_head,
+                       struct efab_ephemeral_port_keeper** new_tail_link)
 {
   ci_uintptr_t ptr = (ci_uintptr_t) &list_head->head;
   ci_uintptr_t new = (ci_uintptr_t) new_head;
-  ci_uintptr_t old;
 
+  ci_assert_equal(*new_tail_link, NULL);
+
+  do {
+    /* [tail_next_ptr] can change under our feet, which is OK -- the CAS
+     * operation later will protect us against this -- but we need
+     * OO_ACCESS_ONCE() to force a re-read each time around the loop. */
+    ptr = (ci_uintptr_t) OO_ACCESS_ONCE(list_head->tail_next_ptr);
+    if( ptr == (ci_uintptr_t) NULL )
+      ptr = (ci_uintptr_t) &list_head->head;
+  } while( ci_cas_uintptr_fail(ptr, (ci_uintptr_t) NULL, new) );
+
+  ci_wmb();
+
+  /* We have attached our new list-portion to the end of the old list.  We now
+   * need to remember the new tail.  There is no need for this to be atomic
+   * with respect to the write in the above loop: if another thread sees the
+   * intermediate state between that write and the one that we're about to do,
+   * it will see a non-NULL old value in its CAS operation and will sit in the
+   * loop.  For the same reason, we cannot race with another thread in either
+   * of the writes.
+   */
+  list_head->tail_next_ptr = new_tail_link;
+}
+
+
+void
+tcp_helper_donate_ephemeral_ports(struct efab_ephemeral_port_head* list_head,
+                                  struct efab_ephemeral_port_keeper* new_head,
+                                  struct efab_ephemeral_port_keeper* new_tail,
+                                  int count)
+{
   /* The addresses of all ports on the list should be equal. */
   ci_assert_equal(list_head->laddr_be32, new_head->laddr_be32);
   ci_assert_equal(list_head->laddr_be32, new_tail->laddr_be32);
 
-  do {
-    new_tail->next = OO_ACCESS_ONCE(list_head->head);
-    old = (ci_uintptr_t) new_tail->next;
-  } while( ci_cas_uintptr_fail(ptr, old, new) );
+  donate_ephemeral_ports(list_head, new_head, &new_tail->next);
+
+  ci_atomic32_add(&list_head->port_count, count);
+}
+
+
+/* Add some ephemeral ports to the list of all ephemeral ports (as opposed to
+ * an IP-specific list). */
+static void
+tcp_helper_donate_global_ephemeral_ports(
+                                  struct efab_ephemeral_port_head* list_head,
+                                  struct efab_ephemeral_port_keeper* new_head,
+                                  struct efab_ephemeral_port_keeper* new_tail)
+{
+  /* This is the global list, which is headed at the INADDR_ANY entry in the
+   * table, as that entry is otherwise unused when shared local ports are
+   * per-IP. */
+  ci_assert_equal(list_head->laddr_be32, INADDR_ANY);
+
+  donate_ephemeral_ports(list_head, new_head, &new_tail->global_next);
 }
 
 
 int
 tcp_helper_alloc_ephemeral_ports(struct efab_ephemeral_port_head* list_head,
+                                 struct efab_ephemeral_port_head* global_head,
                                  ci_uint32 laddr_be32, int count)
 {
   struct efab_ephemeral_port_keeper* new_head = NULL;
+  struct efab_ephemeral_port_keeper* new_global_head = NULL;
   struct efab_ephemeral_port_keeper* new_tail = NULL;
+  struct efab_ephemeral_port_keeper* new_global_tail = NULL;
+  struct efab_ephemeral_port_keeper* existing = NULL;
   int rc = 0;
   int i;
   OO_DEBUG_TCPH(ci_log("%s count %d", __FUNCTION__, count));
 
+  if( global_head != NULL ) {
+    existing = OO_ACCESS_ONCE(list_head->global_consumed);
+    if( existing == NULL )
+      existing = global_head->head;
+  }
+
   for( i = 0; i < count; ++i ) {
-    struct efab_ephemeral_port_keeper* keeper;
-    if( (rc = efab_alloc_ephemeral_port(laddr_be32, &keeper)) != 0 ) {
-      OO_DEBUG_ERR(ci_log("%s: failed to allocate %d-th ephemeral port: rc=%d",
-                          __FUNCTION__, i, rc));
-      break;
+    struct efab_ephemeral_port_keeper* keeper = NULL;
+    struct efab_ephemeral_port_keeper* existing_prev = NULL;
+
+    /* In order to keep the set of ephemeral ports as small as possible (where
+     * "port" is understood in the strict sense: that is, not an addr:port
+     * pair, but merely the port), we first try to get a port for this IP
+     * address by binding to one of the ports already used by another IP
+     * address. */
+    for( rc = -ENODATA; rc != 0 && existing != NULL;
+         existing = existing->global_next ) {
+      existing_prev = existing;
+      rc = efab_alloc_ephemeral_port(laddr_be32, existing->port_be16, &keeper);
+      if( rc != 0 && rc != -EADDRINUSE )
+        OO_DEBUG_ERR(CI_RLLOG(10, "%s: unexpected failure reusing "
+                              CI_IP_PRINTF_FORMAT":%u for %d-th ephemeral "
+                              "port: rc=%d", __FUNCTION__,
+                              CI_IP_PRINTF_ARGS(&existing->laddr_be32),
+                              CI_BSWAP_BE16(existing->port_be16), i, rc));
     }
+
+    /* Remember where we got to in the global list.  We can race against other
+     * threads when writing here, but it's benign: the worst that can happen is
+     * that the value that's eventually written is earlier in the list than
+     * the latest that has been consumed, but this just means that we'll
+     * reconsider some ports unnecessarily next time around. */
+    if( existing_prev != NULL )
+      list_head->global_consumed = existing_prev;
+
+    /* If we didn't manage to allocate an ephemeral port already used by
+     * another IP address, get a brand new ephemeral port from the kernel on
+     * this IP address. */
+    if( keeper == NULL ) {
+      if( (rc = efab_alloc_ephemeral_port(laddr_be32, 0, &keeper)) != 0 ) {
+        OO_DEBUG_ERR(ci_log("%s: failed to allocate %d-th ephemeral port: "
+                            "rc=%d", __FUNCTION__, i, rc));
+        break;
+      }
+
+      /* This is a genuinely new ephemeral port, so, if we have a global list,
+       * add the new port to the chain of elements that we will add to the
+       * global list at the end of the function.
+       */
+      if( global_head != NULL ) {
+        if( new_global_tail == NULL )
+          new_global_tail = keeper;
+        keeper->global_next = new_global_head;
+        new_global_head = keeper;
+      }
+    }
+
+    /* Add the port to the chain of elements that will be added to the per-IP
+     * list. */
     if( new_tail == NULL )
       new_tail = keeper;
     keeper->next = new_head;
     new_head = keeper;
   }
+
   if( i == 0 )
     return rc;
+
   ci_assert(new_head);
   ci_assert(new_tail);
-  /* Prepend the newly-allocated ports to the caller's list. */
-  tcp_helper_donate_ephemeral_ports(list_head, new_head, new_tail);
+
+  /* Append the newly-allocated ports to the caller's list. */
+  tcp_helper_donate_ephemeral_ports(list_head, new_head, new_tail, i);
+
+  /* Add genuinely new ephemeral ports to the global list. */
+  if( new_global_head != NULL ) {
+    ci_assert(global_head);
+    ci_assert(new_global_tail);
+    tcp_helper_donate_global_ephemeral_ports(global_head, new_global_head,
+                                             new_global_tail);
+  }
+
   return i;
 }
 
@@ -3035,7 +3240,6 @@ tcp_helper_alloc_list_to_aw_pool(tcp_helper_resource_t* rs,
   ci_assert_ge(rc, 0);
   if( rc < 0 )
     return rc;
-  consumed->head = port;
 
   for( ; port != NULL; port = port->next ) {
     int rc = tcp_helper_alloc_to_aw_pool(rs, laddr_be32, port);
@@ -3047,6 +3251,7 @@ tcp_helper_alloc_list_to_aw_pool(tcp_helper_resource_t* rs,
              " shared", __FUNCTION__, CI_MAX(0, i - 1));
       return -ENOBUFS;
     }
+    consumed->head = port;
     ++i;
   }
 
@@ -3120,12 +3325,22 @@ tcp_helper_get_ephemeral_port_list(struct efab_ephemeral_port_head* table,
      * for the specified IP address.  We'd like to use this entry to hold a new
      * list, but we have to guard against another concurrent instance of this
      * function trying to do the same thing. */
-    if( (*list_out)->laddr_be32 == EPHEMERAL_PORT_LIST_NO_LADDR ) {
-      if( ci_cas32_fail(&(*list_out)->laddr_be32, EPHEMERAL_PORT_LIST_NO_LADDR,
-                        laddr_be32) )
-        continue;
+    if( (*list_out)->laddr_be32 == EPHEMERAL_PORT_LIST_NO_LADDR &&
+        ci_cas32_succeed(&(*list_out)->laddr_be32,
+                         EPHEMERAL_PORT_LIST_NO_LADDR, laddr_be32) ) {
+      (*list_out)->port_count = 0;
       return 0;
     }
+
+    /* The address in this entry wasn't the one we were looking for when we
+     * first checked, and it wasn't the magic empty value, either.  So it's
+     * probably something else... unless we're racing against another instance
+     * of this function with the same value of [laddr_be32].  Check again,
+     * relying on the intervening CAS operation to have forced a re-read.  We
+     * don't need to check again for emptiness, because entries can only ever
+     * transition _away_ from being empty. */
+    if( (*list_out)->laddr_be32 == laddr_be32 )
+      return 0;
 
     /* This list is for the wrong IP address, so advance to the next bucket. */
     bucket = (bucket + hash2) & (table_entries - 1);
@@ -3147,9 +3362,9 @@ tcp_helper_alloc_aw_for_ephem_ports(tcp_helper_resource_t* rs,
                                     ci_uint32 laddr_be32)
 {
   int rc;
-  struct efab_ephemeral_port_keeper* port;
-  struct efab_ephemeral_port_keeper* new_consumed = NULL;
+  int count = 0;
   struct efab_ephemeral_port_head* consumed;
+  struct efab_ephemeral_port_keeper* port;
 
   ci_assert(ci_netif_is_locked(&rs->netif));
 
@@ -3164,30 +3379,19 @@ tcp_helper_alloc_aw_for_ephem_ports(tcp_helper_resource_t* rs,
   if( rc < 0 )
     return rc;
 
-  for( port = list_head->head; port != consumed->head; port = port->next ) {
-    if( port == NULL ) {
-      /* We've passed the end of the list.  This should never happen: we
-       * remember the portion of the list that has been processed in the past,
-       * and entries are never removed from the list. */
-      CI_RLLOG(1, "%s: [%d] Fell off the end of the ephemeral port list.",
-               __FUNCTION__, rs->id);
-      ci_assert(0);
-      break;
+  /* If we haven't consumed any yet, start from the beginning of the list. */
+  port = consumed->head != NULL ? consumed->head->next : list_head->head;
+
+  for( ; port != NULL; port = port->next ) {
+    /* Try to allocate an active wild on this port. */
+    if( tcp_helper_alloc_to_aw_pool(rs, laddr_be32, port) == 0 ) {
+      consumed->head = port;
+      ++count;
     }
-
-    /* Try to allocate an active wild on this port.  On our first success in
-     * the loop, remember the position in the list so that we can record it
-     * for use as the terminating point the next time this function is called.
-     */
-    if( tcp_helper_alloc_to_aw_pool(rs, laddr_be32, port) == 0 )
-      if( new_consumed == NULL )
-        new_consumed = port;
   }
 
-  if( new_consumed != NULL ) {
-    consumed->head = new_consumed;
-    return 0;
-  }
+  if( count > 0 )
+    return count;
 
   return -ENOENT;
 }
@@ -3197,7 +3401,11 @@ int tcp_helper_increase_active_wild_pool(tcp_helper_resource_t* rs,
                                          ci_uint32 laddr_be32)
 {
   struct efab_ephemeral_port_head* list_head;
+  struct efab_ephemeral_port_head* global_head = NULL;
+  const ci_netif_config_opts* ni_opts = &NI_OPTS(&rs->netif);
   int rc;
+  const int BATCH_SIZE = 32;
+  int to_alloc = ni_opts->tcp_shared_local_ports_step;
 
   ci_assert(ci_netif_is_locked(&rs->netif));
 
@@ -3214,20 +3422,46 @@ int tcp_helper_increase_active_wild_pool(tcp_helper_resource_t* rs,
   if( rc < 0 )
     return rc;
 
+  /* If we're IP-specific, we also need to get the global list. */
+  if( laddr_be32 != INADDR_ANY ) {
+    rc = tcp_helper_get_ephemeral_port_list(rs->trs_ephem_table, INADDR_ANY,
+                                            rs->trs_ephem_table_entries,
+                                            &global_head);
+
+    if( rc < 0 )
+      return rc;
+  }
+
+  if( NI_OPTS(&rs->netif).tcp_shared_local_ports_per_ip_max &&
+      list_head->port_count >=
+      NI_OPTS(&rs->netif).tcp_shared_local_ports_per_ip_max )
+    return -ENOBUFS;
+
   /* Consume any ephemeral ports that were allocated since the last time we
    * increased the active-wild pool. */
   rc = tcp_helper_alloc_aw_for_ephem_ports(rs, list_head, laddr_be32);
-  if( rc == 0 )
+  if( rc > 0 )
+    to_alloc -= rc;
+
+  while( to_alloc > 0 ) {
+    /* Allocate a few more ephemeral ports. */
+    rc = tcp_helper_alloc_ephemeral_ports(list_head, global_head, laddr_be32,
+                                          CI_MIN(to_alloc, BATCH_SIZE));
+    if( rc < 0 )
+      goto out;
+
+    /* Try again now that we've allocated some ephemeral ports. */
+    rc = tcp_helper_alloc_aw_for_ephem_ports(rs, list_head, laddr_be32);
+    if( rc <= 0 )
+      goto out;
+    to_alloc -= rc;
+  }
+
+ out:
+  /* We succeeded as long as we increased the pool at all. */
+  if( to_alloc < ni_opts->tcp_shared_local_ports_step )
     return 0;
-
-  /* We didn't manage to allocate any new active wilds from existing ephemeral
-   * ports, so allocate another ephemeral port. */
-  rc = tcp_helper_alloc_ephemeral_ports(list_head, laddr_be32, 1);
-  if( rc < 0 )
-    return rc;
-
-  /* Try again now that we've allocated another ephemeral port. */
-  return tcp_helper_alloc_aw_for_ephem_ports(rs, list_head, laddr_be32);
+  return rc;
 }
 
 
@@ -3369,14 +3603,15 @@ tcp_helper_alloc_ephem_table(ci_uint32 min_entries, ci_uint32* entries_out)
   else
     ci_assert_equal(entries, min_entries);
 
-  table = kmalloc(sizeof(struct efab_ephemeral_port_head) * entries,
-                  GFP_KERNEL);
+  table = CI_VMALLOC_ARRAY(struct efab_ephemeral_port_head, entries);
   if( table == NULL )
     return NULL;
 
   for( i = 0; i < entries; ++i ) {
     table[i].laddr_be32 = EPHEMERAL_PORT_LIST_NO_LADDR;
     table[i].head = NULL;
+    table[i].tail_next_ptr = NULL;
+    table[i].global_consumed = NULL;
   }
 
   return table;
@@ -3698,12 +3933,13 @@ int tcp_helper_rm_alloc(ci_resource_onload_alloc_t* alloc,
       ! NI_OPTS(ni).tcp_shared_local_ports_per_ip ) {
     struct efab_ephemeral_port_head* ephemeral_ports;
     /* We know on this path that shared local ports are not per-IP, so we use
-     * an address of zero here where appropriate. */
+     * an address of zero here where appropriate, and we don't need to pass in
+     * a separate global table. */
     if( thc == NULL ) {
       tcp_helper_get_ephemeral_port_list(rs->trs_ephem_table, 0,
                                          rs->trs_ephem_table_entries,
                                          &ephemeral_ports);
-      tcp_helper_alloc_ephemeral_ports(ephemeral_ports, 0,
+      tcp_helper_alloc_ephemeral_ports(ephemeral_ports, NULL, 0,
                                        NI_OPTS(ni).tcp_shared_local_ports);
       /* In the event that tcp_helper_alloc_ephemeral_ports() returns an error,
        * there's nothing to do here: a warning will have been printed, and we
@@ -3748,11 +3984,11 @@ int tcp_helper_rm_alloc(ci_resource_onload_alloc_t* alloc,
   return 0;
 
  fail13:
-  kfree(rs->trs_ephem_table_consumed);
+  vfree(rs->trs_ephem_table_consumed);
  fail12:
   /* Free the table of ephemeral ports unless we share it with the cluster. */
   if( thc == NULL )
-    kfree(rs->trs_ephem_table);
+    vfree(rs->trs_ephem_table);
  fail11:
  fail10:
  fail9:
@@ -3907,6 +4143,10 @@ static inline int thr_queue_delayed_work(tcp_helper_resource_t* thr,
                                          struct delayed_work *dwork,
                                          unsigned long delay)
 {
+  /* RHEL6 fixme:
+   * We should set periodic_timer_cpu to WORK_CPU_UNBOUND, and call
+   * queue_delayed_work_on() unconditionally.
+   * It works for linux>=2.6.36. */
   if( thr->periodic_timer_cpu > -1 )
     return queue_delayed_work_on(thr->periodic_timer_cpu, thr->periodic_wq,
                                  dwork, delay);
@@ -4885,8 +5125,8 @@ void tcp_helper_dtor(tcp_helper_resource_t* trs)
   /* Get the stack lock; it is needed for filter removal and leak check. */
   if( ~trs->netif.flags & CI_NETIF_FLAG_WEDGED ) {
     if( efab_tcp_helper_netif_try_lock(trs, 0) ) {
-      tcp_helper_gracious_dtor(trs);
       oo_inject_packets_kernel(trs, 1);
+      tcp_helper_gracious_dtor(trs);
     }
     else {
       /* Pretend to be wedged and do not check for leaks */
@@ -4913,9 +5153,9 @@ void tcp_helper_dtor(tcp_helper_resource_t* trs)
     tcp_helper_free_ephemeral_ports(trs->trs_ephem_table,
                                     trs->trs_ephem_table_entries);
 
-  /* We just kfree() the consumed table, as the pointers that it contains point
+  /* We just vfree() the consumed table, as the pointers that it contains point
    * straight into the the table of ephemeral ports itself. */
-  kfree(trs->trs_ephem_table_consumed);
+  vfree(trs->trs_ephem_table_consumed);
 
   thr_uninstall_tproxy(trs);
 
@@ -5421,6 +5661,12 @@ efab_tcp_helper_more_bufs(tcp_helper_resource_t* trs)
   int i, rc, bufset_id, intf_i;
 
   ci_assert(ci_netif_is_locked(ni));
+
+  /* efab_tcp_helper_iobufset_alloc() checks for pkt_sets_max, but we do
+   * not want to go in efab_tcp_helper_no_more_bufs() in this case, so
+   * let's exit early. */
+  if( ni->pkt_sets_n == ni->pkt_sets_max )
+    return -ENOSPC;
 
   if( (ni->flags & (CI_NETIF_FLAG_IN_DL_CONTEXT |
                     CI_NETIF_FLAG_AVOID_ATOMIC_ALLOCATION) ) ==
@@ -6032,18 +6278,92 @@ static int oo_handle_wakeup_int_driven(void* context, int is_timeout,
 
 
 static void
-linux_set_periodic_timer_restart(tcp_helper_resource_t* rs) 
+linux_set_periodic_timer_restart(tcp_helper_resource_t* rs,
+                                 unsigned long timeout)
 {
-  unsigned long t = ci_net_random() % CI_TCP_HELPER_PERIODIC_FLOAT_T;
-
   if (atomic_read(&rs->timer_running) == 0) 
     return;
 
-  thr_queue_delayed_work(rs, &rs->timer, CI_TCP_HELPER_PERIODIC_BASE_T + t);
+  /* The timeout is calculated from IP ticks, which are ususally smaller
+   * than jiffies, so the timeout can occur to be 0.
+   * linux_tcp_timer_do() adds 1, but even 1-jiffie timout is ususally
+   * unwelcome, so we use periodic_poll_skew as a minimum. */
+  if( timeout < periodic_poll_skew )
+    timeout = periodic_poll_skew;
+  if( timeout >= periodic_poll )
+    timeout = periodic_poll + ci_net_random() % periodic_poll_skew;
+
+  thr_queue_delayed_work(rs, &rs->timer, timeout);
+}
+
+/* Find the delay before the next IP timer will fire, in jiffies.
+ * Can be unreliable if the stack is not locked. */
+static unsigned long
+tcp_helper_next_ip_timer(ci_netif* ni)
+{
+  unsigned long delay = periodic_poll;
+  ci_ip_timer_state* ipts = IPTIMER_STATE(ni);
+  ci_iptime_t ticks_delay = ipts->closest_timer - ipts->sched_ticks;
+
+  /* 1 tick is roughly equal to 1ms; we do not care about delay > 1s.
+   * Non-positive delta probably means that something is going on under
+   * our feet, so we ignore it. */
+  if( ticks_delay > 1000 || ticks_delay < 1)
+    return delay;
+
+  /* We have the next IP timer closer than 1s.  Let's find the time
+   * in jiffies. */
+  delay = usecs_to_jiffies(
+        (ci_uint64)ticks_delay <<
+        (ipts->ci_ip_time_frc2tick - ipts->ci_ip_time_frc2us));
+  /* The calculations above are imprecise.  Imprecision is OK, as long
+   * as the periodic timer fires **after** the IP timer should be
+   * run, otherwise the IP timer subsystem refuses to run the IP
+   * timer.  So we add 1 jiffie.
+   */
+  return delay + 1;
+}
+
+void
+tcp_helper_request_timer(tcp_helper_resource_t* trs)
+{
+  ci_netif* ni = &trs->netif;
+  unsigned long timer_delay;
+
+  timer_delay = tcp_helper_next_ip_timer(ni);
+  /* If the current periodic timer expiration is too far from
+   * jiffies + timer_delay, then we want to re-schedule the timer. */
+  if( TIME_GT(trs->timer.timer.expires,
+              jiffies + timer_delay + periodic_poll_skew) ) {
+    /* re-schedule the periodic timer to match the delay */
+    /* RHEL6 fixme:
+     * We'd better run mod_delayed_work(), but it exists for
+     * linux>=3.7 only.  So we cancel the old work and run a new one.
+     */
+    cancel_delayed_work(&trs->timer);
+    thr_queue_delayed_work(trs, &trs->timer, timer_delay);
+  }
 }
 
 static void
-linux_tcp_timer_do(tcp_helper_resource_t* rs)
+ci_netif_collect_periodic_metrics(ci_netif* ni)
+{
+  /* We have no lock here however, we are the only modifier
+   * of lowest_free_pkts count */
+  uint32_t free_pkts =
+    ((ni->pkt_sets_max - ni->pkt_sets_n) << CI_CFG_PKTS_PER_SET_S) +
+    ni->packets->n_free;
+
+  if( free_pkts <= 0 )
+    free_pkts = 1; /* cannot allow it to be set to 0 */
+
+  if( free_pkts < ni->state->stats.lowest_free_pkts ||
+      ni->state->stats.lowest_free_pkts == 0 )
+    ni->state->stats.lowest_free_pkts = free_pkts;
+}
+
+static void
+linux_tcp_timer_do(tcp_helper_resource_t* rs, unsigned long* next_timer)
 {
   ci_netif* ni = &rs->netif;
   ci_uint64 now_frc;
@@ -6062,8 +6382,10 @@ linux_tcp_timer_do(tcp_helper_resource_t* rs)
   if( now_frc - ni->state->evq_last_prime >
       ni->state->timer_prime_cycles * 5 ) {
     if( efab_tcp_helper_netif_try_lock(rs, 0) ) {
+
       rc = ci_netif_poll(ni);
       oo_inject_packets_kernel_force(ni);
+      *next_timer = tcp_helper_next_ip_timer(ni);
       efab_tcp_helper_netif_unlock(rs, 0);
       CITP_STATS_NETIF_INC(ni, periodic_polls);
       if( rc > 0 )
@@ -6072,6 +6394,7 @@ linux_tcp_timer_do(tcp_helper_resource_t* rs)
     else {
       CITP_STATS_NETIF_INC(ni, periodic_lock_contends);
     }
+    ci_netif_collect_periodic_metrics(ni);
   }
 }
 
@@ -6084,13 +6407,14 @@ linux_tcp_helper_periodic_timer(struct work_struct *work)
                                                 .work
 #endif
                                           );
+  unsigned long next_timer = periodic_poll;
 
   ci_assert(NULL != rs);
 
   OO_DEBUG_VERB(ci_log("linux_tcp_helper_periodic_timer: fired"));
 
-  linux_tcp_timer_do(rs);
-  linux_set_periodic_timer_restart(rs);
+  linux_tcp_timer_do(rs, &next_timer);
+  linux_set_periodic_timer_restart(rs, next_timer);
 }
 
 static void
@@ -6100,7 +6424,7 @@ tcp_helper_initialize_and_start_periodic_timer(tcp_helper_resource_t* rs)
 
   INIT_DELAYED_WORK(&rs->timer, linux_tcp_helper_periodic_timer);
 
-  linux_set_periodic_timer_restart(rs);
+  linux_set_periodic_timer_restart(rs, periodic_poll);
 }
 
 
@@ -6639,7 +6963,7 @@ efab_tcp_helper_netif_lock_callback(eplock_helper_t* epl, ci_uint64 lock_val,
   const ci_uint64 all_after_unlock_flags = (CI_EPLOCK_NETIF_NEED_PRIME |
                                            CI_EPLOCK_NETIF_PKT_WAKE);
   ci_netif* ni = &thr->netif;
-  ci_uint64 flags_set, clear_flags;
+  ci_uint64 flags_set;
   ci_uint64 after_unlock_flags = 0;
   int intf_i;
 
@@ -6647,41 +6971,23 @@ efab_tcp_helper_netif_lock_callback(eplock_helper_t* epl, ci_uint64 lock_val,
 
 
   do {
-    clear_flags = 0;
     if( in_dl_context )
       ni->flags |= CI_NETIF_FLAG_IN_DL_CONTEXT;
 
-    if( lock_val & CI_EPLOCK_NETIF_IS_PKT_WAITER )
-      if( ci_netif_pkt_tx_can_alloc_now(ni) ) {
-        clear_flags |= CI_EPLOCK_NETIF_IS_PKT_WAITER;
-        after_unlock_flags |= CI_EPLOCK_NETIF_PKT_WAKE;
-        lock_val = ni->state->lock.lock;
-        CITP_STATS_NETIF_INC(ni, unlock_slow_pkt_waiter);
-      }
+    lock_val = ci_netif_unlock_slow_common(ni, lock_val);
 
-    /* Do this first as it might request another address space */
-    if( lock_val & CI_EPLOCK_NETIF_SOCKET_LIST ) {
-      CITP_STATS_NETIF_INC(ni, unlock_slow_socket_list);
-      lock_val = ci_netif_purge_deferred_socket_list(ni);
-    }
     /* Get flags set and clear them.  NB. Its possible no flags were set
     ** e.g. we tried to unlock the eplock (bottom of loop) but found
     ** someone had tried to lock it and therefore set the "need wake" bit.
     */
     flags_set = lock_val & CI_EPLOCK_NETIF_UNLOCK_FLAGS;
-    ef_eplock_clear_flags(&ni->state->lock, clear_flags | flags_set);
-    after_unlock_flags |= flags_set;
+    ef_eplock_clear_flags(&ni->state->lock, flags_set);
+    after_unlock_flags |= flags_set & all_after_unlock_flags;
 
     /* All code between here and the bottom of the loop should use
     ** [flags_set], and must not touch [lock_val].  If any flags
     ** subsequently get re-set, then we'll come round the loop again.
     */
-
-    if( flags_set & CI_EPLOCK_NETIF_NEED_POLL ) {
-      CITP_STATS_NETIF(++ni->state->stats.deferred_polls);
-      ci_netif_poll(ni);
-      flags_set &=~ CI_EPLOCK_NETIF_NEED_POLL;
-    }
 
     if( flags_set & CI_EPLOCK_NETIF_SWF_UPDATE ) {
       oof_cb_sw_filter_apply(ni);
@@ -6693,9 +6999,8 @@ efab_tcp_helper_netif_lock_callback(eplock_helper_t* epl, ci_uint64 lock_val,
       if( in_dl_context && oo_avoid_wakeup_from_dl() ) {
         OO_DEBUG_TCPH(ci_log("%s: [%u] defer endpoint wakeup to workitem",
                              __FUNCTION__, thr->id));
-        ef_eplock_holder_set_flags(
-          &ni->state->lock,
-          (after_unlock_flags & all_after_unlock_flags) | flags_set);
+        ef_eplock_holder_set_flags(&ni->state->lock,
+                                   after_unlock_flags | flags_set);
         ci_assert(ni->state->lock.lock & CI_EPLOCK_NETIF_NEED_WAKE);
         tcp_helper_defer_dl2work(thr, OO_THR_AFLAG_UNLOCK_UNTRUSTED);
         return 0;
@@ -6716,9 +7021,8 @@ efab_tcp_helper_netif_lock_callback(eplock_helper_t* epl, ci_uint64 lock_val,
       if( in_dl_context ) {
       OO_DEBUG_TCPH(ci_log("%s: [%u] NEED_PKT_SET to workitem",
                            __FUNCTION__, thr->id));
-        ef_eplock_holder_set_flags(
-          &ni->state->lock,
-          (after_unlock_flags & all_after_unlock_flags) | flags_set);
+        ef_eplock_holder_set_flags(&ni->state->lock,
+                                   after_unlock_flags | flags_set);
         tcp_helper_defer_dl2work(thr, OO_THR_AFLAG_UNLOCK_UNTRUSTED);
         return 0;
       }
@@ -6727,6 +7031,29 @@ efab_tcp_helper_netif_lock_callback(eplock_helper_t* epl, ci_uint64 lock_val,
       efab_tcp_helper_more_bufs(thr);
       flags_set &=~ CI_EPLOCK_NETIF_NEED_PKT_SET;
     }
+
+    if( flags_set & CI_EPLOCK_NETIF_PURGE_TXQS ) {
+      tcp_helper_purge_txq_locked(thr);
+      flags_set &= ~CI_EPLOCK_NETIF_PURGE_TXQS;
+    }
+
+    if( flags_set & CI_EPLOCK_NETIF_KERNEL_PACKETS ) {
+      OO_DEBUG_TCPH(ci_log("%s: [%u] forward %u packets to kernel",
+                           __FUNCTION__, thr->id,
+                           ni->state->kernel_packets_pending));
+      oo_inject_packets_kernel(thr, 0);
+      flags_set &= ~CI_EPLOCK_NETIF_KERNEL_PACKETS;
+    }
+
+    if( flags_set & CI_EPLOCK_NETIF_FREE_READY_LIST ) {
+      ci_netif_free_ready_lists(ni);
+      flags_set &= ~CI_EPLOCK_NETIF_FREE_READY_LIST;
+    }
+
+    /* CI_EPLOCK_NETIF_CLOSE_ENDPOINT must be the last flag handled, because
+     * it can cause us to take an early exit from the function. */
+    ci_assert_nflags(flags_set & ~all_after_unlock_flags,
+                     ~CI_EPLOCK_NETIF_CLOSE_ENDPOINT);
 
     if( flags_set & CI_EPLOCK_NETIF_CLOSE_ENDPOINT ) {
       if( oo_trusted_lock_lock_or_set_flags(thr,
@@ -6737,9 +7064,8 @@ efab_tcp_helper_netif_lock_callback(eplock_helper_t* epl, ci_uint64 lock_val,
         if( in_dl_context ) {
           OO_DEBUG_TCPH(ci_log("%s: [%u] defer CLOSE_ENDPOINT to workitem",
                                __FUNCTION__, thr->id));
-          if( after_unlock_flags & all_after_unlock_flags )
-            ef_eplock_holder_set_flags(&ni->state->lock,
-                                 after_unlock_flags & all_after_unlock_flags);
+          if( after_unlock_flags )
+            ef_eplock_holder_set_flags(&ni->state->lock, after_unlock_flags);
           tcp_helper_defer_dl2work(thr, OO_THR_AFLAG_CLOSE_ENDPOINTS);
           return 0;
         }
@@ -6754,20 +7080,6 @@ efab_tcp_helper_netif_lock_callback(eplock_helper_t* epl, ci_uint64 lock_val,
         OO_DEBUG_TCPH(ci_log("%s: [%u] defer CLOSE_ENDPOINT to trusted lock",
                              __FUNCTION__, thr->id));
       }
-    }
-
-    if( flags_set & CI_EPLOCK_NETIF_PURGE_TXQS )
-      tcp_helper_purge_txq_locked(thr);
-
-    if( flags_set & CI_EPLOCK_NETIF_KERNEL_PACKETS ) {
-      OO_DEBUG_TCPH(ci_log("%s: [%u] forward %u packets to kernel",
-                           __FUNCTION__, thr->id,
-                           ni->state->kernel_packets_pending));
-      oo_inject_packets_kernel(thr, 0);
-    }
-
-    if( flags_set & CI_EPLOCK_NETIF_FREE_READY_LIST ) {
-      ci_netif_free_ready_lists(ni);
     }
 
     /* IN_DL_CONTEXT flag should be removed under the stack lock - so we
@@ -6806,6 +7118,7 @@ efab_tcp_helper_netif_lock_callback(eplock_helper_t* epl, ci_uint64 lock_val,
   /* ALERT!  If [after_unlock_flags] is used for any more flags, they must
    * be included in all_after_unlock_flags above!
    */
+  ci_assert_nflags(after_unlock_flags, ~all_after_unlock_flags);
 
   return lock_val;
 }

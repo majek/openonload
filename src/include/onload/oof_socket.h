@@ -16,6 +16,7 @@
 #ifndef __ONLOAD_OOF_SOCKET_H__
 #define __ONLOAD_OOF_SOCKET_H__
 
+#include <ci/net/ipvx.h>
 
 struct oof_local_port;
 
@@ -53,7 +54,11 @@ struct oof_socket {
   /* All other fields are only valid when [sf_local_port] is not NULL */
   struct oo_hw_filter sf_full_match_filter;
 
-  unsigned  sf_laddr, sf_raddr;
+  int af_space;
+
+  ci_addr_t sf_laddr;
+  ci_addr_t sf_raddr;
+
   int       sf_rport;
   /* See [sf_local_port] for local port and protocol. */
 

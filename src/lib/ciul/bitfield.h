@@ -44,7 +44,7 @@
 /* This file s a light copy of bitfield.h header in linux_net */
 
 #ifndef BITS_PER_LONG
-#if defined(__x86_64__) || defined(__PPC64__)
+#if defined(__x86_64__) || defined(__PPC64__) || defined (__aarch64__)
 #define BITS_PER_LONG 64
 #else
 #define BITS_PER_LONG 32

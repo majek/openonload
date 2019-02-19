@@ -86,16 +86,6 @@ citp_signal_run_app_handler(int sig, siginfo_t *info, void *context)
   ci_assert(info);
   ci_assert(context);
 
-  if( (act.type & OO_SIGHANGLER_TYPE_MASK) != OO_SIGHANGLER_USER ||
-      (act.flags & SA_SIGINFO) ) {
-    (*handler)(sig, info, context);
-  } else {
-    __sighandler_t handler1 = (void *)handler;
-    (*handler1)(sig);
-  }
-  LOG_SIG(log("%s: returned from handler for signal %d: ret=%x", __FUNCTION__,
-              sig, ret));
-
   /* If sighandler was reset because of SA_ONESHOT, we should properly
    * handle termination.
    * Also, signal flags possibly differs from the time when kernel was
@@ -106,10 +96,20 @@ citp_signal_run_app_handler(int sig, siginfo_t *info, void *context)
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
     sa.sa_handler = SIG_DFL;
-    sa.sa_flags = act.flags;
+    sa.sa_flags = act.flags &~ SA_ONESHOT;
     sigaction(sig, &sa, NULL);
     LOG_SIG(log("%s: SA_ONESHOT fixup", __func__));
   }
+
+  if( (act.type & OO_SIGHANGLER_TYPE_MASK) != OO_SIGHANGLER_USER ||
+      (act.flags & SA_SIGINFO) ) {
+    (*handler)(sig, info, context);
+  } else {
+    __sighandler_t handler1 = (void *)handler;
+    (*handler1)(sig);
+  }
+  LOG_SIG(log("%s: returned from handler for signal %d: ret=%x", __FUNCTION__,
+              sig, ret));
 
   return ret;
 }
@@ -127,7 +127,6 @@ void citp_signal_run_pending(citp_signal_info *our_info)
 
   LOG_SIG(log("%s: start", __FUNCTION__));
   ci_wmb();
-  ci_assert_equal(our_info->inside_lib, 0);
   ci_assert(our_info->aflags & OO_SIGNAL_FLAG_HAVE_PENDING);
 
   ci_atomic32_and(&our_info->aflags, ~OO_SIGNAL_FLAG_HAVE_PENDING);
@@ -146,6 +145,11 @@ void citp_signal_run_pending(citp_signal_info *our_info)
     signum = our_info->signals[i].signum;
     if( ci_cas32_fail(&our_info->signals[i].signum, signum, 0) )
       break;
+
+    /* Segfault in Onload code (such as ci_assert) violate this assertion,
+     * so we check for SIGSEGV here. */
+    if( signum != SIGABRT && signum != SIGSEGV )
+      ci_assert_equal(our_info->inside_lib, 0);
 
     if( citp_signal_run_app_handler(
                 signum,

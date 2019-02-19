@@ -67,7 +67,7 @@
 
 #include "efsend_common.h"
 
-#if defined(__x86_64__) || defined(__PPC64__)
+#if defined(__x86_64__) || defined(__PPC64__) || defined(__aarch64__)
 
 #include <etherfabric/pd.h>
 #include <etherfabric/memreg.h>

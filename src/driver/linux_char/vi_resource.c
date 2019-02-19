@@ -325,8 +325,7 @@ efch_vi_rm_alloc(ci_resource_alloc_t* alloc, ci_resource_table_t* rt,
   alloc_out->nic_arch = nic->devtype.arch;
   alloc_out->nic_variant = nic->devtype.variant;
   alloc_out->nic_revision = nic->devtype.revision;
-  alloc_out->nic_flags = (nic->flags & NIC_FLAG_BUG35388_WORKAROUND) ?
-                          EFHW_VI_NIC_BUG35388_WORKAROUND : 0;
+  alloc_out->nic_flags = efhw_vi_nic_flags(nic);
   alloc_out->io_mmap_bytes = 4096;
   alloc_out->mem_mmap_bytes = virs->mem_mmap_bytes;
   alloc_out->rx_prefix_len = virs->rx_prefix_len;

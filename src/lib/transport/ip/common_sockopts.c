@@ -580,6 +580,35 @@ int ci_get_sol_socket( ci_netif* netif, ci_sock_cmn* s,
     u = (unsigned) s->so_priority;
     goto u_out;
 
+  case SO_BINDTODEVICE:
+    u = 0;
+    if( s->cp.so_bindtodevice == CI_IFID_BAD ) {
+      *optlen = 0;
+      return 0;
+    }
+
+    {
+      struct cp_mibs* mib;
+      cicp_rowid_t id;
+      cp_version_t version;
+      char ifname[IFNAMSIZ+1];
+
+      CP_VERLOCK_START(version, mib, netif->cplane)
+        id = cp_llap_find_row(mib, s->cp.so_bindtodevice);
+        if( id != CICP_ROWID_BAD )
+          strcpy(ifname, mib->llap[id].name);
+      CP_VERLOCK_STOP(version, mib)
+
+      if( id == CICP_ROWID_BAD ) {
+        *optlen = 0;
+        return 0;
+      }
+
+      return ci_getsockopt_final(optval, optlen, SOL_SOCKET,
+                                 ifname, strlen(ifname) + 1);
+    }
+    /*unreachable*/
+
   case SO_ERROR:
     /* Gets the pending socket error and reset the pending error */
     u = ci_get_so_error(s);

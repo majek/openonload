@@ -209,11 +209,11 @@ kill_cplane() {
   pkill -f onload_cp_server
   local count=0
   while [ $count -lt 5 ]; do
-    sleep 1
     if ! pgrep -f onload_cp_server > /dev/null; then
       return 0
     fi
-    count=$[$count+1]
+    sleep 1
+    count=$(($count+1))
   done
   echo Timed out waiting for control plane to stop, trying SIGKILL...
   pkill --signal KILL -f onload_cp_server

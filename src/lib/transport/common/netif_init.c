@@ -128,6 +128,7 @@ static int __citp_netif_alloc(ef_driver_handle* fd, const char *name,
     rc = -ENOMEM;
     goto fail1;
   }
+  oo_atomic_set(&ni->ref_count, 0);
 
   rc = ef_onload_driver_open(fd, OO_STACK_DEV, 1);
   if( rc < 0 ) {
@@ -285,6 +286,44 @@ void citp_cmn_netif_init_ctor(unsigned netif_dtor_mode)
 }
 
 
+static int /*bool*/
+citp_netif_use_scalable_clustered_stack(const char* stackname)
+{
+  return
+    ci_cfg_opts.netif_opts.scalable_filter_enable ==
+      CITP_SCALABLE_FILTERS_ENABLE &&
+    (ci_cfg_opts.netif_opts.scalable_filter_mode & CITP_SCALABLE_MODE_RSS) &&
+    stackname[0] == '\0';
+}
+
+
+int citp_netif_get_process_stack(ci_netif** out_ni, const char* stackname)
+{
+  /* Look through the active netifs for a stack with a name that
+   * matches.  If it has no name, ignore it if DONT_USE_ANON netif
+   * flag is set
+   */
+  if( ci_dllist_not_empty(&citp_active_netifs) ) {
+    CI_DLLIST_FOR_EACH2(ci_netif, *out_ni, link, &citp_active_netifs)
+      if( ! citp_netif_use_scalable_clustered_stack(stackname) ) {
+        if( strncmp((*out_ni)->state->name, stackname,
+                    CI_CFG_STACK_NAME_LEN) == 0 )
+          if( strlen((*out_ni)->state->name) != 0 ||
+              ((*out_ni)->flags & CI_NETIF_FLAGS_DONT_USE_ANON) == 0 )
+            return 0;
+      }
+      else if( (*out_ni)->state->flags & CI_NETIF_FLAG_SCALABLE_FILTERS_RSS &&
+               (*out_ni)->state->pid == getpid() ) {
+        /* We pick the stack that is marked with the above flag.
+         * A process is expected to have access only to one of these. */
+        return 0;
+     }
+  }
+
+  return -ENOENT;
+}
+
+
 /* Common netif initialiser.  
  * \param IN fd file descriptor
  * \param OUT netif constructed
@@ -293,9 +332,8 @@ void citp_cmn_netif_init_ctor(unsigned netif_dtor_mode)
 int citp_netif_alloc_and_init(ef_driver_handle* fd, ci_netif** out_ni)
 {
   ci_netif* ni = NULL;
-  int rc;
   char* stackname;
-  int use_scalable_clustered_stack = 0;
+  int rc;
 
   ci_assert( citp_netifs_inited );
   ci_assert( fd );
@@ -309,37 +347,11 @@ int citp_netif_alloc_and_init(ef_driver_handle* fd, ci_netif** out_ni)
     CITP_FDTABLE_UNLOCK();
     return CI_SOCKET_HANDOVER;
   }
-  else if( ci_cfg_opts.netif_opts.scalable_filter_enable ==
-             CITP_SCALABLE_FILTERS_ENABLE &&
-           (ci_cfg_opts.netif_opts.scalable_filter_mode &
-             CITP_SCALABLE_MODE_RSS) &&
-           stackname[0] == '\0' ) {
-    use_scalable_clustered_stack = 1;
-  }
 
-  /* Look through the active netifs for a stack with a name that
-   * matches.  If it has no name, ignore it if DONT_USE_ANON netif
-   * flag is set
-   */
-  if( ci_dllist_not_empty(&citp_active_netifs) ) {
-    CI_DLLIST_FOR_EACH2(ci_netif, ni, link, &citp_active_netifs)
-      if( ! use_scalable_clustered_stack ) {
-        if( strncmp(ni->state->name, stackname, CI_CFG_STACK_NAME_LEN) == 0 )
-          if( strlen(ni->state->name) != 0 ||
-              (ni->flags & CI_NETIF_FLAGS_DONT_USE_ANON) == 0 )
-            break;
-      }
-      else if( ni->state->flags & CI_NETIF_FLAG_SCALABLE_FILTERS_RSS &&
-               ni->state->pid == getpid() ) {
-          /* We pick the stack that is marked with the above flag.
-           * A process is expected to have access only to one of these. */
-          break;
-     }
-  }
-
-  if( ni == NULL ) {
+  rc = citp_netif_get_process_stack(&ni, stackname);
+  if( rc == -ENOENT ) {
     /* Allocate a new netif */
-    int flags = use_scalable_clustered_stack ?
+    int flags = citp_netif_use_scalable_clustered_stack(stackname) ?
                 CI_NETIF_FLAG_DO_ALLOCATE_SCALABLE_FILTERS_RSS : 0;
     rc = __citp_netif_alloc(fd, stackname, flags, &ni);
     if( rc < 0 ) {
@@ -358,6 +370,10 @@ int citp_netif_alloc_and_init(ef_driver_handle* fd, ci_netif** out_ni)
       citp_netif_add_ref(ni);
 
     VERB(ci_log("%s: constructed NI %d", __FUNCTION__, NI_ID(ni)));
+  }
+  else {
+    ci_assert_equal(rc, 0);
+    ci_assert(ni);
   }
 
   /* We wouldn't be recreating this unless we had an endpoint to attach.
@@ -506,14 +522,12 @@ void citp_netif_cache_warn_on_fork(void)
   /* Disable caching on every netif. */
   if( ci_dllist_not_empty(&citp_active_netifs) )
     CI_DLLIST_FOR_EACH2(ci_netif, ni, link, &citp_active_netifs) {
-      ci_netif_lock(ni);
       if( ni->state->opts.sock_cache_max > 0 &&
           ~ni->state->flags & CI_NETIF_FLAG_SOCKCACHE_FORKED ) {
-        ni->state->flags |= CI_NETIF_FLAG_SOCKCACHE_FORKED;
+        ci_atomic32_or(&ni->state->flags, CI_NETIF_FLAG_SOCKCACHE_FORKED);
         NI_LOG(ni, CONFIG_WARNINGS,
                "WARNING: Socket caching is not supported after fork().");
       }
-      ci_netif_unlock(ni);
     }
 }
 #endif /* CI_CFG_FD_CACHING */

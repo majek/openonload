@@ -118,12 +118,13 @@ ci_inline void ef_eplock_holder_set_flags(ci_eplock_t* l, ci_uint64 flags) {
 }
 
   /*! Clear the specified lock flags. */
-ci_inline void ef_eplock_clear_flags(ci_eplock_t* l, ci_uint64 flags) {
+ci_inline ci_uint64 ef_eplock_clear_flags(ci_eplock_t* l, ci_uint64 flags) {
   ci_uint64 v;
   ci_assert((flags & CI_EPLOCK_LOCK_FLAGS) == 0u);
   do {
     v = l->lock;
   } while( ci_cas64u_fail(&l->lock, v, v &~ flags) );
+  return v;
 }
 
   /*! Used to alert the lock holder.  Caller would normally not hold the

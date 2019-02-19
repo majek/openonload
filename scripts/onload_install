@@ -22,33 +22,36 @@ usage() {
   err "  $me [options]"
   err
   err "options:"
-  err "  --newkernel <ver>  - Build and install drivers for new kernel"
-  err "  --kernelver <ver>  - Specify kernel version for drivers"
-  err "  --nobuild          - Do not (re)compile"
-  err "  --require32        - Fail if 32-bit binaries are not installed"
-  err "  --setuid           - Preload libraries are set-uid and set-gid"
-  err "  --nosetuid         - Preload libraries are not set-uid/gid"
-  err "  --affinity         - Include sfcaffinity"
-  err "  --noaffinity       - Do not include sfcaffinity"
-  err "  --debug            - Build debug binaries"
-  err "  --no-debug-info    - Omit debug info from binaries"
-  err "  --strict           - Compiler warnings are errors"
+  err "  --newkernel <ver>          - Build and install drivers for new kernel"
+  err "  --kernelver <ver>          - Specify kernel version for drivers"
+  err "  --nobuild                  - Do not (re)compile"
+  err "  --require32                - Fail if 32-bit binaries are not installed"
+  err "  --setuid                   - Preload libraries are set-uid and set-gid"
+  err "  --nosetuid                 - Preload libraries are not set-uid/gid"
+  err "  --affinity                 - Include sfcaffinity"
+  err "  --noaffinity               - Do not include sfcaffinity"
+  err "  --debug                    - Build debug binaries"
+  err "  --no-debug-info            - Omit debug info from binaries"
+  err "  --strict                   - Compiler warnings are errors"
+  err "  --require-optional-targets - Require optional targets"
   is_ppc &&
-  err "  --ppc-at <path>    - Specify path to IBM Advanced Toolchain"
-  err "  --userfiles        - Only install user-level components"
-  err "  --kernelfiles      - Only install kernel driver components"
-  err "  --modprobe         - Only install modprobe configuration"
-  err "  --initscript       - Only install init script"
-  err "  --force            - Force install if already installed"
-  err "  --verbose          - Verbose logging of commands"
-  err "  --test             - Do not install; just print commands"
-  err "  --listfiles        - Do not install; just list installed files"
-  err
-  err "  --filter-engine    - Specify location of filter engine directory"
-  err "                       by default - /opt/onload_filter_engine"
-  err "  --no-filter-engine - Don't include filter engine support even if it's"
-  err "                       present in the system"
-  err "  --build-profile    - Specify a build profile"
+  err "  --ppc-at <path>            - Specify path to IBM Advanced Toolchain"
+  err "  --userfiles                - Only install user-level components"
+  err "  --kernelfiles              - Only install kernel driver components"
+  err "  --modprobe                 - Only install modprobe configuration"
+  err "  --initscript               - Only install init script"
+  err "  --force                    - Force install if already installed"
+  err "  --allow-unsupported-cpu    - Force install even when CPU is too old"
+  err "  --verbose                  - Verbose logging of commands"
+  err "  --test                     - Do not install; just print commands"
+  err "  --listfiles                - Do not install; just list installed files"
+  err "  --filter-engine            - Specify location of filter engine directory"
+  err "                               by default - /opt/onload_filter_engine"
+  err "  --no-filter-engine         - Don't include filter engine support even"
+  err "                               if it's present in the system"
+  err "  --build-profile            - Specify a build profile"
+  err "  --no-initramfs             - Do not update initramfs"
+  err "  --no-tcpdirect             - Do not install TCPDirect libraries"
   err
   exit 1
 }
@@ -231,9 +234,14 @@ install_uninstall() {
 install_userland() {
   # Install libraries and tools.
   try $do cd "$TOP/build"
-  u32="$(mmaketool --userbuild_base32)"
   userarch="$(mmaketool --userarch)"
-  u64="gnu_${userarch}"
+  if ${devel}; then
+    u32="$(mmaketool --userbuild_base32)"
+    u64="$(mmaketool --userbuild)"
+  else
+    u32="$(mmaketool --userbuild_base32)"
+    u64="gnu_${userarch}"
+  fi
   want_zf=""
   if [ -d "$u64" ]; then
     # Tolerate lack of 32-bit transport library on 64-bit systems.
@@ -246,14 +254,18 @@ install_userland() {
     install_slib "$u64"/lib/onload_ext/libonload_ext.a "$i_lib64"
     install_slib32 "$u32"/lib/onload_ext/libonload_ext.a "$i_lib32"
     # ZF is x86_64-only.
-    if [ "$userarch" = "x86_64" ]; then
-      install_dlib "$u64"/lib/zf/libonload_zf.so "$i_lib64"
-      install_slib "$u64"/lib/zf/libonload_zf_static.a "$i_lib64"
+    if [ "$userarch" = "x86_64" ] && ! ${notcpdirect}; then
+      (
+        install_dlib "$u64"/lib/zf/libonload_zf.so "$i_lib64"
+        install_slib "$u64"/lib/zf/libonload_zf_static.a "$i_lib64"
+        install_x "$u64/tools/zf/zf_stackdump" "$i_usrbin/zf_stackdump"
+      ) || ${devel} || exit 1;
       install_dir "$i_lib64/zf"
       install_dir "$i_lib64/zf/debug"
-      install_dlib "$u64"/lib/zf/debug/libonload_zf.so "$i_lib64/zf/debug"
-      install_slib "$u64"/lib/zf/debug/libonload_zf_static.a "$i_lib64/zf/debug"
-      install_x "$u64/tools/zf/zf_stackdump" "$i_usrbin/zf_stackdump"
+      (
+        install_dlib "$u64"/lib/zf/debug/libonload_zf.so "$i_lib64/zf/debug"
+        install_slib "$u64"/lib/zf/debug/libonload_zf_static.a "$i_lib64/zf/debug"
+      ) || ${devel} || exit 1;
       want_zf=1
     fi
     if [ -n "$ppc_at" ]; then
@@ -266,6 +278,7 @@ install_userland() {
     install_slib32 "$u32"/lib/ciul/libciul1.a "$i_lib32"
     install_x "$u64/tools/ip/onload_stackdump" "$i_usrbin/onload_stackdump"
     install_x "$u64/tools/ip/onload_tcpdump.bin" "$i_usrbin/onload_tcpdump.bin"
+    install_x "$u64/tools/ip/onload_metrics_record" "$i_usrbin/onload_metrics_record"
     install_x "$u64/tools/ip/onload_fuser" "$i_usrbin/onload_fuser"
     install_x "$u64/tools/cplane/$debug_dir/onload_cp_server" \
               "$i_sbin/onload_cp_server"
@@ -295,6 +308,7 @@ install_userland() {
     install_slib "$u32"/lib/ciul/libciul1.a "$i_lib32"
     install_x "$u32/tools/ip/onload_stackdump" "$i_usrbin/onload_stackdump"
     install_x "$u32/tools/ip/onload_tcpdump.bin" "$i_usrbin/onload_tcpdump.bin"
+    install_x "$u32/tools/ip/onload_metrics_record" "$i_usrbin/onload_metrics_record"
     install_x "$u32/tools/ip/onload_fuser" "$i_usrbin/onload_fuser"
     install_x "$u32/tools/cplane/$debug_dir/onload_cp_server" \
               "$i_sbin/onload_cp_server"
@@ -318,6 +332,7 @@ install_userland() {
   install_f onload_misc/onload_sysconfig "$i_etc/sysconfig/openonload"
   install_x onload_tcpdump "$i_usrbin/onload_tcpdump"
   install_x onload_iptables "$i_usrbin/onload_iptables"
+  install_x onload_metrics "$i_usrbin/onload_metrics"
   install_x zf_debug "$i_usrbin/zf_debug"
   $affinity && {
     install_x sfcaffinity_config "$i_usrsbin/sfcaffinity_config"
@@ -337,8 +352,11 @@ install_userland() {
 
   # Install python components.
   try $do cd "$TOP/scripts"
+  PYTMPDIR=$(mktemp -d)
+  try $do cp -a "$TOP/scripts/" $PYTMPDIR
+  try $do cd "$PYTMPDIR/scripts"
   python_manifest=$(mktemp)
-  [ -f setup.py ] || try $do cp onload_misc/setup.py .
+  [ -f setup.py ] || try $do cp "$TOP/scripts/onload_misc/setup.py" .
   if [ -z "$i_prefix" ]; then
     # Debian and Ubuntu mess up if --prefix=/usr is set.
     $do python setup.py install --record=$python_manifest
@@ -351,6 +369,7 @@ install_userland() {
     log "Could not install OpenOnload python modules. "\
         "(If using SLES10 you need the 'python-devel' package)"
   fi
+  rm -fr $PYTMPDIR
 
   manifest_combine $python_manifest
 
@@ -405,14 +424,23 @@ install_kernel_modules() {
     $do /sbin/depmod -a "$KVER" || log "depmod exited with status $?"
   fi
 
-  if [ -z "$i_prefix" ]; then
+  if [ -z "$i_prefix" ] && ! ${noinitramfs}; then
     if [ -f "/boot/initrd.img-$KVER" -o -f "/boot/initramfs-$KVER.img" ]; then
       # Debian/Ubuntu: get new sfc.ko into ramfs
       if which update-initramfs >/dev/null 2>&1; then
         $do update-initramfs -u -k $KVER
       # RHEL7: get new sfc.ko into ramfs
       elif which dracut >/dev/null 2>&1; then
-        $do dracut -f --kver $KVER
+        kver=$(dracut --help |grep kver)
+        if [ -n "$kver" ]; then
+          $do dracut -f --kver $KVER
+        elif [ -f "/boot/initramfs-$KVER.img" ]; then
+            $do dracut -f "/boot/initramfs-$KVER.img" "$KVER"
+        else
+        log "WARNING: initramfs not found in default location."
+        log "WARNING: please update your initramfs manually."
+        fi
+
       else
         log "WARNING: commands to update initrd not found"
         log "WARNING: please update your initrd manually."
@@ -490,15 +518,22 @@ install_init_script_gen() {
 
 
 install_init_script() {
-  # In case we're working on Debian-derived distro chkconfig should 
+  # In case we're working on Debian-derived distro chkconfig should
   # not be used - it has internal problems which lead to failure.
-  if which dpkg >/dev/null 2>&1; then
-    try_chkconfig=false
+  # chkconfig --add openonload fails on SLES15 if insserv-compat is
+  # not installed.
+  if [ -f /etc/os-release ]; then
+    . /etc/os-release
+    if [ "$ID" = "sles" ]; then
+      try_chkconfig=false
+    fi
   else
     try_chkconfig=true
   fi
 
-  install_init_script_gen
+  if [ ! -f /etc/debian_version ]; then
+    install_init_script_gen
+  fi
 }
 
 
@@ -546,7 +581,7 @@ check_whether_installed() {
              "To remove, run: onload_uninstall"
     return
   fi
-  local rpm_qa=$(safe_rpm -qa)
+  local rpm_qa=$(safe_rpm -qa --nodigest --nosignature)
   if echo "$rpm_qa" | grep -q 'onload'| grep -v 'dkms'; then
     conflict "Onload rpms are already installed." \
              "To remove, run: rpm -qa | grep 'onload' | xargs rpm -e"
@@ -563,6 +598,36 @@ check_whether_installed() {
       check_file_installed "$i_prefix/lib/modules/$KVER/$where/$drv"
     done
   done
+}
+
+
+check_unsupported_cpu() {
+  local family
+  local bad=false
+  if [ ! -r /proc/cpuinfo ]; then
+    log "WARNING: Unable to read /proc/cpuinfo. This configuration may not" \
+        "be supported."
+  elif grep -qE '^vendor_id[[:space:]]*:[[:space:]]*AuthenticAMD$' \
+          /proc/cpuinfo; then
+    family=$(grep -E '^cpu family[[:space:]]*:[[:space:]]*[0-9]+$' \
+                  /proc/cpuinfo | head -1 | cut -d : -f 2)
+    # Family 23 is AMD Zen architecture. All older CPUs are untested
+    if $(test -z "$family" || test $family -lt 23); then
+      bad=true
+    fi
+  fi
+  if $bad; then
+    if $allow_unsupported_cpu; then
+      log "WARNING: This CPU is not supported by Onload, but" \
+          "--allow-unsupported-cpu has been used to continue anyway." \
+          "This configuration will not be supported by Solarflare" \
+          "Communications. Crashes and data loss may occur."
+    else
+      err "ERROR: This CPU is not supported by Onload. Check the release" \
+          "notes for further information."
+      exit 1
+    fi
+  fi
 }
 
 ######################################################################
@@ -629,6 +694,7 @@ failorm=false
 require32=false
 setuid=true
 force=false
+allow_unsupported_cpu=false
 check_install=true
 logprog=true
 sfccheck=true
@@ -636,6 +702,9 @@ withofe=true
 install_modules=true
 install_user=true
 ppc_at=
+noinitramfs=false
+notcpdirect=false
+devel=false
 # $debug_dir is relevant for blob binaries only.  We package debug and ndebug
 # versions, and need to select between them.
 debug_dir=
@@ -662,6 +731,7 @@ while [ $# -gt 0 ]; do
   --debug)	buildargs="$buildargs $1"; debug_dir=debug;;
   --no-debug-info)buildargs="$buildargs $1";;
   --strict)	buildargs="$buildargs $1";;
+  --require-optional-targets) buildargs="$buildargs $1";;
   --ppc-at)     is_ppc || usage; ppc_at="$2"; shift;;
   --userfiles)	all=false; userfiles=true;;
   --ldconfig)	all=false; ldconfig=true;;
@@ -678,6 +748,7 @@ while [ $# -gt 0 ]; do
   --noinstallcheck) check_install=false;;
   --nosfccheck) sfccheck=false;;
   --force)	force=true;;
+  --allow-unsupported-cpu) allow_unsupported_cpu=true;;
   --verbose)	set -x;;
   --test)	do=echo; test=true;;
   --listfiles)	do=donot; test=true; listfiles=true; check_install=false
@@ -686,6 +757,9 @@ while [ $# -gt 0 ]; do
   --no-filter-engine) withofe=false; "$buildargs $1";;
   --build-profile)   [ $# -gt 1 ] || usage; buildargs="$buildargs $1=$2"; shift;;
   --build-profile=*) buildargs="$buildargs $1";;
+  --no-initramfs) noinitramfs=true;;
+  --no-tcpdirect) notcpdirect=true;;
+  --devel) devel=true; build=false; noinitramfs=true;debug_dir=;;
   -*)           usage;;
   *)            break;;
   esac
@@ -724,6 +798,8 @@ elif [ -e /lib32/libc.so.6 ]; then
   # pure64 with secondary 32-bit
   i_lib32="$i_prefix/usr/lib32"
 fi
+
+check_unsupported_cpu
 
 # Special commands.  May do something and exit, or may modify settings and
 # continue.

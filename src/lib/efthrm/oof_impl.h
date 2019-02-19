@@ -18,6 +18,7 @@
 
 #include <ci/tools.h>
 #include <ci/internal/transport_config_opt.h>
+#include <ci/net/ipvx.h>
 #include <onload/oof_hw_filter.h>
 #include <onload/oof_interface.h>
 
@@ -122,7 +123,7 @@ struct oof_local_interface_details {
 
 
 struct oof_local_addr {
-  unsigned la_laddr;
+  ci_addr_t la_laddr;
 
   /* Number of sockets explicitly using this address (i.e. full match and
    * semi-wild).

@@ -16,7 +16,9 @@
 #ifndef __ONLOAD_OOF_INTERFACE_H__
 #define __ONLOAD_OOF_INTERFACE_H__
 
+#include <ci/internal/transport_config_opt.h>
 #include <cplane/mib.h> /* for ci_hwport_id_t */
+#include <ci/net/ipvx.h>
 
 struct tcp_helper_resource_s;
 struct oof_socket;
@@ -56,10 +58,12 @@ extern void
 oof_manager_free(struct oof_manager*);
 
 extern void
-oof_manager_addr_add(struct oof_manager*, unsigned laddr, unsigned ifindex);
+oof_manager_addr_add(struct oof_manager*, int af, ci_addr_t laddr,
+                     unsigned ifindex);
 
 extern void
-oof_manager_addr_del(struct oof_manager*, unsigned laddr, unsigned ifindex);
+oof_manager_addr_del(struct oof_manager*, int af, ci_addr_t laddr,
+                     unsigned ifindex);
 
 extern void
 oof_hwport_up_down(struct oof_manager* fm, int hwport, int up,
@@ -91,8 +95,9 @@ oof_socket_is_armed(struct oof_socket* skf);
 #define OOF_SOCKET_ADD_FLAG_NO_UCAST  0x8
 extern int
 oof_socket_add(struct oof_manager*, struct oof_socket*,
-               int flags, int protocol, unsigned laddr, int lport,
-               unsigned raddr, int rport,
+               int flags, int protocol, int af_space,
+               ci_addr_t laddr, int lport,
+               ci_addr_t raddr, int rport,
                struct tcp_helper_cluster_s** thc_out);
 
 extern int
@@ -109,8 +114,8 @@ oof_socket_update_sharer_details(struct oof_manager*, struct oof_socket*,
 
 extern int
 oof_socket_share(struct oof_manager*, struct oof_socket* skf,
-                 struct oof_socket* listen_skf, unsigned laddr,
-                 unsigned raddr, int rport);
+                 struct oof_socket* listen_skf, int af_space,
+                 ci_addr_t laddr, ci_addr_t raddr, int rport);
 
 extern void
 oof_socket_del(struct oof_manager*, struct oof_socket*);
@@ -193,14 +198,17 @@ extern void
 oof_cb_callback_set_filter(struct oof_socket* skf);
 
 extern int
-oof_cb_sw_filter_insert(struct oof_socket*, unsigned laddr, int lport,
-                        unsigned raddr, int rport, int protocol,
-                        int stack_locked);
+oof_cb_sw_filter_insert(struct oof_socket* skf, int af,
+                        const ci_addr_t laddr, int lport,
+                        const ci_addr_t raddr, int rport,
+                        int protocol, int stack_locked);
+
 
 extern void
-oof_cb_sw_filter_remove(struct oof_socket*, unsigned laddr, int lport,
-                        unsigned raddr, int rport, int protocol,
-                        int stack_locked);
+oof_cb_sw_filter_remove(struct oof_socket* skf, int af,
+                        const ci_addr_t laddr, int lport,
+                        const ci_addr_t raddr, int rport,
+                        int protocol, int stack_locked);
 
 struct ci_netif_s;
 extern void oof_cb_sw_filter_apply(struct ci_netif_s* ni);

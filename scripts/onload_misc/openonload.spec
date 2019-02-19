@@ -34,7 +34,7 @@
 #    --define "build_profile <profile>"
 
 
-%define pkgversion 201805-u1
+%define pkgversion 201811
 
 %{!?kernel:  %{expand: %%define kernel %%(uname -r)}}
 %{!?target_cpu:  %{expand: %%define target_cpu %{_host_cpu}}}
@@ -220,6 +220,16 @@ ldconfig -n /usr/lib /usr/lib64
 
 %post kmod-%{kverrel}
 depmod -a "%{kernel}"
+if [ -f  "/boot/initramfs-%{kernel}.img" ]; then
+  if which dracut >/dev/null 2>&1; then
+    kver=$(dracut --help |grep kver)
+    if [ -n "$kver" ]; then
+      dracut -f --kver "%{kernel}"
+    else
+      dracut -f "/boot/initramfs-%{kernel}.img" "%{kernel}"
+    fi
+  fi
+fi
 
 %postun kmod-%{kverrel}
 depmod -a "%{kernel}"

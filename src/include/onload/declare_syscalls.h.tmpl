@@ -180,6 +180,10 @@ CI_MK_DECL(int           , epoll_pwait, (int, struct epoll_event *, int, int, co
 #endif
 #endif
 
+#if CI_CFG_USERSPACE_SYSCALL
+CI_MK_DECL(long          , syscall    , (long, ...));
+#endif
+
 #undef CI_MK_DECL
 
 /*! \cidoxg_end */

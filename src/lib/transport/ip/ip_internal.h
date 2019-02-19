@@ -721,11 +721,10 @@ oo_spinloop_pause_check_signals(ci_netif* ni, ci_uint64 now_frc,
   ci_assert_gt(si->inside_lib, 0);
   ci_assert(~si->aflags & OO_SIGNAL_FLAG_FDTABLE_LOCKED);
 
-  if(CI_LIKELY( ~si->aflags & OO_SIGNAL_FLAG_HAVE_PENDING )) {
-    ci_spinloop_pause();
+  if(CI_LIKELY( ! (si->aflags & OO_SIGNAL_FLAG_HAVE_PENDING) ))
     return 0;
-  }
-  return oo_spinloop_run_pending_sigs(ni, w, si, have_timeout);
+  else
+    return oo_spinloop_run_pending_sigs(ni, w, si, have_timeout);
 }
 
 #define OO_SPINLOOP_PAUSE_CHECK_SIGNALS(ni, now_frc, schedule_frc,      \
@@ -820,6 +819,27 @@ extern void ci_netif_set_merge_atomic_flag(ci_netif* ni);
 
 void oo_pkt_calc_checksums(ci_netif* ni, ci_ip_pkt_fmt* pkt,
                            struct iovec* host_iov);
+
+
+#if CI_CFG_TCP_METRICS
+extern void ci_tcp_metrics_init(ci_tcp_state* ts);
+extern void ci_tcp_metrics_on_state(ci_netif* ni, ci_tcp_state* ts,
+                                    int new_state);
+extern void ci_tcp_metrics_on_promote(ci_netif* ni, ci_tcp_state* ts,
+                                      const ci_tcp_state_synrecv* tsr);
+extern void ci_tcp_metrics_on_rx(ci_netif* ni, ci_tcp_state* ts);
+extern void ci_tcp_metrics_on_tx(ci_netif* ni, ci_tcp_state* ts);
+#else
+static inline void ci_tcp_metrics_init(ci_tcp_state* ts) {}
+static inline void ci_tcp_metrics_on_state(ci_netif* ni, ci_tcp_state* ts,
+                               int new_state) {}
+static inline void ci_tcp_metrics_on_promote(ci_netif* ni, ci_tcp_state* ts,
+                                             const ci_tcp_state_synrecv* tsr)
+{}
+static inline void ci_tcp_metrics_on_rx(ci_netif* ni, ci_tcp_state* ts) {}
+static inline void ci_tcp_metrics_on_tx(ci_netif* ni, ci_tcp_state* ts) {}
+#endif
+
 
 #endif /* __CI_LIB_IP_INTERNAL_H__ */
 /*! \cidoxg_end */

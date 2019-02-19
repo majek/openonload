@@ -379,7 +379,7 @@ struct efx_pps_dev_attr {
  * @adjfreq_ppb_shift: Shift required to convert scaled parts-per-billion
  * frequency adjustment into a fixed point fractional nanosecond format.
  * @max_adjfreq: Current ppb adjustment, lives here instead of phc_clock_info as
- * 		 it must be accessable without PHC support, using private ioctls.
+ *		 it must be accessable without PHC support, using private ioctls.
  * @current_adjfreq: Current ppb adjustment.
  * @phc_clock: Pointer to registered phc device
  * @phc_clock_info: Registration structure for phc device
@@ -550,6 +550,7 @@ static int efx_phc_settime32(struct ptp_clock_info *ptp,
 #endif
 
 static LIST_HEAD(efx_all_funcs_list);
+static DEFINE_SPINLOCK(ptp_all_funcs_list_lock);
 
 bool efx_ptp_use_mac_tx_timestamps(struct efx_nic *efx)
 {
@@ -3568,7 +3569,8 @@ static void ptp_event_fault(struct efx_nic *efx, struct efx_ptp_data *ptp)
 
 static void ptp_event_pps(struct efx_nic *efx, struct efx_ptp_data *ptp)
 {
-	queue_work(ptp->pps_workwq, &ptp->pps_work);
+	if (efx && ptp->pps_workwq)
+		queue_work(ptp->pps_workwq, &ptp->pps_work);
 }
 
 #if defined(EFX_NOT_UPSTREAM) && defined(CONFIG_SFC_PPS)
@@ -3596,7 +3598,8 @@ static void hw_pps_event_pps(struct efx_nic *efx, struct efx_ptp_data *ptp)
 
 void efx_ptp_event(struct efx_nic *efx, efx_qword_t *ev)
 {
-	struct efx_ptp_data *ptp = efx->ptp_data;
+	struct efx_nic *phc_efx = efx->phc_efx;
+	struct efx_ptp_data *ptp = phc_efx->ptp_data;
 	int code = EFX_QWORD_FIELD(*ev, MCDI_EVENT_CODE);
 
 	if (!ptp) {
@@ -3614,6 +3617,8 @@ void efx_ptp_event(struct efx_nic *efx, efx_qword_t *ev)
 			  "PTP out of sequence event %d\n", code);
 		ptp->evt_frag_idx = 0;
 	}
+	/* Relay all events to the PF that administers the hardware */
+	efx = phc_efx;
 
 	ptp->evt_frags[ptp->evt_frag_idx++] = *ev;
 	if (!MCDI_EVENT_FIELD(*ev, CONT)) {

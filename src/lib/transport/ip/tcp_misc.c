@@ -184,6 +184,7 @@ const char* ci_tcp_congstate_str(unsigned s)
   case CI_TCP_CONG_RTO_RECOV:   return "RTORecovery";
   case CI_TCP_CONG_FAST_RECOV:  return "FastRecovery";
   case CI_TCP_CONG_COOLING:     return "Cooling";
+  case CI_TCP_CONG_COOLING | CI_TCP_CONG_RTO:     return "RTOCooling";
   case CI_TCP_CONG_NOTIFIED:    return "Notified";
   default:
     ci_log("BAD CONGESTION STATE %x", s);
@@ -242,12 +243,13 @@ static void __ci_tcp_state_free(ci_netif *ni, ci_tcp_state *ts)
   ci_assert(ci_ip_queue_is_empty(&ts->rob));
   ci_assert(ci_ip_queue_is_empty(&ts->retrans));
 
-  ci_ip_queue_drop(ni, &ts->recv1);
-  ci_ip_queue_drop(ni, &ts->recv2);
+  ci_tcp_rx_queue_drop(ni, ts, &ts->recv1);
+  ci_tcp_rx_queue_drop(ni, ts, &ts->recv2);
 
 #if CI_CFG_TIMESTAMPING
   ci_udp_recv_q_drop(ni, &ts->timestamp_q);
 #endif
+  ci_assert_equal(__ci_tcp_rx_buf_count(ni, ts), 0);
 
 #if CI_CFG_FD_CACHING
   /* Clear any cache link - it's possible that this socket is on the
@@ -266,6 +268,13 @@ static void __ci_tcp_state_free(ci_netif *ni, ci_tcp_state *ts)
 }
 
 
+static void ci_tcp_set_state(ci_netif* ni, ci_tcp_state* ts, int new_state)
+{
+  ci_tcp_metrics_on_state(ni, ts, new_state);
+  ci_tcp_rx_buf_account_begin(ni, ts);
+  ts->s.b.state = new_state;
+  ci_tcp_rx_buf_account_end(ni, ts);
+}
 
 
 /* This frees up the resources used by the tcp state, but if there are
@@ -324,7 +333,7 @@ void ci_tcp_set_established_state(ci_netif* ni, ci_tcp_state* ts)
   ci_assert(ts);
   ci_assert(ci_netif_is_locked(ni));
 
-  ts->s.b.state = CI_TCP_ESTABLISHED;
+  ci_tcp_set_state(ni, ts, CI_TCP_ESTABLISHED);
   CI_TCP_STATS_INC_CURR_ESTAB( ni );
 
   ts->s.tx_errno = 0;
@@ -362,22 +371,15 @@ void ci_tcp_set_established_state(ci_netif* ni, ci_tcp_state* ts)
   ts->rcvbuf_drs.time  = ci_tcp_time_now(ni);
 
 #if CI_CFG_PORT_STRIPING
-  if( ts->tcpflags & CI_TCPT_FLAG_STRIPE ) {
-    ts->dup_thresh = NI_OPTS(ni).stripe_dupack_threshold;
+  if( ts->tcpflags & CI_TCPT_FLAG_STRIPE )
     LOG_TC(ci_log(NT_FMT "striping on (l=%x r=%x m=%x)", NT_PRI_ARGS(ni, ts),
                   tcp_laddr_be32(ts), tcp_raddr_be32(ts),
                   NI_OPTS(ni).stripe_netmask_be32));
-  }
 #endif
 
   CITP_TCP_FASTSTART(ts->faststart_acks = NI_OPTS(ni).tcp_faststart_init);
   /* dirty hack to abuse this, init for faststart */
   CITP_TCP_FASTSTART(ts->tslastack = tcp_rcv_nxt(ts));
-
-#if CI_CFG_TAIL_DROP_PROBE
-  if(NI_OPTS(ni).tail_drop_probe)
-    ts->taildrop_state = CI_TCP_TAIL_DROP_ACTIVE;
-#endif
 
   if( ci_tcp_can_use_fast_path(ts) )
     ci_tcp_fast_path_enable(ts);
@@ -426,10 +428,8 @@ void ci_tcp_set_slow_state(ci_netif *ni, ci_tcp_state* ts, int state)
     ci_assert(ci_ni_dllist_is_free(&ts->timeout_q_link));
   }
 #endif
-
   ci_tcp_estabs_handle(ni, ts, state);
-
-  ts->s.b.state = state;
+  ci_tcp_set_state(ni, ts, state);
   ci_tcp_fast_path_disable(ts);
 }
 
@@ -446,7 +446,7 @@ int ci_tcp_parse_options(ci_netif* ni, ciip_tcp_rx_pkt* rxp,
   */
   ci_tcp_hdr* tcp;
   ci_uint8* opt;
-  int i, bytes;
+  int i, bytes, len;
 
   ci_assert(rxp);
   ci_assert(rxp->pkt);
@@ -462,15 +462,37 @@ int ci_tcp_parse_options(ci_netif* ni, ciip_tcp_rx_pkt* rxp,
              OO_PKT_FMT(rxp->pkt), bytes));
 
   /* parse valid TCP options */
-  while( bytes > 0 ) {
+  for( ; bytes > 0;  bytes -= len, opt += len ) {
+    /* In the most cases, length of a TCP option is opt[1],
+     * but such options as NOP reset it. */
+    if( opt[0] == CI_TCP_OPT_NOP ) {
+      len = 1;
+      continue;
+    }
+    else if( opt[0] == CI_TCP_OPT_END ) {
+      break;
+    }
+    else if ( bytes < 2 ) {
+      LOG_U(log(LPF "TCP option %d truncated", opt[0]));
+      goto fail_out;
+    }
+    else {
+      len = opt[1];
+    }
+
+    /*
+    ** RFC 1122 "(all TCP options defined in the future will have
+    **      length fields)"
+    */
+    if( bytes < len || len < 2 ) {
+      LOG_U(log(LPF "TCP option %d truncated", opt[0]));
+      goto fail_out;
+    }
+
     switch(opt[0]) {
     case CI_TCP_OPT_TIMESTAMP:
-      if( bytes < 10 ) {
-        LOG_U(log(LPF "TSopt(truncated)"));
-        goto fail_out;
-      }
-      if( opt[1] != 0xa ) {
-        LOG_U(log(LPF "TSopt(bad length %d)", (int) opt[1]));
+      if( len != 0xa ) {
+        LOG_U(log(LPF "TSopt(bad length %d)", len));
         goto fail_out;
       }
       rxp->flags |= CI_TCPT_FLAG_TSO;
@@ -478,37 +500,22 @@ int ci_tcp_parse_options(ci_netif* ni, ciip_tcp_rx_pkt* rxp,
 	rxp->timestamp = CI_BSWAP_BE32(*(ci_uint32*) &opt[2]);
 	rxp->timestamp_echo = CI_BSWAP_BE32(*(ci_uint32*) &opt[6]);
       }
-      opt += 10; bytes -= 10;
       break;
     case CI_TCP_OPT_SACK:
-      if( bytes < 10 || bytes < opt[1] ) {
-        LOG_U(log(LPF "SACK(truncated)"));
-        goto fail_out;
-      }
-      if( opt[1] < 2 + 8 || (opt[1] & 7) != 2 ) {
-        LOG_U(log(LPF "SACK(bad length %d)", (int) opt[1]));
+      if( len < 2 + 8 || (len & 7) != 2 ) {
+        LOG_U(log(LPF "SACK(bad length %d)", len));
         goto fail_out;
       }
       if( topts == NULL ) {
         rxp->flags |= CI_TCPT_FLAG_SACK;
-        rxp->sack_blocks = (int)(opt[1] >> 3u);
+        rxp->sack_blocks = (int)(len >> 3u);
         for( i = 0; i < 2 * rxp->sack_blocks; i++ )
           rxp->sack[i] = CI_BSWAP_BE32(*(ci_uint32*) &opt[2 + i * 4]);
       }
-      bytes -= opt[1]; opt += opt[1];
-      break;
-    case CI_TCP_OPT_END:
-      goto out;
-    case CI_TCP_OPT_NOP:
-      ++opt; --bytes;
       break;
     case CI_TCP_OPT_MSS:
-      if( bytes < 4 ) {
-        LOG_U(log(LPF "MSS(truncated)"));
-        goto fail_out;
-      }
-      if( opt[1] != 0x4 ) {
-        LOG_U(log(LPF "MSS(bad length %d)", (int) opt[1]));
+      if( len != 0x4 ) {
+        LOG_U(log(LPF "MSS(bad length %d)", len));
         goto fail_out;
       }
       if( topts ) {
@@ -521,15 +528,11 @@ int ci_tcp_parse_options(ci_netif* ni, ciip_tcp_rx_pkt* rxp,
           topts->smss = 64;
         }
       }
-      opt += 4; bytes -= 4;
+      ci_assert_equal(len, 4);
       break;
     case CI_TCP_OPT_WINSCALE:
-      if( bytes < 3 ) {
-        LOG_U(log(LPF "WSopt(truncated)"));
-        goto fail_out;
-      }
-      if( opt[1] != 0x3 ) {
-        LOG_U(log(LPF "WSopt(bad length %d)", (int) opt[1]));
+      if( len != 0x3 ) {
+        LOG_U(log(LPF "WSopt(bad length %d)", len));
         goto fail_out;
       }
       if ( opt[2] > CI_TCP_WSCL_MAX ) {
@@ -542,59 +545,32 @@ int ci_tcp_parse_options(ci_netif* ni, ciip_tcp_rx_pkt* rxp,
         topts->flags |= CI_TCPT_FLAG_WSCL;
         topts->wscl_shft = opt[2];
       }
-      opt += 3; bytes -= 3;
       break;
     case CI_TCP_OPT_SACK_PERM:
-      if( bytes < 2 ) {
-        LOG_U(log(LPF "SACKperm(truncated)"));
-        goto fail_out;
-      }
-      if( opt[1] != 0x2 ) {
-        LOG_U(log(LPF "SACKperm(bad length %d)", (int) opt[1]));
+      if( len != 0x2 ) {
+        LOG_U(log(LPF "SACKperm(bad length %d)", len));
         goto fail_out;
       }
       if( topts )  topts->flags |= CI_TCPT_FLAG_SACK;
-      opt += 2; bytes -= 2;
       break;
     default:
 #if CI_CFG_PORT_STRIPING
       if( opt[0] == NI_OPTS(ni).stripe_tcp_opt ) {
-        if( bytes < 2 ) {
-          LOG_U(log(LPF "STRIPE(truncated)"));
-          goto fail_out;
-        }
-        if( opt[1] != 0x2 ) {
-          LOG_U(log(LPF "STRIPE(bad length %d)", (int) opt[1]));
+        if( len != 0x2 ) {
+          LOG_U(log(LPF "STRIPE(bad length %d)", len));
           goto fail_out;
         }
         if( topts )  topts->flags |= CI_TCPT_FLAG_STRIPE;
-        opt += 2; bytes -= 2;
         break;
       }
 #endif
 
-      /*
-      ** RFC 1122 "(all TCP options defined in the future will have
-      **      length fields)"
-      */
-      if( bytes < 2 || bytes < opt[1] ) {
-        LOG_U(log(LPF "truncated options"));
-        goto fail_out;
-      }
-      if( (int) opt[1] < 2 ) {
-        LOG_U(log(LPF "unknown/invalid TCP option %x length %d [ILLEGAL]",
-                  (unsigned) opt[0], (int) opt[1]));
-        goto fail_out;
-      } else {
-        LOG_U(log(LPF "unknown/invalid TCP option %x length %d",
-                  (unsigned) opt[0], (int) opt[1]));
-        bytes -= opt[1]; opt += opt[1];
-      }
+      LOG_U(log(LPF "unknown/invalid TCP option %x length %d",
+                (unsigned) opt[0], (int) len));
       break;
     }
   }
 
- out:
   return 0;
  fail_out:
   LOG_U(log(LPF "failed to process (some) TCP option(s)"));
@@ -624,26 +600,29 @@ void ci_tcp_stop_timers(ci_netif* netif, ci_tcp_state* ts)
 #if CI_CFG_TCP_SOCK_STATS
   ci_ip_timer_clear_ool(netif, &ts->stats_tid);
 #endif
-#if CI_CFG_TAIL_DROP_PROBE
-  if(NI_OPTS(netif).tail_drop_probe)
-    ci_ip_timer_clear_ool(netif, &ts->taildrop_tid);
-#endif
 }
 
 
 /*
 ** Drop anything on an IP queue
 */
+#if defined(__KERNEL__) || ! defined(NDEBUG)
+  /* In both kernel case and debug case we want to detect corrupted shared
+   * state and exit from the loop below. */
+  #define CI_DEBUG_OR_KERNEL(x) x
+#else
+  #define CI_DEBUG_OR_KERNEL(x)
+#endif
 void ci_ip_queue_drop(ci_netif* netif, ci_ip_pkt_queue *qu)
 {
   ci_ip_pkt_fmt* p;
-  CI_DEBUG(int i = qu->num);
+  CI_DEBUG_OR_KERNEL(int i = qu->num);
 
   ci_assert(netif);
   ci_assert(qu);
   ci_assert(ci_ip_queue_is_valid(netif, qu));
 
-  while( OO_PP_NOT_NULL(qu->head)   CI_DEBUG( && i-- > 0) ) {
+  while( OO_PP_NOT_NULL(qu->head)   CI_DEBUG_OR_KERNEL( && i-- > 0) ) {
     p = PKT_CHK(netif, qu->head);
     qu->head = p->next;
     ci_netif_pkt_release(netif, p);
@@ -657,6 +636,7 @@ void ci_ip_queue_drop(ci_netif* netif, ci_ip_pkt_queue *qu)
 static void ci_tcp_tx_drop_queues(ci_netif* ni, ci_tcp_state* ts)
 {
   ci_tcp_retrans_drop(ni, ts);
+  ci_tcp_sendmsg_enqueue_prequeue(ni, ts, CI_TRUE);
   ci_tcp_sendq_drop(ni, ts);
 
   /* Maintain invariants. */
@@ -664,6 +644,7 @@ static void ci_tcp_tx_drop_queues(ci_netif* ni, ci_tcp_state* ts)
   ts->congstate = CI_TCP_CONG_OPEN;
   ts->cwnd_extra = 0;
   ts->dup_acks = 0;
+  ts->tcpflags &=~ CI_TCPT_FLAG_FIN_PENDING;
 }
 
 
@@ -795,18 +776,41 @@ void ci_tcp_drop(ci_netif* netif, ci_tcp_state* ts, int so_error)
     return;
   }
 
+  ts->s.tx_errno = EPIPE;
+  ts->s.rx_errno = CI_SHUT_RD;
   if( ts->s.b.state == CI_TCP_TIME_WAIT || ci_tcp_is_timeout_orphan(ts) )
     ci_netif_timeout_remove(netif, ts);
   ci_ni_dllist_remove_safe(netif, &ts->tx_ready_link);
   ci_tcp_tx_drop_queues(netif, ts);
-  ci_ip_queue_drop(netif, &ts->rob);
-  ts->s.tx_errno = EPIPE;
-  ts->s.rx_errno = CI_SHUT_RD;
+
+  ci_tcp_rx_queue_drop(netif, ts, &ts->rob);
+
   ci_tcp_stop_timers(netif, ts);
+  ci_tcp_state_tcb_reinit_minimal(netif, ts);
   ts->acks_pending = 0;
   if( ts->s.b.state == CI_TCP_SYN_SENT ) {
-    ts->retransmits = 0;
     ts->tcpflags &= ~CI_TCPT_FLAG_NO_ARP;
+    switch( so_error ) {
+      case ETIMEDOUT:
+        CITP_STATS_NETIF(++netif->state->stats.tcp_connect_etimedout);
+        break;
+      case ECONNREFUSED:
+        CITP_STATS_NETIF(++netif->state->stats.tcp_connect_econnrefused);
+        break;
+      case EHOSTUNREACH:
+        CITP_STATS_NETIF(++netif->state->stats.tcp_connect_ehostunreach);
+        break;
+      case ENETUNREACH:
+        CITP_STATS_NETIF(++netif->state->stats.tcp_connect_enetunreach);
+        break;
+      case ENETDOWN:
+        CITP_STATS_NETIF(++netif->state->stats.tcp_connect_enetdown);
+        break;
+      default:
+        CITP_STATS_NETIF(++netif->state->stats.tcp_connect_eother);
+        netif->state->stats.tcp_connect_eother_val = so_error;
+        break;
+    }
   }
   ci_tcp_set_slow_state(netif, ts, CI_TCP_CLOSED);
 
@@ -824,9 +828,13 @@ void ci_tcp_drop(ci_netif* netif, ci_tcp_state* ts, int so_error)
     }
   }
   else {
+    ci_addr_t laddr, raddr;
+
+    laddr = CI_ADDR_FROM_IP4(tcp_laddr_be32(ts));
+    raddr = CI_ADDR_FROM_IP4(tcp_raddr_be32(ts));
     /* Remove sw filters only for cached endpoint. */
-    ci_netif_filter_remove(netif, S_ID(ts), tcp_laddr_be32(ts),
-                           tcp_lport_be16(ts), tcp_raddr_be32(ts),
+    ci_netif_filter_remove(netif, S_ID(ts), AF_SPACE_FLAG_IP4, laddr,
+                           tcp_lport_be16(ts), raddr,
                            tcp_rport_be16(ts), tcp_protocol(ts));
     ts->s.s_flags &= ~(CI_SOCK_FLAG_FILTER | CI_SOCK_FLAG_MAC_FILTER);
   }
@@ -1012,12 +1020,14 @@ void ci_tcp_recovered(ci_netif* ni, ci_tcp_state* ts)
       ts->cwnd = CI_MAX(ts->cwnd, NI_OPTS(ni).min_cwnd);
     }
   }
-  else if( ts->congstate == CI_TCP_CONG_RTO_RECOV ) {
-    if( ts->dup_acks >= ts->dup_thresh ) {
-      ci_tcp_enter_fast_recovery(ni, ts);
-      return;
-    }
+  /* Transition from RTO recovery to fast recovery if that's the right thing to
+   * do. */
+  else if( ts->congstate == CI_TCP_CONG_RTO_RECOV &&
+           ci_tcp_maybe_enter_fast_recovery(ni, ts) ) {
+    return;
   }
+
+  /* If we get here, we've recovered. */
 
   ts->congstate = CI_TCP_CONG_OPEN;
   ts->cwnd_extra = 0;
@@ -1032,8 +1042,8 @@ void ci_tcp_recovered(ci_netif* ni, ci_tcp_state* ts)
 
 
 static int ci_tcp_rx_pkt_coalesce(ci_netif* ni, ci_ip_pkt_queue* q,
-                                  ci_ip_pkt_fmt* pkt, int* p_freed
-                                  CI_DEBUG_ARG(ci_tcp_state* ts))
+                                  ci_ip_pkt_fmt* pkt, int* p_freed,
+                                  ci_tcp_state* ts)
 {
   /* Coalesces [pkt] with the one that follows it.  Requires that there is
   ** a packet that follows it.  Also requires that the sock-lock be held,
@@ -1085,6 +1095,7 @@ static int ci_tcp_rx_pkt_coalesce(ci_netif* ni, ci_ip_pkt_queue* q,
       ci_assert( ! OO_PP_EQ(ts->recv1_extract, OO_PKT_P(next)) );
       ci_netif_pkt_release_rx_1ref(ni, next);
       (*p_freed)++;
+      ci_tcp_rx_buf_adjust(ni, ts, q, -1);
       --q->num;
     }
 
@@ -1115,7 +1126,7 @@ static int ci_tcp_rx_coalesce_recv(ci_netif* ni, ci_tcp_state* ts,
 
   do {
     while( OO_PP_NOT_NULL(pkt->next) )
-      if( ! ci_tcp_rx_pkt_coalesce(ni, q, pkt, &freed CI_DEBUG_ARG(ts)) )
+      if( ! ci_tcp_rx_pkt_coalesce(ni, q, pkt, &freed, ts) )
         break;
     if( OO_PP_IS_NULL(pkt->next) )
       break;
@@ -1128,45 +1139,12 @@ static int ci_tcp_rx_coalesce_recv(ci_netif* ni, ci_tcp_state* ts,
 void ci_tcp_drop_rob(ci_netif* ni, ci_tcp_state* ts)
 {
   int i;
-  ci_ip_queue_drop(ni, &ts->rob);
+  ci_tcp_rx_queue_drop(ni, ts, &ts->rob);
   for( i = 0; i <= CI_TCP_SACK_MAX_BLOCKS; ++i )
     ts->last_sack[i] = OO_PP_NULL;
   ts->dsack_block = OO_PP_INVALID;
 }
 
-
-int ci_tcp_try_to_free_pkts(ci_netif* ni, ci_tcp_state* ts,
-                             int desperation)
-{
-  ci_assert(ts->s.b.state & CI_TCP_STATE_TCP_CONN);
-
-  switch( desperation ) {
-  case 0:
-    if( ! ci_sock_trylock(ni, &ts->s.b) )  break;
-    {
-      int freed = 0;
-      ci_int32 q_num_b4 = ts->recv1.num;
-      ci_tcp_rx_reap_rxq_bufs_socklocked(ni, ts);
-      freed += q_num_b4 - ts->recv1.num;
-
-      freed += ci_tcp_rx_coalesce_recv(ni, ts, &ts->recv1);
-      freed += ci_tcp_rx_coalesce_recv(ni, ts, &ts->recv2);
-      ci_sock_unlock(ni, &ts->s.b);
-      return freed;
-    }
-  case 1:
-    {
-      int num = ts->rob.num;
-      ci_tcp_drop_rob(ni, ts);
-      return num;
-    }
-  default:
-    break;
-  }
-
-  /* ?? TODO: could also coalesce the retrans queue. */
-  return 0;
-}
 
 static inline void
 ci_tcp_rcvbuf_unabuse_socklocked(ci_netif* ni, ci_tcp_state* ts)
@@ -1176,12 +1154,43 @@ ci_tcp_rcvbuf_unabuse_socklocked(ci_netif* ni, ci_tcp_state* ts)
   ci_tcp_rx_coalesce_recv(ni, ts, &ts->recv2);
 }
 
+int ci_tcp_try_to_free_pkts(ci_netif* ni, ci_tcp_state* ts,
+                             int desperation)
+{
+  int freed;
+  ci_assert(ts->s.b.state & CI_TCP_STATE_TCP_CONN);
+
+  switch( desperation ) {
+  case 0:
+    if( ! ci_sock_trylock(ni, &ts->s.b) )  break;
+    {
+      freed = __ci_tcp_rx_buf_count(ni, ts);
+      ci_tcp_rcvbuf_unabuse_socklocked(ni, ts);
+      freed -= __ci_tcp_rx_buf_count(ni, ts);
+      ci_assert_ge(freed, 0);
+      ci_sock_unlock(ni, &ts->s.b);
+      return freed;
+    }
+  case 1:
+    {
+      freed = ts->rob.num;
+      ci_tcp_drop_rob(ni, ts);
+      return freed;
+    }
+  default:
+    break;
+  }
+
+  /* ?? TODO: could also coalesce the retrans queue. */
+  return 0;
+}
+
 void
 ci_tcp_rcvbuf_unabuse(ci_netif* ni, ci_tcp_state* ts, int sock_already_locked)
 {
   int rob_dropped = 0;
 #ifndef NDEBUG
-  int pkts = ts->recv1.num + ts->recv2.num + ts->rob.num;
+  int pkts = __ci_tcp_rx_buf_count(ni, ts);
 #endif
 
   CITP_STATS_NETIF_INC(ni, tcp_rcvbuf_abused);
@@ -1278,6 +1287,19 @@ ci_uint16 ci_tcp_limit_mss(ci_uint16 mss, ci_netif* ni, const char* caller)
   return mss;
 }
 #endif
+
+
+unsigned ci_tcp_amss(ci_netif* ni, const ci_tcp_socket_cmn* c,
+                     unsigned mtu, const char* caller)
+{
+  unsigned amss = mtu - sizeof(ci_tcp_hdr) - sizeof(ci_ip4_hdr);
+  if( c->user_mss && c->user_mss < amss )
+    amss = c->user_mss;
+#if CI_CFG_LIMIT_AMSS
+  amss = ci_tcp_limit_mss(amss, ni, caller);
+#endif
+  return amss;
+}
 
 
 void ci_tcp_perform_deferred_socket_work(ci_netif* ni, ci_tcp_state* ts)
@@ -1468,7 +1490,11 @@ static int ci_tcp_sync_so_sockopts(ci_netif* ni, ci_tcp_state* ts,
      */
     char* ifname;
     struct net_device *dev = dev_get_by_index(
+#ifdef EFRM_DO_NAMESPACES
                                netif2tcp_helper_resource(ni)->nsproxy->net_ns,
+#else
+                               &init_net,
+#endif
                                ts->s.cp.so_bindtodevice);
     if( dev ) {
       ifname = dev->name;

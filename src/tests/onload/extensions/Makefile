@@ -2,6 +2,7 @@ TARGETS		:= libpthread_intercept.so.1.0.0.1 \
 				onload_fd_stat \
 				onload_is_present \
 				onload_move_fd \
+				onload_recv_filter \
 				onload_set_stackname \
 				onload_stack_opt \
 				onload_thread_set_spin \
@@ -30,6 +31,8 @@ onload_fd_stat: onload_fd_stat.c
 onload_is_present: onload_is_present.c
 	@$(CC) $(MMAKE_EXTLIBS) -o$@ $^
 onload_move_fd: onload_move_fd.c
+	@$(CC) $(MMAKE_EXTLIBS) -o$@ $^
+onload_recv_filter: onload_recv_filter.c
 	@$(CC) $(MMAKE_EXTLIBS) -o$@ $^
 onload_set_stackname: onload_set_stackname.c
 	@$(CC) $(MMAKE_EXTLIBS) -o$@ $^

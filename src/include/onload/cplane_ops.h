@@ -216,11 +216,6 @@ ci_inline int ci_hwport_check_onload(ci_hwport_id_t hwport,
 
 #ifdef __ci_driver__
 
-static inline struct cicppl_instance* cicppl_by_netif(ci_netif *netif)
-{
-  return &netif->cplane->cppl;
-}
-
 /*!
  * Very restricted copying of an IP packet in to a packet buffer. 
  *
@@ -261,7 +256,7 @@ cicppl_mac_defer_send(ci_netif *netif, int *out_os_rc,
 
 
 /*! Send IP packet via RAW socket.  Computes TCP/UDP checksum if possible */
-extern int cicp_raw_ip_send(struct cicppl_instance* cppl,
+extern int cicp_raw_ip_send(struct oo_cplane_handle* cp,
                             const ci_ip4_hdr* ip, int len, ci_ifid_t ifindex,
                             ci_ip_addr_t next_hop);
 

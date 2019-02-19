@@ -33,6 +33,8 @@
  ** IP
  */
 
+typedef ci_uint32 ci_ip_addr_t;
+
 typedef struct ci_ip4_hdr_s {
   ci_uint8   ip_ihl_version;
   ci_uint8   ip_tos;
@@ -158,6 +160,7 @@ ci_inline ci_uint32 ci_ip_mask2prefix(ci_uint32 mask_he32)
 #define CI_IP_IS_LOOPBACK(ip_be32) \
   (((ip_be32) & CI_BSWAPC_BE32(0xff000000)) == CI_BSWAPC_BE32(0x7f000000))
 
+#define CI_IP_ADDR_CMP(addr1, addr2) ((addr1) != (addr2))
 
 /* Cast struct sockaddr* to struct sockaddr_in* */
 #define CI_SIN(sa) ((struct sockaddr_in *)(sa))

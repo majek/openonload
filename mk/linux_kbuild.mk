@@ -11,6 +11,10 @@ ifndef MMAKE_LIBERAL
 EXTRA_CFLAGS += -Werror
 endif # MMAKE_LIBERAL
 
+ifdef W_NO_STRING_TRUNCATION
+EXTRA_CFLAGS += -Wno-stringop-truncation
+endif
+
 ifndef NDEBUG
 EXTRA_CFLAGS += -g
 endif

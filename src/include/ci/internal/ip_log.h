@@ -173,6 +173,10 @@
                               ((int) ((const ci_uint8*)&(ip4))[2]),     \
                               ((int) ((const ci_uint8*)&(ip4))[3])
 
+/* FIXME: add ip6 support in ci_addr_t */
+#define OOF_IPX               OOF_IP4
+#define OOFA_IPX(addr)        OOFA_IP4((addr).ip4)
+
 #define OOF_IP4PORT           OOF_IP4":"OOF_PORT
 #define OOFA_IP4PORT(ip,port) OOFA_IP4(ip), OOFA_PORT(port)
 
@@ -208,7 +212,8 @@
  * Format various flags fields etc.
  */
 
-#define CI_TCP_SOCKET_FLAGS_FMT		"%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s"
+#define CI_TCP_SOCKET_FLAGS_FMT                                        \
+  "%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s"
 #define CI_TCP_SOCKET_FLAGS_PRI_ARG(ts)                                \
   ((ts)->tcpflags & CI_TCPT_FLAG_TSO    ? "TSO " :""),                 \
   ((ts)->tcpflags & CI_TCPT_FLAG_WSCL   ? "WSCL ":""),                 \
@@ -228,7 +233,10 @@
   ((ts)->tcpflags & CI_TCPT_FLAG_ACTIVE_WILD      ? "ACTIVE_WILD ":""), \
   ((ts)->tcpflags & CI_TCPT_FLAG_MSG_WARM         ? "MSG_WARM ":""),    \
   ((ts)->tcpflags & CI_TCPT_FLAG_LOOP_FAKE        ? "LOOP_FAKE ":""),   \
-  ((ts)->tcpflags & CI_TCPT_FLAG_TOA              ? "TOA ":"")          \
+  ((ts)->tcpflags & CI_TCPT_FLAG_TOA              ? "TOA ":""),         \
+  ((ts)->tcpflags & CI_TCPT_FLAG_TAIL_DROP_TIMING ? "TLP_TIMER ":""),   \
+  ((ts)->tcpflags & CI_TCPT_FLAG_TAIL_DROP_MARKED ? "TLP_SENT ":""),    \
+  ((ts)->tcpflags & CI_TCPT_FLAG_FIN_PENDING      ? "FIN_PENDING ":"")
 
 
 #define CI_SOCK_FLAGS_FMT  "%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s"
@@ -259,7 +267,7 @@
   ((s)->cp.sock_cp_flags & OO_SCP_NO_MULTICAST ? "NOMCAST ":"")
 
 
-#define CI_SB_FLAGS_FMT			"%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s"
+#define CI_SB_FLAGS_FMT			"%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s"
 #define CI_SB_FLAGS_PRI_ARG(sb)                                         \
   ((sb)->sb_flags  & CI_SB_FLAG_WAKE_TX         ? "WK_TX ":""),         \
   ((sb)->sb_flags  & CI_SB_FLAG_WAKE_RX         ? "WK_RX ":""),         \
@@ -276,7 +284,8 @@
   ((sb)->sb_aflags & CI_SB_AFLAG_IN_CACHE       ? "CACHE ":""),         \
   ((sb)->sb_aflags & CI_SB_AFLAG_IN_PASSIVE_CACHE ? "PASSIVE_CACHE ":""), \
   ((sb)->sb_aflags & CI_SB_AFLAG_IN_CACHE_NO_FD ? "CACHE_NO_FD ":""),   \
-  ((sb)->sb_aflags & CI_SB_AFLAG_OS_BACKED      ? "OS_BACKED ":"")
+  ((sb)->sb_aflags & CI_SB_AFLAG_OS_BACKED      ? "OS_BACKED ":""),     \
+  ((sb)->sb_aflags & CI_SB_AFLAG_O_NONBLOCK_UNSYNCED ? "NONB_UNSYNCED ":"")
 
 
 #define CI_EVMASK_FMT                  "%s%s%s%s%s%s%s"
@@ -339,7 +348,7 @@
 extern unsigned ci_tp_log CI_HV;
 
 
-#define CI_PKT_FLAGS_FMT    "%s%s%s%s%s%s%s%s"
+#define CI_PKT_FLAGS_FMT    "%s%s%s%s%s%s%s%s%s"
 #define CI_PKT_FLAGS_PRI_ARG(pkt)  __CI_PKT_FLAGS_PRI_ARG((pkt)->flags)
 #define __CI_PKT_FLAGS_PRI_ARG(flags)                           \
   ((flags) & CI_PKT_FLAG_TX_PENDING      ? "TxPend ":""),       \
@@ -349,10 +358,11 @@ extern unsigned ci_tp_log CI_HV;
   ((flags) & CI_PKT_FLAG_TX_PSH          ? "Psh ":""),          \
   ((flags) & CI_PKT_FLAG_TX_MORE         ? "More ":""),         \
   ((flags) & CI_PKT_FLAG_NONB_POOL       ? "Nonb ":""),         \
-  ((flags) & CI_PKT_FLAG_RX              ? "Rx ":"")
+  ((flags) & CI_PKT_FLAG_RX              ? "Rx ":""),           \
+  ((flags) & CI_PKT_FLAG_TX_PSH_ON_ACK   ? "PshOnAck ":"")
 
 
-#define CI_NETIF_LOCK_FMT         "%s%s%s%s%s%s%s%s%s%s%s"
+#define CI_NETIF_LOCK_FMT         "%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s"
 #define CI_NETIF_LOCK_PRI_ARG(v)                                        \
   ((v) & CI_EPLOCK_UNLOCKED              ? "UNLOCKED ":""),             \
   ((v) & CI_EPLOCK_LOCKED                ? "LOCKED ":""),               \
@@ -364,6 +374,11 @@ extern unsigned ci_tp_log CI_HV;
   ((v) & CI_EPLOCK_NETIF_PKT_WAKE        ? "PKT_WAKE ":""),             \
   ((v) & CI_EPLOCK_NETIF_SWF_UPDATE      ? "SWF_UPDATE ":""),           \
   ((v) & CI_EPLOCK_NETIF_IS_PKT_WAITER   ? "PKT_WAIT ":""),             \
+  ((v) & CI_EPLOCK_NETIF_MERGE_ATOMIC_COUNTERS ? "MERGE ":""),          \
+  ((v) & CI_EPLOCK_NETIF_NEED_PKT_SET    ? "PKT_SET ":""),              \
+  ((v) & CI_EPLOCK_NETIF_PURGE_TXQS      ? "PURGE_TXQ ":""),            \
+  ((v) & CI_EPLOCK_NETIF_KERNEL_PACKETS  ? "KPKTS ":""),                \
+  ((v) & CI_EPLOCK_NETIF_FREE_READY_LIST ? "FREE_RLIST ":""),           \
   ((v) & CI_EPLOCK_NETIF_SOCKET_LIST     ? "DEFERRED ":"")
 
 

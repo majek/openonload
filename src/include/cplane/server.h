@@ -39,6 +39,7 @@
 #define CPLANE_SERVER_IPADDR_NUM_OPT "ipif-max"
 #define CPLANE_SERVER_FORCE_BONDING_NETLINK "force-bonding-netlink"
 #define CPLANE_SERVER_BOOTSTRAP "bootstrap"
+#define CPLANE_SERVER_NO_IPV6 "no-ipv6"
 
 /* To make a string from a macro number (such as CI_CFG_MAX_HWPORTS), use
  * STRINGIFY(CI_CFG_MAX_HWPORTS). */
@@ -48,12 +49,6 @@
 /* Mask for forward request id, as used between server and module. */
 #define CP_FWD_FLAG_REQ      0x80000000
 #define CP_FWD_FLAG_REQ_MASK 0x03ffffff
-
-/* When the server receives this signal, it dumps its internal state using
- * ci_log(), which by default goes to syslog.  The OO_IOC_CP_PRINT ioctl
- * causes this signal to be sent to the current server.  This is used by
- * onload_mibdump. */
-#define CP_SERVER_PRINT_STATE_SIGNAL  SIGUSR1
 
 
 #include <cplane/mib.h> /* for cp_fwd_key */

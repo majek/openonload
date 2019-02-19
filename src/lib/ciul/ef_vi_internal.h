@@ -255,6 +255,7 @@ extern void falcon_ef_eventq_timer_zero(ef_vi*);
 extern void ef10_vi_init(ef_vi*) EF_VI_HF;
 
 extern void ef10_ef_eventq_prime(ef_vi*);
+extern void ef10_ef_eventq_prime_bug35388_workaround(ef_vi*);
 extern int ef10_ef_eventq_poll(ef_vi*, ef_event*, int evs_len);
 
 extern void ef10_ef_eventq_timer_prime(ef_vi*, unsigned v);

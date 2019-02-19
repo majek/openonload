@@ -92,7 +92,7 @@
  *
  **************************************************************************/
 
-#define EFX_DRIVER_VERSION	"4.14.0.1014"
+#define EFX_DRIVER_VERSION	"4.15.0.1012"
 
 #ifdef DEBUG
 #define EFX_WARN_ON_ONCE_PARANOID(x) WARN_ON_ONCE(x)
@@ -1253,6 +1253,26 @@ struct efx_async_filter_insertion {
 #endif /* CONFIG_RFS_ACCEL */
 
 /**
+ * struct efx_vport - A driver-managed virtual port
+ * @list: node of linked list on which this struct is stored
+ * @vport_id: the VPORT_ID returned by MC firmware, or %EVB_PORT_ID_NULL if this
+ *	vport is not present on the NIC
+ * @user_id: the port_id exposed to the user
+ * @vlan: VID of this vport's VLAN, or %EFX_FILTER_VID_UNSPEC for none
+ * @vlan_restrict: as per %MC_CMD_VPORT_ALLOC_IN_FLAG_VLAN_RESTRICT
+ */
+#ifdef EFX_NOT_UPSTREAM
+/* These are used by Driverlink (and no-one else currently). */
+#endif
+struct efx_vport {
+	struct list_head list;
+	u32 vport_id;
+	u16 user_id;
+	u16 vlan;
+	bool vlan_restrict;
+};
+
+/**
  * struct efx_nic - an Efx NIC
  * @name: Device name (net device name or bus id before net device registered)
  * @pci_dev: The PCI device
@@ -1286,6 +1306,7 @@ struct efx_async_filter_insertion {
  * @txq_entries: Size of transmit queues requested by user.
  * @txq_stop_thresh: TX queue fill level at or above which we stop it.
  * @txq_wake_thresh: TX queue fill level at or below which we wake it.
+ * @txq_min_entries: Minimum valid number of TX queue entries.
  * @tx_dc_entries: Number of entries in each TX queue descriptor cache
  * @rx_dc_entries: Number of entries in each RX queue descriptor cache
  * @tx_dc_base: Base qword address in SRAM of TX queue descriptor caches
@@ -1321,6 +1342,8 @@ struct efx_async_filter_insertion {
  * @rss_context: Main RSS context.  Its @list member is the head of the list of
  *	RSS contexts created by user requests
  * @rss_lock: Protects custom RSS context software state in @rss_context.list
+ * @vport: Main virtual port.  Its @list member is the head of a list of vports.
+ * @vport_lock: Protects extra virtual port state in @vport.list
  * @errors: Error condition stats
  * @int_error_count: Number of internal errors seen recently
  * @int_error_expire: Time at which error count will be expired
@@ -1471,6 +1494,7 @@ struct efx_nic {
 	unsigned int txq_entries;
 	unsigned int txq_stop_thresh;
 	unsigned int txq_wake_thresh;
+	unsigned int txq_min_entries;
 
 	unsigned int tx_dc_entries;
 	unsigned int rx_dc_entries;
@@ -1514,6 +1538,9 @@ struct efx_nic {
 	bool rx_scatter;
 	struct efx_rss_context rss_context;
 	struct mutex rss_lock;
+
+	struct efx_vport vport;
+	struct mutex vport_lock;
 
 	struct efx_tx_queue *(*select_tx_queue)(struct efx_channel *channel,
 						struct sk_buff *skb);
@@ -1679,7 +1706,6 @@ struct efx_nic {
 #endif
 	spinlock_t stats_lock;
 	atomic_t n_rx_noskb_drops;
-	char *vpd_sn;
 #if defined(EFX_USE_KCOMPAT) && !defined(EFX_HAVE_ETHTOOL_FCS)
 	bool forward_fcs;
 #endif
@@ -1720,11 +1746,13 @@ struct efx_mtd_partition {
 struct efx_udp_tunnel {
 	u16 type; /* TUNNEL_ENCAP_UDP_PORT_ENTRY_foo, see mcdi_pcol.h */
 	__be16 port;
-	/* Count of repeated adds of the same port.  Used only inside the list,
-	 * not in request arguments.
+	/* Current state of slot.  Used only inside the list, not in request
+	 * arguments.
 	 */
-	u16 count;
+	u16 adding:1, removing:1, count:14;
 };
+#define	EFX_UDP_TUNNEL_COUNT_WARN	0x2000 /* top bit of 14-bit field */
+#define EFX_UDP_TUNNEL_COUNT_MAX	0x3fff /* saturate at this value */
 
 /**
  * struct efx_nic_type - Efx device type definition
@@ -1842,8 +1870,6 @@ struct efx_udp_tunnel {
  * @filter_rfs_expire_one: Consider expiring a filter inserted for RFS.
  *	This must check whether the specified table entry is used by RFS
  *	and that rps_may_expire_flow() returns true for it.
- * @vport_filter_insert: add filter for another vport (for driverlink)
- * @vport_filter_remove: remove filter for another vport (for driverlink)
  * @mtd_probe: Probe and add MTD partitions associated with this net device,
  *	 using efx_mtd_add()
  * @mtd_rename: Set an MTD partition name using the net device name
@@ -1860,6 +1886,9 @@ struct efx_udp_tunnel {
  *	and tx_type will already have been validated but this operation
  *	must validate and update rx_filter.
  * @get_phys_port_id: Get the underlying physical port id.
+ * @vport_add: Add a vport with specified VLAN parameters.  Returns an MCDI id.
+ * @vport_del: Destroy a vport specified by MCDI id.
+ * @vports_restore: restore custom vports removed from hardware after reset
  * @sriov_init: Initialise VFs when vf-count is set via module parameter.
  * @sriov_fini: Disable sriov
  * @sriov_wanted: Check that max_vf > 0.
@@ -1981,6 +2010,7 @@ struct efx_nic_type {
 	void (*tx_notify)(struct efx_tx_queue *tx_queue);
 	unsigned int (*tx_limit_len)(struct efx_tx_queue *tx_queue,
 				     dma_addr_t dma_addr, unsigned int len);
+	unsigned int (*tx_max_skb_descs)(struct efx_nic *efx);
 	int (*rx_push_rss_config)(struct efx_nic *efx, bool user,
 				  const u32 *rx_indir_table, const u8 *key);
 	int (*rx_pull_rss_config)(struct efx_nic *efx);
@@ -2046,11 +2076,6 @@ struct efx_nic_type {
 /* Unblock kernel, i.e. enable automatic and hint filters */
 	void (*filter_unblock_kernel)(struct efx_nic *efx, enum
 				      efx_dl_filter_block_kernel_type type);
-	int (*vport_filter_insert)(struct efx_nic *efx, unsigned int vport_id,
-				   const struct efx_filter_spec *spec,
-				   u64 *filter_id_out, bool *is_exclusive_out);
-	int (*vport_filter_remove)(struct efx_nic *efx, unsigned int vport_id,
-				   u64 filter_id, bool is_exclusive);
 #endif
 #ifdef CONFIG_SFC_MTD
 	int (*mtd_probe)(struct efx_nic *efx);
@@ -2076,6 +2101,10 @@ struct efx_nic_type {
 	int (*get_phys_port_id)(struct efx_nic *efx,
 				struct netdev_phys_item_id *ppid);
 #endif
+	int (*vport_add)(struct efx_nic *efx, u16 vlan, bool vlan_restrict,
+			 unsigned int *port_id_out);
+	int (*vport_del)(struct efx_nic *efx, unsigned int port_id);
+	void (*vports_restore)(struct efx_nic *efx);
 	int (*sriov_init)(struct efx_nic *efx);
 	void (*sriov_fini)(struct efx_nic *efx);
 	bool (*sriov_wanted)(struct efx_nic *efx);
@@ -2099,10 +2128,10 @@ struct efx_nic_type {
 	int (*get_mac_address)(struct efx_nic *efx, unsigned char *perm_addr);
 	int (*set_mac_address)(struct efx_nic *efx);
 	unsigned int (*mcdi_rpc_timeout)(struct efx_nic *efx, unsigned int cmd);
-	int (*udp_tnl_push_ports)(struct efx_nic *efx);
-	int (*udp_tnl_add_port)(struct efx_nic *efx, struct efx_udp_tunnel tnl);
+	void (*udp_tnl_push_ports)(struct efx_nic *efx);
+	void (*udp_tnl_add_port)(struct efx_nic *efx, struct efx_udp_tunnel tnl);
 	bool (*udp_tnl_has_port)(struct efx_nic *efx, __be16 port);
-	int (*udp_tnl_del_port)(struct efx_nic *efx, struct efx_udp_tunnel tnl);
+	void (*udp_tnl_del_port)(struct efx_nic *efx, struct efx_udp_tunnel tnl);
 
 	int revision;
 	unsigned int txd_ptr_tbl_base;

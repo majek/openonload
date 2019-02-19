@@ -13,12 +13,36 @@
 ** Lesser General Public License for more details.
 */
 
+/****************************************************************************
+ * Copyright 2017-2018: Solarflare Communications Inc,
+ *                      7505 Irvine Center Drive, Suite 100
+ *                      Irvine, CA 92618, USA
+ *
+ * Maintained by Solarflare Communications
+ *  <linux-xen-drivers@solarflare.com>
+ *  <onload-dev@solarflare.com>
+ *
+ * This program is free software; you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License version 2 as published
+ * by the Free Software Foundation, incorporated herein by reference.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+ ****************************************************************************
+ */
+
 /**************************************************************************\
 *//*! \file
 ** \author    Solarflare Communications, Inc.
 ** \brief     Checksum utility functions.
-** \date      2017/11/17
-** \copyright Copyright &copy; 2017 Solarflare Communications, Inc. All
+** \date      2018/11/06
+** \copyright Copyright &copy; 2018 Solarflare Communications, Inc. All
 **            rights reserved. Solarflare, OpenOnload and EnterpriseOnload
 **            are trademarks of Solarflare Communications, Inc.
 *//*
@@ -43,7 +67,9 @@ extern "C" {
 **
 ** \return The checksum of the IP header.
 **
-** Calculate the checksum for an IP header.
+** Calculate the checksum for an IP header.  The IP header must be populated
+** (with the exception of the checksum field itself, which is ignored) before
+** calling this function.
 */
 extern uint32_t ef_ip_checksum(const struct iphdr* ip);
 
@@ -56,7 +82,9 @@ extern uint32_t ef_ip_checksum(const struct iphdr* ip);
 **
 ** \return The checksum of the UDP packet.
 **
-** Calculate the checksum for a UDP packet.
+** Calculate the checksum for a UDP packet.  The UDP header must be populated
+** (with the exception of the checksum field itself, which is ignored) before
+** calling this function.
 */
 extern uint32_t
 ef_udp_checksum(const struct iphdr* ip, const struct udphdr* udp,
@@ -71,7 +99,9 @@ ef_udp_checksum(const struct iphdr* ip, const struct udphdr* udp,
 **
 ** \return The checksum of the TCP packet.
 **
-** Calculate the checksum for a TCP packet.
+** Calculate the checksum for a TCP packet.  The TCP header must be populated
+** (with the exception of the checksum field itself, which is ignored) before
+** calling this function.
 */
 extern uint32_t
 ef_tcp_checksum(const struct iphdr* ip, const struct tcphdr* tcp,

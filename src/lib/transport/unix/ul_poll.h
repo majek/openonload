@@ -29,7 +29,8 @@
 
 #if CI_CFG_USERSPACE_SELECT
 
-#define OO_POLL_MAX_KFDS   1024
+/* Keep kernel fds data on-stack for that many kfds. */
+#define OO_POLL_KFDS_LOCAL 16
 
 #define OO_POLL_MAX_OSP    16
 
@@ -55,12 +56,6 @@ struct oo_ul_poll_state {
   /* Number of entries in [kfds] and [kfd_map]. */
   int                   nkfds;
 
-  /* Maps entry number in [kfds] onto entry number in [pfds]. */
-  int                   kfd_map[OO_POLL_MAX_KFDS];
-
-  /* Use this to do sys_poll() on non-onload fds. */
-  struct pollfd         kfds[OO_POLL_MAX_KFDS];
-
   /* Should it spin */
   unsigned              ul_poll_spin;
 
@@ -68,6 +63,16 @@ struct oo_ul_poll_state {
   /* Have we incremented statistics for this spin round? */
   int stat_incremented;
 #endif
+
+  /* Kernel file descriptors */
+
+  /* Maps entry number in [kfds] onto entry number in [pfds]. */
+  int                   kfd_map_local[OO_POLL_KFDS_LOCAL];
+  int*                  kfd_map;
+
+  /* Use this to do sys_poll() on non-onload fds. */
+  struct pollfd         kfds_local[OO_POLL_KFDS_LOCAL];
+  struct pollfd*        kfds;
 };
 
 #endif /* CI_CFG_USERSPACE_SELECT */

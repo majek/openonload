@@ -196,7 +196,9 @@ enum efx_encap_type {
  *	an RX drop filter
  * @stack_id: Stack id associated with RX queue, used for
  *	multicast loopback suppression
- * @vport_id: Virtual port ID associated with RX queue, for adapter switching
+ * @vport_id: Virtual port user_id associated with RX queue, for adapter
+ *	switching  This is a user_id, with 0 meaning the main driver vport, not
+ *	an MCFW vport_id.
  * @outer_vid: Outer VLAN ID to match, if %EFX_FILTER_MATCH_OUTER_VID is set
  * @inner_vid: Inner VLAN ID to match, if %EFX_FILTER_MATCH_INNER_VID is set
  * @loc_mac: Local MAC address to match, if %EFX_FILTER_MATCH_LOC_MAC or
@@ -212,7 +214,7 @@ enum efx_encap_type {
  * @tni: VXLAN Tenant Network ID.
  * @encap_type: Type of encapsulation, see efx_encap_type above.
  * @outer_loc_mac: Outer local MAC address to match, if
- * 	%EFX_FILTER_MATCH_OUTER_LOC_MAC is set
+ *	%EFX_FILTER_MATCH_OUTER_LOC_MAC is set
  *
  * The efx_filter_init_rx() or efx_filter_init_tx() function *must* be
  * used to initialise the structure.  The efx_filter_set_*() functions
@@ -229,9 +231,9 @@ struct efx_filter_spec {
 	u32	flags:8;
 	u32	dmaq_id:16;
 	u32	stack_id:16;
-	u32	vport_id;
 	u32	rss_context;
-	__be16	outer_vid __aligned(4); /* allow jhash2() of match values */
+	u32	vport_id;
+	__be16	outer_vid;
 	__be16	inner_vid;
 	u8	loc_mac[ETH_ALEN];
 	u8	rem_mac[ETH_ALEN];
@@ -429,9 +431,9 @@ static inline void efx_filter_set_stack_id(struct efx_filter_spec *spec,
 }
 
 /**
- * efx_filter_set_vport_id - override virtual port id relating to filter
+ * efx_filter_set_vport_id - override virtual port user_id relating to filter
  * @spec: Specification to initialise
- * @vport_id: ID of the virtual port
+ * @vport_id: user_id of the virtual port
  */
 static inline void efx_filter_set_vport_id(struct efx_filter_spec *spec,
 					   unsigned int vport_id)

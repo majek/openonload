@@ -176,8 +176,6 @@ struct workqueue_struct *efx_workqueue;
  */
 static struct workqueue_struct *reset_workqueue;
 
-DEFINE_SPINLOCK(ptp_all_funcs_list_lock);
-
 /* How often and how many times to poll for a reset while waiting for a
  * BIST that another function started to complete.
  */
@@ -420,6 +418,30 @@ static int efx_check_disabled(struct efx_nic *efx)
 			  "device is disabled due to earlier errors\n");
 		return -EIO;
 	}
+	return 0;
+}
+
+/** Check queue size for range and rounding.
+ *
+ *  If #fix is set it will clamp and round as required.
+ *  Regardless of #fix this will return an error code if the value is
+ *  invalid.
+ */
+int efx_check_queue_size(struct efx_nic *efx, u32 *entries,
+			 u32 min, u32 max, bool fix)
+{
+	if (*entries < min || *entries > max) {
+		if (fix)
+			*entries = clamp_t(u32, *entries, min, max);
+		return -ERANGE;
+	}
+
+	if (!is_power_of_2(*entries)) {
+		if (fix)
+			*entries = roundup_pow_of_two(*entries);
+		return -EINVAL;
+	}
+
 	return 0;
 }
 
@@ -1066,7 +1088,8 @@ static int efx_start_datapath(struct efx_nic *efx)
 	 * the ring completely.  We wake it when half way back to
 	 * empty.
 	 */
-	efx->txq_stop_thresh = efx->txq_entries - efx_tx_max_skb_descs(efx);
+	efx->txq_stop_thresh = efx->txq_entries -
+			       efx->type->tx_max_skb_descs(efx);
 	efx->txq_wake_thresh = efx->txq_stop_thresh / 2;
 
 	/* Initialise the channels */
@@ -2290,7 +2313,6 @@ static int efx_set_cpu_affinity(struct efx_channel *channel, int cpu)
 	if (!efx_irq_set_affinity)
 		return 0;
 
-#ifdef EFX_USE_IRQ_SET_AFFINITY_HINT
 	rc = irq_set_affinity_hint(channel->irq, cpumask_of(cpu));
 	if (rc) {
 		netif_err(channel->efx, drv, channel->efx->net_dev,
@@ -2298,9 +2320,6 @@ static int efx_set_cpu_affinity(struct efx_channel *channel, int cpu)
 			  " interrupt %d\n", channel->channel, channel->irq);
 		return rc;
 	}
-#else
-	rc = irq_set_affinity(channel->irq, cpumask_of(cpu));
-#endif
 	efx_set_xps_queue(channel, cpumask_of(cpu));
 	return rc;
 }
@@ -2468,14 +2487,10 @@ static void efx_set_interrupt_affinity(struct efx_nic *efx)
 
 static void efx_clear_interrupt_affinity(struct efx_nic *efx)
 {
-#ifdef EFX_USE_IRQ_SET_AFFINITY_HINT
 	struct efx_channel *channel;
 
 	efx_for_each_channel(channel, efx)
 		(void)irq_set_affinity_hint(channel->irq, NULL);
-#else
-	irq_set_affinity(channel->irq, NULL);
-#endif
 }
 
 #endif /* EFX_NOT_UPSTREAM */
@@ -2843,6 +2858,8 @@ static int efx_probe_nic(struct efx_nic *efx)
 		return 0;
 #endif
 
+	efx->txq_min_entries = roundup_pow_of_two(2 * efx->type->tx_max_skb_descs(efx));
+
 	do {
 		if (!efx->max_channels || !efx->max_tx_channels) {
 			netif_err(efx, drv, efx->net_dev,
@@ -3041,28 +3058,32 @@ static int efx_probe_all(struct efx_nic *efx)
 		goto fail2;
 	}
 
+	rc = efx_check_queue_size(efx, &rx_ring,
+				  EFX_RXQ_MIN_ENT, EFX_MAX_DMAQ_SIZE, true);
+	if (rc == -ERANGE)
+		netif_warn(efx, probe, efx->net_dev,
+			   "rx_ring parameter must be between %u and %lu; clamped to %u\n",
+			   EFX_RXQ_MIN_ENT, EFX_MAX_DMAQ_SIZE, rx_ring);
+	else if (rc == -EINVAL)
+		netif_warn(efx, probe, efx->net_dev,
+			   "rx_ring parameter must be a power of two; rounded to %u\n",
+			   rx_ring);
 	efx->rxq_entries = rx_ring;
-	efx->txq_entries = max(tx_ring, EFX_TXQ_MIN_ENT(efx));
 
-	if (efx->rxq_entries < EFX_RXQ_MIN_ENT ||
-	    efx->rxq_entries > EFX_MAX_DMAQ_SIZE) {
-		netif_err(efx, drv, efx->net_dev,
-			  "rx_ring parameter must be between %u and %lu",
-			  EFX_RXQ_MIN_ENT, EFX_MAX_DMAQ_SIZE);
-		rc = -EINVAL;
-		goto fail3;
-	}
-	if (efx->txq_entries > EFX_TXQ_MAX_ENT(efx)) {
-		netif_err(efx, drv, efx->net_dev,
-			  "tx_ring parameter must be no greater than %lu",
-			  EFX_TXQ_MAX_ENT(efx));
-		rc = -EINVAL;
-		goto fail3;
-	}
-	if (efx->txq_entries != tx_ring)
-		netif_warn(efx, drv, efx->net_dev,
-			   "increasing TX queue size to minimum of %u\n",
-			   efx->txq_entries);
+	rc = efx_check_queue_size(efx, &tx_ring,
+				  efx->txq_min_entries, EFX_TXQ_MAX_ENT(efx),
+				  true);
+	if (rc == -ERANGE)
+		netif_warn(efx, probe, efx->net_dev,
+			   "tx_ring parameter must be between %u and %lu; clamped to %u\n",
+			   efx->txq_min_entries, EFX_TXQ_MAX_ENT(efx), tx_ring);
+	else if (rc == -EINVAL)
+		netif_warn(efx, probe, efx->net_dev,
+			   "tx_ring parameter must be a power of two; rounded to %u\n",
+			   tx_ring);
+	efx->txq_entries = tx_ring;
+
+	/* We fixed queue size errors so don't care about rc at this point */
 
 	rc = efx->type->vswitching_probe(efx);
 	if (rc) /* not fatal; the PF will still work fine */
@@ -3074,20 +3095,19 @@ static int efx_probe_all(struct efx_nic *efx)
 	if (rc) {
 		netif_err(efx, probe, efx->net_dev,
 			  "failed to create filter tables\n");
-		goto fail4;
+		goto fail3;
 	}
 
 	rc = efx_probe_channels(efx);
 	if (rc)
-		goto fail5;
+		goto fail4;
 
 	return 0;
 
- fail5:
-	efx_remove_filters(efx);
  fail4:
-	efx->type->vswitching_remove(efx);
+	efx_remove_filters(efx);
  fail3:
+	efx->type->vswitching_remove(efx);
 	efx_remove_port(efx);
  fail2:
 	efx_remove_nic(efx);
@@ -3192,7 +3212,9 @@ static void efx_remove_all(struct efx_nic *efx)
 #endif
 
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_XDP)
+	rtnl_lock();
 	efx_xdp_setup_prog(efx, NULL);
+	rtnl_unlock();
 #endif
 	efx_remove_channels(efx);
 	efx_remove_filters(efx);
@@ -3506,13 +3528,14 @@ int efx_resume_napi(struct efx_nic *efx)
  *
  *************************************************************************/
 
+#if defined(EFX_USE_KCOMPAT) && defined(EFX_WANT_NDO_POLL_CONTROLLER)
 #ifdef CONFIG_NET_POLL_CONTROLLER
 
 /* Although in the common case interrupts will be disabled, this is not
  * guaranteed. However, all our work happens inside the NAPI callback,
  * so no locking is required.
  */
-void efx_netpoll(struct net_device *net_dev)
+static void efx_netpoll(struct net_device *net_dev)
 {
 	struct efx_nic *efx = netdev_priv(net_dev);
 	struct efx_channel *channel;
@@ -3521,6 +3544,7 @@ void efx_netpoll(struct net_device *net_dev)
 		efx_schedule_channel(channel);
 }
 
+#endif
 #endif
 
 #if defined(EFX_USE_KCOMPAT) && defined(EFX_WANT_DRIVER_BUSY_POLL)
@@ -4088,7 +4112,7 @@ static void efx_udp_tunnel_add(struct net_device *dev, struct udp_tunnel_info *t
 	tnl.port = ti->port;
 
 	if (efx->type->udp_tnl_add_port)
-		(void) efx->type->udp_tnl_add_port(efx, tnl);
+		efx->type->udp_tnl_add_port(efx, tnl);
 }
 
 static void efx_udp_tunnel_del(struct net_device *dev, struct udp_tunnel_info *ti)
@@ -4105,7 +4129,7 @@ static void efx_udp_tunnel_del(struct net_device *dev, struct udp_tunnel_info *t
 	tnl.port = ti->port;
 
 	if (efx->type->udp_tnl_del_port)
-		(void) efx->type->udp_tnl_del_port(efx, tnl);
+		efx->type->udp_tnl_del_port(efx, tnl);
 }
 #else
 #if defined(EFX_HAVE_NDO_ADD_VXLAN_PORT)
@@ -4117,7 +4141,7 @@ void efx_vxlan_add_port(struct net_device *dev, sa_family_t sa_family,
 	struct efx_nic *efx = netdev_priv(dev);
 
 	if (efx->type->udp_tnl_add_port)
-		(void) efx->type->udp_tnl_add_port(efx, tnl);
+		efx->type->udp_tnl_add_port(efx, tnl);
 }
 
 void efx_vxlan_del_port(struct net_device *dev, sa_family_t sa_family,
@@ -4128,7 +4152,7 @@ void efx_vxlan_del_port(struct net_device *dev, sa_family_t sa_family,
 	struct efx_nic *efx = netdev_priv(dev);
 
 	if (efx->type->udp_tnl_del_port)
-		(void) efx->type->udp_tnl_del_port(efx, tnl);
+		efx->type->udp_tnl_del_port(efx, tnl);
 }
 #endif
 #if defined(EFX_HAVE_NDO_ADD_GENEVE_PORT)
@@ -4140,7 +4164,7 @@ void efx_geneve_add_port(struct net_device *dev, sa_family_t sa_family,
 	struct efx_nic *efx = netdev_priv(dev);
 
 	if (efx->type->udp_tnl_add_port)
-		(void) efx->type->udp_tnl_add_port(efx, tnl);
+		efx->type->udp_tnl_add_port(efx, tnl);
 }
 
 void efx_geneve_del_port(struct net_device *dev, sa_family_t sa_family,
@@ -4151,7 +4175,7 @@ void efx_geneve_del_port(struct net_device *dev, sa_family_t sa_family,
 	struct efx_nic *efx = netdev_priv(dev);
 
 	if (efx->type->udp_tnl_del_port)
-		(void) efx->type->udp_tnl_del_port(efx, tnl);
+		efx->type->udp_tnl_del_port(efx, tnl);
 }
 #endif
 #endif
@@ -4181,16 +4205,18 @@ static int efx_xdp_setup_prog(struct efx_nic *efx, struct bpf_prog *prog)
 static int efx_xdp(struct net_device *dev, struct netdev_bpf *xdp)
 {
 	struct efx_nic *efx = netdev_priv(dev);
+	struct bpf_prog *xdp_prog;
 
 	switch (xdp->command) {
 	case XDP_SETUP_PROG:
 		return efx_xdp_setup_prog(efx, xdp->prog);
 	case XDP_QUERY_PROG:
+		xdp_prog = rtnl_dereference(efx->xdp_prog);
 #if defined(EFX_USE_KCOMPAT) && (defined(EFX_HAVE_XDP_PROG_ATTACHED) || defined(EFX_HAVE_XDP_OLD))
-		xdp->prog_attached = !!efx->xdp_prog;
+		xdp->prog_attached = !!xdp_prog;
 #endif
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_XDP_PROG_ID) || !defined(EFX_HAVE_XDP_OLD)
-		xdp->prog_id = efx->xdp_prog ? efx->xdp_prog->aux->id : 0;
+		xdp->prog_id = xdp_prog ? xdp_prog->aux->id : 0;
 #endif
 		return 0;
 	default:
@@ -4240,9 +4266,7 @@ static void efx_xdp_flush(struct net_device *dev)
 #endif /* HAVE_XDP_REDIR */
 #endif /* HAVE_XDP */
 
-#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_NET_DEVICE_OPS)
 extern const struct net_device_ops efx_netdev_ops;
-#endif
 
 #if defined(EFX_USE_KCOMPAT) && defined(EFX_HAVE_NET_DEVICE_OPS_EXT)
 extern const struct net_device_ops_ext efx_net_device_ops_ext;
@@ -4266,11 +4290,7 @@ static void efx_update_name(struct efx_nic *efx)
 #ifdef EFX_NOT_UPSTREAM
 bool efx_dl_netdev_is_ours(const struct net_device *net_dev)
 {
-#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_NET_DEVICE_OPS)
 	return net_dev->netdev_ops == &efx_netdev_ops;
-#else
-	return net_dev->open == efx_net_open;
-#endif
 }
 EXPORT_SYMBOL(efx_dl_netdev_is_ours);
 #endif
@@ -4285,12 +4305,8 @@ static int efx_netdev_event(struct notifier_block *this,
 	struct net_device *net_dev = info->dev;
 #endif
 
-#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_NET_DEVICE_OPS)
 	if ((net_dev->netdev_ops == &efx_netdev_ops) &&
 	    event == NETDEV_CHANGENAME)
-#else
-	if (net_dev->open == efx_net_open && event == NETDEV_CHANGENAME)
-#endif
 		efx_update_name(netdev_priv(net_dev));
 
 	return NOTIFY_DONE;
@@ -4373,40 +4389,10 @@ static int efx_register_netdev(struct efx_nic *efx)
 
 	net_dev->watchdog_timeo = 5 * HZ;
 	net_dev->irq = efx->pci_dev->irq;
-#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_NET_DEVICE_OPS)
 	net_dev->netdev_ops = &efx_netdev_ops;
 #if !defined(EFX_USE_KCOMPAT) || !defined(EFX_HAVE_NDO_SET_MULTICAST_LIST)
 	if (efx_nic_rev(efx) >= EFX_REV_HUNT_A0)
 		net_dev->priv_flags |= IFF_UNICAST_FLT;
-#endif
-#else
-	net_dev->open = efx_net_open;
-	net_dev->stop = efx_net_stop;
-	net_dev->get_stats = efx_net_stats;
-	net_dev->tx_timeout = efx_watchdog;
-	net_dev->hard_start_xmit = efx_hard_start_xmit;
-	net_dev->do_ioctl = efx_ioctl;
-	net_dev->change_mtu = efx_change_mtu;
-	net_dev->set_mac_address = efx_set_mac_address;
-
-	/* On older kernel versions, set_rx_mode is expected to
-	 * support multiple unicast addresses and set_multicast_list
-	 * is expected to support only one.  (And on really old
-	 * versions, set_rx_mode does not exist.)
-	 */
-#ifdef HAVE_SET_RX_MODE
-	if (efx_nic_rev(efx) >= EFX_REV_HUNT_A0)
-		net_dev->set_rx_mode = efx_set_rx_mode;
-	else
-#endif
-		net_dev->set_multicast_list = efx_set_rx_mode;
-
-#if defined(EFX_NOT_UPSTREAM) && defined(EFX_HAVE_VLAN_RX_PATH)
-	net_dev->vlan_rx_register = efx_vlan_rx_register;
-#endif
-#ifdef CONFIG_NET_POLL_CONTROLLER
-	net_dev->poll_controller = efx_netpoll;
-#endif
 #endif
 #if defined(EFX_USE_KCOMPAT) && defined(EFX_HAVE_NETDEV_RFS_INFO)
 #ifdef CONFIG_RFS_ACCEL
@@ -5041,6 +5027,8 @@ static int efx_init_struct(struct efx_nic *efx,
 		efx->type->rx_ts_offset - efx->type->rx_prefix_size;
 	INIT_LIST_HEAD(&efx->rss_context.list);
 	mutex_init(&efx->rss_lock);
+	INIT_LIST_HEAD(&efx->vport.list);
+	mutex_init(&efx->vport_lock);
 	spin_lock_init(&efx->stats_lock);
 	efx->num_mac_stats = MC_CMD_MAC_NSTATS;
 	BUILD_BUG_ON(MC_CMD_MAC_NSTATS - 1 != MC_CMD_MAC_GENERATION_END);
@@ -5109,9 +5097,6 @@ static void efx_fini_struct(struct efx_nic *efx)
 			efx->channel[i] = NULL;
 		}
 
-	kfree(efx->vpd_sn);
-	efx->vpd_sn = NULL;
-
 #ifdef CONFIG_SFC_DEBUGFS
 	mutex_destroy(&efx->debugfs_symlink_mutex);
 #endif
@@ -5136,17 +5121,17 @@ bool efx_filter_spec_equal(const struct efx_filter_spec *left,
 	     (EFX_FILTER_FLAG_RX | EFX_FILTER_FLAG_TX)))
 		return false;
 
-	return memcmp(&left->outer_vid, &right->outer_vid,
+	return memcmp(&left->vport_id, &right->vport_id,
 		      sizeof(struct efx_filter_spec) -
-		      offsetof(struct efx_filter_spec, outer_vid)) == 0;
+		      offsetof(struct efx_filter_spec, vport_id)) == 0;
 }
 
 u32 efx_filter_spec_hash(const struct efx_filter_spec *spec)
 {
-	BUILD_BUG_ON(offsetof(struct efx_filter_spec, outer_vid) & 3);
-	return jhash2((const u32 *)&spec->outer_vid,
+	BUILD_BUG_ON(offsetof(struct efx_filter_spec, vport_id) & 3);
+	return jhash2((const u32 *)&spec->vport_id,
 		      (sizeof(struct efx_filter_spec) -
-		       offsetof(struct efx_filter_spec, outer_vid)) / 4,
+		       offsetof(struct efx_filter_spec, vport_id)) / 4,
 		      0);
 }
 
@@ -5322,6 +5307,109 @@ void efx_free_rss_context_entry(struct efx_rss_context *ctx)
 	kfree(ctx);
 }
 
+/* V-port allocations.  Same algorithms (and justification for them) as RSS
+ * contexts, above.
+ */
+static struct efx_vport *efx_alloc_vport_entry(struct efx_nic *efx)
+{
+	struct list_head *head = &efx->vport.list;
+	struct efx_vport *ctx, *new;
+	u16 id = 1; /* Don't use zero, that refers to the driver master vport */
+
+	WARN_ON(!mutex_is_locked(&efx->vport_lock));
+
+	/* Search for first gap in the numbering */
+	list_for_each_entry(ctx, head, list) {
+		if (ctx->user_id != id)
+			break;
+		id++;
+		/* Check for wrap.  If this happens, we have nearly 2^16
+		 * allocated vports, which seems unlikely.
+		 */
+		if (WARN_ON_ONCE(!id))
+			return NULL;
+	}
+
+	/* Create the new entry */
+	new = kzalloc(sizeof(struct efx_vport), GFP_KERNEL);
+	if (!new)
+		return NULL;
+
+	/* Insert the new entry into the gap */
+	new->user_id = id;
+	list_add_tail(&new->list, &ctx->list);
+	return new;
+}
+
+struct efx_vport *efx_find_vport_entry(struct efx_nic *efx, u16 id)
+{
+	struct list_head *head = &efx->vport.list;
+	struct efx_vport *ctx;
+
+	WARN_ON(!mutex_is_locked(&efx->vport_lock));
+
+	list_for_each_entry(ctx, head, list)
+		if (ctx->user_id == id)
+			return ctx;
+	return NULL;
+}
+
+void efx_free_vport_entry(struct efx_vport *ctx)
+{
+	list_del(&ctx->list);
+	kfree(ctx);
+}
+
+int efx_vport_add(struct efx_nic *efx, u16 vlan, bool vlan_restrict)
+{
+	struct efx_vport *vpx;
+	int rc;
+
+	if (!efx->type->vport_add)
+		return -EOPNOTSUPP;
+
+	mutex_lock(&efx->vport_lock);
+	vpx = efx_alloc_vport_entry(efx);
+	if (!vpx) {
+		rc = -ENOMEM;
+		goto out_unlock;
+	}
+	vpx->vlan = vlan;
+	vpx->vlan_restrict = vlan_restrict;
+	rc = efx->type->vport_add(efx, vpx->vlan, vpx->vlan_restrict,
+				  &vpx->vport_id);
+	if (rc < 0)
+		efx_free_vport_entry(vpx);
+	else
+		rc = vpx->user_id;
+out_unlock:
+	mutex_unlock(&efx->vport_lock);
+	return rc;
+}
+
+int efx_vport_del(struct efx_nic *efx, u16 port_user_id)
+{
+	struct efx_vport *vpx;
+	int rc;
+
+	if (!efx->type->vport_del)
+		return -EOPNOTSUPP;
+
+	mutex_lock(&efx->vport_lock);
+	vpx = efx_find_vport_entry(efx, port_user_id);
+	if (!vpx) {
+		rc = -ENOENT;
+		goto out_unlock;
+	}
+
+	rc = efx->type->vport_del(efx, vpx->vport_id);
+	if (!rc)
+		efx_free_vport_entry(vpx);
+out_unlock:
+	mutex_unlock(&efx->vport_lock);
+	return rc;
+}
+
 /**************************************************************************
  *
  * PCI interface
@@ -5411,86 +5499,6 @@ static void efx_pci_remove(struct pci_dev *pci_dev)
 	pci_disable_pcie_error_reporting(pci_dev);
 #endif
 };
-
-/* NIC VPD information
- * Called during probe to display the part number of the
- * installed NIC.  VPD is potentially very large but this should
- * always appear within the first 4 Kbytes.
- */
-#define SFC_VPD_LEN 4096
-
-static void efx_probe_vpd_strings(struct efx_nic *efx)
-{
-	struct pci_dev *dev = efx->pci_dev;
-	char *vpd_data;
-	ssize_t vpd_size;
-	int ro_start, ro_size, i, j;
-
-	vpd_data = kmalloc(SFC_VPD_LEN, GFP_KERNEL);
-	if (!vpd_data)
-		return;
-
-	/* Get the vpd data from the device */
-	vpd_size = pci_read_vpd(dev, 0, SFC_VPD_LEN, vpd_data);
-	if (vpd_size <= 0) {
-		netif_err(efx, drv, efx->net_dev, "Unable to read VPD\n");
-		goto out;
-	}
-
-	/* Get the Read only section */
-	ro_start = pci_vpd_find_tag(vpd_data, 0, vpd_size, PCI_VPD_LRDT_RO_DATA);
-	if (ro_start < 0) {
-		netif_err(efx, drv, efx->net_dev, "VPD Read-only not found\n");
-		goto out;
-	}
-
-	ro_size = pci_vpd_lrdt_size(&vpd_data[ro_start]);
-	j = ro_size;
-	i = ro_start + PCI_VPD_LRDT_TAG_SIZE;
-	if (i + j > vpd_size)
-		j = vpd_size - i;
-
-	/* Get the Part number */
-	i = pci_vpd_find_info_keyword(vpd_data, i, j, "PN");
-	if (i < 0) {
-		netif_err(efx, drv, efx->net_dev, "Part number not found\n");
-		goto out;
-	}
-
-	j = pci_vpd_info_field_size(&vpd_data[i]);
-	i += PCI_VPD_INFO_FLD_HDR_SIZE;
-	if (i + j > vpd_size) {
-		netif_err(efx, drv, efx->net_dev, "Incomplete part number\n");
-		goto out;
-	}
-
-	netif_info(efx, drv, efx->net_dev,
-		   "Part Number : %.*s\n", j, &vpd_data[i]);
-
-	/* We also want to store the serial number so this is available for potential
-	 * errors at a later time */
-
-	i = ro_start + PCI_VPD_LRDT_TAG_SIZE;
-	j = ro_size;
-	i = pci_vpd_find_info_keyword(vpd_data, i, j, "SN");
-	if (i < 0) {
-		netif_err(efx, drv, efx->net_dev, "Serial number not found\n");
-		goto out;
-	}
-
-	j = pci_vpd_info_field_size(&vpd_data[i]);
-	i += PCI_VPD_INFO_FLD_HDR_SIZE;
-	if (i + j > vpd_size) {
-		netif_err(efx, drv, efx->net_dev, "Incomplete serial number\n");
-		goto out;
-	}
-
-	efx->vpd_sn = kzalloc(j + 1, GFP_KERNEL);
-	if (efx->vpd_sn)
-		strncpy(efx->vpd_sn, &vpd_data[i], j);
-out:
-	kfree(vpd_data);
-}
 
 /* Main body of NIC initialisation
  * This is called at module load (or hotplug insertion, theoretically).
@@ -5633,7 +5641,7 @@ static int efx_pci_probe(struct pci_dev *pci_dev,
 #if defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_SFC_LRO)
 	if (lro) {
 #if defined(NETIF_F_LRO)
- 		net_dev->features |= NETIF_F_LRO;
+		net_dev->features |= NETIF_F_LRO;
 #endif
 	}
 #endif
@@ -5698,10 +5706,10 @@ static int efx_pci_probe(struct pci_dev *pci_dev,
 		goto fail1;
 
 	netif_info(efx, probe, efx->net_dev,
-		   "Solarflare NIC detected\n");
-
-	if (!efx->type->is_vf)
-		efx_probe_vpd_strings(efx);
+		   "Solarflare NIC detected: device %04x:%04x subsys %04x:%04x\n",
+		   efx->pci_dev->vendor, efx->pci_dev->device,
+		   efx->pci_dev->subsystem_vendor,
+		   efx->pci_dev->subsystem_device);
 
 	/* Set up basic I/O (BAR mappings etc) */
 	rc = efx_init_io(efx);
@@ -6136,7 +6144,6 @@ static struct pci_driver efx_pci_driver = {
 #endif
 };
 
-#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_NET_DEVICE_OPS)
 const struct net_device_ops efx_netdev_ops = {
 	.ndo_open		= efx_net_open,
 	.ndo_stop		= efx_net_stop,
@@ -6204,8 +6211,10 @@ const struct net_device_ops efx_netdev_ops = {
 #if defined(EFX_NOT_UPSTREAM) && defined(EFX_HAVE_VLAN_RX_PATH)
 	.ndo_vlan_rx_register	= efx_vlan_rx_register,
 #endif
+#if defined(EFX_USE_KCOMPAT) && defined(EFX_WANT_NDO_POLL_CONTROLLER)
 #ifdef CONFIG_NET_POLL_CONTROLLER
 	.ndo_poll_controller	= efx_netpoll,
+#endif
 #endif
 #if defined(EFX_USE_KCOMPAT) && defined(EFX_HAVE_NDO_BUSY_POLL)
 #ifdef CONFIG_NET_RX_BUSY_POLL
@@ -6231,9 +6240,7 @@ const struct net_device_ops efx_netdev_ops = {
 	.ndo_del_geneve_port	= efx_geneve_del_port,
 #endif
 #endif
-#if defined(EFX_USE_KCOMPAT) && defined(EFX_HAVE_XDP_EXT)
-	.extended.ndo_bpf	= efx_xdp,
-#elif !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_XDP)
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_XDP)
 	.ndo_bpf		= efx_xdp,
 #endif
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_XDP_REDIR)
@@ -6247,7 +6254,6 @@ const struct net_device_ops efx_netdev_ops = {
 	.ndo_size		= sizeof(struct net_device_ops),
 #endif
 };
-#endif
 
 #if defined(EFX_USE_KCOMPAT) && defined(EFX_HAVE_NET_DEVICE_OPS_EXT)
 const struct net_device_ops_ext efx_net_device_ops_ext = {

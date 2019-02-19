@@ -1,44 +1,16 @@
-OpenOnload-201805-u1
-====================
-
-This is a minor update release to refresh the sfc net driver included
-in the Onload package and address a potentially serious bug in
-openonload-201805.  This issue is described in Known Issue
-SF-120489-KI.  It affects applications using ef_vi or TCPDirect and
-doing PIO and warming sends in multiple threads and can result in data
-corruption.  Applications using Onload are not affected as Onload
-provides sufficient locking around those operations to provide correct
-operation.
-
-Linux distribution support
---------------------------
-
- This package is supported on:
- - Red Hat Enterprise Linux 6.7 - 6.9
- - Red Hat Enterprise Linux 7.1 - 7.5
- - SuSE Linux Enterprise Server 11 sp4
- - SuSE Linux Enterprise Server 12 sp2 and sp3
- - Canonical Ubuntu Server LTS 16.04, 18.04
- - Canonical Ubuntu Server 17.10
- - Debian 8 "Jessie"
- - Debian 9 "Stretch"
- - Linux kernels 3.0 - 4.16.6
-
-
-OpenOnload-201805
+OpenOnload-201811
 =================
 
- This is a major feature release that adds new features to OpenOnload, in
- particular support for the new X2 adapters from Solarflare, extensions
- to TCPDirect and new Onload scalable filter capabilities.
+ This is a feature release that adds new features to TCPDirect,
+ extends architecture, NIC and OS support, provides improvements
+ to Onload's performance in lossy network environments and includes
+ many bug fixes.
 
- The support for X2 adapters includes the new cut-through PIO (CTPIO)
- mechanism, which reduces latency on the send path.
+ Preview-level support is provided for ARM's 64-bit architecture and
+ support for AMD CPUs prior to the Zen architecture is deprecated.
 
- The notes below describe some of the new features, including CTPIO and
- how it is used with OpenOnload, TCPDirect and ef_vi.
-
- See the Onload user guide for full details of new features and associated
+ The notes below describe some of the new features. See the Onload
+ user guide for full details of new features and associated
  configuration options.
 
  See the accompanying ChangeLog for a list of bugs fixed.
@@ -48,350 +20,182 @@ Linux distribution support
 --------------------------
 
  This package is supported on:
- - Red Hat Enterprise Linux 6.7 - 6.9
- - Red Hat Enterprise Linux 7.1 - 7.5
- - SuSE Linux Enterprise Server 11 sp4
- - SuSE Linux Enterprise Server 12 sp2 and sp3
- - Canonical Ubuntu Server LTS 16.04, 18.04
- - Canonical Ubuntu Server 17.10
+ - Red Hat Enterprise Linux 6.7 - 6.10
+ - Red Hat Enterprise Linux 7.3 - 7.6
+ - SuSE Linux Enterprise Server 12 sp3 and sp4*
+ - SuSE Linux Enterprise Server 15
+ - Canonical Ubuntu Server LTS 18.04
+ - Canonical Ubuntu Server 18.10
  - Debian 8 "Jessie"
  - Debian 9 "Stretch"
- - Linux kernels 3.0 - 4.16.6
+ - Linux kernels 3.0 - 4.19
+
+* SLES 12 sp4 was only available in pre-release form at the time this
+  OpenOnload release was tested.
 
 
-CTPIO
------
-
- CTPIO improves send latency by moving packets from the PCIe bus to network
- port with minimal latency.  It can be used in three modes:
-
-   1) Cut-through: The frame is transmitted onto the network as it is
-      streamed across the PCIe bus.  This mode offers the best latency.
-
-   2) Store-and-forward: The frame is buffered on the adapter before
-      transmiting onto the network.
-
-   3) Store-and-forward with poison disabled: As for (2), except that it is
-      guaranteed that frames are never poisoned.  When this mode is enabled
-      on any VI, all VIs are placed into store-and-forward mode.
-
- Underrun, poisoning and fallback:
-
- When using cut-through mode, if the frame is not streamed to the adapter
- at at least line rate, then the frame is likely to be poisoned.  This is
- most likely to happen if the application thread is interrupted while
- writing the frame to the adapter.  In the underrun case, the frame is
- terminated with an invalid FCS -- this is referred to as "poisoning" --
- and so will be discarded by the link partner.  Cut-through mode is
- currently expected to perform well only on 10G links.
-
- CTPIO may be aborted for other reasons, including timeout while writing a
- frame, contention between threads using CTPIO at the same time, and the
- CPU writing data to the adapter in the wrong order.
-
- In all of the above failure cases the adapter falls-back to sending via
- the traditional DMA mechanism, which incurs a latency penalty.  So a valid
- copy of the packet is always transmitted, whether the CTPIO operation
- succeeds or not.
-
- Normally only an underrun in cut-through mode will result in a poisoned
- frame being transmitted.  In rare cases it is also possible for a poisoned
- frame to be emitted in store-and-forward mode.  If it is necessary to
- strictly prevent poisoned packets from reaching the network, then
- poisoning can be disabled globally.
-
-
-CTPIO with OpenOnload
----------------------
-
- When using a suitable adapter, CTPIO is enabled by default in "sf-np"
- mode.  The operation of CTPIO can be controlled via the following
- Onload configuration variables:
-
-   EF_CTPIO: 0 (disabled)
-             1 (enable) (default)
-             2 (enable, fail if not available)
-
-   EF_CTPIO_MODE: ct      (cut-through mode)
-                  sf      (store-and-forward mode)
-                  sf-np   (store-and-forward with no poisoning)
-
-   EF_CTPIO_MAX_FRAME_LEN: CTPIO is only used for packets whose length does
-                           not exceed this value.  Packets exceeding this
-                           length are sent using another mechanism (DMA or
-                           PIO).
-
- CTPIO bypasses the main adapter datapath, and as a result, packets sent
- by CTPIO cannot be looped back in hardware.  As a result, CTPIO will not
- be enabled by default on interfaces running full-featured firmware.  This
- behaviour can be overridden using the EF_CTPIO_SWITCH_BYPASS configuration
- variable.
-
-
-CTPIO with TCPDirect
---------------------
-
- When using a suitable adapter CTPIO is enabled by default in "sf-np"
- mode.  The operation of CTPIO can be controlled via the following
- TCPDirect attributes:
-
-   ctpio: 0 (disable)
-          1 (enable) (default)
-          2 (enable, warn if not available)
-          3 (enable, fail if not available)
-
-   ctpio_mode: ct      (cut-through mode)
-               sf      (store-and-forward mode)
-               sf-np   (store-and-forward with no poisoning)
-
-
-CTPIO with ef_vi
-----------------
-
- A complete example showing the use of CTPIO with ef_vi is given in
- openonload/src/tests/rtt/rtt_efvi.c.
-
- N.B.  CTPIO bypasses the main adapter datapath, and as a result does not
- support checksum offload: Frames sent with CTPIO are placed on the wire
- without modification, so checksum fields must be completed in software before
- sending.  For the same reason, frames sent with CTPIO cannot be looped
- back by the adapter.
-
- Here is the sequence of steps needed:
-
-   1) When allocating a VI (ef_vi_alloc_from_pd()) set the EF_VI_TX_CTPIO
-      flag.
-
-   2) To initiate a send, form a complete Ethernet frame (including L3/L4
-      checksums, but excluding FCS) in host memory.  Initiate the send with
-      ef_vi_transmit_ctpio() or ef_vi_transmitv_ctpio().
-
-   3) Post a fall-back descriptor using ef_vi_transmit_ctpio_fallback() or
-      ef_vi_transmitv_ctpio_fallback().  These calls are used just like the
-      standard DMA send calls (ef_vi_transmit() etc.), and so must be
-      provided with a copy of the frame in registered memory.
-
-      The posting of a fall-back descriptor is not on the latency critical
-      path, provided the CTPIO operation succeeds.  However, it must be
-      posted before posting any further sends on the same VI.
-
-
-CTPIO diagnostics
+TCPDirect bonding
 -----------------
 
- The adapter maintains counters that show whether CTPIO is being used, and
- any reasons for CTPIO sends failing.  These can be inspected as follows:
+ This release enables TCPDirect to send and receive traffic over a bonded
+ interface. Bonded interfaces can now be specified using the interface
+ attribute, as with regular interfaces. See the user guide for further
+ details.
 
-   ethtool -S ethX | grep ctpio
+ The following bonding modes are supported:
+ - Active-backup
+ - LACP with layer2, layer2+3 and layer3+4 transmit hash policies
 
- Note that some of these counters are maintained on a per-adapter basis,
- whereas others are per network port.
-
-
-Delegated sends in TCPDirect: technology preview
-------------------------------------------------
-
- This release adds new API functions to TCPDirect that allow the user to
- have TCPDirect handle the TCP state machine while performing critical
- sends through another mechanism (such as ef_vi) to achieve lower
- latency.  This is analogous both in principle and in the arrangement of
- the API to the delegated sends feature of Onload.  The new API is
- offered as a technology preview: it is functionally complete but has
- had limited testing, and the API may change if we find problems.
- Customers are invited to experiment with the feature and to direct
- feedback to support@solarflare.com.
-
- Zockets are created through the TCPDirect API as normal.  The user can
- then request that TCPDirect delegate sending to their application.
- Once the application has completed a send through (for example) ef_vi,
- it updates TCPDirect and TCPDirect will handle the TCP state machinery,
- retransmissions, and so on.
-
- There is an example application at
-
-   <onload_install_dir>/src/tests/trade_sim/trader_tcpdirect_ds_efvi.c
-
- Please see the README file in the same directory for further details.
-
- The delegated sends API should be used carefully as there are windows of
- time (while the send has been delegated to the application) when the TCP
- sequence numbers used by TCPDirect (for ACKs) and the application (for
- messages) differ.  Delegated sends has been implemented in a way that
- should make this harmless, but it is important to ensure the API is used
- correctly, and there is potential to confuse other TCP implementations.
+ TCPDirect bonding has the following constraints:
+ - Bonded interfaces of up to 4 Solarflare network adapters are supported.
+ - Failover is supported, however bonds may not be otherwise reconfigured
+   while TCPDirect is running.
+ - TX Alternatives must be disabled in stacks using bonding.
+ - All interfaces in the bond must be in the same network namespace.
+ - VLAN, IPVLAN and MACVLAN interfaces created over a bond are not supported.
+ - As with Onload, bonding of VLAN, IPVLAN and MACVLAN interfaces is not
+   supported.
 
 
-Onload scalable filters
------------------------
+TCPDirect transmit timestamping
+-------------------------------
 
- A major overhaul to clustering and scalable filters enables new data
- center use cases.
-
- Scalable filters direct all traffic for a given VI to Onload so that
- the filter table size is not a constraint on the number of concurrent
- connections supported efficiently. This release allows scalable filters
- to be combined for both passive and active open connections and with RSS,
- enabling very high transaction rates for use cases such as a reverse web
- proxy.
-
- The extended feature requires modern CPUs that support the CLMUL
- instruction.
-
- See the user guide on how to work with the new scalable filter modes
- using new and existing Onload configuration options including:
-
- EF_SCALABLE_FILTERS:                  any=rss:active:passive
-
-   This option has been extended to support active-open sockets, and to
-   support multiple interfaces.
-
- EF_SCALABLE_LISTEN_MODE:              1
-
-   This option avoids the performance limitations of kernel listening
-   sockets when there is a very large number of listening sockets.
-
- The most effective way to use scalable filters is with a dedicated
- VI created with a MACVLAN. The new kernel option inject_kernel_gid
- controls the injection of packets not handled by Onload back to the
- kernel when the VI is instead shared with other functions.
+ Transmit timestamping support was added to TCPDirect and can be enabled by
+ specifying tx_timestamping attribute. Transmit timestamps can be retrieved
+ by calling zft_get_tx_timestamps for TCP and zfut_get_tx_timestamps for UDP
+ zockets. Please see the TCPDirect user guide and zftcppingpong/zfudppingpong
+ sample applications for more details.
 
 
-NGINX application support
--------------------------
+Onload TCP performance in lossy network environments
+----------------------------------------------------
 
- Onload's clustering capability can support the NGINX application's
- master process pattern and hot restart operation by correctly
- associating Onload stacks and application worker processes, e.g.:
+ This release makes several improvements to Onload's TCP core in the presence
+ of loss and reordering, as can be the case, for example, where the route to
+ the peer traverses the internet.
 
- EF_SCALABLE_FILTERS_ENABLE:           2
- EF_CLUSTER_HOT_RESTART:               1
+ - EF_TAIL_DROP_PROBE
 
- See the user guide for full details. The Onload runtime profile
- "nginx_reverse_proxy.opf" has an example set of relevant configurations.
+   Classical TCP implementations recover poorly from the case where the last
+   segment(s) in flight are dropped. This results in no visible gap in
+   sequence space, and so there is nothing to trigger fast retransmissions;
+   instead, the segments are retransmitted by the RTO mechanism. In order to
+   attempt to trigger a fast retransmission in the case where such tail-loss is
+   suspected, a "tail-drop probe" segment can be sent after a short timeout.
+   This segment would either be the next segment due to be transmitted, or an
+   opportunistic retransmission of the most recent in-flight segment.
 
- Use of this mode is not compatible with use of the onload extensions
- stackname API.
+   Previous releases of Onload had a tail-drop probe implementation, but it was
+   not compiled in by default. In this release, the mechanism has been
+   rewritten, and is now built by default. Its use is controlled at runtime by
+   the EF_TAIL_DROP_PROBE environment variable, which previously defaulted to 0
+   (off) but now defaults to the value read from the kernel configuration at
+   /proc/sys/net/ipv4/tcp_early_retrans, which defaults to on.
 
+ - EF_TCP_EARLY_RETRANSMIT
 
-Improvements to socket caching and EF_TCP_SHARED_LOCAL_PORTS
-------------------------------------------------------------
+   This release implements the Early Retransmit (RFC 5827) algorithm for TCP,
+   and also the Limited Transmit (RFC 3042) algorithm, on which Early
+   Retransmit depends. As for tail-drop probes, the purpose of these algorithms
+   is to allow fast retransmissions to happen more readily. The use of these
+   algorithms is controlled by the EF_TCP_EARLY_RETRANSMIT environment
+   variable, whose default value is read from the kernel configuration at
+   /proc/sys/net/ipv4/tcp_early_retrans.
 
- Applications such as web proxies that create and close large numbers of
- sockets can benefit significantly from Onload's reduced overhead
- compared to the kernel in the handling of the socket lifecycle.  With
- these use cases in mind, some configuration options have been added to
- the EF_TCP_SHARED_LOCAL_PORTS feature:
+ - SACK improvements
 
- EF_TCP_SHARED_LOCAL_PORTS_REUSE_FAST allows the pool of shared local
- ports to be recycled more rapidly, and EF_TCP_SHARED_LOCAL_PORTS_PER_IP
- enables shared local ports to be reserved dynamically for the IP
- addresses that require them, avoiding exhaustion of the ephemeral port
- range.
-
- Similarly, socket caching has been extended to improve the support for
- such applications.  Applications using many listening sockets with
- scalable filters can now use a common cache of sockets accepted from
- them, improving utilization of the cache.  Also, when a listening
- socket is used by multiple processes simultaneously, file descriptors
- can now be cached per-process, whereas before, accepted sockets were
- cachable only in the process that originated them.  This is of
- particular benefit to server applications such as NGINX that support
- dynamic reconfiguration by spawning a new process reusing existing
- listening sockets.  This feature is not compatible with sockets that
- require O_CLOEXEC.
-
- The default value for EF_PER_SOCKET_CACHE_MAX has changed from 0 to -1,
- but the significance is unchanged: the default is still that there is
- no per-listen-socket limit to the number of cached accepted sockets.  A
- value of 0 now means that no accepted sockets will be cached for any
- listening sockets; this allows active-open socket caching to be enabled
- without also enabling passive-open socket caching.
-
- Please see the User Guide for full details of these features.
+   Selective acknowledgments received from the peer are now used to grow the
+   congestion window more aggressively when recovering from loss.
 
 
-Changes to EF_UL_EPOLL=3
-------------------------
-
- EF_UL_EPOLL=3 allows epoll_wait() to perform well on epoll sets that
- contain a large number of accelerated sockets.  Previously, each socket
- could gain this scalability benefit in at most one epoll set at a time.
- Now, this is possible in up to four epoll sets for any given socket,
- provided that each epoll set is in a different process.
-
-
-Other new Onload configuration options
+Onload initial sequence number caching
 --------------------------------------
 
- In addition to those already mentioned, this release of Onload
- introduces the following new environmental options:
+Applications which rapidly open and close a large number of connections to
+other machines may experience occasional connection failures due to the rapid
+reuse of TCP sequence numbers being detected as retransmits in the TIME-WAIT
+state. This is most commonly a problem with Windows and FreeBSD TCP stacks.
 
-  - EF_KERNEL_PACKETS_BATCH_SIZE
-  - EF_KERNEL_PACKETS_TIMER_USEC
-    Controls how often packets destined for the kernel are forwarded
-    there when kernel packet injection is enabled using the
-    inject_kernel_gid module option.
+The standard RFC-derived algorithm for avoiding this problem relies on a
+clock ticking at a rate which is faster than bytes are transmitted. A link
+running at 100Mb can theoretically transmit faster than the clock can tick,
+however, and 10Gb+ links can practically do this.
 
-  - EF_PERIODIC_TIMER_CPU
-    Specifies CPU affinity for periodic kernel tasks.
+Onload has added the EF_TCP_ISN_MODE option to provide a solution. The
+default "clocked" setting uses the standard best-effort algorithm. The
+"clocked+cache" setting will store the last sequence number used for every
+remote endpoint to guarantee that the problem is avoided. This mode is
+recommended for applications such as proxies which rapidly open and close
+connections to a variety of unknown, third-party servers.
 
-  - EF_PREALLOC_PACKETS
-    Allocates the maximum number of packet buffers when the stack is
-    created.
+The following settings may be used to fine-tune the clocked+cache mode:
 
-  - EF_SCALABLE_ACTIVE_WILDS_NEED_FILTER
-    Normally this option is set automatically according to the
-    scalable-filter mode, but it may be used manually to override
-    whether TCP shared local ports use IP hardware filters.
+ - EF_TCP_ISN_CACHE_SIZE
+   Number of entries to allocate in the cache of remote endpoints. The default
+   value of 0 selects a size automatically.
 
-  - EF_SLEEP_SPIN_USEC
-    Sleeps periodically during epoll_wait() after the initial spin
-    timeout has elapsed.
+ - EF_TCP_ISN_INCLUDE_PASSIVE
+   Store data for closed passively-opened connections in the cache. This data
+   would only be needed by an application which closed its listening socket
+   and continued to run, so the option is disabled by default
 
-  - EF_SYNC_CPLANE_AT_CREATE
-    Controls how Onload queries network interface configuration when
-    creating stacks.
+ - EF_TCP_ISN_OFFSET
+   Distance by which to step the initial sequence number of new connections
+   relative to the previous connection. Only extremely specialized
+   applications would consider changing the default.
 
-  - EF_TCP_MIN_CWND
-    Sets the minimum size of the congestion window for TCP connections.
-
-  - EF_TCP_SHARED_LOCAL_PORTS_NO_FALLBACK
-    Causes connect() to fail for TCP sockets if no shared local ports
-    are available.
-
- Finally, the default value, but not the default behaviour, of the
- EF_PER_SOCKET_CACHE_MAX variable has changed: please see the section above
- on socket caching.
-
- Please see the User Guide for more details.
+ - EF_TCP_ISN_2MSL
+   Maximum amount of time that any remote TCP stack's implementation will
+   leave a socket in the TIME-WAIT state. This is configurable in many
+   systems, however the default value of 240 seconds is a maximum common value
+   across a variety of operating systems.
 
 
-32-bit kernels
---------------
+Other Onload configuration options changes
+------------------------------------------
 
- This release drops support for 32-bit kernels. 32-bit userspace
- applications are still supported.
+In addition to those already mentioned, this release of Onload
+adds or modifies the following environmental options:
+
+ - EF_TCP_URG_MODE
+   New option to allow disabling TCP urgent data processing. Urgent data is
+   a rarely-used feature which is inconsistently implemented on various
+   operating systems, however applications which are written to the Linux
+   convention will experience corrupt data if they use the "ignore" setting
+   and actually receive urgent data.
+
+ - EF_TCP_TIME_WAIT_ASSASSINATION
+   New option to implement the RFC 1337 behaviour of replacing old TIME-WAIT
+   sockets with newly-received incoming connections. The default value is
+   read from /proc/sys/net/ipv4/tcp_rfc1337.
+
+ - EF_TCP_SHARED_LOCAL_PORTS_PER_IP_MAX
+   New option to fine-tune the shared local ports feature. Sets the maximum
+   size of the pool of local shared ports for given local IP address. When
+   used with scalable RSS mode this setting limits the total number within the
+   cluster.
+
+ - EF_TCP_SHARED_LOCAL_PORTS_STEP
+   New option to fine-tune the shared local ports feature. Controls the number
+   of ports allocated when expanding the pool of shared local ports.
 
 
-CONFIG_KALLSYMS
----------------
+TCPDirect errors issued by newer C++ compilers
+----------------------------------------------
 
- The CONFIG_KALLSYMS kernel configuration option is required for Onload to
- operate correctly.  The dependency of Onload on this option is not new in
- this release, but very recent kernels -- namely, those containing the
- commit 21d375b6b34ff511a507de27bf316b3dde6938d9 that removes the x86
- syscall-dispatch fast path -- will be unable to load the Onload driver
- when CONFIG_KALLSYSMS is not defined.  All of the Linux distributions
- listed in the table at the start of this file set this option in their
- default kernel configurations and so are not affected.
+Applications using TCPDirect may fail to build with g++ version 6 and above
+with the message "error: flexible array member 'zft_msg::iov' not at end of
+'struct my_msg'". To work around this issue, application code may be modified
+from
 
+struct my_msg {
+  zft_msg msg;
+  iovec iov[1];
+};
 
-Monitoring tools
-----------------
+to
 
- The 'orm_json' tool for monitoring Onload stacks and reporting statistics
- has been improved to include more comprehensive statistics and further
- details of Onload stacks' status.  To ease integration with standard
- performance monitoring tools, the new version features an additional, more
- machine-friendly output format, as well as the facility to generate
- metadata for the reported statistics.
+typedef struct {
+  zft_msg msg;
+  iovec iov[1];
+} my_msg;

@@ -140,7 +140,9 @@ init_vi_resource_dimensions(struct vi_resource_dimensions *rd,
 		EFRM_TRACE("Using VI range %d+(%d-%d)<<%d bar %d ws 0x%x", rd->vi_base,
 			   rd->vi_min, rd->vi_lim, rd->vi_shift,
 			   rd->mem_bar, rd->vi_stride);
+#if EFX_DRIVERLINK_API_VERSION < 25
 		rd->vport_id = ef10_res->vport_id;
+#endif
 	}
 	else {
 		rd->evq_timer_min = falcon_res->evq_timer_min;
@@ -349,12 +351,14 @@ static void efrm_dl_reset_resume(struct efx_dl_device *efrm_dev, int ok)
 				   ef10_res->vi_base);
 			nic->vi_base = ef10_res->vi_base;
 		}
+#if EFX_DRIVERLINK_API_VERSION < 25
 		if( nic->vport_id != ef10_res->vport_id ) {
 			EFRM_TRACE("%s: vport_id changed from %d to %d\n",
 				   __FUNCTION__, nic->vport_id, 
 				   ef10_res->vport_id);
 			nic->vport_id = ef10_res->vport_id;
 		}
+#endif
 #if EFX_DRIVERLINK_API_VERSION > 22 || (EFX_DRIVERLINK_API_VERSION == 22 && \
 					EFX_DRIVERLINK_API_VERSION_MINOR > 2)
 		if( nic->vi_shift != ef10_res->vi_shift ) {

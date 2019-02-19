@@ -107,6 +107,11 @@ extern ci_netif* citp_find_ul_netif(int id, int locked) CI_HF;
   return it  */
 extern int citp_netif_alloc_and_init(ef_driver_handle*, ci_netif**) CI_HF;
 
+/* Find the current process stack. */
+extern int
+citp_netif_get_process_stack(ci_netif** out_ni, const char* stackname) CI_HF;
+
+
 /* Recreate a netif for a 'probed' user-level endpoint */
 extern int citp_netif_recreate_probed(ci_fd_t caller_fd,
                                       ef_driver_handle* fd,
@@ -191,8 +196,8 @@ ci_inline void __citp_getsockname(ci_sock_cmn* s, struct sockaddr* sa,
   CI_TEST(sa);
   CI_TEST(salen);
 
-  ci_addr_to_user(sa, salen, s->domain, 
-                  sock_lport_be16(s), sock_laddr_be32(s));
+  ci_addr_to_user(sa, salen, AF_INET, s->domain, 
+                  sock_lport_be16(s), &sock_laddr_be32(s));
 }
 
 

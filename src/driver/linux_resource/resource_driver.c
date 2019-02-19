@@ -202,7 +202,9 @@ linux_efrm_nic_ctor(struct linux_efhw_nic *lnic, struct efx_dl_device *dl_device
 	unsigned vi_shift = 0;
 	unsigned mem_bar = EFHW_MEM_BAR_UNDEFINED;
 	unsigned vi_stride = 0;
+#if EFX_DRIVERLINK_API_VERSION < 25
 	unsigned vport_id = 0;
+#endif
 	struct pci_dev *dev = dl_device->pci_dev;
 
 	/* Tie the lifetime of the kernel's state to that of our own. */
@@ -217,7 +219,9 @@ linux_efrm_nic_ctor(struct linux_efhw_nic *lnic, struct efx_dl_device *dl_device
 		if( res_dim->mem_bar != VI_RES_MEM_BAR_UNDEFINED )
 			mem_bar = res_dim->mem_bar;
 		vi_stride = res_dim->vi_stride;
+#if EFX_DRIVERLINK_API_VERSION < 25
 		vport_id = res_dim->vport_id;
+#endif
 	}
 	else if (dev_type->arch == EFHW_ARCH_FALCON) {
 		map_min = CI_MIN(res_dim->evq_int_min, res_dim->evq_timer_min);
@@ -234,7 +238,11 @@ linux_efrm_nic_ctor(struct linux_efhw_nic *lnic, struct efx_dl_device *dl_device
 	}
 
 	efhw_nic_init(nic, nic_flags, NIC_OPT_DEFAULT, dev_type, map_min,
-		      map_max, vi_base, vi_shift, mem_bar, vi_stride, vport_id);
+		      map_max, vi_base, vi_shift, mem_bar, vi_stride
+#if EFX_DRIVERLINK_API_VERSION < 25
+		      , vport_id
+#endif
+		      );
 	lnic->efrm_nic.efhw_nic.pci_dev = dev;
 	lnic->efrm_nic.efhw_nic.net_dev = net_dev;
 	lnic->efrm_nic.efhw_nic.bus_number = dev->bus->number;
@@ -314,8 +322,10 @@ linux_efrm_nic_reclaim(struct linux_efhw_nic *lnic,
 	nic->ifindex = net_dev->ifindex;
 	if (dev_type->arch == EFHW_ARCH_EF10) {
 		nic->vi_base = res_dim->vi_base;
+#if EFX_DRIVERLINK_API_VERSION < 25
 		nic->vport_id = res_dim->vport_id;
-        }
+#endif
+	}
 	efrm_init_resource_filter(&nic->pci_dev->dev, net_dev->ifindex);
 
 	/* Drop reference to [old_pci_dev] now that the race window has been

@@ -48,6 +48,7 @@
 #include "ef_vi_internal.h"
 #include "logging.h"
 #include <ci/efhw/mc_driver_pcol.h>
+#include <ci/driver/efab/hardware/ef10_evq.h>
 #include <etherfabric/packedstream.h>
 
 
@@ -593,8 +594,7 @@ ef10_ef_vi_receive_get_timestamp_with_sync_flags_from_tsync(ef_vi* vi,
   uint32_t pkt_minor_raw = le32_to_cpu(*data);
   uint32_t diff;
 
-  if( evqs->sync_timestamp_synchronised &&
-      (pkt_minor_raw & FLAG_NO_TIMESTAMP) == 0 ) {
+  if( ~pkt_minor_raw & FLAG_NO_TIMESTAMP ) {
     uint32_t pkt_minor =
       ( pkt_minor_raw + vi->rx_ts_correction) & 0x7FFFFFF;
     ts_out->tv_nsec = ((uint64_t) pkt_minor * 1000000000) >> 27;
@@ -619,7 +619,7 @@ ef10_ef_vi_receive_get_timestamp_with_sync_flags_from_tsync(ef_vi* vi,
        */
       ts_out->tv_sec = tsync_major;
       ts_out->tv_sec -=
-        diff + tsync_minor <= ONE_SEC;
+        diff + tsync_minor < ONE_SEC;
       *flags_out = evqs->sync_flags;
       return 0;
     } else {
@@ -644,11 +644,16 @@ ef10_ef_vi_receive_get_timestamp_with_sync_flags_from_tsync_qns
 {
   const uint32_t NO_TIMESTAMP = 0xFFFFFFFF;
   /* Since M2, timestamp_minor unit is quarter nanoseconds */
-  const uint32_t ONE_SEC = 0xEE6B2800;
-  const uint32_t MAX_RX_PKT_DELAY = 0x17D78400; /* ONE_SEC / 10 */
-  const uint32_t MAX_TIME_SYNC_DELAY = 0x2FAF0800; /* ONE_SEC * 2 / 10 */
-  const uint32_t WRAP_CORRECTION = 0x1194D7FF;
+  const uint32_t ONE_SEC             = 4000000000U;
+  const uint32_t MAX_RX_PKT_DELAY    =  400000000U; /* ONE_SEC / 10 */
+  const uint32_t MAX_TIME_SYNC_DELAY =  800000000U; /* ONE_SEC * 2 / 10 */
   const uint32_t SYNC_EVENTS_PER_SECOND = 4;
+
+  /* M2 can overrun pkt_minor a little due to an adjustment that isn't
+   * wrapped.  According to bugzilla it can overrun by up to 15.  We
+   * inflate a little in case that is wrong.
+   */
+  const uint32_t BUG75412_OVERRUN    = 20;
 
   /* Comments in sibling function,
    * ef10_ef_vi_receive_get_timestamp_with_sync_flags_from_tsync apply here.
@@ -656,54 +661,73 @@ ef10_ef_vi_receive_get_timestamp_with_sync_flags_from_tsync_qns
 
   ef_eventq_state* evqs = &(vi->ep_state->evq);
   uint32_t* data = (uint32_t*) ((uint8_t*)pkt + ES_DZ_RX_PREFIX_TSTAMP_OFST);
-  uint32_t pkt_minor_raw = le32_to_cpu(*data);
+  uint32_t pkt_minor = le32_to_cpu(*data);
+  uint32_t diff;
+  int pkt_lt_tsync;
 
-  if( pkt_minor_raw == NO_TIMESTAMP )
+  /* Ensure correction does not move NO_TIMESTAMP into the positive range. */
+  EF_VI_ASSERT(vi->rx_ts_correction <= 0);
+
+  /* pkt_minor is in the range [0, ONE_SEC + BUG75412_OVERRUN), or has the
+   * value NO_TIMESTAMP.  
+   *
+   * Apply rx_ts_correction, which accounts for time delta between wire and
+   * MAC (+ 2ns to improve rounding).  It is expected to be negative but
+   * could be slightly positive if MAC delay was tiny.
+   */
+  pkt_minor += vi->rx_ts_correction;
+
+  /* pkt_minor is logically in the range
+   *   [slightly_negative, ONE_SEC + BUG75412_OVERRUN).
+   *
+   * But pkt_minor is uint32_t, so slightly_negative translates to
+   * (1<<32)-a_bit.  This allows us to test for [0, ONE_SEC) more cheaply
+   * than if pkt_minor were int64_t.
+   */
+  if(likely( pkt_minor < ONE_SEC ))
+    ;
+  else if(likely( pkt_minor < ONE_SEC + BUG75412_OVERRUN + 2 ))
+    pkt_minor -= ONE_SEC;
+  /* It would be cleaner to test for NO_TIMESTAMP prior to applying the
+   * correction, but doing it this way moves the test off the fast path.
+   */
+  else if(likely( pkt_minor != NO_TIMESTAMP + vi->rx_ts_correction ))
+    pkt_minor += ONE_SEC;
+  else
     return -ENODATA;
+  EF_VI_ASSERT( pkt_minor < ONE_SEC );
 
-  if( evqs->sync_timestamp_synchronised ) {
-    uint32_t pkt_minor = pkt_minor_raw + vi->rx_ts_correction;
-    uint32_t diff;
-    int c1, c2;
+  /* Take the difference mod ONE_SEC.  The upper end of the ONE_SEC range
+   * is 'negative'.  (This slightly obfuscated code avoids a conditional
+   * jump, at least on x86_64).
+   */
+  pkt_lt_tsync = pkt_minor < tsync_minor;
+  diff = pkt_minor - tsync_minor + (ONE_SEC & -pkt_lt_tsync);
 
-    /* If the packet arrived more than halfway through a nanosecond
-     * then the resulting timestamp will be more accurate if we round
-     * it up, rather than down. */
-    pkt_minor += 2;
-
-    /* See bug75412 */
-    if(unlikely( pkt_minor >= 4000000000U ))
-      pkt_minor -= 4000000000U;
-
-    ts_out->tv_nsec = pkt_minor >> 2;
-    ts_out->tv_sec = tsync_major;
-
-    diff = pkt_minor - tsync_minor;
-    if( pkt_minor < tsync_minor )
-      diff -= WRAP_CORRECTION;
-
-    /* tsync minor before pkt minor */
-    c1 = diff < (ONE_SEC / SYNC_EVENTS_PER_SECOND) + MAX_TIME_SYNC_DELAY;
-    /* pkt minor before tsync minor */
-    c2 = diff > ONE_SEC - MAX_RX_PKT_DELAY;
-
-    if(unlikely( ! (c1 | c2) ))
-      goto invalid;
-
-    /* Adjust seconds in case of wrapping. One of these will do nothing. */
-    ts_out->tv_sec += c1 & (pkt_minor < tsync_minor);
-    ts_out->tv_sec -= c2 & (tsync_minor < pkt_minor);
-
-    *flags_out = evqs->sync_flags;
-
-    return 0;
+  if(likely( diff < (ONE_SEC/SYNC_EVENTS_PER_SECOND) + MAX_TIME_SYNC_DELAY )) {
+    /* tsync before pkt (and in expected range).  Most common case. */
+    tsync_major += pkt_lt_tsync;
+  }
+  else if(likely( diff > ONE_SEC - MAX_RX_PKT_DELAY )) {
+    /* pkt before tsync (and in expected range).
+     *
+     * NB. We really want "tsync_major -= tsync_lt_pkt", but this is okay
+     * because pkt_minor!=tsync_minor here (as diff would be 0).
+     */
+    int tsync_le_pkt = ! pkt_lt_tsync;
+    tsync_major -= tsync_le_pkt;
+  }
+  else {
+    /* Zero ts_out in case of failure to avoid returning garbage. */
+    *ts_out = (struct timespec) { 0 };
+    evqs->sync_timestamp_synchronised = 0;
+    return (tsync_major == ~0u) ? -ENOMSG : -EL2NSYNC;
   }
 
-invalid:
-  evqs->sync_timestamp_synchronised = 0;
-  /* Zero ts_out in case of failure to avoid returning garbage. */
-  *ts_out = (struct timespec) { 0 };
-  return (tsync_major == ~0u) ? -ENOMSG : -EL2NSYNC;
+  ts_out->tv_nsec = pkt_minor >> 2;
+  ts_out->tv_sec = tsync_major;
+  *flags_out = evqs->sync_flags;
+  return 0;
 }
 
 int ef10_receive_get_timestamp_with_sync_flags_internal
@@ -737,8 +761,18 @@ ef10_receive_get_timestamp_with_sync_flags(ef_vi* vi, const void* pkt,
   uint32_t tsync_minor = evqs->sync_timestamp_minor;
   uint32_t tsync_major = evqs->sync_timestamp_major;
 
-  return ef10_receive_get_timestamp_with_sync_flags_internal
-	  (vi, pkt, ts_out, flags_out, tsync_minor, tsync_major);
+  /* We want to check whether the eventq is in sync here rather than in the
+   * internal hook that we've created. This is because TCPDirect will be
+   * storing timestamps to translate them later and will be dealing with
+   * the case of the eventq being out of sync itself. */
+  if(unlikely( ! evqs->sync_timestamp_synchronised )) {
+    *ts_out = (struct timespec) { 0 };
+    return -EL2NSYNC;
+  }
+  else {
+    return ef10_receive_get_timestamp_with_sync_flags_internal
+	    (vi, pkt, ts_out, flags_out, tsync_minor, tsync_major);
+  }
 }
 
 static void
@@ -860,6 +894,7 @@ int ef10_ef_eventq_poll(ef_vi* evq, ef_event* evs, int evs_len)
 {
   int evs_len_orig = evs_len;
   ef_vi_event *pev, ev;
+  static int overflow_logged = 0;
 
   EF_VI_BUG_ON(evs == NULL);
 
@@ -946,9 +981,18 @@ int ef10_ef_eventq_poll(ef_vi* evq, ef_event* evs, int evs_len)
   return 0;
 
  overflow:
-  ef_log("%s: ERROR: overflow in %d at %u", __FUNCTION__, evq->vi_i,
-         (unsigned) EF_VI_EVENT_OFFSET(evq, 0));
   evs->generic.type = EF_EVENT_TYPE_OFLOW;
+  if( overflow_logged == 0 ) {
+    int i;
+
+    ef_log("%s: ERROR: overflow in %d at 0x%x", __FUNCTION__, evq->vi_i,
+           (unsigned) EF_VI_EVENT_OFFSET(evq, 0));
+
+    for( i = 0; i <= evq->evq_mask / EF_VI_EV_SIZE; i++ )
+      ef_log("%04x: "CI_QWORD_FMT, i, CI_QWORD_VAL(*EF_VI_EVENT_PTR(evq, i)));
+
+    overflow_logged = 1;
+  }
   return 1;
 }
 
@@ -957,8 +1001,15 @@ void ef10_ef_eventq_prime(ef_vi* vi)
 {
   unsigned ring_i = (ef_eventq_current(vi) & vi->evq_mask) / 8;
   EF_VI_ASSERT(vi->inited & EF_VI_INITED_IO);
-  writel(ring_i << ERF_DZ_EVQ_RPTR_LBN, vi->io + ER_DZ_EVQ_RPTR_REG);
-  mmiowb();
+  ef10_update_evq_rptr(vi->io, ring_i);
+}
+
+
+void ef10_ef_eventq_prime_bug35388_workaround(ef_vi* vi)
+{
+  unsigned ring_i = (ef_eventq_current(vi) & vi->evq_mask) / 8;
+  EF_VI_ASSERT(vi->inited & EF_VI_INITED_IO);
+  ef10_update_evq_rptr_bug35388_workaround(vi->io, ring_i);
 }
 
 

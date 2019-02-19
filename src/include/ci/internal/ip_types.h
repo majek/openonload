@@ -152,7 +152,11 @@ struct ci_netif_s {
 #endif
 
   ci_netif_filter_table* filter_table;
+#if CI_CFG_IPV6
+  ci_ip6_netif_filter_table* ip6_filter_table;
+#endif
   ci_ni_dllist_t*      active_wild_table;
+  ci_tcp_prev_seq_t*   seq_table;
 
 
 #ifdef __ci_driver__
@@ -228,10 +232,6 @@ struct ci_netif_s {
   /* May inject packets to kernel */
 #define CI_NETIF_FLAG_MAY_INJECT_TO_KERNEL 0x8000
 
-#endif
-
-#ifndef __KERNEL__
-  double    ci_ip_time_tick2ms;     /* time for 1 tick in ms */
 #endif
 
 #ifdef __KERNEL__

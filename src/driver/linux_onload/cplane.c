@@ -77,6 +77,10 @@ const char* cplane_server_const_params[] = {
 #define CP_SERVER_CONST_PARAM_NUM \
   (sizeof(cplane_server_const_params) / sizeof(char*))
 
+/* Protects the state that is not associated with a single cplane instance
+ * -- for example, the hash table containing all the instances.  The "link"
+ * member of each oo_cplane_handle is protected by that lock, though.
+ */
 static spinlock_t cp_lock;
 
 /* When onload module is loaded with a parameter, a handler from
@@ -660,20 +664,9 @@ static struct oo_cplane_handle* __cp_acquire_from_netns(struct net* netns)
 
   /* cicpplos_ctor() must be called with CAP_NET_RAW. */
   new_cplane_inst->cppl.cp = new_cplane_inst;
-#ifdef EFRM_NET_HAS_USER_NS
-  if( ! ns_capable(netns->user_ns, CAP_NET_RAW) ) {
-#else
-  if( ! capable(CAP_NET_RAW) ) {
-#endif
-    struct cred *creds = prepare_creds();
-    if( creds != NULL ) {
-      creds->cap_effective.cap[0] |= 1 << CAP_NET_RAW;
-      orig_creds = override_creds(creds);
-    }
-  }
+  orig_creds = oo_cplane_empower_cap_net_raw(netns);
   rc = cicpplos_ctor(&new_cplane_inst->cppl);
-  if( orig_creds != NULL )
-    revert_creds(orig_creds);
+  oo_cplane_drop_cap_net_raw(orig_creds);
 
   if( rc != 0 ) {
     cp_destroy(new_cplane_inst);
@@ -1016,8 +1009,10 @@ cp_wait_interruptible(struct oo_cplane_handle* cp, cp_wait_check_fn check,
       return -ETIMEDOUT;
     else if( rc > 0 )
       return 0;
+    return rc;
   }
   /* unreachable */
+  ci_assert(0);
   return 0;
 }
 
@@ -1317,7 +1312,7 @@ static int cp_spawn_server(ci_uint32 flags)
   /* The maximum number of parameters that we'll stick on the end of the
    * command line, after building up the invariable and user-specified
    * arguments.  This includes the terminating NULL. */
-  const int DIRECT_PARAM_MAX = 4;
+  const int DIRECT_PARAM_MAX = 5;
 
   char* ns_file_path = NULL;
   char* path = cp_get_server_path();
@@ -1402,6 +1397,9 @@ static int cp_spawn_server(ci_uint32 flags)
   }
   if( flags & CP_SPAWN_SERVER_BOOTSTRAP )
     argv[direct_param_base + direct_param++] = "--"CPLANE_SERVER_BOOTSTRAP;
+#if !CI_CFG_IPV6
+  argv[direct_param_base + direct_param++] = "--"CPLANE_SERVER_NO_IPV6;
+#endif
   argv[direct_param_base + direct_param++] = NULL;
   ci_assert_le(direct_param, DIRECT_PARAM_MAX);
 
@@ -1529,7 +1527,16 @@ oo_cp_wait_for_server(struct oo_cplane_handle* cp, enum cp_sync_mode mode)
 
   if( cp->server_pid != NULL ) {
     /* Cplane server has been started, but it may be unusable yet.
-     * We probably need to re-sync it with OS depending on the mode.
+     * First of all, wait for full setup: */
+    if( ! cp_is_usable(cp) ) {
+      rc = cp_wait_interruptible(cp, cp_is_usable_hook, 0);
+      if( rc < 0 )
+        return rc;
+      if( mode == CP_SYNC_NONE )
+        return 0;
+    }
+
+    /* We probably need to re-sync it with OS depending on the mode.
      *
      * The server may disappear under our feet.  We'll misbehave but do not
      * crash in this case. */
@@ -1985,28 +1992,6 @@ int cplane_route_request_timeout_set(const char* val,
     return rc;
   cplane_route_request_timeout_proceed();
   return 0;
-}
-
-
-int oo_cp_print_rsop(ci_private_t *priv, void *arg)
-{
-  struct oo_cplane_handle* cp = cp_acquire_from_priv(priv);
-  int rc;
-
-  if( cp == NULL )
-    return -ENOMEM;
-
-  spin_lock_bh(&cp->cp_handle_lock);
-  /* Holding cp_handle_lock ensures that cp->server_pid is not going to be
-   * released under our feet.  Calling kill_pid() is safe in atomic context. */
-  if( cp->server_pid != NULL )
-    rc = kill_pid(cp->server_pid, CP_SERVER_PRINT_STATE_SIGNAL, 1);
-  else
-    rc = -ESRCH;
-  spin_unlock_bh(&cp->cp_handle_lock);
-
-  cp_release(cp);
-  return rc;
 }
 
 

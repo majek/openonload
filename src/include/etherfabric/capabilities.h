@@ -14,8 +14,7 @@
 */
 
 /****************************************************************************
- * Copyright 2002-2005: Level 5 Networks Inc.
- * Copyright 2005-2015: Solarflare Communications Inc,
+ * Copyright 2016-2018: Solarflare Communications Inc,
  *                      7505 Irvine Center Drive, Suite 100
  *                      Irvine, CA 92618, USA
  *
@@ -42,8 +41,8 @@
 *//*! \file
 ** \author    Solarflare Communications, Inc.
 ** \brief     Capabilities API for EtherFabric Virtual Interface HAL.
-** \date      2015/06/08
-** \copyright Copyright &copy; 2015 Solarflare Communications, Inc. All
+** \date      2018/11/06
+** \copyright Copyright &copy; 2018 Solarflare Communications, Inc. All
 **            rights reserved. Solarflare, OpenOnload and EnterpriseOnload
 **            are trademarks of Solarflare Communications, Inc.
 *//*
@@ -191,6 +190,12 @@ enum ef_vi_capability {
 
   /** Availability of CTPIO */
   EF_VI_CAP_CTPIO,
+
+  /** Size of TX alternatives common pool buffers **/
+  EF_VI_CAP_TX_ALTERNATIVES_CP_BUFFER_SIZE,
+
+  /** RX queue is configured to force event merging **/
+  EF_VI_CAP_RX_FORCE_EVENT_MERGING,
 
   /** Maximum value of capabilities enumeration */
   EF_VI_CAP_MAX, /* Keep this last */

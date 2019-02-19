@@ -32,7 +32,6 @@
 #include <linux/pci.h>
 #include <linux/spinlock.h>
 #include <linux/rtnetlink.h>
-#include <linux/bootmem.h>
 #include <linux/slab.h>
 #include <linux/cpumask.h>
 #include <asm/uaccess.h>
@@ -427,59 +426,6 @@ int efx_param_get_bool(char *buffer, struct kernel_param *kp)
 EXPORT_SYMBOL(efx_param_get_bool);
 
 #endif /* EFX_HAVE_PARAM_BOOL_INT */
-
-#ifdef EFX_NEED_PCI_VPD_LRDT
-int efx_pci_vpd_find_tag(const u8 *buf, unsigned int off, unsigned int len, u8 rdt)
-{
-	int i;
-
-	for (i = off; i < len; ) {
-		u8 val = buf[i];
-
-		if (val & PCI_VPD_LRDT) {
-			/* Don't return success of the tag isn't complete */
-			if (i + PCI_VPD_LRDT_TAG_SIZE > len)
-				break;
-
-			if (val == rdt)
-				return i;
-
-			i += PCI_VPD_LRDT_TAG_SIZE +
-			     pci_vpd_lrdt_size(&buf[i]);
-		} else {
-			u8 tag = val & ~PCI_VPD_SRDT_LEN_MASK;
-
-			if (tag == rdt)
-				return i;
-
-			if (tag == PCI_VPD_SRDT_END)
-				break;
-
-			i += PCI_VPD_SRDT_TAG_SIZE +
-			     pci_vpd_srdt_size(&buf[i]);
-		}
-	}
-
-	return -ENOENT;
-}
-
-int efx_pci_vpd_find_info_keyword(const u8 *buf, unsigned int off,
-			      unsigned int len, const char *kw)
-{
-	int i;
-
-	for (i = off; i + PCI_VPD_INFO_FLD_HDR_SIZE <= off + len;) {
-		if (buf[i + 0] == kw[0] &&
-		    buf[i + 1] == kw[1])
-			return i;
-
-		i += PCI_VPD_INFO_FLD_HDR_SIZE +
-		     pci_vpd_info_field_size(&buf[i]);
-	}
-
-	return -ENOENT;
-}
-#endif /* EFX_NEED_PCI_VPD_LRDT */
 
 #ifdef EFX_NEED_KOBJECT_SET_NAME_VARGS
 int efx_kobject_set_name_vargs(struct kobject *kobj, const char *fmt, va_list vargs)

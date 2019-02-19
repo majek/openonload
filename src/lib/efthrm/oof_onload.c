@@ -24,30 +24,29 @@
 #define skf_to_ep(skf)  CI_CONTAINER(tcp_helper_endpoint_t, oofilter, (skf))
 #define skf_to_ni(skf)  (&skf_to_ep(skf)->thr->netif)
 
-
-void oof_onload_on_cplane_ipadd(unsigned net_ip, ci_ifid_t ifindex,
+void oof_onload_on_cplane_ipadd(int af, ci_addr_t net_ip, ci_ifid_t ifindex,
                                 struct net* netns, void* arg)
 {
   struct oo_filter_ns* fns = oo_filter_ns_lookup(arg, netns);
 
-  ci_assert_nequal(net_ip, 0);
+  ci_assert(memcmp(&net_ip, &addr_any, sizeof(net_ip)));
 
   if( fns ) {
-    oof_manager_addr_add(fns->ofn_filter_manager, net_ip, ifindex);
+    oof_manager_addr_add(fns->ofn_filter_manager, af, net_ip, ifindex);
     oo_filter_ns_put(arg, fns);
   }
 }
 
 
-void oof_onload_on_cplane_ipdel(unsigned net_ip, ci_ifid_t ifindex,
+void oof_onload_on_cplane_ipdel(int af, ci_addr_t net_ip, ci_ifid_t ifindex,
                                 struct net* netns, void* arg)
 {
   struct oo_filter_ns* fns = oo_filter_ns_lookup(arg, netns);
 
-  ci_assert_nequal(net_ip, 0);
+  ci_assert(memcmp(&net_ip, &addr_any, sizeof(net_ip)));
 
   if( fns ) {
-    oof_manager_addr_del(fns->ofn_filter_manager, net_ip, ifindex);
+    oof_manager_addr_del(fns->ofn_filter_manager, af, net_ip, ifindex);
     oo_filter_ns_put(arg, fns);
   }
 }

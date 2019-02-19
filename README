@@ -18,18 +18,23 @@ Introduction
 Supported platforms
 ===================
 
- Linux kernels from 3.0.  ia32 and amd64/em64t processor architectures.
+ Linux kernels from 3.0.
 
- When using 64-bit kernels, both 32-bit and 64-bit applications are
- supported.  Onload no longer supports 32-bit kernels.
+ The following processor architectures are supported:
+ - amd64/em64t (support for AMD processors prior to Zen is deprecated)
+ - ia32 (in userspace for Onloaded applications only)
+ - aarch64 (to preview level)
 
  Onload supports Solarflare SFC9000 network controller chips,
  including the following network adapters:
-   X2522
-   SFN8041, SFN8042
+   X2541, X2542
+   X2522, X2522-25G
+   SFN8042
    SFN8522, SFN8522M, SFN8542, SFN8722
    SFN7142Q
    SFN7122F, SFN7322F, SFN7124F
+
+ Onload support for the following network adapters is deprecated:
    SFN5122F, SFN5322F
    SFN6122F, SFN6322F
    SFN5812H, SFN5814H
@@ -114,6 +119,6 @@ Any questions?
 
 
 ==========
- version: openonload-201805-u1
-revision: c5bb38d31f76 (ool1805-u1-hotfix) openonload-201805-u1
-    date: Wed Aug 22 10:44:04 BST 2018
+ version: openonload-201811
+revision: 7badc3bebbd7 (ool1811) openonload-201811
+    date: Mon Dec  3 10:33:48 GMT 2018

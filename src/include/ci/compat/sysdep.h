@@ -115,6 +115,9 @@
 # elif defined(__PPC__)
 #  include <ci/compat/ppc.h>
 #  include <ci/compat/gcc_ppc.h>
+# elif defined(__aarch64__)
+#  include <ci/compat/aarch64.h>
+#  include <ci/compat/gcc_aarch64.h>
 # elif defined(__mips__)
 #  include <ci/compat/mips.h>
 #  include <ci/compat/gcc_mips.h>
