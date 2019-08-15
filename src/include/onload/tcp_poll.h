@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -150,7 +150,7 @@ ci_udp_poll_events(ci_netif* ni, ci_udp_state* us)
       events |= POLLHUP;
   }
 
-  if( UDP_RX_DONE(us) | ci_udp_recv_q_not_empty(&us->recv_q) )
+  if( UDP_RX_ERRNO(us) | ci_udp_recv_q_not_empty(&us->recv_q) )
     events |= POLLIN | POLLRDNORM;
 
   if( us->s.os_sock_status & OO_OS_STATUS_RX )

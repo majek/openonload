@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -55,6 +55,10 @@ struct efx_mcdi_phy_data {
 	u8 index[MC_CMD_PHY_NSTATS];
 #endif
 };
+
+static int efx_mcdi_phy_diag_type(struct efx_nic *efx);
+static int efx_mcdi_phy_sff_8472_level(struct efx_nic *efx);
+static u32 efx_mcdi_phy_module_type(struct efx_nic *efx);
 
 #ifdef CONFIG_SFC_DEBUGFS
 
@@ -1383,6 +1387,7 @@ static const char *efx_mcdi_phy_test_name(struct efx_nic *efx,
 #define SFP_PAGE_SIZE		128
 #define SFF_DIAG_TYPE_OFFSET	92
 #define SFF_DIAG_ADDR_CHANGE	(1 << 2)
+#define SFF_DIAG_IMPLEMENTED	(1 << 6)
 #define SFF_8079_NUM_PAGES	2
 #define SFF_8472_NUM_PAGES	4
 #define SFF_8436_NUM_PAGES	5
@@ -1426,8 +1431,21 @@ static int efx_mcdi_phy_get_module_eeprom_page(struct efx_nic *efx,
 		return rc;
 
 	if (outlen < (MC_CMD_GET_PHY_MEDIA_INFO_OUT_DATA_OFST +
-			SFP_PAGE_SIZE))
+			SFP_PAGE_SIZE)) {
+		/* There are SFP+ modules that claim to be SFF-8472 compliant
+		 * and do not provide diagnostic information, but they don't
+		 * return all bits 0 as the spec says they should... */
+		if (page >= 2 && page < 4 &&
+		    efx_mcdi_phy_module_type(efx) == MC_CMD_MEDIA_SFP_PLUS &&
+		    efx_mcdi_phy_sff_8472_level(efx) > 0 &&
+		    (efx_mcdi_phy_diag_type(efx) & SFF_DIAG_IMPLEMENTED) == 0) {
+			memset(data, 0, to_copy);
+
+			return to_copy;
+		}
+
 		return -EIO;
+	}
 
 	payload_len = MCDI_DWORD(outbuf, GET_PHY_MEDIA_INFO_OUT_DATALEN);
 	if (payload_len != SFP_PAGE_SIZE)
@@ -1831,13 +1849,8 @@ static int efx_mcdi_mac_stats(struct efx_nic *efx,
 	else if (action == EFX_STATS_DISABLE)
 		efx->stats_enabled = false;
 
-	if (action == EFX_STATS_PULL) {
-		dma = 0;
-		change = 0;
-	} else {
-		change = 1;
-		dma = efx->stats_enabled;
-	}
+	dma = action == EFX_STATS_PULL || efx->stats_enabled;
+	change = action != EFX_STATS_PULL;
 
 	dma_len = dma ? efx->num_mac_stats * sizeof(u64) : 0;
 
@@ -1885,21 +1898,22 @@ void efx_mcdi_mac_update_stats_period(struct efx_nic *efx)
 	efx_mcdi_mac_stats(efx, EFX_STATS_PERIOD, 0);
 }
 
-#define EFX_MAC_STATS_WAIT_US 100
-#define EFX_MAC_STATS_WAIT_ATTEMPTS 10
+#define EFX_MAC_STATS_WAIT_MS 1000
 
 void efx_mcdi_mac_pull_stats(struct efx_nic *efx)
 {
 	__le64 *dma_stats = efx->stats_buffer.addr;
-	int attempts = EFX_MAC_STATS_WAIT_ATTEMPTS;
+	unsigned long end;
 
 	dma_stats[efx->num_mac_stats - 1] = EFX_MC_STATS_GENERATION_INVALID;
 	efx_mcdi_mac_stats(efx, EFX_STATS_PULL, 0);
 
-	while (dma_stats[efx->num_mac_stats - 1] ==
-				EFX_MC_STATS_GENERATION_INVALID &&
-			attempts-- != 0)
-		udelay(EFX_MAC_STATS_WAIT_US);
+	end = jiffies + msecs_to_jiffies(EFX_MAC_STATS_WAIT_MS);
+
+	while (READ_ONCE(dma_stats[efx->num_mac_stats - 1]) ==
+			EFX_MC_STATS_GENERATION_INVALID &&
+	       time_before(jiffies, end))
+		usleep_range(100, 1000);
 }
 
 int efx_mcdi_port_probe(struct efx_nic *efx)
@@ -1922,22 +1936,39 @@ int efx_mcdi_port_probe(struct efx_nic *efx)
 	/* Allocate buffer for stats */
 	rc = efx_nic_alloc_buffer(efx, &efx->stats_buffer,
 				  efx->num_mac_stats * sizeof(u64), GFP_KERNEL);
-	if (rc)
-		return rc;
+	if (rc) {
+		netif_warn(efx, probe, efx->net_dev,
+			   "failed to allocate DMA buffer: %d\n", rc);
+		goto fail;
+	}
+
+	efx->mc_initial_stats =
+		kcalloc(efx->num_mac_stats, sizeof(u64), GFP_KERNEL);
+	if (!efx->mc_initial_stats) {
+		netif_warn(efx, probe, efx->net_dev,
+			   "failed to allocate initial MC stats buffer\n");
+		rc = -ENOMEM;
+		goto fail;
+	}
+
 	netif_dbg(efx, probe, efx->net_dev,
 		  "stats buffer at %llx (virt %p phys %llx)\n",
 		  (u64)efx->stats_buffer.dma_addr,
 		  efx->stats_buffer.addr,
 		  (u64)virt_to_phys(efx->stats_buffer.addr));
 
-	efx_mcdi_mac_stats(efx, EFX_STATS_DISABLE, 1);
-
 	return 0;
+
+fail:
+	efx_mcdi_port_remove(efx);
+	return rc;
 }
 
 void efx_mcdi_port_remove(struct efx_nic *efx)
 {
 	efx->phy_op->remove(efx);
+	kfree(efx->mc_initial_stats);
+	efx->mc_initial_stats = NULL;
 	efx_nic_free_buffer(efx, &efx->stats_buffer);
 }
 

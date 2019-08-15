@@ -1,3 +1,69 @@
+openonload-201811-u1
+--------------------
+
+Update sfc net driver to v4.15.3.1011
+
+Allow cplane_server to be run by non-root users
+Improve Onload UDP latency for blocking receives
+
+Support recent Linux kernel versions (up to 5.0)
+Support recent Linux distributions (RHEL 8.0, Ubuntu 19.04)
+
+Deprecate RHEL 6.7 and RHEL 7.3
+Deprecate Ubuntu 18.10
+
+SF-121200-KI/bug85104: Failure of SolarCapture with RSS and ef_vi RSS vport filters
+SF-121410-KI/bug84071: Control plane reports 'Integrity failure' after no active slaves seen in active-backup bond
+SF-121416-KI/bug84181: Failover of TCPDirect active-backup bond does not occur
+SF-122145-KI/bug85169: Onload sends multicast traffic via gateway instead of to multicast Ethernet address
+SF-122146-KI/bug85261: Possible crash in cplane when many routes or rules added
+SF-122147-KI/bug86244: Onload may accelerate connections on bonds with blacklisted slaves
+SF-122448-KI/bug88066: Memory leak in Onload control plane server
+
+bug45205: use errno EMFILE when exceeding EF_MAX_ENDPOINTS on socket/pipe alloc
+bug56725: fix possible hang waiting for packet buffers
+bug76743: fix list corruption in scalable passive mode with stack sharing/multi-threading
+bug78598: fix handling of IPv6 sockets in Onload extensions API and JNI interface
+bug79971: improve TCP timer handling performance further
+bug80732: handle home stack being set during onload_ordered_epoll_wait()
+bug81680: fix incorrect ARP update in fwd table resulting in rare non-acceleration
+bug83143: preallocate RSS transparent active & shared ephemeral ports, avoiding warning
+bug83515: fix incorrect populating of msg_controllen in recvmsg
+bug83524: handle case where NIC is not ready for application key checking.
+bug83712: improve filtering to remove an undocumented limit on local addresses
+bug83740: fix handover with setsockopt(SOL_IPV6)
+bug83795: fix assertion on passive accept with EF_FORCE_TCP_NODELAY=1
+bug83856: print all defined socket flags in onload_stackdump
+bug83989: fix libc analysis on systems with $TMP mounted noexec and where libc < 2.10
+bug84055: fix sending via OS on RT kernels, avoiding deadlock
+bug84105: fix TCPDirect to link with librt explicitly (required for RHEL6)
+bug84225: fix event count when rolling back attempt to receive TCP packet ahead of event
+bug84311: fix setsockopt(SO_BINDTODEVICE) for TCP listening sockets with non-SFC interfaces
+bug84786: fix check for stacks in onload_tool, avoiding killing cp_server when stacks present
+bug84808: avoid potential socket leak on failure to expand active wild pool
+bug84907: don't send RST when closing a TIME-WAIT socket with SO_LINGER=0
+bug84926: fix compatibility for get_user_pages() change in Linux 4.4.(>=168)
+bug85121: avoid relying on bash extensions in Onload profiles
+bug85406: fix incorrect reporting of signal number in core dump on RHEL6
+bug85453: cplane: avoid walking past the end of the interfaces table when full
+bug85545: fix potential spurious events when changing home stack (EF_UL_EPOLL=3)
+bug85753: TCPDirect: correct handling of incoming SYN with a bad src address
+bug85904: reinstate use of weak-modules script
+bug85909: fix occasional failure to start control plane server on boot
+bug85967: TCPDirect: fail graciously when SYN-ACK needs unavailable interface
+bug86225: avoid getpid() syscall in endpoint caching
+bug86242: fix pacing of last CTPIO block, reducing failure rate
+bug86489: pass IP-fragmented packets to kernel
+bug86499: ensure zft_pkt_report->start is reported correctly for accepted zockets
+bug86637: avoid special handling of zero checksum for TCP sockets
+bug86839: fix cp_server logging to use the correct PID
+bug87055: TCPDirect: fix handling of stack names at maximum length (20 characters)
+bug87117: fix occasional tv_nsec value of 1000000000 in software timestamps
+bug87126: avoid rare misroute/latency spike in short window after route/rule/src-addr change
+bug87556: take PCIe domain into account when checking for NIC match
+bug87563: rate limit messages when cplane can't find LLAP entry
+
+
 openonload-201811
 -----------------
 
@@ -852,7 +918,7 @@ bug54657: ensure interrupts are primed before dropping into kernel for epoll_wai
 bug54708: wire-order delivery: handle stacks which have not received anything
 bug54793: correctly accelerate IP interfaces with /31 netmask
 bug54924: return useful error from ef_pio_alloc when hw or module incapable
-bug54968: correctly handle SO_RCVTIMEO with 0 value (was affecting SO_SNDTIMEO).	
+bug54968: correctly handle SO_RCVTIMEO with 0 value (was affecting SO_SNDTIMEO).
 bug54920: fix send buffer size checks when MSG_SENDPAGE_NOTLAST is set
 bug54891: return POLLERR if TX timestamp queue is non-empty
 bug55166: fix case where datagram sending via system write() is interrupted by signal

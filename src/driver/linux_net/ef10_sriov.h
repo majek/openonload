@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -109,7 +109,5 @@ int efx_ef10_evb_port_assign(struct efx_nic *efx, unsigned int port_id,
 			     unsigned int vf_fn);
 int efx_ef10_vport_add_mac(struct efx_nic *efx, unsigned int port_id, u8 *mac);
 int efx_ef10_vport_del_mac(struct efx_nic *efx, unsigned int port_id, u8 *mac);
-int efx_ef10_vport_get_stats(struct efx_nic *efx, unsigned int vport_id,
-			     u64 *stats, spinlock_t *lock);
 
 #endif /* EF10_SRIOV_H */

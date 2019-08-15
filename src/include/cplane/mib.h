@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -417,8 +417,6 @@ struct cp_tables_dim {
   ci_uint8 fwd_ln2;
   cicp_mac_rowid_t fwd_mask; /* 2^fwd_ln2 - 1 */
 
-  /* RT signal used to notify about new route requests */
-  ci_int32 fwd_req_sig;
   /* RT signal used to notify about new oof instances */
   ci_int32 oof_req_sig;
   /* signal used to notify about update of main cp server */
@@ -430,7 +428,7 @@ struct cp_tables_dim {
   ci_uint32 server_pid;
 
 #ifdef CP_SYSUNIT
-  ci_uint16 sub_server_pid;
+  ci_uint32 sub_server_pid;
 #endif
 };
 

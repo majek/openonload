@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -76,6 +76,8 @@
 #include <onload/atomics.h>
 #include <onload/drv/dump_to_user.h>
 #include <onload/hash.h>
+#include <ci/internal/ni_dllist.h>
+#include <ci/internal/iptimer.h>
 #endif
 
 #if CI_CFG_TIMESTAMPING
@@ -141,108 +143,6 @@ extern const char* oo_uk_intf_ver;
 # define CHECK_TEP_NNL(ep)
 
 #endif
-
-
-/*********************************************************************
-*********************** Indirected linked lists **********************
-*********************************************************************/
-
-/* Get pointer from an address in the ci_netif_state address space. */
-
-
-# define ci_ni_dllist_iter(ni, l)           \
-            ((l) = (ci_ni_dllist_link*) CI_NETIF_PTR(ni, (l)->next))
-# define ci_ni_dllist_backiter(ni, l)       \
-            ((l) = (ci_ni_dllist_link*) CI_NETIF_PTR(ni, (l)->prev))
-
-
-/*! \TODO Move these into their own header. */
-
-#define CI_ILL_UNUSED           -2
-#define CI_ILL_END              -1
-
-#define _ci_ill_assert_valid(i, file, line) \
-        _ci_assert_ge((int)(i), CI_ILL_END, (file), (line))
-
-/* A singly linked list. */
-#define ci_ill_assert_valid(i)  _ci_ill_assert_valid((i), __FILE__, __LINE__)
-#define ci_ill_is_empty(i)      ((i) == CI_ILL_END)
-#define ci_ill_not_empty(i)     ((i) != CI_ILL_END)
-
-/* A singly linked list with tail pointer. */
-#define ci_ill2_assert_valid(h,t)  do{                  \
-  ci_assert((h) >= CI_ILL_END);                         \
-  ci_assert((h) == CI_ILL_END || (t) >= CI_ILL_END);    \
-  }while(0)
-
-/* A double linked list. */
-#define ci_idll_assert_valid(h,t)  do{                  \
-  ci_assert((h) >= CI_ILL_END);                         \
-  ci_assert((t) >= CI_ILL_END);                         \
-  ci_assert((h) != CI_ILL_END || (t) == CI_ILL_END);    \
-  ci_assert((h) == CI_ILL_END || (t) != CI_ILL_END);    \
-  }while(0)
-
-
-extern void ci_ip_queue_drop(ci_netif*, ci_ip_pkt_queue*) CI_HF;
-
-
-/*********************************************************************
-********************** Timers and management *************************
-*********************************************************************/
-
-#define TIME_LT(x, y)  ((ci_int32)((x)-(y)) <  0)
-#define TIME_LE(x, y)  ((ci_int32)((x)-(y)) <= 0)
-#define TIME_GT(x, y)  ((ci_int32)((x)-(y)) >  0)
-#define TIME_GE(x, y)  ((ci_int32)((x)-(y)) >= 0)
-
-
-/* debugging hook called if CI_IP_TIMER_DEBUG_HOOK set */
-typedef void (*ci_ip_timer_debug_fn_t)(ci_netif*, int, int);
-extern ci_ip_timer_debug_fn_t ci_ip_timer_debug_fn;
-
-/*! Set a non-pending ip timer
-**  \param netif  A pointer to the netif for this timer
-**  \param ts     A pointer to the timer structure
-**  \param t      The time at which the timer should fire in ticks
-*/
-extern void __ci_ip_timer_set(ci_netif*, ci_ip_timer* ts, ci_iptime_t t) CI_HF;
-
-#define ci_ip_timer_set(ni, ts, t)  do{			\
-    ci_assert(! ci_ip_timer_pending((ni), (ts)));	\
-    __ci_ip_timer_set((ni), (ts), (t));			\
-  }while(0)
-
-/*! Modify a pending timer 
-**  \param netif  A pointer to the netif for this timer
-**  \param ts     A pointer to the timer structure
-**  \param t      The time at which the timer should now fire in ticks
-*/
-#define ci_ip_timer_modify(ni, ts, t)  do{	\
-    ci_ni_dllist_remove((ni), &(ts)->link);	\
-    __ci_ip_timer_set((ni), (ts), (t));		\
-  }while(0)
-
-/*! Poll the ip timer scheduler to run the timer wheel and fire any
-**  expiring timers.
-**  \param netif  A pointer to the netif structure
-*/
-extern void ci_ip_timer_poll(ci_netif* netif) CI_HF;
-
-/*! Initialise the ip timer management structure shared state in netif,
-**  includes calibration and wheel setup.
-**  \param netif  A pointer to the netif to initialise
-**  \param cpu_khz CPU speed in kHz
-*/
-extern void ci_ip_timer_state_init(ci_netif* netif, unsigned cpu_khz) CI_HF;
-
-/*! Dump out state of timers
-**  \param netif  A pointer to the netif to initialise
-*/
-extern void ci_ip_timer_state_dump(ci_netif* ni) CI_HF;
-
-CI_DEBUG(extern void ci_ip_timer_state_assert_valid(ci_netif*,
-                                                    const char*, int) CI_HF;)
 
 
 /*********************************************************************
@@ -428,8 +328,6 @@ typedef struct {
 #else
 # define NI_PKT_SET(ni) ((ni)->packets->id)
 #endif
-
-#define IPTIMER_STATE(ni) (&(ni)->state->iptimer_state)
 
 
 extern void ci_netif_config_opts_rangecheck(ci_netif_config_opts* opts) CI_HF;
@@ -792,7 +690,6 @@ extern int __ci_icmp_send_error(ci_netif* ni, ci_ip4_hdr* rx_ip,
 #define udp_ip6_raddr(us)       (sock_ip6_raddr(&us->s))
 #endif
 
-#define UDP_RX_DONE(us)         (SOCK_RX_ERRNO(&(us)->s) & ~CI_SHUT_WR)
 #define UDP_TX_ERRNO(us)        (SOCK_TX_ERRNO(&(us)->s))
 #define UDP_RX_ERRNO(us)	(SOCK_RX_ERRNO(&(us)->s))
 #define UDP_IS_SHUT_RD(us)      ((us)->s.rx_errno & CI_SHUT_RD)
@@ -1284,8 +1181,8 @@ extern int ci_pipe_list_to_iovec(ci_netif* ni, struct oo_pipe* p,
 #endif
 
 extern ci_tcp_state* ci_tcp_get_state_buf(ci_netif*) CI_HF;
-#ifndef __KERNEL__
-extern ci_tcp_state* ci_tcp_get_state_buf_from_cache(ci_netif*) CI_HF;
+#if ! defined(__KERNEL__) && CI_CFG_FD_CACHING
+extern ci_tcp_state* ci_tcp_get_state_buf_from_cache(ci_netif*, int pid) CI_HF;
 #endif
 extern ci_udp_state* ci_udp_get_state_buf(ci_netif*) CI_HF;
 extern void ci_tcp_state_init(ci_netif* netif, ci_tcp_state* ts,
@@ -2472,15 +2369,15 @@ ci_inline int ci_netif_has_many_events(ci_netif* ni, int lookahead) {
  * This must not match the first four bytes of the packet. Anything that does
  * not match our OUI or multicast addresses will do. If we add support for
  * third-party NICs, we may want a per-NIC poison value to ensure a mismatch.
- * If we add support for detecting subsequent cache
- * lines, there will be the possibility of deciding falsely that a packet is
- * still poisonous when in fact it is not, but there is very little that we can
- * do about that. It would not cause a functional problem in any case.
+ * If we add support for detecting subsequent cache lines, or if packet prefixes
+ * are enabled, there will be the possibility of deciding falsely that a packet
+ * is still poisonous when in fact it is not, but there is very little that we
+ * can do about that. It would not cause a functional problem in any case.
  */
 #define CI_PKT_RX_POISON 0xFEA0C09Cu
 ci_inline volatile uint32_t* ci_netif_poison_location(ci_ip_pkt_fmt* pkt)
 {
-  return (volatile uint32_t*)oo_ether_hdr(pkt);
+  return (volatile uint32_t*)pkt->dma_start;
 }
 ci_inline void ci_netif_poison_rx_pkt(ci_ip_pkt_fmt* pkt)
 {
@@ -2517,6 +2414,33 @@ ci_inline int ci_netif_intf_has_rx_future(ci_netif* ni, int intf_i)
 {
   ci_ip_pkt_fmt* pkt = ci_netif_intf_next_rx_pkt(ni, intf_i);
   return pkt && ! ci_netif_rx_pkt_is_poisoned(pkt);
+}
+
+
+/* Returns the location of the poison value in the next RX packet buffer for
+ * an interface, if the interface is configured to poll the future. Otherwise,
+ * or if the RX queue is empty, returns the provided pointer to a fixed
+ * poison value. This should be located on the stack close to other state
+ * accessed while polling, to minimise cache churn.
+ */
+ci_inline const volatile uint32_t*
+ci_netif_intf_rx_future(ci_netif* ni, int intf_i, const uint32_t* poison)
+{
+  ci_ip_pkt_fmt* pkt;
+  ci_uint8* p;
+
+  ci_assert(*poison == CI_PKT_RX_POISON);
+
+  if( ! ci_netif_intf_may_poll_future(ni, intf_i) )
+    return poison;
+
+  pkt = ci_netif_intf_next_rx_pkt(ni, intf_i);
+
+  /* FIXME: colocate all the fields used by the rx path to reduce cache usage */
+  for( p = (ci_uint8*)pkt; p < pkt->dma_start; p += CI_CACHE_LINE_SIZE )
+    ci_prefetch(p);
+
+  return pkt ? ci_netif_poison_location(pkt) : poison;
 }
 
 
@@ -2575,63 +2499,6 @@ ci_inline int ci_netif_should_allocate_tcp_shared_local_ports(ci_netif* ni)
     NI_OPTS(ni).scalable_filter_enable != CITP_SCALABLE_FILTERS_ENABLE_WORKER;
 }
 
-/*********************************************************************
-*********************** Indirected linked lists **********************
-*********************************************************************/
-
-/* Get the code for the linked lists. */
-#define CI_MK_ID(x)             ci_ni_dllist##x
-#define CI_ILL_PTR(ctx, a)      ((ci_ni_dllist_link*) CI_NETIF_PTR((ctx), (a)))
-#define CI_ILL_ADDR_EQ(a, b)    OO_P_EQ((a), (b))
-#define CI_ILL_ADDR_T           oo_p
-#define CI_ILL_ADDR_NULL        OO_P_NULL
-#define CI_ILL_CTX_T            ci_netif*
-#if CI_CFG_OOP_IS_PTR
-# define CI_ILL_ADDR(ctx,lnk)	((oo_p) (lnk))
-# define CI_ILL_CAS(p,old,new)  ci_cas_uintptr_succeed( \
-                                            (volatile ci_uintptr_t*) (p), \
-                                            (ci_uintptr_t) (old), \
-                                            (ci_uintptr_t) (new))
-# define CI_ILL_XCHG(p,new)     ((oo_p) ci_xchg_uintptr( \
-                                            (volatile ci_uintptr_t*) (p), \
-                                            (ci_uintptr_t) (new)))
-#else
-# define CI_ILL_CAS(p,old,new)  ci_cas32u_succeed((volatile ci_uint32*) (p), \
-                                                  (ci_uint32) (old), \
-                                                  (ci_uint32) (new))
-# define CI_ILL_XCHG(p,new)     ((oo_p) ci_xchg32((volatile ci_uint32*) (p), \
-                                                  (ci_uint32) (new)))
-#endif
-#define CI_ILL_NO_TYPES
-#include <ci/tools/idllist.h.tmpl>
-
-
-/*! Debug function to see if the list link behind the timer is valid */
-ci_inline int ci_ip_timer_is_link_valid(ci_netif* ni, ci_ip_timer* ts)
-{ return ci_ni_dllist_is_valid(ni, &ts->link); }
-
-/*! Clear a timer (whether or not its pending).
-**  \param netif  A pointer to the netif for this timer
-**  \param ts     A pointer to the timer structure
-*/
-ci_inline void ci_ip_timer_clear(ci_netif* netif, ci_ip_timer* ts)
-{ ci_ni_dllist_remove_safe(netif, &ts->link); }
-
-/*! Check if a timer is pending 
-**  \param ts     A pointer to the ip timer structure to check 
-**  \return       0 if not pending, 1 if pending
-*/
-ci_inline int ci_ip_timer_pending(ci_netif* netif, ci_ip_timer* ts)
-{ return ! ci_ni_dllist_is_self_linked(netif, &ts->link); }
-
-/*! Initialise a new timer. */
-ci_inline void ci_ip_timer_init(ci_netif* netif, ci_ip_timer* t,
-                                oo_p t_sp, const char* name) {
-  OO_P_ADD(t_sp, CI_MEMBER_OFFSET(ci_ip_timer, link));
-  ci_assert(CI_NETIF_PTR(netif, t_sp) == (char*) &t->link);
-  ci_ni_dllist_link_init(netif, &t->link, t_sp, name);
-  ci_ni_dllist_self_link(netif, &t->link);
-}
 
 
 /*********************************************************************
@@ -2961,6 +2828,9 @@ ci_tcp_rx_buf_adjust(ci_netif* netif, ci_tcp_state* ts, ci_ip_pkt_queue* q, int 
   netif->state->reserved_pktbufs += n - m;
   ci_assert(ci_netif_is_locked(netif));
 }
+
+
+extern void ci_ip_queue_drop(ci_netif*, ci_ip_pkt_queue*) CI_HF;
 
 ci_inline void
 ci_tcp_rx_queue_drop(ci_netif* ni, ci_tcp_state* ts, ci_ip_pkt_queue* q)
@@ -4559,7 +4429,7 @@ ci_addr_to_user(struct sockaddr *sa, socklen_t *sa_len,
       return;
     }
 
-    memset(&ss_u.sa, 0, len_min);
+    memset(&ss_u, 0, len_min);
 #if CI_CFG_FAKE_IPV6
     if (domain_out == AF_INET)
       ci_make_sockaddr_from_ip4(&ss_u.sin, port_be16, *addr_be32_p);

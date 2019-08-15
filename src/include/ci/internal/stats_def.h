@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -783,19 +783,19 @@ OO_STAT("The last errno value in use when tcp_connect_eother counter "
 
 OO_STAT("Number of times that an active-open connection has used an initial "
         "sequence number from the table of remembered sequence numbers.",
-        ci_uint32, tcp_seq_table_hits, val)
+        ci_uint32, tcp_seq_table_hits, count)
 OO_STAT("Number of insertions made to sequence number table.",
-        ci_uint32, tcp_seq_table_insertions, val)
+        ci_uint32, tcp_seq_table_insertions, count)
 OO_STAT("Number of sequence-table entries expired by ISN clock.",
-        ci_uint32, tcp_seq_table_expiries, val)
+        ci_uint32, tcp_seq_table_expiries, count)
 OO_STAT("Number of sequence-table entries purged as oldest in set.",
-        ci_uint32, tcp_seq_table_purgations, val)
+        ci_uint32, tcp_seq_table_purgations, count)
 OO_STAT("Number of all steps made across entries in all insertions.",
-        ci_uint32, tcp_seq_table_steps, val)
+        ci_uint32, tcp_seq_table_steps, count)
 OO_STAT("Number of insertions with short expiry.",
-        ci_uint32, tcp_seq_table_short_expiry, val)
+        ci_uint32, tcp_seq_table_short_expiry, count)
 OO_STAT("Number of times there was no need to create entry.",
-        ci_uint32, tcp_seq_table_avoided, val)
+        ci_uint32, tcp_seq_table_avoided, count)
 
 OO_STAT("Number of times the urgent flag was ignored in received packets",
         ci_uint32, tcp_urgent_ignore_rx, count)

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -2691,7 +2691,9 @@ OO_INTERCEPT(long, syscall,
     NR(bind)
     NR(listen)
     NR(accept)
+#if CI_LIBC_HAS_accept4
     NR(accept4)
+#endif
     NR(connect)
     NR(shutdown)
     NR(getsockname)
@@ -2714,8 +2716,12 @@ OO_INTERCEPT(long, syscall,
 #endif
     NR(select)
     NR(poll)
+#if CI_LIBC_HAS_ppoll
     NR(ppoll)
+#endif
+#if CI_LIBC_HAS_splice
     NR(splice)
+#endif
     NR(read)
     NR(write)
     NR(readv)
@@ -2725,13 +2731,17 @@ OO_INTERCEPT(long, syscall,
     NR(ioctl)
     NR(dup)
     NR(dup2)
+#if CI_LIBC_HAS_dup3
     NR(dup3)
+#endif
     NR(vfork)
     NR(open)
     NR(creat)
     NR(socketpair)
     NR(pipe)
+#if CI_LIBC_HAS_pipe2
     NR(pipe2)
+#endif
     NR(setuid)
     NR(chroot)
     NR(execve)
@@ -2739,7 +2749,9 @@ OO_INTERCEPT(long, syscall,
     NR(epoll_create1)
     NR(epoll_ctl)
     NR(epoll_wait)
+#if CI_LIBC_HAS_epoll_pwait
     NR(epoll_pwait)
+#endif
     /* When adding new syscalls here, make sure to check that the libc API
     matches the kernel API. It does for almost everything (on x86-64) but
     there are a few exceptions.  */

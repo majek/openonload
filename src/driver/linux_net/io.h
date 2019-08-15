@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -178,7 +178,15 @@ static inline void efx_writeo(struct efx_nic *efx, const efx_oword_t *value,
 	_efx_writed(efx, value->u32[2], reg + 8);
 	_efx_writed(efx, value->u32[3], reg + 12);
 #endif
+#if defined(EFX_USE_KCOMPAT) && defined(EFX_HAVE_MMIOWB)
+	/* Kernels from 5.2 onwards no longer have mmiowb(), because it is now
+	 * implied by spin_unlock() on architectures that require it.  Hence we
+	 * can simply ifdef it out for kernels where it doesn't exist.  We do
+	 * this, rather than defining it to empty in kernel_compat.h, to make
+	 * the unifdef'd driver match upstream.
+	 */
 	mmiowb();
+#endif
 	spin_unlock_irqrestore(&efx->biu_lock, flags);
 }
 
@@ -200,7 +208,9 @@ static inline void efx_sram_writeq(struct efx_nic *efx, void __iomem *membase,
 	__raw_writel((__force u32)value->u32[0], membase + addr);
 	__raw_writel((__force u32)value->u32[1], membase + addr + 4);
 #endif
+#if defined(EFX_USE_KCOMPAT) && defined(EFX_HAVE_MMIOWB)
 	mmiowb();
+#endif
 	spin_unlock_irqrestore(&efx->biu_lock, flags);
 }
 

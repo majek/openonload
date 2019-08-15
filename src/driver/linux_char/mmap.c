@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -278,10 +278,6 @@ static struct page* vm_op_nopage(struct vm_area_struct* vma,
         get_page(pg);
 #endif
 
-#ifdef EFRM_VMA_HAS_NOPAGE
-      if( type )  *type = VM_FAULT_MINOR;
-#endif
-
       EFCH_TRACE("%s: "EFRM_RESOURCE_FMT" vma=%p sz=%lx pageoff=%lx id=%d "
                  "pfn=%x", __FUNCTION__, EFRM_RESOURCE_PRI_ARG(rs),
                  vma, vma->vm_end - vma->vm_start,
@@ -304,13 +300,20 @@ static struct page* vm_op_nopage(struct vm_area_struct* vma,
 }
 
 
-#ifndef EFRM_VMA_HAS_NOPAGE
-static int vm_op_fault(
-#ifndef EFRM_HAVE_NEW_FAULT
+/* The fault callback has different prototypes in different linux versions:
+ * - linux<=4.10: 2 arguments (EFRM_HAVE_OLD_FAULT);
+ * - 4.11<=linux<=5.0: 1 argument, returns int;
+ * - 4.17<=linux<=5.1: 1 argument, returns vm_fault_t
+ *                    (EFRM_HAVE_NEW_FAULT).
+ * For some versions vm_fault_t is int, so the last 2 lines have some
+ * common numbers.
+ */
+static vm_fault_t vm_op_fault(
+#ifdef EFRM_HAVE_OLD_FAULT
                        struct vm_area_struct *vma, 
 #endif
                        struct vm_fault *vmf) {
-#ifdef EFRM_HAVE_NEW_FAULT
+#ifndef EFRM_HAVE_OLD_FAULT
   struct vm_area_struct *vma = vmf->vma;
 #endif
   struct page* ret;
@@ -319,16 +322,11 @@ static int vm_op_fault(
   vmf->page = ret;
   return (ret==NOPAGE_SIGBUS) ? VM_FAULT_SIGBUS : 0; 
 }
-#endif
 
 static struct vm_operations_struct vm_ops = {
   .open  = vm_op_open,
   .close = vm_op_close,
-#ifdef EFRM_VMA_HAS_NOPAGE
-  .nopage = vm_op_nopage
-#else
   .fault = vm_op_fault
-#endif
 };
 
 

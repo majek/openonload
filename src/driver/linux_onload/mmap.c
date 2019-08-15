@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -291,10 +291,6 @@ __vm_op_nopage(tcp_helper_resource_t* trs, struct vm_area_struct* vma,
   pg = pfn_to_page(pfn);
   get_page(pg);
 
-#ifdef EFRM_VMA_HAS_NOPAGE
-  if( type )  *type = VM_FAULT_MINOR;
-#endif
-
   OO_DEBUG_TRAMP(ci_log("%s: %u vma=%p sz=%lx pageoff=%lx id=%d pfn=%lx",
                  __FUNCTION__, trs->id, vma, vma->vm_end - vma->vm_start,
                  (address - vma->vm_start) >> CI_PAGE_SHIFT,
@@ -335,13 +331,12 @@ static struct page* vm_op_nopage(struct vm_area_struct* vma,
   return NOPAGE_SIGBUS;
 }
 
-#ifndef EFRM_VMA_HAS_NOPAGE
-static int vm_op_fault(
-#ifndef EFRM_HAVE_NEW_FAULT
+static vm_fault_t vm_op_fault(
+#ifdef EFRM_HAVE_OLD_FAULT
                        struct vm_area_struct *vma,
 #endif
                        struct vm_fault *vmf) {
-#ifdef EFRM_HAVE_NEW_FAULT
+#ifndef EFRM_HAVE_OLD_FAULT
   struct vm_area_struct *vma = vmf->vma;
 #endif
   struct page* page;
@@ -351,17 +346,12 @@ static int vm_op_fault(
 
   return ( page == NULL ) ? VM_FAULT_SIGBUS : 0; 
 }
-#endif
 
 
 static struct vm_operations_struct vm_ops = {
   .open  = vm_op_open,
   .close = vm_op_close,
-#ifdef EFRM_VMA_HAS_NOPAGE
-  .nopage = vm_op_nopage,
-#else
   .fault = vm_op_fault,
-#endif
 };
 
 
@@ -432,7 +422,7 @@ oo_fop_mmap(struct file* file, struct vm_area_struct* vma)
   case OO_MMAP_TYPE_NETIF:
     return oo_stack_mmap(priv, vma);
   case OO_MMAP_TYPE_CPLANE:
-    return oo_cplane_mmap(priv, vma);
+    return oo_cplane_mmap(file, vma);
 #ifdef OO_MMAP_TYPE_DSHM
   case OO_MMAP_TYPE_DSHM:
     return oo_dshm_mmap_impl(vma);

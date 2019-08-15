@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -690,20 +690,24 @@ JNIEXPORT jint JNICALL
 Java_OnloadExt_UnicastNonaccel_1 (JNIEnv* env, jclass cls, jobject fd)
 {
   jint fd_val = GetFdFromUnknown( env, fd );
-  int new_sock =
-      onload_socket_unicast_nonaccel(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
   int rc;
-  struct sockaddr addr;
+  struct sockaddr_storage addr;
   socklen_t addrlen = sizeof(addr);
-  if( new_sock < 0 )
-    return -errno;
-  rc = getsockname(fd_val, &addr, &addrlen);
+
+  rc = getsockname(fd_val, (struct sockaddr*)&addr, &addrlen);
   if( rc < 0 )
+    return -errno;
+  if( addrlen > sizeof(addr) )
+    return -EAFNOSUPPORT;
+
+  int new_sock =
+      onload_socket_unicast_nonaccel(addr.ss_family, SOCK_DGRAM, IPPROTO_UDP);
+  if( new_sock < 0 )
     return -errno;
 
   rc = dup2(new_sock, fd_val);
   if( rc >= 0 )
-    rc = bind(new_sock, &addr, sizeof(addr));
+    rc = bind(new_sock, (struct sockaddr*)&addr, addrlen);
   close(new_sock);
   return rc < 0 ? -errno : 0;
 }

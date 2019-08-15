@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -530,15 +530,14 @@ int ci_tcp_close(ci_netif* netif, ci_tcp_state* ts)
     ci_tcp_send_rst(netif, ts);
     goto drop;
   }
-  if( (ts->s.s_flags & CI_SOCK_FLAG_LINGER) && ts->s.so.linger == 0 ) {
+  if( (ts->s.s_flags & CI_SOCK_FLAG_LINGER) && ts->s.so.linger == 0
+      && ! (ts->s.b.state & CI_TCP_STATE_NOT_CONNECTED) ) {
     /* TCP abort, drop connection, send reset only if connected,
     ** rfc793 p62.
     */
     CI_TCP_EXT_STATS_INC_TCP_ABORT_ON_DATA(netif);
-    if( ! (ts->s.b.state & CI_TCP_STATE_NOT_CONNECTED) ) {
-      LOG_TV(log(LPF "%d ABORT sent reset", S_FMT(ts)));
-      ci_tcp_send_rst(netif, ts);
-    }
+    LOG_TV(log(LPF "%d ABORT sent reset", S_FMT(ts)));
+    ci_tcp_send_rst(netif, ts);
     goto drop;
   }
 

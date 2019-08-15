@@ -27,7 +27,7 @@ SUBDIRS         += zf_apps zf_internal
 endif
 ifndef PREBUILD_ZF
 ifneq ($(ONLOAD_ONLY),1)
-SUBDIRS         += packetdrill
+OTHER_SUBDIRS         += packetdrill
 ifdef ZF_DEVEL
 SUBDIRS         += zf_unit
 endif

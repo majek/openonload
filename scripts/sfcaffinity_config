@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python2
 ######################################################################
 # Script to configure the sfc_affinity driver.
 # Author: David Riddoch <driddoch@solarflare.com>

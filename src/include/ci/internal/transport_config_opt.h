@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -476,13 +476,6 @@
  * that RFC.  It should be between 1 and 2 to comply
  */ 
 #define CI_CFG_CONG_AVOID_RFC3465_L_VALUE 2
-
-/* Enable filtering of DHCP packets from the net driver, which the DHCP client
- * code inside the iSCSI module can register to receive.  (This is required for
- * the DHCP client to work, but the iSCSI DHCP client is only needed for
- * Windows.)
- */
-#define CI_CFG_NET_DHCP_FILTER 0
 
 /* Detect cases where delayed acks could be detrimental to performance
  * (e.g. in slow start, or after data loss) and send ACKs for all

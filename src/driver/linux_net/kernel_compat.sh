@@ -5,10 +5,10 @@ me=$(basename "$0")
 
 err  () { echo >&2 "$*";    }
 log  () { err "$me: $*";    }
-vlog () { $verbose && err "$me: $*"; }
+vlog () { $efx_verbose && err "$me: $*"; }
 fail () { log "$*"; exit 1; }
 try  () { "$@" || fail "'$*' failed"; }
-vmsg () { $quiet || log "$@"; }
+vmsg () { $efx_quiet || log "$@"; }
 
 function usage()
 {
@@ -103,6 +103,7 @@ EFX_USE_ETHTOOL_LP_ADVERTISING		symbol	lp_advertising		include/linux/ethtool.h
 EFX_USE_ETHTOOL_MDIO_SUPPORT		symbol	mdio_support		include/linux/ethtool.h
 EFX_USE_LINUX_UACCESS_H			file				include/linux/uaccess.h
 EFX_USE_MTD_WRITESIZE			symbol	writesize		include/linux/mtd/mtd.h
+EFX_HAVE_MTD_NVMEM			member	struct_mtd_info	nvmem	include/linux/mtd/mtd.h
 EFX_USE_NETDEV_DEV			member	struct_net_device	dev	include/linux/netdevice.h
 EFX_USE_NETDEV_STATS			custom
 EFX_USE_NETDEV_STATS64			member	struct_net_device_ops	ndo_get_stats64 include/linux/netdevice.h
@@ -152,7 +153,8 @@ EFX_HAVE_PCI_NUM_VF			export	pci_num_vf		include/linux/pci.h	drivers/pci/iov.c
 EFX_HAVE_SRIOV_CONFIGURE                member  struct_pci_driver       sriov_configure        include/linux/pci.h
 EFX_HAVE_PCI_DRIVER_RH                  member  struct_pci_driver_rh    sriov_configure        include/linux/pci.h
 EFX_HAVE_PHYSFN                         member  struct_pci_dev          physfn                 include/linux/pci.h
-EFX_HAVE_NET_DEVICE_OPS_EXTENDED	symbol	net_device_ops_extended	include/linux/netdevice.h
+EFX_HAVE_NDO_SIZE			member	struct_net_device_ops	ndo_size		include/linux/netdevice.h
+EFX_HAVE_NDO_SIZE_RH			member	struct_net_device_ops	ndo_size_rh		include/linux/netdevice.h
 EFX_HAVE_NDO_SET_VF_MAC 		member	struct_net_device_ops	ndo_set_vf_mac		include/linux/netdevice.h
 EFX_HAVE_NDO_SET_VF_VLAN_PROTO		memtype	struct_net_device_ops	ndo_set_vf_vlan		include/linux/netdevice.h	int (*)(struct net_device *, int, u16, u8, __be16)
 EFX_HAVE_NDO_EXT_SET_VF_VLAN_PROTO		memtype struct_net_device_ops_extended	ndo_set_vf_vlan	include/linux/netdevice.h	int (*)(struct net_device *, int, u16, u8, __be16)
@@ -321,6 +323,7 @@ EFX_HAVE_ETHTOOL_PRIV_FLAGS	member	struct_ethtool_ops	get_priv_flags	include/lin
 EFX_HAVE_HW_ENC_FEATURES	member	struct_net_device	hw_enc_features	include/linux/netdevice.h
 EFX_NEED_SKB_INNER_TRANSPORT_OFFSET	nsymbol	skb_inner_transport_offset	include/linux/skbuff.h
 EFX_HAVE_SKB_XMIT_MORE	bitfield	struct_sk_buff	xmit_more	include/linux/skbuff.h
+EFX_HAVE_NETDEV_XMIT_MORE	symbol	netdev_xmit_more	include/linux/netdevice.h
 EFX_HAVE_NDO_ADD_VXLAN_PORT	member	struct_net_device_ops	ndo_add_vxlan_port	include/linux/netdevice.h
 EFX_NEED_PAGE_REF_ADD		nfile				include/linux/page_ref.h
 EFX_NEED_D_HASH_AND_LOOKUP	nexport	d_hash_and_lookup	include/linux/dcache.h fs/dcache.c
@@ -346,9 +349,10 @@ EFX_HAVE_XDP_PROG_ATTACHED	member	struct_netdev_bpf	prog_attached	include/linux/
 EFX_HAVE_XDP_PROG_ID	member	struct_netdev_bpf	prog_id	include/linux/netdevice.h
 EFX_NEED_PAGE_FRAG_FREE	nsymbol	page_frag_free	include/linux/gfp.h
 EFX_HAVE_FREE_PAGE_FRAG	symbol	__free_page_frag	include/linux/gfp.h
-EFX_NEED_VOID_SKB_PUT	nsymtype	skb_pub	include/linux/skbuff.h	void *skb_put(struct sk_buff *, unsigned int)
+EFX_NEED_VOID_SKB_PUT	nsymtype	skb_put	include/linux/skbuff.h	void *(struct sk_buff *, unsigned int)
 EFX_HAVE_ETHTOOL_FCS	symbol	NETIF_F_RXALL	include/linux/netdev_features.h
 EFX_HAVE_ETHTOOL_LINKSETTINGS	symbol	ethtool_link_ksettings	include/linux/ethtool.h
+EFX_HAVE_ETHTOOL_LEGACY	symbol	__ethtool_get_settings	include/linux/ethtool.h
 EFX_HAVE_LINK_MODE_25_50_100	symbol	ETHTOOL_LINK_MODE_25000baseCR_Full_BIT	include/uapi/linux/ethtool.h
 EFX_HAVE_LINK_MODE_FEC_BITS	symbol	ETHTOOL_LINK_MODE_FEC_BASER_BIT	include/uapi/linux/ethtool.h
 EFX_HAVE_NETDEV_EXT_MTU_LIMITS	member	struct_net_device_extended	max_mtu	include/linux/netdevice.h
@@ -359,6 +363,8 @@ EFX_HAVE_ETHTOOL_RXNFC_CONTEXT	member	struct_ethtool_rxnfc	rss_context	include/l
 EFX_NEED_HASH_64		nsymbol	hash_64	include/linux/hash.h
 EFX_HAVE_XDP_FRAME_API		symbol	xdp_frame	include/net/xdp.h
 EFX_HAVE_XDP_DATA_META		member	struct_xdp_buff	data_meta	include/linux/filter.h
+EFX_HAVE_OLD_DEV_OPEN	symtype	dev_open	include/linux/netdevice.h	int (struct net_device *)
+EFX_HAVE_MMIOWB				symbol	mmiowb	include/asm-generic/io.h
 " | egrep -v -e '^#' -e '^$' | sed 's/[ \t][ \t]*/:/g'
 }
 
@@ -486,7 +492,7 @@ function strip_comments()
 N
 ba
 }
-s:/\*.*\*/::'
+s:/\*.*\*/::' | sed -e '/^#include/d'
 }
 
 function test_symbol()
@@ -520,7 +526,7 @@ function test_symbol()
         fi
 
 	for prefix in $prefix_list; do
-            if [ $verbose = true ]; then
+            if [ $efx_verbose = true ]; then
                 echo >&2 "Looking for '$symbol' in '$KBUILD_SRC/$prefix$file'"
             fi
             [ -f "$KBUILD_SRC/$prefix$file" ] &&  \
@@ -637,13 +643,13 @@ function test_export()
     #     3. The MAP file if present. May give a false positive
     #        because it lists all extern (not only exported) symbols.
     if [ -f $KPATH/Module.symvers ]; then
-        if [ $verbose = true ]; then
+        if [ $efx_verbose = true ]; then
             echo >&2 "Looking for export of $symbol in $KPATH/Module.symvers"
 	fi
 	[ -n "$(awk '/0x[0-9a-f]+[\t ]+'$symbol'[\t ]+/' $KPATH/Module.symvers)" ]
     else
 	for file in $files; do
-            if [ $verbose = true ]; then
+            if [ $efx_verbose = true ]; then
 		echo >&2 "Looking for export of $symbol in $KBUILD_SRC/$file"
             fi
             if [ -f $KBUILD_SRC/$file ]; then
@@ -651,7 +657,7 @@ function test_export()
             fi
 	done
 	if [ -n "$MAP" ]; then
-            if [ $verbose = true ]; then
+            if [ $efx_verbose = true ]; then
 		echo >&2 "Looking for export of $symbol in $MAP"
             fi
 	    egrep -q "[A-Z] $symbol\$" $MAP && return
@@ -670,10 +676,10 @@ function test_compile()
 $makefile_prefix
 obj-m := test.o
 EOF
-    make -C $KPATH M=$dir >$dir/log 2>&1
+    make -rR -C $KPATH M=$dir >$dir/log 2>&1
     rc=$?
 
-    if [ $verbose = true ]; then
+    if [ $efx_verbose = true ]; then
 	echo >&2 "tried to compile:"
 	sed >&2 's/^/    /' $dir/test.c
 	echo >&2 "compiler output:"
@@ -913,8 +919,8 @@ void f(void)
 '
 }
 
-quiet=false
-verbose=false
+efx_quiet=false
+efx_verbose=false
 
 KVER=
 KPATH=
@@ -962,9 +968,9 @@ while [ $# -gt 0 ]; do
     case "$1" in
 	-r) KVER=$2; shift;;
 	-k) KPATH=$2; shift;;
-	-q) quiet=true;;
+	-q) efx_quiet=true;;
 	-m) MAP=$2; shift;;
-	-v) verbose=true;;
+	-v) efx_verbose=true;;
 	-s) kompat_symbols="$2"; shift;;
 	-*) usage; exit -1;;
 	*)  [ -z $FILTER ] && FILTER=$1 || FILTER="$FILTER|$1";;
@@ -1117,7 +1123,7 @@ done
 eval make -C $KPATH -k $EXTRA_MAKEFLAGS M="$compile_dir" \
     >"$compile_dir/log" 2>&1 \
     || true
-if [ $verbose = true ]; then
+if [ $efx_verbose = true ]; then
     echo >&2 "compiler output:"
     sed >&2 's/^/    /' "$compile_dir/log"
 fi

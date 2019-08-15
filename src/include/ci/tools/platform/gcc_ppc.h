@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -1024,15 +1024,16 @@ static inline int ci_is_multithreaded (void)
 	return 1;	
 }
 
-static inline void ci_prefetch(const void *x)
+static inline void ci_prefetch_ppc(const void *x)
 {
 	__asm__ __volatile__ ("dcbt 0,%0" : : "r" (x));
 }
 
 #else
-#define ci_prefetch(addr)  do{}while(0)
+#define ci_prefetch_ppc(addr)  do{}while(0)
 #endif   /* def __GNUC__ */
 
+#define ci_prefetch ci_prefetch_ppc
 
 #define ci_spinloop_pause()      do{}while(0)
 

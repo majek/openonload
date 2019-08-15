@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -64,7 +64,7 @@ efab_signal_substitute(int sig, struct sigaction *new_act,
 
   user_data = &(((struct oo_sigaction *)
                  (CI_USER_PTR_GET(tramp_data->user_data)))[sig - 1]);
-  if( !access_ok(VERIFY_WRITE, user_data, sizeof(struct oo_sigaction) ) )
+  if( !efab_access_ok(user_data, sizeof(struct oo_sigaction) ) )
     return -EFAULT;
 
   do {
@@ -535,7 +535,7 @@ efab_linux_trampoline_sigaction32(int sig, const struct sigaction32 *act32,
   if( act32 != NULL && !pass_to_kernel ) {
     compat_uptr_t handler, restorer;
 
-    if( !access_ok(VERIFY_READ, act32, sizeof(*act32)) ||
+    if( !efab_access_ok(act32, sizeof(*act32)) ||
         __get_user(handler, &act32->sa_handler) ||
         __get_user(act.sa_flags, &act32->sa_flags) ||
         __get_user(restorer, &act32->sa_restorer) ||
@@ -580,7 +580,7 @@ efab_linux_trampoline_sigaction32(int sig, const struct sigaction32 *act32,
       set32.sig[0] = oact.sa_mask.sig[0];
     }
 
-    if( !access_ok(VERIFY_WRITE, oact32, sizeof(*oact32)) ||
+    if( !efab_access_ok(oact32, sizeof(*oact32)) ||
         __put_user(ptr_to_compat(oact.sa_handler), &oact32->sa_handler) ||
         __put_user(ptr_to_compat(oact.sa_restorer), &oact32->sa_restorer) ||
         __put_user(oact.sa_flags, &oact32->sa_flags) ||

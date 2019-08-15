@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -357,6 +357,14 @@ module_param_call(cplane_route_request_timeout_ms,
 MODULE_PARM_DESC(cplane_route_request_timeout_ms,
                  "Time out value for route resolution requests.");
 
+module_param(cplane_server_uid, int, S_IRUGO | S_IWUSR);
+MODULE_PARM_DESC(cplane_server_uid,
+                 "UID to drop privileges to for the cplane server.");
+module_param(cplane_server_gid, int, S_IRUGO | S_IWUSR);
+MODULE_PARM_DESC(cplane_server_gid,
+                 "GID to drop privileges to for the cplane server.");
+
+
 /**************************************************************************** 
  * 
  * ioctl: customised driver interface
@@ -643,6 +651,10 @@ struct file_operations oo_fops = {
   .unlocked_ioctl = oo_fop_unlocked_ioctl,
   .compat_ioctl = oo_fop_compat_ioctl,
   .mmap    = oo_fop_mmap,
+
+  /* read and poll are used by the cplane server only */
+  .read = cp_fop_read,
+  .poll = cp_fop_poll,
 };
 
 
@@ -702,8 +714,8 @@ static int onload_sanity_checks(void)
    * assumptions that other padding in the structure doesn't change by
    * changing CI_CFG_MAX_INTERFACES to CI_CFG_MAX_SUPPORTED_INTERFACES.
    */
-  CI_BUILD_ASSERT( (uintptr_t)
-                   (&((ci_ip_pkt_fmt*) NULL)->space_for_encap__do_not_use + 1)
+  CI_BUILD_ASSERT( CI_MEMBER_OFFSET(ci_ip_pkt_fmt, space_for_encap__do_not_use) +
+                   sizeof(((ci_ip_pkt_fmt*)NULL)->space_for_encap__do_not_use) +
                    + (CI_CFG_MAX_SUPPORTED_INTERFACES - CI_CFG_MAX_INTERFACES)
                    * sizeof(ef_addr) <= 256 );
 

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -74,6 +74,10 @@ static inline void *PDE_DATA(const struct inode *inode)
 
 #ifndef EFRM_HAVE_WAIT_QUEUE_ENTRY
 #define wait_queue_entry_t wait_queue_t
+#endif
+
+#ifndef EFRM_HAVE_NEW_FAULT
+typedef int vm_fault_t;
 #endif
 
 #endif

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -206,7 +206,7 @@ citp_epoll_set_home_stack(struct citp_epoll_fd* ep, ci_netif* ni)
 
   Log_POLL(ci_log("%s: Set home stack using ready list %d "
                   "stack %s",
-                  __FUNCTION__, ep->ready_list, ni->state->name));
+                  __FUNCTION__, ep->ready_list, ni->state->pretty_name));
 
   op.sockfd = ci_netif_get_driver_handle(ni);
   op.ready_list = ep->ready_list;
@@ -285,13 +285,14 @@ citp_epoll_promote_to_home(struct citp_epoll_member* eitem, citp_fdinfo* fd_fdi,
                            citp_socket* sock, struct citp_epoll_fd* ep)
 {
   Log_POLL(ci_log("%s:  fd %d", __FUNCTION__, eitem->fd));
-  /* Fixme: Sockets from the oo_sockets list are added to the OS epoll set.
-   * Now we have to remove the promoted sockets from the OS epoll set. */
+  /* Sockets from the oo_sockets list are added to the OS epoll set.
+   * We'll handle it when deleting them, see citp_epoll_ctl_onload_del().
+   */
   ci_dllist_remove_safe(&eitem->dllink);
   ep->oo_sockets_n--;
   eitem->item_list = &ep->oo_stack_sockets;
   eitem->ready_list_id = ep->ready_list;
-  eitem->poll_end = 0;
+  eitem->flags &=~ CITP_EITEM_FLAG_POLL_END;
   ep->oo_stack_sockets_n++;
 
   ci_dllist_push(&ep->oo_stack_sockets, &eitem->dllink);
@@ -790,7 +791,7 @@ static void citp_eitem_init(struct citp_epoll_member* eitem,
   eitem->fd = fd_fdi->fd;
   eitem->fdi_seq = fd_fdi->seq;
   eitem->ready_list_id = -1;
-  eitem->poll_end = 0;
+  eitem->flags = 0;
   ci_dllink_self_link(&eitem->dead_stack_link);
 }
 
@@ -802,7 +803,7 @@ static void citp_epoll_ctl_onload_add_home(struct citp_epoll_member* eitem,
 {
   eitem->item_list = &ep->oo_stack_sockets;
   eitem->ready_list_id = ep->ready_list;
-  eitem->poll_end = 0;
+  eitem->flags &=~ (CITP_EITEM_FLAG_POLL_END | CITP_EITEM_FLAG_OS_SYNC);
   ep->oo_stack_sockets_n++;
 
   /* We start it out on the ready list - if it's already ready it won't be
@@ -824,7 +825,7 @@ static void citp_epoll_ctl_onload_add_other(struct citp_epoll_member* eitem,
                                             ci_uint64 epoll_fd_seq)
 {
   eitem->item_list = &ep->oo_sockets;
-  eitem->poll_end = 0;
+  eitem->flags &=~ CITP_EITEM_FLAG_POLL_END;
   ci_dllist_push(&ep->oo_sockets, &eitem->dllink);
   ep->oo_sockets_n++;
 
@@ -1017,9 +1018,18 @@ static int citp_epoll_ctl_onload_mod(struct citp_epoll_member* eitem,
     eitem->epoll_data = *event;
     eitem->epoll_data.events |= EPOLLERR | EPOLLHUP;
     citp_eitem_reset_epollet(eitem, fd_fdi);
+    if( eitem->flags & CITP_EITEM_FLAG_OS_SYNC )
+      *sync_kernel = 1;
     if( *sync_kernel ) {
-      if( eitem->epfd_event.events == EP_NOT_REGISTERED )
+      if( eitem->epfd_event.events == EP_NOT_REGISTERED ) {
         *sync_op = EPOLL_CTL_ADD;
+      }
+      else if( eitem->ready_list_id >= 0 ) {
+        ci_assert_flags(eitem->flags, CITP_EITEM_FLAG_OS_SYNC);
+        *sync_op = EPOLL_CTL_DEL;
+        eitem->flags &=~ CITP_EITEM_FLAG_OS_SYNC;
+      }
+
     }
     else if( (eitem->ready_list_id < 0) && !citp_eitem_is_synced(eitem) )
       ++ep->epfd_syncs_needed;
@@ -1045,6 +1055,11 @@ static int citp_epoll_ctl_onload_del(struct citp_epoll_member* eitem,
   int rc = 0;
   if(CI_LIKELY( eitem != NULL )) {
     if( eitem->ready_list_id >= 0 ) {
+      /* Once upon a time, it was a non-home member, so we have to sync to
+       * kernel.  See the comment in citp_epoll_promote_to_home(). */
+      if( eitem->flags & CITP_EITEM_FLAG_OS_SYNC )
+        *sync_kernel = 1;
+
       /* This may already be being, or have been, removed via close of the
        * socket, so need to check.
        */
@@ -1052,7 +1067,9 @@ static int citp_epoll_ctl_onload_del(struct citp_epoll_member* eitem,
       if( ci_dllink_is_self_linked(&eitem->dead_stack_link) ) {
         /* Not been closed yet, can cleanup now. */
         citp_remove_home_member(ep, eitem, fd_fdi, fdt_locked);
-        CI_FREE_OBJ(eitem);
+        if( ! *sync_kernel )
+          CI_FREE_OBJ(eitem);
+        /* else the eitem will be freed after syncing */
       }
       ci_assert_equal(fd_fdi->epoll_fd, -1);
       oo_wqlock_unlock(&ep->dead_stack_lock, NULL);
@@ -1128,9 +1145,6 @@ static int citp_epoll_ctl_onload2(struct citp_epoll_fd* ep, int op,
 
   /* Apply epoll_ctl() to the kernel. */
   if( sync_kernel && rc == 0 ) {
-    /* We don't sync home sockets to the kernel */
-    ci_assert_equal(eitem->ready_list_id, -1);
-
     Log_POLL(ci_log("%s("EPOLL_CTL_FMT"): SYNC_KERNEL", __FUNCTION__,
                     EPOLL_CTL_ARGS(epoll_fd, op, fd_fdi->fd, event)));
     if( sync_op == EPOLL_CTL_ADD ) {
@@ -1140,6 +1154,7 @@ static int citp_epoll_ctl_onload2(struct citp_epoll_fd* ep, int op,
       /* We ignore rc: we do not care if ioctl failed.
        * So, we should restore errno. */
       errno = saved_errno;
+      eitem->flags |= CITP_EITEM_FLAG_OS_SYNC;
     }
     rc = ci_sys_epoll_ctl(epoll_fd, sync_op, fd_fdi->fd, event);
     if( rc < 0 )
@@ -1384,7 +1399,8 @@ static void citp_ul_epoll_ctl_sync(struct citp_epoll_fd* ep, int epfd)
   struct citp_epoll_member* eitem_tmp;
   int rc;
 
-  Log_POLL(ci_log("%s(%d)", __FUNCTION__, epfd));
+  Log_POLL(ci_log("%s(%d): epfd_syncs_needed=%d", __FUNCTION__, epfd,
+                  ep->epfd_syncs_needed));
 
   while( ci_dllist_not_empty(&ep->dead_sockets) ) {
     eitem = EITEM_FROM_DLLINK(ci_dllist_pop(&ep->dead_sockets));
@@ -1405,8 +1421,11 @@ static void citp_ul_epoll_ctl_sync(struct citp_epoll_fd* ep, int epfd)
   CI_DLLIST_FOR_EACH3(struct citp_epoll_member, eitem,
                       dllink, &ep->oo_sockets, eitem_tmp)
     if( ! citp_eitem_is_synced(eitem) ) {
-      if( citp_ul_epoll_member_to_fdi(eitem) )
+      if( citp_ul_epoll_member_to_fdi(eitem) ) {
+        Log_POLL(ci_log("%s(): sync %d", __func__, eitem->fd));
         citp_ul_epoll_ctl_sync_fd(epfd, ep, eitem);
+        eitem->flags |= CITP_EITEM_FLAG_OS_SYNC;
+      }
       else {
         ci_dllist_remove(&eitem->dllink);
         ep->oo_sockets_n--;
@@ -1523,14 +1542,14 @@ static void citp_epoll_get_ready_list(struct oo_ul_epoll_state*
      * provides a noticeable benefit when we're doing WODA with a large
      * number of sockets.
      */
-    eitem->poll_end = 0;
+    eitem->flags &=~ CITP_EITEM_FLAG_POLL_END;
     ci_dllist_push_tail(&eps->ep->oo_stack_sockets,
                         &((struct citp_epoll_member*)eitem)->dllink);
   }
   if( eitem ) {
     /* mark that when we remove this item from ready list we shall poll
      * other as well as os fds */
-    eitem->poll_end = 1;
+    eitem->flags |= CITP_EITEM_FLAG_POLL_END;
   }
   ci_netif_unlock(ni);
 }
@@ -1552,7 +1571,8 @@ static void citp_epoll_poll_home_socks(struct oo_ul_epoll_state*
 
     do {
       eitem = CI_CONTAINER(struct citp_epoll_member, dllink, next);
-      eps->phase |= eitem->poll_end ? EPOLL_PHASE_DONE_ACCELERATED : 0;
+      if( eitem->flags & CITP_EITEM_FLAG_POLL_END )
+        eps->phase |= EPOLL_PHASE_DONE_ACCELERATED;
       next = next->next;
       stored_event = citp_ul_epoll_one(eps, eitem);
       if( !stored_event ) {
@@ -1605,10 +1625,12 @@ static void citp_epoll_poll_ul_other(struct oo_ul_epoll_state* __restrict__ eps)
 
     last = ci_dllist_last(&eps->ep->oo_sockets);
     next = ci_dllist_start(&eps->ep->oo_sockets);
-    CI_CONTAINER(struct citp_epoll_member, dllink, last)->poll_end = 1;
+    CI_CONTAINER(struct citp_epoll_member, dllink, last)->flags |=
+                                                CITP_EITEM_FLAG_POLL_END;
     do {
       eitem = CI_CONTAINER(struct citp_epoll_member, dllink, next);
-      eps->phase |= eitem->poll_end ? EPOLL_PHASE_DONE_OTHER : 0;
+      if( eitem->flags & CITP_EITEM_FLAG_POLL_END )
+        eps->phase |= EPOLL_PHASE_DONE_OTHER;
       next = next->next;
       citp_ul_epoll_one(eps, eitem);
     } while( eps->events < eps->events_top && &eitem->dllink != last );
@@ -1935,8 +1957,9 @@ no_events:
     }
 #endif
 
-    /* See if another thread has queued any epoll_ctl requests. */
-    if( CITP_OPTS.ul_epoll_ctl_fast ) {
+    /* Has another thread queued any epoll_ctl requests or
+     * blocking on the lock?  See citp_epoll_ctl_onload(). */
+    if( CITP_OPTS.ul_epoll_ctl_handoff ) {
       oo_wqlock_try_drain_work(&ep->lock, (void*)(uintptr_t) 0);
     }
     else {
@@ -2537,7 +2560,8 @@ static void citp_epoll_get_ordering_limit(ci_netif* ni,
       limit_out->tv_nsec = 0;
     }
 
-    Log_POLL(ci_log("%s: poll limit %ld:%09lu", __FUNCTION__,
+    Log_POLL(ci_log("%s: %s poll limit %ld:%09lu", __FUNCTION__,
+                    ni->state->pretty_name,
                     limit_out->tv_sec, limit_out->tv_nsec));
   }
 }
@@ -2752,9 +2776,11 @@ int citp_epoll_ordered_wait(citp_fdinfo* fdi,
   if( wait.poll_again ) {
     ci_assert_gt(rc, 0);
     Log_POLL(ci_log("%s: need repoll at user level", __FUNCTION__));
+    citp_reenter_lib(lib_context);
+    if( ni == NULL )
+      goto new_stack;
     citp_epoll_get_ordering_limit(ni, &limit_ts);
 
-    citp_reenter_lib(lib_context);
     rc = citp_epoll_wait(fdi, ep->wait_events, &wait, n_socks,
                          0, sigmask, lib_context);
     if( rc == 0 && wait.next_timeout != 0 ) {

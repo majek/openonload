@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -486,15 +486,17 @@ struct efx_ptp_data {
 #endif
 	_MCDI_DECLARE_BUF(txbuf, MC_CMD_PTP_IN_TRANSMIT_LENMAX);
 
-	unsigned int good_syncs;
-	unsigned int fast_syncs;
-	unsigned int bad_syncs;
-	unsigned int sync_timeouts;
-	unsigned int no_time_syncs;
-	unsigned int invalid_sync_windows;
-	unsigned int undersize_sync_windows;
-	unsigned int oversize_sync_windows;
-	unsigned int rx_no_timestamp;
+	struct {
+		unsigned int good_syncs;
+		unsigned int fast_syncs;
+		unsigned int bad_syncs;
+		unsigned int sync_timeouts;
+		unsigned int no_time_syncs;
+		unsigned int invalid_sync_windows;
+		unsigned int undersize_sync_windows;
+		unsigned int oversize_sync_windows;
+		unsigned int rx_no_timestamp;
+	} sw_stats;
 #ifdef CONFIG_SFC_DEBUGFS
 	/* Host nanoseconds at last synchronisation. */
 	unsigned int last_sync_time_host;
@@ -518,6 +520,8 @@ struct efx_ptp_data {
 	int corrected_sync_window_min;
 	int corrected_sync_window_max;
 	int corrected_sync_window_average;
+	bool initialised_stats;
+	__le16 initial_mc_stats[MC_CMD_PTP_OUT_STATUS_LEN / sizeof(__le16)];
 	/* Context value for MC statistics */
 	u8 mc_stats[MC_CMD_PTP_OUT_STATUS_LEN / sizeof(u32)];
 #endif
@@ -617,15 +621,15 @@ static void efx_ptp_save_rx_ts(struct efx_nic *efx, struct sk_buff *skb,
 #define PTP_MC_STAT(ext_name, mcdi_name)				\
 	{ #ext_name, 32, MC_CMD_PTP_OUT_STATUS_STATS_ ## mcdi_name ## _OFST }
 static const struct efx_hw_stat_desc efx_ptp_stat_desc[] = {
-	PTP_SW_STAT(ptp_good_syncs, good_syncs),
-	PTP_SW_STAT(ptp_fast_syncs, fast_syncs),
-	PTP_SW_STAT(ptp_bad_syncs, bad_syncs),
-	PTP_SW_STAT(ptp_sync_timeouts, sync_timeouts),
-	PTP_SW_STAT(ptp_no_time_syncs, no_time_syncs),
-	PTP_SW_STAT(ptp_invalid_sync_windows, invalid_sync_windows),
-	PTP_SW_STAT(ptp_undersize_sync_windows, undersize_sync_windows),
-	PTP_SW_STAT(ptp_oversize_sync_windows, oversize_sync_windows),
-	PTP_SW_STAT(ptp_rx_no_timestamp, rx_no_timestamp),
+	PTP_SW_STAT(ptp_good_syncs, sw_stats.good_syncs),
+	PTP_SW_STAT(ptp_fast_syncs, sw_stats.fast_syncs),
+	PTP_SW_STAT(ptp_bad_syncs, sw_stats.bad_syncs),
+	PTP_SW_STAT(ptp_sync_timeouts, sw_stats.sync_timeouts),
+	PTP_SW_STAT(ptp_no_time_syncs, sw_stats.no_time_syncs),
+	PTP_SW_STAT(ptp_invalid_sync_windows, sw_stats.invalid_sync_windows),
+	PTP_SW_STAT(ptp_undersize_sync_windows, sw_stats.undersize_sync_windows),
+	PTP_SW_STAT(ptp_oversize_sync_windows, sw_stats.oversize_sync_windows),
+	PTP_SW_STAT(ptp_rx_no_timestamp, sw_stats.rx_no_timestamp),
 	PTP_MC_STAT(ptp_tx_timestamp_packets, TX),
 	PTP_MC_STAT(ptp_rx_timestamp_packets, RX),
 	PTP_MC_STAT(ptp_timestamp_packets, TS),
@@ -646,14 +650,29 @@ size_t efx_ptp_describe_stats(struct efx_nic *efx, u8 *strings)
 				      efx_ptp_stat_mask, strings);
 }
 
+void efx_ptp_reset_stats(struct efx_nic *efx)
+{
+	struct efx_ptp_data *ptp = efx->ptp_data;
+
+	if (ptp) {
+		u64 temp[PTP_STAT_COUNT];
+
+		memset(&ptp->sw_stats, 0, sizeof(ptp->sw_stats));
+
+		ptp->initialised_stats = false;
+		efx_ptp_update_stats(efx, temp);
+	}
+}
+
 size_t efx_ptp_update_stats(struct efx_nic *efx, u64 *stats)
 {
+	struct efx_ptp_data *ptp = efx->ptp_data;
 	MCDI_DECLARE_BUF(inbuf, MC_CMD_PTP_IN_STATUS_LEN);
 	MCDI_DECLARE_BUF(outbuf, MC_CMD_PTP_OUT_STATUS_LEN);
 	size_t i;
 	int rc;
 
-	if (!efx->ptp_data)
+	if (!ptp)
 		return 0;
 
 	/* Copy software statistics */
@@ -674,9 +693,15 @@ size_t efx_ptp_update_stats(struct efx_nic *efx, u64 *stats)
 			  outbuf, sizeof(outbuf), NULL);
 	if (rc)
 		memset(outbuf, 0, sizeof(outbuf));
+	if (!ptp->initialised_stats) {
+		memcpy(ptp->initial_mc_stats, _MCDI_PTR(outbuf, 0),
+		       sizeof(ptp->initial_mc_stats));
+		ptp->initialised_stats = !rc;
+	}
 	efx_nic_update_stats(efx_ptp_stat_desc, PTP_STAT_COUNT,
 			     efx_ptp_stat_mask,
-			     stats, _MCDI_PTR(outbuf, 0), false);
+			     stats, ptp->initial_mc_stats,
+			     _MCDI_PTR(outbuf, 0));
 
 	return PTP_STAT_COUNT;
 }
@@ -1514,11 +1539,11 @@ efx_ptp_process_times(struct efx_nic *efx, MCDI_DECLARE_STRUCT_PTR(synch_buf),
 		 * time and writing it to MC memory.
 		 */
 		if (window < SYNCHRONISATION_GRANULARITY_NS) {
-			++ptp->invalid_sync_windows;
+			++ptp->sw_stats.invalid_sync_windows;
 		} else if (corrected >= MAX_SYNCHRONISATION_NS) {
-			++ptp->oversize_sync_windows;
+			++ptp->sw_stats.oversize_sync_windows;
 		} else if (corrected < ptp->min_synchronisation_ns) {
-			++ptp->undersize_sync_windows;
+			++ptp->sw_stats.undersize_sync_windows;
 		} else {
 			ngood++;
 			last_good = i;
@@ -1710,9 +1735,9 @@ static int efx_ptp_synchronize(struct efx_nic *efx, unsigned int num_readings)
 		}
 
 		if (mcdi_data->done || !READ_ONCE(*start))
-			++ptp->sync_timeouts;
+			++ptp->sw_stats.sync_timeouts;
 		else if (loops <= 1)
-			++ptp->fast_syncs;
+			++ptp->sw_stats.fast_syncs;
 
 		if (!mcdi_data->done && READ_ONCE(*start))
 			efx_ptp_send_times(efx, &last_time, mcdi_data);
@@ -1731,9 +1756,9 @@ static int efx_ptp_synchronize(struct efx_nic *efx, unsigned int num_readings)
 		rc = efx_ptp_process_times(efx, mcdi_data->outbuf,
 					   mcdi_data->resplen, &last_time);
 		if (rc == 0)
-			++ptp->good_syncs;
+			++ptp->sw_stats.good_syncs;
 		else
-			++ptp->no_time_syncs;
+			++ptp->sw_stats.no_time_syncs;
 	}
 
 	kref_put(&mcdi_data->ref, efx_ptp_mcdi_data_release);
@@ -1742,7 +1767,7 @@ static int efx_ptp_synchronize(struct efx_nic *efx, unsigned int num_readings)
 	 * the reason.
 	 */
 	if (rc != 0)
-		++ptp->bad_syncs;
+		++ptp->sw_stats.bad_syncs;
 
 	return rc;
 }
@@ -1777,6 +1802,13 @@ static void efx_ptp_xmit_skb_queue(struct efx_nic *efx, struct sk_buff *skb)
 	tx_queue = efx->select_tx_queue(ptp_data->channel, skb);
 	if (tx_queue && tx_queue->timestamping) {
 		efx_enqueue_skb(tx_queue, skb);
+		/* If netdev_xmit_more() was true in enqueue_skb() then our
+		 * queue will be waiting for the next packet to push the
+		 * doorbell. Since the next packet might not be coming this
+		 * way (if it doesn't need a timestamp) we need to push it
+		 * directly.
+		 */
+		efx_nic_push_buffers(tx_queue);
 	} else {
 		WARN_ONCE(1, "PTP channel has no timestamped tx queue\n");
 		dev_kfree_skb_any(skb);
@@ -1956,7 +1988,7 @@ static void efx_ptp_process_events(struct efx_nic *efx, struct sk_buff_head *q)
 			__skb_queue_tail(q, skb);
 		} else if (time_after(jiffies, match->expiry)) {
 			match->state = PTP_PACKET_STATE_TIMED_OUT;
-			++ptp->rx_no_timestamp;
+			++ptp->sw_stats.rx_no_timestamp;
 			__skb_queue_tail(q, skb);
 		} else {
 			/* Replace unprocessed entry and stop */
@@ -2592,9 +2624,10 @@ static const struct ptp_clock_info efx_phc_clock_info = {
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_PHC_SUPPORT) || defined(EFX_NOT_UPSTREAM)
 static int efx_create_pps_worker(struct efx_ptp_data *ptp)
 {
-	char busdevice[10];
+	char busdevice[11];
 
-	snprintf(busdevice, sizeof(busdevice), "%02x:%02x",
+	snprintf(busdevice, sizeof(busdevice), "%04x:%02x:%02x",
+		 pci_domain_nr(ptp->efx->pci_dev->bus),
 		 ptp->efx->pci_dev->bus->number,
 		 PCI_SLOT(ptp->efx->pci_dev->devfn));
 
@@ -2636,7 +2669,8 @@ static void efx_associate_phc(struct efx_nic *efx)
 	list_for_each_entry_safe(other, next, &efx_all_funcs_list,
 				 node_ptp_all_funcs) {
 		EFX_WARN_ON_PARANOID(other == efx);
-		if (ether_addr_equal(other->adapter_base_addr,
+		if (other->phc_efx == other &&
+		    ether_addr_equal(other->adapter_base_addr,
 				     efx->adapter_base_addr)) {
 			efx->phc_efx = other;
 			goto out;
@@ -3002,7 +3036,22 @@ static bool efx_ptp_rx(struct efx_channel *channel, struct sk_buff *skb)
 
 	match->expiry = jiffies + msecs_to_jiffies(PKT_EVENT_LIFETIME_MS);
 
+#if defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_FAKE_VLAN_RX_ACCEL)
+	/* All vlan info is provided by the "hardware" in this case. */
 	match->vlan_tagged = !vlan_get_tag(skb, &match->vlan_tci);
+#else
+	/* In this case, software accounts for lack of receive vlan acceleration */
+	if (skb->dev->features & NETIF_F_HW_VLAN_CTAG_RX)
+		match->vlan_tagged = !vlan_get_tag(skb, &match->vlan_tci);
+	else if ((skb->protocol == htons(ETH_P_8021Q) ||
+		  skb->protocol == htons(ETH_P_8021AD)) && pskb_may_pull(skb, VLAN_HLEN)) {
+		match->vlan_tagged = 1;
+		match->vlan_tci = skb->vlan_tci = ntohs(*((__be16 *)skb->data));
+		skb->protocol = *((__be16 *)(skb->data + 2));
+		skb_pull(skb, VLAN_HLEN);
+	}
+#endif
+
 	/* Correct version? */
 	if (ptp->mode == MC_CMD_PTP_MODE_V1) {
 		if (!pskb_may_pull(skb, PTP_V1_MIN_LENGTH))
@@ -3117,10 +3166,7 @@ int efx_ptp_tx(struct efx_nic *efx, struct sk_buff *skb)
 	struct efx_ptp_data *ptp = efx->ptp_data;
 
 	skb_queue_tail(&ptp->txq, skb);
-
-	if ((udp_hdr(skb)->dest == htons(PTP_EVENT_PORT)) &&
-	    (skb->len <= MC_CMD_PTP_IN_TRANSMIT_PACKET_MAXNUM))
-		efx_xmit_hwtstamp_pending(skb);
+	efx_xmit_hwtstamp_pending(skb);
 	queue_work(ptp->workwq, &ptp->work);
 
 	return NETDEV_TX_OK;
@@ -3596,14 +3642,25 @@ static void hw_pps_event_pps(struct efx_nic *efx, struct efx_ptp_data *ptp)
 }
 #endif
 
+static bool efx_ptp_warn_once(struct efx_nic *efx)
+{
+	if (efx->ptp_unavailable_warned)
+		return false;
+	efx->ptp_unavailable_warned = true;
+	return true;
+}
+
 void efx_ptp_event(struct efx_nic *efx, efx_qword_t *ev)
 {
-	struct efx_nic *phc_efx = efx->phc_efx;
-	struct efx_ptp_data *ptp = phc_efx->ptp_data;
+	struct efx_ptp_data *ptp;
+	struct efx_nic *phc_efx;
 	int code = EFX_QWORD_FIELD(*ev, MCDI_EVENT_CODE);
 
+	phc_efx = efx->phc_efx;
+	ptp = phc_efx ? phc_efx->ptp_data : NULL;
+
 	if (!ptp) {
-		if (net_ratelimit())
+		if (efx_ptp_warn_once(efx))
 			netif_warn(efx, drv, efx->net_dev,
 				   "Received PTP event (code %d) but PTP not set up\n",
 				   code);

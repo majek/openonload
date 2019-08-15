@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -301,8 +301,9 @@ cicppl_mac_defer_send(ci_netif *netif, int *ref_os_rc,
       ci_assert(cicppl_pktbuf_is_valid_id(cppl->pktpool, pendable_pktid));
 
       /* now we have a cicp_bufpool_t buffer ID we can call this: */
-      *ref_os_rc = cicpplos_pktbuf_defer_send(netif->cplane, ip,
-					      pendable_pktid, ifindex);
+      *ref_os_rc = cicpplos_pktbuf_defer_send(
+                        netif->cplane, ip, pendable_pktid, ifindex,
+                        netif->flags & CI_NETIF_FLAG_IN_DL_CONTEXT);
 
       return (*ref_os_rc == 0);
     }

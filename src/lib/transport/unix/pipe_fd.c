@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -891,7 +891,7 @@ static int oo_pipe_ctor(ci_netif* netif, struct oo_pipe** out_pipe,
   p = oo_pipe_buf_get(netif);
   if( !p ) {
     rc = -1;
-    errno = ENOMEM;
+    errno = EMFILE;
     goto out;
   }
 

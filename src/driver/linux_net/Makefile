@@ -310,6 +310,9 @@ clean_modules :
 export:
 	./export.sh $(KPATH) $(sfc-y:%.o=%.c)
 
+export-resolve-kcompat:
+	./export.sh -k -kk $(KPATH) $(sfc-y:%.o=%.c)
+
 # Export into a Xen kernel tree
 export-xen:
 	./export.sh -k -kk --suffix=xen $(KPATH) $(sfc-y:%.o=%.c)

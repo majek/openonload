@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -2082,7 +2082,8 @@ int efrm_filter_rename( struct efhw_nic *nic, struct net_device *net_dev )
 }
 
 #if EFX_DRIVERLINK_API_VERSION >= 23
-ci_inline u32 efrm_rss_mode_to_nic_flags(struct efx_dl_device *efx_dev,
+ci_inline u32 efrm_rss_mode_to_nic_flags(struct efhw_nic *efhw_nic,
+                                         struct efx_dl_device *efx_dev,
 					 u32 efrm_rss_mode)
 {
 	u32 nic_tcp_mode;
@@ -2094,6 +2095,12 @@ ci_inline u32 efrm_rss_mode_to_nic_flags(struct efx_dl_device *efx_dev,
 	ci_dword_t nic_flags = { {efx_dl_rss_flags_default(efx_dev)} };
 	ci_dword_t nic_flags_new;
 	ci_dword_t nic_flags_mask;
+
+        /* we need to use default flags in packed stream mode,
+         * note in that case TCP hashing will surely be enabled,
+         * so nothing to do there anyway */
+        if( efhw_nic->flags & NIC_FLAG_RX_RSS_LIMITED )
+                return nic_flags.u32[0];
 
 	switch(efrm_rss_mode) {
 	case EFRM_RSS_MODE_SRC:
@@ -2114,7 +2121,9 @@ ci_inline u32 efrm_rss_mode_to_nic_flags(struct efx_dl_device *efx_dev,
 		MC_CMD_RSS_CONTEXT_SET_FLAGS_IN_TOEPLITZ_TCPV4_EN,
                      (1 << MC_CMD_RSS_CONTEXT_SET_FLAGS_IN_TOEPLITZ_IPV4_EN_WIDTH) - 1,
 		MC_CMD_RSS_CONTEXT_SET_FLAGS_IN_TCP_IPV4_RSS_MODE,
-                     (1 << MC_CMD_RSS_CONTEXT_SET_FLAGS_IN_TCP_IPV4_RSS_MODE_WIDTH) - 1
+                     ( efhw_nic->flags & NIC_FLAG_ADDITIONAL_RSS_MODES ) ?
+                     (1 << MC_CMD_RSS_CONTEXT_SET_FLAGS_IN_TCP_IPV4_RSS_MODE_WIDTH) - 1 :
+                     0
 		);
 	CI_POPULATE_DWORD_2(nic_flags_new,
 		MC_CMD_RSS_CONTEXT_SET_FLAGS_IN_TOEPLITZ_TCPV4_EN, 1,
@@ -2145,7 +2154,7 @@ int efrm_rss_context_alloc(struct efrm_client* client, u32 vport_id,
 	/* If [efx_dev] is NULL, the hardware is morally absent. */
 	if (efx_dev == NULL)
 		return -ENETDOWN;
-	nic_rss_flags = efrm_rss_mode_to_nic_flags(efx_dev, efrm_rss_mode);
+	nic_rss_flags = efrm_rss_mode_to_nic_flags(efhw_nic, efx_dev, efrm_rss_mode);
 	/* Driverlink API takes ef10 MCDI compatible RSS flags */
 	rc = efx_dl_rss_context_new(efx_dev, indir, key, nic_rss_flags,
 				    num_qs, rss_context_out);
@@ -2218,7 +2227,7 @@ int efrm_rss_context_update(struct efrm_client* client, u32 rss_context,
 	if (efx_dev == NULL)
 		return -ENETDOWN;
 
-	nic_rss_flags = efrm_rss_mode_to_nic_flags(efx_dev, efrm_rss_mode);
+	nic_rss_flags = efrm_rss_mode_to_nic_flags(efhw_nic, efx_dev, efrm_rss_mode);
 	rc = efx_dl_rss_context_set(efx_dev, indir, key, nic_rss_flags,
 				    rss_context);
 

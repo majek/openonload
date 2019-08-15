@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -43,6 +43,7 @@
 #include "farch_regs.h"
 #include "io.h"
 #include "workarounds.h"
+#include "mcdi_pcol.h"
 
 /**************************************************************************
  *
@@ -582,6 +583,47 @@ size_t efx_nic_describe_stats(const struct efx_hw_stat_desc *desc, size_t count,
 }
 
 /**
+ * efx_nic_copy_stats - Copy stats from the DMA buffer in to an
+ *	intermediate buffer. This is used to get a consistent
+ *	set of stats while the DMA buffer can be written at any time
+ *	by the NIC.
+ * @efx: The associated NIC.
+ * @dest: Destination buffer. Must be the same size as the DMA buffer.
+ */
+int efx_nic_copy_stats(struct efx_nic *efx, __le64 *dest)
+{
+	int retry;
+	__le64 generation_start, generation_end;
+	__le64 *dma_stats = efx->stats_buffer.addr;
+	int rc = 0;
+
+	if (!dest)
+		return 0;
+
+	if (!dma_stats)
+		goto return_zeroes;
+
+	for (retry = 0; retry < 100; ++retry) {
+		generation_end = dma_stats[efx->num_mac_stats - 1];
+		if (generation_end == EFX_MC_STATS_GENERATION_INVALID)
+			goto return_zeroes;
+		rmb();
+		memcpy(dest, dma_stats, efx->num_mac_stats * sizeof(__le64));
+		rmb();
+		generation_start = dma_stats[MC_CMD_MAC_GENERATION_START];
+		if (generation_end == generation_start)
+			return 0; /* return good data */
+		udelay(100);
+	}
+
+	rc = -EIO;
+
+return_zeroes:
+	memset(dest, 0, efx->num_mac_stats * sizeof(u64));
+	return rc;
+}
+
+/**
  * efx_nic_update_stats - Convert statistics DMA buffer to array of u64
  * @desc: Array of &struct efx_hw_stat_desc describing the DMA buffer
  *	layout.  DMA widths of 0, 16, 32 and 64 are supported; where
@@ -591,41 +633,46 @@ size_t efx_nic_describe_stats(const struct efx_hw_stat_desc *desc, size_t count,
  * @mask: Bitmask of which elements of @desc are enabled
  * @stats: Buffer to update with the converted statistics.  The length
  *	of this array must be at least @count.
- * @dma_buf: DMA buffer containing hardware statistics
- * @accumulate: If set, the converted values will be added rather than
- *	directly stored to the corresponding elements of @stats
+ * @mc_initial_stats: Copy of DMA buffer containing initial stats. Subtracted
+ *	from the stats in mc_stats.
+ * @mc_stats: DMA buffer containing hardware statistics
  */
 void efx_nic_update_stats(const struct efx_hw_stat_desc *desc, size_t count,
-			  const unsigned long *mask,
-			  u64 *stats, const void *dma_buf, bool accumulate)
+			  const unsigned long *mask, u64 *stats,
+			  const void *mc_initial_stats, const void *mc_stats)
 {
 	size_t index;
+	__le64 zero = 0;
 
 	for_each_set_bit(index, mask, count) {
 		if (desc[index].dma_width) {
-			const void *addr = dma_buf + desc[index].offset;
-			u64 val;
+			const void *addr =
+				mc_stats ?
+				mc_stats + desc[index].offset :
+				&zero;
+			const void *init =
+				mc_initial_stats && mc_stats ?
+				mc_initial_stats + desc[index].offset :
+				&zero;
 
 			switch (desc[index].dma_width) {
 			case 16:
-				val = le16_to_cpup((__le16 *)addr);
+				stats[index] = le16_to_cpup((__le16 *)addr) -
+					       le16_to_cpup((__le16 *)init);
 				break;
 			case 32:
-				val = le32_to_cpup((__le32 *)addr);
+				stats[index] = le32_to_cpup((__le32 *)addr) -
+					       le32_to_cpup((__le32 *)init);
 				break;
 			case 64:
-				val = le64_to_cpup((__le64 *)addr);
+				stats[index] = le64_to_cpup((__le64 *)addr) -
+					       le64_to_cpup((__le64 *)init);
 				break;
 			default:
-				WARN_ON(1);
-				val = 0;
+				WARN_ON_ONCE(1);
+				stats[index] = 0;
 				break;
 			}
-
-			if (accumulate)
-				stats[index] += val;
-			else
-				stats[index] = val;
 		}
 	}
 }

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -47,11 +47,14 @@
  *
  *--------------------------------------------------------------------*/
 
+#include "onload_kernel_compat.h"
+
 #include <onload/linux_onload_internal.h>
 #include <onload/linux_trampoline.h>
 #include <onload/linux_mmap.h>
 #include <onload/linux_onload.h>
 #include <linux/unistd.h>
+#include <linux/stop_machine.h>
 
 /*--------------------------------------------------------------------
  *
@@ -685,7 +688,7 @@ ci_inline unsigned long *get_oldrsp_addr(void)
    *   <some CFI stuff (?)>
    *   movq   %rsp,PER_CPU_VAR(old_rsp)
    *        65 48 89 24 25 XX XX XX XX
-   *   <some zeroes?>
+   *   <some zeroes, or SWITCH_TO_KERNEL_CR3 %rsp>
    *   movq   PER_CPU_VAR(kernel_stack),%rsp
    *        65 48 8b 24 25 YY YY YY YY
    * where kernel_stack is exported, so it can be checked.
@@ -732,16 +735,18 @@ ci_inline unsigned long *get_oldrsp_addr(void)
     p += 5;
     result = p[0] + (p[1] << 8) + (p[2] << 16);
     p +=3;
-    while (*p == 0)
+    p_end = p + 32;
+    while (p[0] != 0x65 || p[1] != 0x48 || p[2] != 0x8b ||
+           p[3] != 0x24 || p[4] != 0x25 ||
+           p[5] != (kernel_stack_p & 0xff) ||
+           p[6] != ((kernel_stack_p >> 8) & 0xff) ||
+           p[7] != ((kernel_stack_p >> 16) & 0xff)) {
       p++;
-    if (p[0] != 0x65 || p[1] != 0x48 || p[2] != 0x8b ||
-        p[3] != 0x24 || p[4] != 0x25 ||
-        p[5] != (kernel_stack_p & 0xff) ||
-        p[6] != ((kernel_stack_p >> 8) & 0xff) ||
-        p[7] != ((kernel_stack_p >> 16) & 0xff)) {
-      ci_log("Looking up for movq PER_CPU_VAR(kernel_stack=%lx),%%rsp",
-             kernel_stack_p);
-      OOPS("Unexpected code in system_call(), can't trampoline.");
+      if (p >= p_end) {
+        ci_log("Looking up for movq PER_CPU_VAR(kernel_stack=%lx),%%rsp",
+               kernel_stack_p);
+        OOPS("Unexpected code in system_call(), can't trampoline.");
+      }
     }
     TRAMP_DEBUG("&per_cpu__old_rsp=%08lx", result);
 
@@ -813,7 +818,7 @@ tramp_close_begin(int fd, ci_uintptr_t *tramp_entry_out,
       read_unlock (&oo_mm_tbl_lock);
 
       if( *tramp_entry_out != 0 &&
-          access_ok(VERIFY_READ, *tramp_entry_out, 1)) {
+          efab_access_ok(*tramp_entry_out, 1)) {
         fput(f);
         return false;
       }
@@ -966,7 +971,7 @@ efab_linux_trampoline_handler_close64(struct pt_regs *regs)
     TRAMP_DEBUG("read user_sp=%p", user_sp);
 
     /* Make sure there is sufficient user-space stack */
-    if (!access_ok (VERIFY_WRITE, user_sp - 24, 24)) {
+    if (!efab_access_ok (user_sp - 24, 24)) {
       ci_log ("Invalid user-space stack-pointer; cannot trampoline!");
       return tramp_close_passthrough(fd);
     }
@@ -1154,7 +1159,7 @@ efab_linux_trampoline_handler_close32(struct pt_regs *regs)
    *
    * First we ensure there is sufficient user-space stack
    */
-  if (!access_ok (VERIFY_WRITE, sp(regs) - 20, 20)) {
+  if (!efab_access_ok (sp(regs) - 20, 20)) {
     ci_log ("Bogus 32-bit user-mode stack; cannot trampoline!");
     return tramp_close_passthrough(bx);
   }
@@ -1408,6 +1413,39 @@ int efab_linux_trampoline_ctor(int no_sct)
 }
 
 
+int stop_machine_do_nothing(void *arg)
+{
+  /* Can we somehow detect that we are in one of the intercepted syscalls?
+   * May be ORC unwinder?
+   * And even if we can, what can we do?  Wait and try again? */
+  return 0;
+}
+
+void wait_for_other_syscall_callers(void)
+{
+  /* For some older kernels, we used to call synchronize_sched()
+   * and it was a guarantee that any other CPU is not in the short chunk of
+   * code between syscall enter and efab_syscall_used++, or between
+   * efab_syscall_used-- and syscall exit.
+   *
+   * But even at that time, synchronize_sched() did not provide this
+   * guarantee for CONFIG_PREEMPT-enabled kernel, because they MAY schedule
+   * at the points described above.
+   *
+   * From linux-5.1, there is no synchronize_sched(), and it have been
+   * more-or-less equivalent to synchronize_rcu() for a long time already.
+   *
+   * We are using stop_machine() to schedule all the CPUs, but it has the
+   * same issue with CONFIG_PREEMPT-enabled kernel as the old
+   * synchronize_sched() solution.
+   */
+  stop_machine(stop_machine_do_nothing, NULL, NULL);
+#ifdef CONFIG_PREEMPT
+  /* No guarantee, but let's try to wait */
+  schedule_timeout(msecs_to_jiffies(50));
+#endif
+}
+
 int
 efab_linux_trampoline_dtor (int no_sct) {
   if (syscall_table != NULL && !no_sct) {
@@ -1429,11 +1467,8 @@ efab_linux_trampoline_dtor (int no_sct) {
 
     /* If anybody have already entered our syscall handlers, he should get
      * to efab_syscall_used++ now: let's wait a bit. */
-    synchronize_sched();
-#ifdef CONFIG_PREEMPT
-    /* No guarantee, but let's try to wait */
-    schedule_timeout(msecs_to_jiffies(50));
-#endif
+    wait_for_other_syscall_callers();
+
     while( atomic_read(&efab_syscall_used) ) {
       if( !waiting ) {
         ci_log("%s: Waiting for intercepted syscalls to finish...",
@@ -1445,11 +1480,7 @@ efab_linux_trampoline_dtor (int no_sct) {
     if( waiting )
       ci_log("%s: All syscalls have finished", __FUNCTION__);
     /* And now wait for exiting from syscall after efab_syscall_used-- */
-    synchronize_sched();
-#ifdef CONFIG_PREEMPT
-    /* No guarantee, but let's try to wait */
-    schedule_timeout(msecs_to_jiffies(50));
-#endif
+    wait_for_other_syscall_callers();
   }
 
 #ifdef CONFIG_COMPAT

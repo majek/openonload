@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -289,7 +289,19 @@ struct file *alloc_file_pseudo(struct inode *inode, struct vfsmount *mnt,
          * flags=FMODE_READ | FMODE_WRITE.
          * We do not convert first to second, we always use read|write.
          */
+#ifdef RHEL_MAJOR
+#if RHEL_MAJOR == 8
+        /* RHEL8 backported new prototype of alloc_file() to its
+         * linux-4.18, but did not backport alloc_file_pseudo().  These two
+         * variants of alloc_file() share the same prototype and can not be
+         * detected by kernel_compat.sh. */
+        file = alloc_file(&path, O_RDWR, fops);
+#else
         file = alloc_file(&path, FMODE_READ | FMODE_WRITE, fops);
+#endif
+#else
+        file = alloc_file(&path, FMODE_READ | FMODE_WRITE, fops);
+#endif /*RHEL_MAJOR*/
 	if (IS_ERR(file)) {
 		ihold(inode);
 		path_put(&path);

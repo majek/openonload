@@ -1,6 +1,6 @@
 Solarflare 4.X Linux network driver
 ===================================
-Version:  v4.15.0.1012
+Version:  4.15.3.1011
 
 
 Overview
@@ -15,9 +15,10 @@ The drivers contained in this package support the following Solarflare
 adapters:
 
 - Solarflare Server Adapters:
-  - Solarflare X2522 Dual Port SFP28 10/25G Adapter
-  - Solarflare X2541 Single Port QSFP28 10/25G/100G Adapter
-  - Solarflare X2542 Dual Port QSFP28 10/25G/100G Adapter
+  - XtremeScale X2522 (10G) PCIe Dual Port SFP28
+  - XtremeScale X2522-25G PCIe Dual Port SFP28
+  - XtremeScale X2541 PCIe Single Port QSFP28
+  - XtremeScale X2542 PCIe Dual Port QSFP28
   - Solarflare SFN8522M Dual Port SFP+ Server Adapter
   - Solarflare SFN8042 Dual Port QSFP+ Server Adapter
   - Solarflare SFN8522 Dual Port SFP+ Server Adapter
@@ -79,38 +80,24 @@ kernel
 Installation of the driver can be confirmed by typing:
    modinfo sfc | grep version
 and checking for the line:
-   version: v4.15.0.1012
+   version: 4.15.3.1011
 
 All network interfaces available on the system can be found with:
   ifconfig -a
-
-
-Driver updates
---------------
-The latest version of this driver can always be downloaded from
-<https://support.solarflare.com/>.
-
-
-Documentation
--------------
-For detailed instructions of how to install and configure the driver
-please refer to the "Solarflare Server Adapter User's Guide"
-(part number SF-103837-CD) which is available as a PDF from
-<https://support.solarflare.com/>.
 
 
 Linux distribution support for Solarflare Adapters
 --------------------------------------------------
 
 This driver package is supported on:
- - RedHat Enterprise Linux		          6.7, 6.8, 6.9, 6.10
- - RedHat Enterprise Linux		          7.3, 7.4, 7.5, 7.6
- - SuSE Linux Enterprise Server 11                sp4
- - SuSE Linux Enterprise Server 12                sp3
+ - RedHat Enterprise Linux                        6.8, 6.9, 6.10
+ - RedHat Enterprise Linux                        7.4, 7.5, 7.6
+ - SuSE Linux Enterprise Server 12                sp3, sp4
+ - SuSE Linux Enterprise Server 15                base
  - Canonical Ubuntu Server LTS                    14.04.5, 16.04.x, 18.04
  - Debian 8 "Jessie"                              8.10
  - Debian 9 "Stretch"                             9.4
- - Kernel.org linux kernels                       3.0 to 4.19
+ - Kernel.org linux kernels                       3.0 to 4.20
 
 
 Solarflare aims to support the current and previous major release of each
@@ -129,6 +116,76 @@ Please contact your local Solarflare support representative or email
 
 Changelog
 ---------
+
+### v4.15.3.1011
+[General changes]
+ ~ Initial kernel compat fixes for linux kernel 5.2.
+ ~ Reset stats when a network interface is created. Note this will not reset
+   stats on other interfaces that share the physical network port
+   i.e. when sfboot pf-count>=2
+   Alternatively reset stats with "ethtool --reset <device> mac" or use
+   "sfctool" if your copy of "ethtool" does not support "--reset".
+ ~ LNXNET-62: Report the version of the driver to adapter firmware at driver
+   load. This can then be reported by management protocols (e.g. NC-SI).
+ ~ The 8000 series and newer adapters all get hardware timestamps from the MAC
+   and hence can supply a hardware timestamp for any packet when requested.
+   This enables the use of PTP layer 2 timestamps.
+ ~ add "rss_cpus=rss_numa_local_cores" and "rss_cpus=numa_local_hyperthreads"
+   module parameters to only allocate channels on a given NUMA node. This is
+   useful for very large systems and can significantly reduce the number of
+   interrupts consumed.
+
+Issue 87503:
+ ~ Add PCIe domain to PTP/PPS workqueue name to avoid naming collisions in /sys.
+
+Issue 86926:
+ ~ Ensure ethtool can return 256bytes of DAC module info (instead of none) when
+   the module is SFF-8472 compliant but where the DDM compliance bit isn't set.
+
+Issue 86925:
+ ~ Link speed shows as "0 Mbps full duplex" for bonds on linux kernels < 4.6
+
+Issue 86413:
+ ~ For kernels >=4.19 avoid duplicate names with MTD/NVMEM symlinks caused
+   by interface renaming races in udev.
+
+Issue 85750:
+ ~ Fix registration of PHC clocks where there are more than two ports or
+   functions on an adapter.
+
+Issue 81246:
+ ~ Fix timestamping for PTP packets over VLANed interfaces on <=SFN6XXX
+   hardware.
+
+Issue 80717:
+ ~ Improve race handling in MCDI completions. This was seen to cause
+   LIST_POISON1 assertions in the kernel.
+
+### v4.15.2.1001 -- maintenance release for 18.3
+
+Issue 85216:
+ ~ Some MTD partitions were not correctly populated, with the missing
+   partitions depending on uninitialised data. This could potentially cause
+   issues when updating firmware.
+
+Issue 84673:
+ ~ In some situations the driver could fail to recover from a failure to
+   allocate a receive buffer. This may happen when the system is under very
+   serious memory pressure. The driver should now recover once memory becomes
+   available.
+
+### v4.15.1.1008 -- 18.3 release
+[General changes]
+ ~ Performance improvements for 100G NICs.
+   On a 100G NIC in a single port mode, setting the performance_profile
+   module parameter to "throughput" will put the NIC in a mode that
+   makes more efficient use of the NIC. Please note that this mode is
+   incompatible with EFVI and Onload.
+ ~ Kernel compat fixes to support Linux 4.20.
+
+[Deprecation warnings]
+ ~ The hybrid SRIOV support for 5000- and 6000-series NICs will be removed in
+   an upcoming release.
 
 ### v4.15.0.1012 -- update release for OpenOnload-201811
 [General changes]
@@ -2077,6 +2134,17 @@ Issue 19951
 ### v3.0.5.2175 -- Update release
 
 
+Deprecated features
+-------------------
+
+The hybrid SRIOV support for 5000- and 6000-series NICs with Linux KVM will be
+removed in an upcoming release. This feature has not been actively used or
+maintained for some time.
+
+Support for legacy interrupts (as opposed to MSI or MSI-X interrupts) will be
+removed in a future release. All servers in use are expected to support MSI
+or MSI-X interrupts.
+
 Removed features
 ----------------
 
@@ -2313,5 +2381,5 @@ Issue 50868:
 
 Copyright
 ---------
-Copyright 2009-2018 Solarflare Communications Inc.  All rights reserved.
+Copyright 2009-2019 Solarflare Communications Inc.  All rights reserved.
 Use is subject to license terms.

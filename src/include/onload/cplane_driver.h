@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -18,13 +18,17 @@
 #define __ONLOAD_CPLANE_DRIVER_H__
 
 #include <linux/mm.h>
+#include <linux/poll.h>
 
 #define DEFAULT_CPLANE_SERVER_PATH "/sbin/onload_cp_server"
 
+extern int oo_cplane_mmap(struct file* file, struct vm_area_struct* vma);
+extern ssize_t cp_fop_read(struct file *filp, char __user *buf,
+                           size_t len, loff_t *off);
+extern unsigned cp_fop_poll(struct file* filp, poll_table* wait);
+
 struct ci_private_s;
 struct oo_cplane_handle;
-extern int oo_cplane_mmap(struct ci_private_s* priv,
-                          struct vm_area_struct* vma);
 extern int oo_cp_get_mib_size(struct ci_private_s *priv, void *arg);
 extern int oo_cp_fwd_resolve_rsop(struct ci_private_s *priv, void *arg);
 extern int oo_cp_fwd_resolve_complete(struct ci_private_s *priv, void *arg);

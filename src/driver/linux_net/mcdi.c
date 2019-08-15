@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -108,6 +108,18 @@ static void efx_mcdi_mode_fail(struct efx_nic *efx, struct list_head *cleanup_li
 static void _efx_mcdi_display_error(struct efx_nic *efx, unsigned int cmd,
 				    size_t inlen, int raw, int arg, int rc);
 
+static bool efx_cmd_running(struct efx_mcdi_cmd *cmd)
+{
+	return cmd->state == MCDI_STATE_RUNNING ||
+	       cmd->state == MCDI_STATE_RUNNING_CANCELLED;
+}
+
+static bool efx_cmd_cancelled(struct efx_mcdi_cmd *cmd)
+{
+	return cmd->state == MCDI_STATE_RUNNING_CANCELLED ||
+	       cmd->state == MCDI_STATE_PROXY_CANCELLED;
+}
+
 static void efx_mcdi_cmd_release(struct kref *ref)
 {
 	kfree(container_of(ref, struct efx_mcdi_cmd, ref));
@@ -122,6 +134,10 @@ static void _efx_mcdi_remove_cmd(struct efx_mcdi_iface *mcdi,
 				 struct efx_mcdi_cmd *cmd,
 				 struct list_head *cleanup_list)
 {
+	/* if cancelled, the completers have already been called */
+	if (efx_cmd_cancelled(cmd))
+		return;
+
 	if (cmd->atomic_completer)
 		cmd->atomic_completer(mcdi->efx, cmd->cookie, cmd->rc,
 				      cmd->outbuf, cmd->outlen);
@@ -137,8 +153,8 @@ static void efx_mcdi_remove_cmd(struct efx_mcdi_iface *mcdi,
 				struct list_head *cleanup_list)
 {
 	list_del(&cmd->list);
-	if (!cmd->cancelled)
-		_efx_mcdi_remove_cmd(mcdi, cmd, cleanup_list);
+	_efx_mcdi_remove_cmd(mcdi, cmd, cleanup_list);
+	cmd->state = MCDI_STATE_FINISHED;
 	kref_put(&cmd->ref, efx_mcdi_cmd_release);
 	if (list_empty(&mcdi->cmd_list))
 		wake_up(&mcdi->cmd_complete_wq);
@@ -155,7 +171,6 @@ static unsigned long efx_mcdi_rpc_timeout(struct efx_nic *efx, unsigned int cmd)
 int efx_mcdi_init(struct efx_nic *efx)
 {
 	struct efx_mcdi_iface *mcdi;
-	bool already_attached;
 	int rc = -ENOMEM;
 
 	efx->mcdi = kzalloc(sizeof(*efx->mcdi), GFP_KERNEL);
@@ -195,10 +210,9 @@ int efx_mcdi_init(struct efx_nic *efx)
 	 * caller should retry with variant "don't care".
 	 */
 	rc = efx_mcdi_drv_attach(efx, true, MC_CMD_FW_LOW_LATENCY,
-				 &already_attached, &efx->mcdi->fn_flags);
+				 &efx->mcdi->fn_flags);
 	if (rc == -EPERM) {
 		rc = efx_mcdi_drv_attach(efx, true, MC_CMD_FW_DONT_CARE,
-					 &already_attached,
 					 &efx->mcdi->fn_flags);
 	}
 	if (rc) {
@@ -206,10 +220,6 @@ int efx_mcdi_init(struct efx_nic *efx)
 			  "Unable to register driver with MCPU\n");
 		goto fail4;
 	}
-	if (already_attached)
-		/* Not a fatal error */
-		netif_err(efx, probe, efx->net_dev,
-			  "Host already registered with MCPU\n");
 
 	return 0;
 fail4:
@@ -232,8 +242,7 @@ void efx_mcdi_detach(struct efx_nic *efx)
 
 	if (!efx_nic_hw_unavailable(efx))
 		/* Relinquish the device (back to the BMC, if this is a LOM) */
-		efx_mcdi_drv_attach(efx, false, MC_CMD_FW_DONT_CARE,
-				NULL, NULL);
+		efx_mcdi_drv_detach(efx);
 }
 
 void efx_mcdi_fini(struct efx_nic *efx)
@@ -261,7 +270,7 @@ static bool efx_mcdi_reset_cmd_running(struct efx_mcdi_iface *mcdi)
 
 	list_for_each_entry(cmd, &mcdi->cmd_list, list)
 		if (cmd->cmd == MC_CMD_REBOOT &&
-		    cmd->state == MCDI_STATE_RUNNING)
+		    efx_cmd_running(cmd))
 			return true;
 	return false;
 }
@@ -273,7 +282,7 @@ static void efx_mcdi_reboot_detected(struct efx_nic *efx)
 
 	_efx_mcdi_mode_poll(mcdi);
 	list_for_each_entry(cmd, &mcdi->cmd_list, list)
-		if (cmd->state == MCDI_STATE_RUNNING)
+		if (efx_cmd_running(cmd))
 			cmd->reboot_seen = true;
 	efx->type->mcdi_reboot_detected(efx);
 }
@@ -544,19 +553,19 @@ static void _efx_mcdi_cancel_cmd(struct efx_mcdi_iface *mcdi,
 				 * sure it's not called again later, by
 				 * marking it as cancelled.
 				 */
-				if (cmd->cancelled) {
-					netif_warn(efx, drv, efx->net_dev,
-						   "command %#x inlen %zu double cancelled\n",
-						   cmd->cmd, cmd->inlen);
-				} else {
-					cmd->rc = -EPIPE;
-					cmd->cancelled = true;
-					_efx_mcdi_remove_cmd(mcdi, cmd, cleanup_list);
-				}
+				cmd->rc = -EPIPE;
+				_efx_mcdi_remove_cmd(mcdi, cmd, cleanup_list);
+				cmd->state = cmd->state == MCDI_STATE_RUNNING ?
+					     MCDI_STATE_RUNNING_CANCELLED :
+					     MCDI_STATE_PROXY_CANCELLED;
 				break;
-			case MCDI_STATE_ABORT:
-				/* It's already done. nothing to do. */
+			case MCDI_STATE_RUNNING_CANCELLED:
+			case MCDI_STATE_PROXY_CANCELLED:
+				netif_warn(efx, drv, efx->net_dev,
+					   "command %#x inlen %zu double cancelled\n",
+					   cmd->cmd, cmd->inlen);
 				break;
+			case MCDI_STATE_FINISHED:
 			default:
 				/* invalid state? */
 				WARN_ON(1);
@@ -588,7 +597,6 @@ static void efx_mcdi_proxy_response(struct efx_mcdi_iface *mcdi,
 		if (status == -EIO || status == -EINTR)
 			efx_mcdi_reset_during_cmd(mcdi, cmd);
 		kref_get(&cmd->ref);
-		cmd->state = MCDI_STATE_ABORT;
 		cmd->rc = status;
 		efx_mcdi_remove_cmd(mcdi, cmd, cleanup_list);
 		if (cancel_delayed_work(&cmd->work))
@@ -649,8 +657,10 @@ static void efx_mcdi_ev_cpl(struct efx_nic *efx, unsigned int seqno,
 		netif_err(efx, hw, efx->net_dev,
 			  "MC response unexpected tx seq 0x%x\n",
 			  seqno);
-		/* We're out of sync with the MC, let's reboot it */
-		efx_schedule_reset(efx, RESET_TYPE_WORLD);
+		/* this could theoretically just be a race between command
+		 * time out and processing the completion event,  so while not
+		 * a good sign, it'd be premature to attempt any recovery.
+		 */
 	}
 	spin_unlock(&mcdi->iface_lock);
 
@@ -842,7 +852,6 @@ static int efx_mcdi_rpc_async_internal(struct efx_nic *efx,
 	INIT_DELAYED_WORK(&cmd->work, efx_mcdi_cmd_work);
 	INIT_LIST_HEAD(&cmd->list);
 	INIT_LIST_HEAD(&cmd->cleanup_list);
-	cmd->cancelled = false;
 	cmd->proxy_handle = 0;
 	cmd->rc = 0;
 	cmd->outbuf = NULL;
@@ -1027,10 +1036,10 @@ static void efx_mcdi_cmd_work(struct work_struct *context)
 
 	spin_lock_bh(&mcdi->iface_lock);
 
-	if (cmd->state == MCDI_STATE_ABORT) {
+	if (cmd->state == MCDI_STATE_FINISHED) {
 		/* The command is done and this is a race between the
 		 * completion in another thread and the work item running.
-		 * The rest of the cleanup as been done, so just delete it.
+		 * All processing been done, so just release it.
 		 */
 		spin_unlock_bh(&mcdi->iface_lock);
 		kref_put(&cmd->ref, efx_mcdi_cmd_release);
@@ -1244,7 +1253,7 @@ static bool efx_mcdi_complete_cmd(struct efx_mcdi_iface *mcdi,
 		if (mcdi->db_held_by == cmd)
 			mcdi->db_held_by = NULL;
 
-		if (cmd->cancelled) {
+		if (efx_cmd_cancelled(cmd)) {
 			list_del(&cmd->list);
 			kref_put(&cmd->ref, efx_mcdi_cmd_release);
 			completed = true;
@@ -1419,8 +1428,7 @@ static void _efx_mcdi_mode_poll(struct efx_mcdi_iface *mcdi)
 		mcdi->mode = MCDI_MODE_POLL;
 
 		list_for_each_entry(cmd, &mcdi->cmd_list, list)
-			if (cmd->state == MCDI_STATE_RUNNING &&
-			    !cmd->polled) {
+			if (efx_cmd_running(cmd) && !cmd->polled) {
 				netif_dbg(mcdi->efx, drv, mcdi->efx->net_dev,
 					  "converting command %#x inlen %zu to polled mode\n",
 					  cmd->cmd, cmd->inlen);
@@ -1693,62 +1701,139 @@ fail:
 	buf[0] = 0;
 }
 
-int efx_mcdi_drv_attach(struct efx_nic *efx, bool driver_operating,
-			u32 fw_variant, bool *was_attached, u32 *flags)
+static int efx_mcdi_drv_attach_attempt(struct efx_nic *efx,
+				       u32 fw_variant, u32 new_state,
+				       u32 *flags)
 {
-	MCDI_DECLARE_BUF(inbuf, MC_CMD_DRV_ATTACH_IN_LEN);
+	MCDI_DECLARE_BUF(inbuf, MC_CMD_DRV_ATTACH_IN_V2_LEN);
 	MCDI_DECLARE_BUF(outbuf, MC_CMD_DRV_ATTACH_EXT_OUT_LEN);
 	size_t outlen;
 	int rc;
 
-	MCDI_POPULATE_DWORD_2(inbuf, DRV_ATTACH_IN_NEW_STATE,
-			      DRV_ATTACH_IN_ATTACH, !!driver_operating,
-			      DRV_ATTACH_IN_WANT_V2_LINKCHANGES, 1);
+	MCDI_SET_DWORD(inbuf, DRV_ATTACH_IN_NEW_STATE, new_state);
 	MCDI_SET_DWORD(inbuf, DRV_ATTACH_IN_UPDATE, 1);
 	MCDI_SET_DWORD(inbuf, DRV_ATTACH_IN_FIRMWARE_ID, fw_variant);
+
+	strlcpy(MCDI_PTR(inbuf, DRV_ATTACH_IN_V2_DRIVER_VERSION),
+		EFX_DRIVER_VERSION, MC_CMD_DRV_ATTACH_IN_V2_DRIVER_VERSION_LEN);
 
 	rc = efx_mcdi_rpc_quiet(efx, MC_CMD_DRV_ATTACH, inbuf, sizeof(inbuf),
 				outbuf, sizeof(outbuf), &outlen);
 
-	/* If we're not the primary PF, trying to ATTACH with a firmware 
-	 * variant other than MC_CMD_FW_DONT_CARE will fail with EPERM. In
-	 * this case we can return without logging an error.
+	/* If we're not the primary PF, trying to ATTACH with a firmware
+	 * variant other than MC_CMD_FW_DONT_CARE will fail with EPERM.
+	 *
+	 * The firmware can also return EOPNOTSUPP, EBUSY or EINVAL if we've
+	 * asked for some combinations of VI spreading. Such failures are
+	 * handled at a slightly higher level.
+	 *
+	 * In these cases we can return without logging an error.
 	 */
-	if (rc == -EPERM) {
+	if (rc == -EPERM || rc == -EOPNOTSUPP || rc == -EBUSY || rc == -EINVAL) {
 		netif_dbg(efx, probe, efx->net_dev,
-			  "efx_mcdi_drv_attach with fw-variant setting failed EPERM, trying without it\n");
+			  "efx_mcdi_drv_attach failed: %d\n", rc);
 		return rc;
 	}
-	if (rc) {
-		efx_mcdi_display_error(efx, MC_CMD_DRV_ATTACH, sizeof(inbuf),
-				       outbuf, outlen, rc);
-		goto fail;
-	}
-	if (outlen < MC_CMD_DRV_ATTACH_OUT_LEN) {
-		rc = -EIO;
-		goto fail;
-	}
 
-	if (was_attached != NULL)
-		*was_attached = MCDI_DWORD(outbuf, DRV_ATTACH_OUT_OLD_STATE);
-
-	if (flags != NULL) {
-		if (outlen >= MC_CMD_DRV_ATTACH_EXT_OUT_LEN) {
-			*flags = MCDI_DWORD(outbuf,
-					    DRV_ATTACH_EXT_OUT_FUNC_FLAGS);
-		} else {
-			/* Synthesise flags for Siena */
-			*flags = 1 << MC_CMD_DRV_ATTACH_EXT_OUT_FLAG_LINKCTRL |
-				 1 << MC_CMD_DRV_ATTACH_EXT_OUT_FLAG_TRUSTED |
-				 (efx_port_num(efx) == 0) <<
-				 MC_CMD_DRV_ATTACH_EXT_OUT_FLAG_PRIMARY;
-		}
+	if (rc || outlen < MC_CMD_DRV_ATTACH_OUT_LEN) {
+		if (outlen < MC_CMD_DRV_ATTACH_OUT_LEN)
+			rc = -EIO;
+		netif_err(efx, probe, efx->net_dev,
+			  "efx_mcdi_drv_attach failed (fatal): %d\n", rc);
+		return rc;
 	}
 
-	return 0;
+	if (new_state & (1 << MC_CMD_DRV_ATTACH_IN_ATTACH_LBN)) {
+		/* Were we already attached? */
+		u32 old_state = MCDI_DWORD(outbuf, DRV_ATTACH_OUT_OLD_STATE);
 
-fail:
-	netif_err(efx, probe, efx->net_dev, "%s: failed rc=%d\n", __func__, rc);
+		if (old_state & (1 << MC_CMD_DRV_ATTACH_IN_ATTACH_LBN))
+			netif_warn(efx, probe, efx->net_dev,
+				   "efx_mcdi_drv_attach attached when already attached\n");
+	}
+
+	if (!flags)
+		return rc;
+
+	if (outlen >= MC_CMD_DRV_ATTACH_EXT_OUT_LEN)
+		*flags = MCDI_DWORD(outbuf, DRV_ATTACH_EXT_OUT_FUNC_FLAGS);
+	else
+		/* Mock up flags for older NICs */
+		*flags = 1 << MC_CMD_DRV_ATTACH_EXT_OUT_FLAG_LINKCTRL |
+			 1 << MC_CMD_DRV_ATTACH_EXT_OUT_FLAG_TRUSTED |
+			 (efx_port_num(efx) == 0) <<
+			 MC_CMD_DRV_ATTACH_EXT_OUT_FLAG_PRIMARY;
+
+	return rc;
+}
+
+static bool efx_mcdi_drv_attach_bad_spreading(u32 flags)
+{
+	/* We don't support full VI spreading, only the tx-only version. */
+	return flags & (1 << MC_CMD_DRV_ATTACH_EXT_OUT_FLAG_VI_SPREADING_ENABLED);
+}
+
+int efx_mcdi_drv_detach(struct efx_nic *efx)
+{
+	return efx_mcdi_drv_attach_attempt(efx, MC_CMD_FW_DONT_CARE, 0, NULL);
+}
+
+int efx_mcdi_drv_attach(struct efx_nic *efx, bool driver_operating,
+			u32 fw_variant, u32 *out_flags)
+{
+#ifdef EFX_NOT_UPSTREAM
+	bool request_spreading = false;
+#endif
+	u32 flags;
+	u32 in;
+	int rc;
+
+	in = (1 << MC_CMD_DRV_ATTACH_IN_ATTACH_LBN) |
+	     (1 << MC_CMD_DRV_ATTACH_IN_WANT_V2_LINKCHANGES_LBN);
+
+#ifdef EFX_NOT_UPSTREAM
+	/* We request TX-only VI spreading. The firmware will only provide
+	 * this if we're a single port device where this is actually useful.
+	 */
+	if (efx->performance_profile == EFX_PERFORMANCE_PROFILE_THROUGHPUT) {
+		request_spreading = true;
+		in |= 1 << MC_CMD_DRV_ATTACH_IN_WANT_TX_ONLY_SPREADING_LBN;
+	}
+#endif
+
+	rc = efx_mcdi_drv_attach_attempt(efx, fw_variant, in, &flags);
+
+#ifdef EFX_NOT_UPSTREAM
+	/* If we requested spreading and the firmware failed to provide that
+	 * we should retry the attach without the request.
+	 */
+	if (request_spreading && (rc == -EINVAL || rc == -EOPNOTSUPP)) {
+		netif_dbg(efx, probe, efx->net_dev,
+			  "efx_mcdi_drv_attach failed (%d) when requesting VI spreading mode; retrying\n",
+			  rc);
+
+		/* Retry without asking for spreading. */
+		in &= ~(1 << MC_CMD_DRV_ATTACH_IN_WANT_TX_ONLY_SPREADING_LBN);
+		rc = efx_mcdi_drv_attach_attempt(efx, fw_variant,
+						 in, &flags);
+	}
+#endif
+
+	if (rc == 0 && efx_mcdi_drv_attach_bad_spreading(flags)) {
+		efx_mcdi_drv_detach(efx);
+		netif_err(efx, probe, efx->net_dev,
+			  "efx_mcdi_drv_attach gave unsupported VI spreading mode\n");
+		rc = -EINVAL;
+	}
+
+	if (rc == 0) {
+		netif_dbg(efx, probe, efx->net_dev,
+			  "efx_mcdi_drv_attach attached with flags %#x\n",
+			  flags);
+		if (out_flags)
+			*out_flags = flags;
+	}
+
 	return rc;
 }
 
@@ -2156,10 +2241,11 @@ static int efx_flr(struct efx_nic *efx)
 		kref_get(&cmd->ref);
 
 		cmd->rc = -EIO;
-		efx_mcdi_remove_cmd(mcdi, cmd, &cleanup_list);
 
-		if (cmd->state == MCDI_STATE_RUNNING)
+		if (efx_cmd_running(cmd))
 			efx->type->mcdi_put_buf(efx, cmd->bufid);
+
+		efx_mcdi_remove_cmd(mcdi, cmd, &cleanup_list);
 
 		if (cancel_delayed_work(&cmd->work))
 			kref_put(&cmd->ref, efx_mcdi_cmd_release);

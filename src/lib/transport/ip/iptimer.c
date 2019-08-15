@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -69,27 +69,6 @@ void (*ci_ip_timer_debug_fn)(ci_netif*, int, int) = ci_ip_timer_debug;
 ** '96, Varghese and Lauck.
 */
 
-/* gives a bucket no for a given wheelno */
-#define BUCKETNO(wheelno, abs)                          \
-        (((abs) >> ((wheelno)*CI_IPTIME_BUCKETBITS)) & CI_IPTIME_BUCKETMASK)
-
-/* get the bucket for a given wheelno and abs */
-#define BUCKET(netif, wheelno, abs)                     \
-        (&(IPTIMER_STATE((netif))->warray[(wheelno)*CI_IPTIME_BUCKETS + BUCKETNO((wheelno), (abs))]))
-
-#define WHEEL2_MASK         (CI_IPTIME_BUCKETMASK << (CI_IPTIME_BUCKETBITS*3))
-#define WHEEL1_MASK         (WHEEL2_MASK + \
-                            (CI_IPTIME_BUCKETMASK << (CI_IPTIME_BUCKETBITS*2)))
-#define WHEEL0_MASK         (WHEEL1_MASK + \
-                            (CI_IPTIME_BUCKETMASK << (CI_IPTIME_BUCKETBITS*1)))
-
-/* "now + IPTIME_INFINITY" is detected to be "after now", and probably "after"
- * any reasonable event. */
-#define IPTIME_INFINITY ((1U << 31) - 1)
-/* If time difference is larger than this, then we probably see the sort of
- * infinity above */
-#define IPTIME_INFINITY_LOW (1U << 30)
-
 #ifdef __KERNEL__ 
 
 static int shift_for_gran(ci_uint32 G, unsigned khz) 
@@ -155,7 +134,10 @@ void ci_ip_timer_state_init(ci_netif* netif, unsigned cpu_khz)
 
   ci_ip_time_initial_sync(ipts);
   ipts->sched_ticks = ci_ip_time_now(netif);
-  ipts->closest_timer = ipts->sched_ticks + IPTIME_INFINITY;
+
+  /* See comments at the end of ci_ip_timer_poll() why
+   * 2 * CI_IPTIME_BUCKETS can be considered equal to infinity. */
+  ipts->closest_timer = ipts->sched_ticks + 2 * CI_IPTIME_BUCKETS;
 
   /* To convert ms to ticks we will use fixed point arithmetic
    * Calculate conversion factor, which is expected to be in range <0.5,1]
@@ -202,23 +184,28 @@ void __ci_ip_timer_set(ci_netif *netif, ci_ip_timer *ts, ci_iptime_t t)
    */
 
   /* insert in wheel 0 if the top 3 wheels have the same time */
-  if ((stime & WHEEL0_MASK) == (t & WHEEL0_MASK))
+  if ((stime & IPTIMER_WHEEL0_MASK) == (t & IPTIMER_WHEEL0_MASK)) {
     w = 0;
+    __ci_timer_busy_set(netif, t);
+  }
   /* else, insert in wheel 1 if the top 2 wheels have the same time */
-  else if ((stime & WHEEL1_MASK) == (t & WHEEL1_MASK))
+  else if ((stime & IPTIMER_WHEEL1_MASK) == (t & IPTIMER_WHEEL1_MASK)) {
     w = 1;
+  }
   /* else, insert in wheel 2 if the top wheel has the same time */
-  else if ((stime & WHEEL2_MASK) == (t & WHEEL2_MASK))
+  else if ((stime & IPTIMER_WHEEL2_MASK) == (t & IPTIMER_WHEEL2_MASK)) {
     w = 2;
-  else
+  }
+  else {
     w = 3;
+  }
 
-  bucket = BUCKET(netif, w, t);
+  bucket = IPTIMER_BUCKET(netif, w, t);
 
   LOG_ITV(log("%s: delta=0x%x (t=0x%x-s=0x%x), w=0x%x, b=0x%x", 
          __FUNCTION__, 
          ts->time-stime, ts->time, stime, 
-         w, BUCKETNO(w, ts->time)));
+         w, IPTIMER_BUCKETNO(w, ts->time)));
 
   /* append onto the correct bucket 
   **
@@ -249,12 +236,12 @@ static int ci_ip_timer_cascadewheel(ci_netif* netif, int wheelno,
   ci_assert( (stime & ((unsigned)(-1) << (CI_IPTIME_BUCKETBITS*wheelno))) == stime );
 
   /* bucket to empty */
-  bucket = BUCKET(netif, wheelno, stime);
+  bucket = IPTIMER_BUCKET(netif, wheelno, stime);
   buckid = ci_ni_dllist_link_addr(netif, &bucket->l);
   curid = bucket->l.next;
 
   LOG_ITV(log(LN_FMT "cascading wheel=%u sched_ticks=0x%x bucket=%i",
-	      LN_PRI_ARGS(netif), wheelno, stime, BUCKETNO(wheelno, stime)));
+	      LN_PRI_ARGS(netif), wheelno, stime, IPTIMER_BUCKETNO(wheelno, stime)));
 
   /* ditch the timers in this dll, pointers held in curid and buckid */
   ci_ni_dllist_init(netif, bucket,
@@ -269,21 +256,26 @@ static int ci_ip_timer_cascadewheel(ci_netif* netif, int wheelno,
 #ifndef NDEBUG
     {
       /* if inserting in wheel 0 - top 3 wheels must have the same time */
-      if (wheelno == 1)
-        ci_assert( (stime & WHEEL0_MASK) == (ts->time & WHEEL0_MASK) );
+      if (wheelno == 1) {
+        ci_assert_equal(stime & IPTIMER_WHEEL0_MASK,
+                        ts->time & IPTIMER_WHEEL0_MASK);
+      }
       /* else, if inserting in wheel 1 - top 2 wheels must have the same time */
-      else if (wheelno == 2)
-        ci_assert( (stime & WHEEL1_MASK) == (ts->time & WHEEL1_MASK) );
+      else if (wheelno == 2) {
+        ci_assert_equal(stime & IPTIMER_WHEEL1_MASK,
+                        ts->time & IPTIMER_WHEEL1_MASK);
+      }
       /* else, if inserting in wheel 2 - the top wheel must have the same time */
       else {
         ci_assert(wheelno == 3);
-        ci_assert( (stime & WHEEL2_MASK) == (ts->time & WHEEL2_MASK) );
+        ci_assert_equal(stime & IPTIMER_WHEEL2_MASK,
+                        ts->time & IPTIMER_WHEEL2_MASK);
       }
     }    
 #endif
 
     /* insert ts into wheel below */
-    bucket = BUCKET(netif, wheelno-1, ts->time);
+    bucket = IPTIMER_BUCKET(netif, wheelno-1, ts->time);
     changed = 1;
 
     /* append onto the correct bucket 
@@ -294,6 +286,9 @@ static int ci_ip_timer_cascadewheel(ci_netif* netif, int wheelno,
     */
     ci_ni_dllist_push_tail(netif, bucket, &ts->link);
     ci_assert(ci_ip_timer_is_link_valid(netif, ts));
+
+    if( wheelno == 1 )
+      __ci_timer_busy_set(netif, ts->time);
   }
   return changed;
 }
@@ -386,9 +381,9 @@ void ci_ip_timer_poll(ci_netif *netif) {
     (*stime)++;
 
     /* cascade through wheels if reached end of current wheel */
-    if(BUCKETNO(0, *stime) == 0) {
-      if(BUCKETNO(1, *stime) == 0) {
-	if(BUCKETNO(2, *stime) == 0) {
+    if(IPTIMER_BUCKETNO(0, *stime) == 0) {
+      if(IPTIMER_BUCKETNO(1, *stime) == 0) {
+	if(IPTIMER_BUCKETNO(2, *stime) == 0) {
 	  ci_ip_timer_cascadewheel(netif, 3, *stime);
 	}
 	ci_ip_timer_cascadewheel(netif, 2, *stime);
@@ -410,7 +405,8 @@ void ci_ip_timer_poll(ci_netif *netif) {
     /* run timers in the current bucket */
     ci_ni_dllist_rehome( netif,
                          &ipts->fire_list,
-                         &ipts->warray[BUCKETNO(0, *stime)] );
+                         &ipts->warray[IPTIMER_BUCKETNO(0, *stime)] );
+    __ci_timer_busy_unset(netif, *stime);
     DETAILED_CHECK_TIMERS(netif);
 
     while( (link = ci_ni_dllist_try_pop(netif, &ipts->fire_list)) ) {
@@ -436,22 +432,38 @@ void ci_ip_timer_poll(ci_netif *netif) {
 
   /* What is our next timer?
    * Let's update if our previous "closest" timer have already been
-   * handled, or if the previous estimation was "infinity". */
-  if( TIME_GE(ipts->sched_ticks, ipts->closest_timer) ||
-      (changed &&
-       ipts->closest_timer - ipts->sched_ticks > IPTIME_INFINITY_LOW) ) {
+   * handled, or we have cascaded some more timers into wheel0. */
+  if( TIME_GE(ipts->sched_ticks, ipts->closest_timer) || changed  ) {
     /* we peek into the first wheel only */
-    ci_iptime_t base = ipts->sched_ticks & WHEEL0_MASK;
+    ci_iptime_t base = ipts->sched_ticks & IPTIMER_WHEEL0_MASK;
     ci_iptime_t b = ipts->sched_ticks - base;
-    for( b++ ; b < CI_IPTIME_BUCKETS; b++ ) {
-      if( !ci_ni_dllist_is_empty(netif, &ipts->warray[b]) ) {
-        ipts->closest_timer = base + b;
+    int i = b/64;
+
+    /* All the lower bits have been already unset in the bitmask: */
+    ci_assert_nflags(ipts->busy_mask[i], (1ULL << (b%64)) - 1);
+
+    /* We peek into the wheel0 */
+    for( ; i < 4; i++ ) {
+      if( ipts->busy_mask[i] != 0 ) {
+        ipts->closest_timer = base + i*64 + ci_ffs64(ipts->busy_mask[i]) - 1;
         return;
       }
     }
 
-    /* We do not know the next timer.  Set it to a sort of infinity. */
-    ipts->closest_timer = ipts->sched_ticks + IPTIME_INFINITY;
+    /* Next timer is not closer that the start of wheel1.  We'll cascade it
+     * and determine the closest_timer correctly after cascading.  */
+    ipts->closest_timer = base + CI_IPTIME_BUCKETS;
+
+    /* But if the first bucket in wheel1 is empty, we can push the
+     * closest_timer even further.  We are guaranteed to cascade at least
+     * once during this time frame, so we'll get better estimation when
+     * this value becomes limiting (we call linux_tcp_timer_do() every
+     * 90ms, which is smaller than CI_IPTIME_BUCKETS=250 ticks. */
+    if( ci_ni_dllist_is_empty(netif,
+                              IPTIMER_BUCKET(netif, 1,
+                                             base + CI_IPTIME_BUCKETS) ) ) {
+      ipts->closest_timer += CI_IPTIME_BUCKETS;
+    }
   }
 }
 
@@ -472,7 +484,8 @@ void ci_ip_timer_state_assert_valid(ci_netif* ni, const char* file, int line)
    * values 
    */
   unsigned wheel_mask[CI_IPTIME_WHEELS] = 
-                { WHEEL0_MASK, WHEEL1_MASK, WHEEL2_MASK, 0 };
+                { IPTIMER_WHEEL0_MASK, IPTIMER_WHEEL1_MASK,
+                  IPTIMER_WHEEL2_MASK, 0 };
 
   ipts = IPTIMER_STATE(ni);
   stime = ipts->sched_ticks;
@@ -495,7 +508,12 @@ void ci_ip_timer_state_assert_valid(ci_netif* ni, const char* file, int line)
       /* check list looks valid */
       if ( ci_ni_dllist_start(ni, bucket) == ci_ni_dllist_end(ni, bucket) ) {
         ci_assert( ci_ni_dllist_is_empty(ni, bucket) );
+        if( w == 0 )
+          ci_assert_nflags(ipts->busy_mask[b/64], (1ULL << (b%64)));
       }
+      else if( w == 0 )
+        ci_assert_flags(ipts->busy_mask[b/64], (1ULL << (b%64)));
+
 
       /* check buckets that should be empty are! */
       a3 = TIME_GT(min_time, stime) || ci_ni_dllist_is_empty(ni, bucket);
@@ -577,7 +595,8 @@ void ci_ip_timer_state_dump(ci_netif* ni)
    * values 
    */
   unsigned wheel_mask[CI_IPTIME_WHEELS] = 
-                { WHEEL0_MASK, WHEEL1_MASK, WHEEL2_MASK, 0 };
+                { IPTIMER_WHEEL0_MASK, IPTIMER_WHEEL1_MASK,
+                  IPTIMER_WHEEL2_MASK, 0 };
 
   ipts = IPTIMER_STATE(ni);
   stime = ipts->sched_ticks;

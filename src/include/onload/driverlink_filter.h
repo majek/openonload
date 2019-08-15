@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -55,12 +55,7 @@ efx_dlfilter_handler(struct net* netns, int ifindex, struct efx_dlfilt_cb_s*,
                      const struct ci_ether_hdr_s*, const void* ip_hdr, int len);
 
 
-extern void efx_dlfilter_dump(struct efx_dlfilt_cb_s*, unsigned what);
-#define EFAB_DLFILT_DUMP_LAT	     0x00010000
-#define EFAB_DLFILT_DUMP_LACB_FREE   0x00000001
-#define EFAB_DLFILT_DUMP_LACB_USED   0x00002000
-#define EFAB_DLFILT_DUMP_ENTRYT	     0x00040000
-#define EFAB_DLFILT_DUMP_ACTIVE      0x10000000
+extern void efx_dlfilter_dump(struct efx_dlfilt_cb_s*);
 
 
 /* Add a filter.  Caller is responsible for protecting this and

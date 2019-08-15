@@ -19,6 +19,7 @@ Lesser General Public License version 2.1.
 This package includes software derived from lwIP.  Please see
 lwIP-LICENSE.
 
-The TCP Direct API and library are licensed as described in TCPD-LICENSE
+The TCP Direct API and library and other binary objects are licensed as
+described in BIN-LICENSE.
 
 

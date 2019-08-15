@@ -1,3 +1,50 @@
+OpenOnload-201811-u1
+====================
+
+ This is a minor update to refresh the sfc net driver included in
+ the Onload package and to provide fixes to various bugs found in
+ openonload-201811.
+
+ See the accompanying ChangeLog for a list of bugs fixed.
+
+
+Linux distribution support
+--------------------------
+
+ This package is supported on:
+ - Red Hat Enterprise Linux 6.8 - 6.10
+ - Red Hat Enterprise Linux 7.4 - 7.6
+ - Red Hat Enterprise Linux 8.0
+ - SuSE Linux Enterprise Server 12 sp3 and sp4
+ - SuSE Linux Enterprise Server 15 and sp1
+ - Canonical Ubuntu Server LTS 18.04
+ - Canonical Ubuntu Server 19.04
+ - Debian 8 "Jessie"
+ - Debian 9 "Stretch"
+ - Linux kernels 3.0 - 5.0
+
+
+Running control plane server as non-root user
+---------------------------------------------
+
+The control plane server now optionally drops privileges. This can be configured
+using the ONLOAD_CPLANE_USER setting in /etc/sysconfig/openonload, or by passing
+the cplane_server_uid and cplane_server_gid parameters to the onload module. The
+server retains CAP_NET_ADMIN capability.
+
+This also means that the server depends on libcap library.
+
+
+Red Hat Enterprise Linux 8.0
+----------------------------
+
+Users of RHEL 8 will need to ensure that the new Codeready-Builder
+repository is included in their system's repository list to provide
+the libpcap-devel build dependency.
+
+Onload Docker support has not been qualified for RHEL 8.0 in this release.
+
+
 OpenOnload-201811
 =================
 

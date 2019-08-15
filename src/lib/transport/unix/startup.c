@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -253,6 +253,10 @@ static void citp_log_to_file(const char *s)
 static void citp_get_process_name(void)
 {
   citp.process_name = citp.process_path;
+
+#if CI_CFG_FD_CACHING
+  citp.pid = getpid();
+#endif
 
   ci_sprintf(citp.process_path, "<unknown-proc>");
 

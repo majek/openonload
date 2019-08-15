@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -107,7 +107,7 @@ ef_vi_inline uint32_t ip_proto_csum64_finish(uint64_t csum64)
     sum =  (sum >> 16) + (sum & 0xffff);
     sum += (sum >> 16);
     sum = ~sum & 0xffff;
-    return sum ? sum : 0xffff;
+    return sum;
   }
 }
 
@@ -156,6 +156,7 @@ uint32_t ef_udp_checksum(const struct iphdr* ip, const struct udphdr* udp,
 {
   ip4_pseudo_hdr ph;
   uint64_t csum64;
+  uint32_t csum;
 
   ph.ip_saddr_be32 = ip->saddr;
   ph.ip_daddr_be32 = ip->daddr;
@@ -166,7 +167,8 @@ uint32_t ef_udp_checksum(const struct iphdr* ip, const struct udphdr* udp,
   csum64 = ip_csum64_partial(0, &ph, sizeof(ph));
   csum64 = ip_csum64_partial(csum64, udp, 6); /* omit udp_check_be16 */
   csum64 = ip_csum64_partialv(csum64, iov, iovlen);
-  return ip_proto_csum64_finish(csum64);
+  csum = ip_proto_csum64_finish(csum64);
+  return csum ? csum : 0xffff;
 }
 
 

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -86,13 +86,15 @@
 #include "filter.h"
 #endif
 
+#include "workarounds.h"
+
 /**************************************************************************
  *
  * Build definitions
  *
  **************************************************************************/
 
-#define EFX_DRIVER_VERSION	"4.15.0.1012"
+#define EFX_DRIVER_VERSION	"4.15.3.1011"
 
 #ifdef DEBUG
 #define EFX_WARN_ON_ONCE_PARANOID(x) WARN_ON_ONCE(x)
@@ -188,6 +190,8 @@ enum efx_rss_mode {
 	EFX_RSS_PACKAGES,
 	EFX_RSS_CORES,
 	EFX_RSS_HYPERTHREADS,
+	EFX_RSS_NUMA_LOCAL_CORES,
+	EFX_RSS_NUMA_LOCAL_HYPERTHREADS,
 	EFX_RSS_CUSTOM,
 };
 
@@ -1323,8 +1327,6 @@ struct efx_vport {
  * @n_xdp_channels: Number of channels used for XDP TX
  * @xdp_channel_offset: Offset of zeroth channel used for XPD TX.
  * @xdp_tx_per_channel: Max number of TX queues on an XDP TX channel.
- * @n_wanted_channels: Number of interrupts efx_probe_interrupts() attempted
- *     to enable.
  * @rx_ip_align: RX DMA address offset to have IP header aligned in
  *	in accordance with NET_IP_ALIGN
  * @rx_dma_len: Current maximum RX DMA length
@@ -1523,7 +1525,6 @@ struct efx_nic {
 	unsigned int n_xdp_channels;
 	unsigned int xdp_channel_offset;
 	unsigned int xdp_tx_per_channel;
-	unsigned int n_wanted_channels;
 	unsigned int rx_ip_align;
 	unsigned int rx_dma_len;
 	unsigned int rx_buffer_order;
@@ -1559,6 +1560,10 @@ struct efx_nic {
 	struct list_head mtd_list;
 	void *mtd_parts;
 	struct kref mtd_parts_kref;
+#if defined(EFX_WORKAROUND_87308)
+	struct delayed_work mtd_creation_work;
+	atomic_t mtds_probed_flag;
+#endif
 #endif
 
 	void *nic_data;
@@ -1587,10 +1592,12 @@ struct efx_nic {
 #endif
 
 	bool stats_enabled;
+	bool stats_initialised;
 	u16 num_mac_stats;
 	unsigned int stats_period_ms;
 
 	struct efx_buffer stats_buffer;
+	__le64 *mc_initial_stats;
 	u64 rx_nodesc_drops_total;
 	u64 rx_nodesc_drops_while_down;
 	bool rx_nodesc_drops_prev_state;
@@ -1685,6 +1692,7 @@ struct efx_nic {
 	struct efx_ptp_data *ptp_data;
 	struct efx_nic *phc_efx;
 	struct list_head node_ptp_all_funcs;
+	bool ptp_unavailable_warned;
 #endif
 	unsigned int ptp_capability;
 
@@ -2165,14 +2173,6 @@ struct efx_nic_type {
 	u32 hwtstamp_filters;
 	unsigned int rx_hash_key_size;
 };
-
-#ifdef EFX_NOT_UPSTREAM
-/* Is Driverlink supported on this device? */
-static inline bool efx_dl_supported(struct efx_nic *efx)
-{
-	return efx->dl_info != NULL;
-}
-#endif
 
 /**************************************************************************
  *

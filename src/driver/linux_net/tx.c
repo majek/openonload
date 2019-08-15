@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -495,11 +495,8 @@ static inline bool efx_tx_may_pio(struct efx_channel *channel,
 {
 	bool empty = true;
 
-#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_SKB_XMIT_MORE)
-	if (!tx_queue->piobuf || (skb->len > efx_piobuf_size) || skb->xmit_more)
-#else
-	if (!tx_queue->piobuf || (skb->len > efx_piobuf_size))
-#endif
+	if (!tx_queue->piobuf || (skb->len > efx_piobuf_size) ||
+	    netdev_xmit_more())
 		return false;
 
 	EFX_WARN_ON_ONCE_PARANOID(!channel->efx->type->option_descriptors);
@@ -727,7 +724,10 @@ static int efx_tx_tso_fallback(struct efx_tx_queue *tx_queue,
 		next = skb->next;
 		skb->next = NULL;
 
-#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_SKB_XMIT_MORE)
+#if defined(EFX_USE_KCOMPAT) && defined(EFX_HAVE_SKB_XMIT_MORE)
+		/* This explicitly sets the flag. Note that checks of this flag
+		 * are buried in the netdev_xmit_more() kcompat macro.
+		 */
 		if (next)
 			skb->xmit_more = true;
 #endif
@@ -738,7 +738,6 @@ static int efx_tx_tso_fallback(struct efx_tx_queue *tx_queue,
 	return 0;
 }
 
-#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_SKB_XMIT_MORE)
 /* Send any pending traffic for a channel. xmit_more is shared across all
  * queues for a channel, so we must check all of them.
  */
@@ -751,7 +750,6 @@ static void efx_tx_send_pending(struct efx_channel *channel)
 			efx_nic_push_buffers(q);
 	}
 }
-#endif
 
 /*
  * Add a socket buffer to a TX queue
@@ -772,9 +770,7 @@ static void efx_tx_send_pending(struct efx_channel *channel)
 int efx_enqueue_skb(struct efx_tx_queue *tx_queue, struct sk_buff *skb)
 {
 	unsigned int old_insert_count = tx_queue->insert_count;
-#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_SKB_XMIT_MORE)
-	bool xmit_more = skb->xmit_more;
-#endif
+	bool xmit_more = netdev_xmit_more();
 	struct efx_channel *channel;
 	bool data_mapped = false;
 	unsigned int segments;
@@ -851,15 +847,11 @@ int efx_enqueue_skb(struct efx_tx_queue *tx_queue, struct sk_buff *skb)
 	tx_queue->xmit_pending = true;
 
 	/* Pass to hardware. */
-#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_SKB_XMIT_MORE)
 	if (!xmit_more || netif_xmit_stopped(tx_queue->core_txq))
 		efx_tx_send_pending(channel);
 	else
 		/* There's another TX on the way. Prefetch next descriptor. */
 		prefetchw(__efx_tx_queue_get_insert_buffer(tx_queue));
-#else
-	efx_nic_push_buffers(tx_queue);
-#endif
 
 	if (segments) {
 		tx_queue->tso_bursts++;
@@ -879,14 +871,12 @@ err:
 	if (!IS_ERR_OR_NULL(skb))
 		dev_kfree_skb_any(skb);
 
-#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_SKB_XMIT_MORE)
 	/* If we're not expecting another transmit and we had something to push
 	 * on this queue or a partner queue then we need to push here to get the
 	 * previous packets out.
 	 */
 	if (!xmit_more)
 		efx_tx_send_pending(channel);
-#endif
 
 	return rc;
 }
@@ -1048,20 +1038,13 @@ netdev_tx_t efx_hard_start_xmit(struct sk_buff *skb,
 	 * PTP "event" packet
 	 */
 	if (unlikely(efx_xmit_with_hwtstamp(skb)) &&
-		unlikely(efx_ptp_is_ptp_tx(efx, skb))) {
-#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_SKB_XMIT_MORE)
-		/* If the xmit_more flag is set we clear it, because PTP
-		 * transmissions will be going via a different path.
-		 * If it isn't set, this may be the packet that's flushing out
-		 * existing packets that had xmit_more set, so we must do that.
+	    (efx_ptp_use_mac_tx_timestamps(efx) ||
+	     unlikely(efx_ptp_is_ptp_tx(efx, skb)))) {
+		/* There may be existing transmits on the channel that are
+		 * waiting for this packet to trigger the doorbell write.
+		 * We need to send the packets at this point.
 		 */
-		if (skb->xmit_more) {
-			skb->xmit_more = false;
-		} else {
-			efx_tx_send_pending(channel);
-		}
-#endif
-
+		efx_tx_send_pending(channel);
 		return efx_ptp_tx(efx, skb);
 	}
 #endif

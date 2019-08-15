@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -109,7 +109,6 @@ static void efab_zap_other_threads(struct task_struct *p)
 }
 
 static void (*efab_my_zap_other_threads)(struct task_struct *p);
-static void (*efab_coredump)(const siginfo_t *siginfo);
 
 
 /* Find all stacks in multithreaded application.
@@ -403,6 +402,18 @@ efab_linux_trampoline_exit_group(int status)
   }
 }
 
+#if defined EFRM_DO_COREDUMP_BINFMTS_SIGNR || \
+    defined EFRM_DO_COREDUMP_COREDUMP_SIGNR
+/* RHEL6, etc. */
+#define EFRM_DO_COREDUMP_SIGNR
+static void (*efab_coredump)(long signr, int exit_core, struct pt_regs*);
+#else
+/* pt_regs parameter was only present for a month in 2012, but it's easy to
+ * keep */
+static void (*efab_coredump)(const siginfo_t *siginfo, struct pt_regs*);
+#endif
+
+
 /* Properly die because of signal sig */
 int
 efab_signal_die(ci_private_t *priv_unused, void *arg)
@@ -427,8 +438,14 @@ efab_signal_die(ci_private_t *priv_unused, void *arg)
      * dump the core with all the threads. */
     if( sig_kernel_coredump(sig) && efab_coredump != NULL ) {
       siginfo_t siginfo;
+      struct pt_regs regs;
+      memset(&regs, 0, sizeof(regs));
       siginfo.si_signo = sig;
-      efab_coredump(&siginfo);
+#ifdef EFRM_DO_COREDUMP_SIGNR
+      efab_coredump(siginfo.si_signo, sig, &regs);
+#else
+      efab_coredump(&siginfo, &regs);
+#endif
     }
     else
       efab_exit_group(&status);

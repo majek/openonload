@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -168,15 +168,19 @@ oo_cp_arp_resolve(struct oo_cplane_handle* cp,
                   cicp_verinfo_t* verinfo)
 {
   struct cp_mibs* mib = &cp->mib[0];
+  struct cp_fwd_data* data;
 
   ci_assert(CICP_MAC_ROWID_IS_VALID(verinfo->id));
+  data = cp_get_fwd_data(mib, verinfo);
 
   /* The most probable reason for verinfo to be invalid is ARP resolution.
    * If ARP is really resolved, then there is no need to go further.
    * After all, we always can resolve the ARP by sending a packet via OS. */
-  if( cp_get_fwd_data(mib, verinfo)->arp_valid ||
-      ! cp_fwd_version_matches(mib, verinfo) )
+  if( data->arp_valid || ! cp_fwd_version_matches(mib, verinfo) )
     return;
+
+  ci_assert_nequal(data->ifindex, CI_IFID_BAD);
+  ci_assert_nequal(data->ifindex, CI_IFID_LOOP);
 
 #ifndef __KERNEL__
   cp_ioctl(cp->fd, OO_IOC_CP_ARP_RESOLVE, verinfo);

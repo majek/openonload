@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -102,11 +102,12 @@ void ci_udp_compute_stamp(ci_netif *ni, ci_uint64 stamp, struct timespec *ts)
     /* clock updated before packet stamped, so need to increase ts */
     ts->tv_sec += delta_sec;
     ts->tv_nsec += delta_nsec;
-    if(ts->tv_nsec > 1000000000){
+    if(ts->tv_nsec >= 1000000000){
       ++ts->tv_sec;
       ts->tv_nsec -= 1000000000;
     }
   }
+  ci_assert_lt(ts->tv_nsec, 1000000000);
 }
 
 

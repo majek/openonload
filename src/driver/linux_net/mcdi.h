@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -52,11 +52,24 @@ enum efx_mcdi_mode {
  *		      race between completion in another threads and the worker.
  */
 enum efx_mcdi_cmd_state {
+	/* waiting to run */
 	MCDI_STATE_QUEUED,
+	/* we tried to run, but the MC said we have too many outstanding
+	 * commands
+	 */
 	MCDI_STATE_RETRY,
+	/* we sent the command and the MC is waiting for proxy auth */
 	MCDI_STATE_PROXY,
+	/* the command is running */
 	MCDI_STATE_RUNNING,
-	MCDI_STATE_ABORT,
+	/* state was PROXY but the issuer cancelled the command */
+	MCDI_STATE_PROXY_CANCELLED,
+	/* the command is running but the issuer cancelled the command */
+	MCDI_STATE_RUNNING_CANCELLED,
+	/* processing of this command has completed.
+	 * used to break races between contexts.
+	 */
+	MCDI_STATE_FINISHED,
 };
 
 typedef void efx_mcdi_async_completer(struct efx_nic *efx,
@@ -78,7 +91,6 @@ typedef void efx_mcdi_async_completer(struct efx_nic *efx,
  * @inbuf: Input buffer
  * @quiet: Whether to silence errors
  * @polled: Whether this command is polled or evented
- * @cancelled: Whether this command has been cancelled by the issuer
  * @reboot_seen: Whether a reboot has been seen during this command,
  *	to prevent duplicates
  * @seq: Sequence number
@@ -100,7 +112,6 @@ struct efx_mcdi_cmd {
 	const efx_dword_t *inbuf;
 	bool quiet;
 	bool polled;
-	bool cancelled;
 	bool reboot_seen;
 	u8 seq;
 	u8 bufid;
@@ -460,7 +471,8 @@ void efx_mcdi_sensor_event(struct efx_nic *efx, efx_qword_t *ev);
 
 void efx_mcdi_print_fwver(struct efx_nic *efx, char *buf, size_t len);
 int efx_mcdi_drv_attach(struct efx_nic *efx, bool driver_operating,
-			u32 fw_variant, bool *was_attached, u32 *flags);
+			u32 fw_variant, u32 *flags);
+int efx_mcdi_drv_detach(struct efx_nic *efx);
 int efx_mcdi_get_board_cfg(struct efx_nic *efx, int port_num, u8 *mac_address,
 			   u16 *fw_subtype_list, u32 *capabilities);
 int efx_mcdi_get_board_perm_mac(struct efx_nic *efx, u8 *mac_address);

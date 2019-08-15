@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -2185,7 +2185,14 @@ static inline unsigned long __attribute_const__ rounddown_pow_of_two(unsigned lo
 	#define timespec64_to_timespec(t) (t)
 #endif // EFX_HAVE_TIMESPEC64
 #ifdef EFX_NEED_KTIME_GET_REAL_TS64
-	#define ktime_get_real_ts64	ktime_get_real_ts
+	static inline void efx_ktime_get_real_ts64(struct timespec64 *ts64)
+	{
+		struct timespec ts;
+		ktime_get_real_ts(&ts);
+		*ts64 = timespec_to_timespec64(ts);
+	}
+
+	#define ktime_get_real_ts64 efx_ktime_get_real_ts64
 #endif // EFX_NEED_KTIME_GET_REAL_TS64
 
 #ifdef EFX_HAVE_OLD_SKB_LINEARIZE
@@ -2772,6 +2779,26 @@ static inline int efx_netif_set_xps_queue(struct net_device *netdev,
 	return netif_set_xps_queue(netdev, (struct cpumask*)mask, index);
 }
 #define netif_set_xps_queue efx_netif_set_xps_queue
+#endif
+
+#ifdef EFX_HAVE_OLD_DEV_OPEN
+static inline int efx_dev_open(struct net_device *netdev,
+			       void *unused __always_unused)
+{
+	return dev_open(netdev);
+}
+#define dev_open efx_dev_open
+#endif
+
+#ifndef EFX_HAVE_NETDEV_XMIT_MORE
+#ifdef EFX_HAVE_SKB_XMIT_MORE
+/* This relies on places that use netdev_xmit_more having an SKB structure
+ * called skb.
+ */
+#define netdev_xmit_more()  (skb->xmit_more)
+#else
+#define netdev_xmit_more()  (0)
+#endif
 #endif
 
 #endif /* EFX_KERNEL_COMPAT_H */

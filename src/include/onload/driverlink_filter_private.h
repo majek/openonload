@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -37,35 +37,14 @@
 #endif
 
 
-/*! This structure defines one record in the local address lut */
-typedef struct efx_dlfilt_local_addr_s {
-  ci_dllink link;
-  ci_uint32 addr_be32;	/*!< Efab IP address */
-  int ref_count;        /*!< Refcount from main filters (if in use) */
-} efx_dlfilt_local_addr_t;
-
-
-#if CI_CFG_NET_DHCP_FILTER
-/*! Type for DHCP filtering hook function */
-typedef int (*efx_dlfilter_dhcp_hook_t)(const ci_ether_hdr*,
-                                        const void* ip_hdr, int len);
-#endif
-
-
-/* This needs to be sufficiently large to include all local IP addresses
- * and all multicast addresses we're subscribing too.
- */
-#define EFAB_DLFILT_LA_COUNT 120
-
-
 /*! Defines one entry in the master filter table */
 typedef struct efx_dlfilt_entry_s {
   int       thr_id;     /*!< TCP helper res. ID from char driver 
 			* (-1 if unknown) */
   ci_uint32 raddr_be32;
   ci_uint16 rport_be16;
+  ci_uint32 laddr_be32;
   ci_uint16 lport_be16;
-  ci_int16  laddr_idx;
   ci_uint16 state;
 #define EFAB_DLFILT_INUSE      0x0000
 #define EFAB_DLFILT_TOMBSTONE  0x4000
@@ -89,13 +68,6 @@ typedef struct efx_dlfilt_entry_s {
 typedef struct efx_dlfilt_cb_s {
   int used_slots;
   efx_dlfilt_entry_t table[EFAB_DLFILT_ENTRY_COUNT];
-  /* la_free and la_used lists are locked by filter manager lock. */
-  ci_dllist la_free;
-  ci_dllist la_used;
-  efx_dlfilt_local_addr_t la_table[EFAB_DLFILT_LA_COUNT];
-#if CI_CFG_NET_DHCP_FILTER
-  efx_dlfilter_dhcp_hook_t dhcp_filter;
-#endif
   void* ctx;
   efx_dlfilter_is_onloaded_t is_onloaded;
 } efx_dlfilter_cb_t;

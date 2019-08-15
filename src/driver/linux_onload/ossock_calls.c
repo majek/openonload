@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -1131,7 +1131,10 @@ int efab_tcp_helper_setsockopt(tcp_helper_resource_t* trs, oo_sp sock_id,
   sock = get_linux_socket(ep);
   if( sock == NULL )
     return  -EINVAL;
-  rc = sock_setsockopt(sock, level, optname, user_optval, optlen);
+  if( level == SOL_SOCKET )
+    rc = sock_setsockopt(sock, level, optname, user_optval, optlen);
+  else
+    rc = sock->ops->setsockopt(sock, level, optname, user_optval, optlen);
   put_linux_socket(sock);
   LOG_SV(ci_log("%s: rc=%d", __FUNCTION__, rc));
 

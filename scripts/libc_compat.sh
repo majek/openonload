@@ -1,25 +1,5 @@
 #!/bin/bash
 
-# Find the libc which is really used.  Usually, it is one of
-# /lib/libc.so.6, /lib32/libc.so.6, /lib64/libc.so.6.
-# Debian-derivative name conventions differ from other linuxes.
-# So, we do not try to guess and ask the system.
-find_libc()
-{
-    local dir=$(mktemp -d)
-    cat >$dir/hello.c <<EOF
-int main(int argc, char ** argv) {return 0;}
-EOF
-    $CC $CFLAGS $dir/hello.c -o $dir/hello >/dev/null
-    if [[ $? != 0 ]] ; then
-	echo "-1"
-	exit
-    fi
-    ldd $dir/hello |egrep '^[[:space:]]*libc.so.6[[:space:]]' \
-        |awk '{print $3}'
-    rm -rf $dir
-}
-
 # Check if the library has the given symbol.
 find_sym()
 {
@@ -35,10 +15,10 @@ find_sym()
     fi
 }
 
-libc_path=$(find_libc)
+libc_path=$($CC $CFLAGS --print-file-name=libc.so.6)
 header="$1"
 
-if [[ $libc_path == "-1" ]] ; then
+if [ ! -f $libc_path ] ; then
     exit -1
 fi
 

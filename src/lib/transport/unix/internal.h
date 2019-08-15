@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -81,6 +81,9 @@ typedef struct {
 
   char			process_path[128];
   char*			process_name;
+#if CI_CFG_FD_CACHING
+  ci_uint32             pid;
+#endif
 } citp_globals_t;
 
 
@@ -1225,6 +1228,13 @@ ms2timespec(ci_uint64 timeout, ci_uint64 spent, struct timespec* tv)
     tv->tv_sec = tv->tv_nsec = 0;
   }
 }
+
+#if CI_CFG_FD_CACHING
+ci_inline int citp_getpid(void)
+{
+  return citp.pid;
+}
+#endif
 
 #endif  /* __CI_TRANSPORT_INTERNAL_H__ */
 /*! \cidoxg_end */

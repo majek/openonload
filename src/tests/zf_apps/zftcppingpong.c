@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -190,13 +190,19 @@ static void muxer_ping_pongs(struct zf_stack* stack, struct zft* zock)
 
       if( zock_has_ts_data ) {
         ZF_TEST(count == 1);
-        ZF_TEST(report.bytes <= ts_bytes_left);
-        fprintf(stderr, "TIME SENT  %ld.%09ld bytes %u flags %x\n",
+        fprintf(stderr, "TIME SENT  %ld.%09ld bytes %u left %lu flags %x\n",
                 report.timestamp.tv_sec,
                 report.timestamp.tv_nsec,
                 report.bytes,
+                ts_bytes_left,
                 report.flags);
-        ts_bytes_left -= report.bytes;
+        /* Ignore a report about a retransmitted packet.  Should check
+         * report.start and report.bytes in case there were some new
+         * bytes transmitted in this packet */
+        if( !(report.flags & ZF_PKT_REPORT_TCP_RETRANS)) {
+          ZF_TEST(report.bytes <= ts_bytes_left);
+          ts_bytes_left -= report.bytes;
+        }
       }
     }
 

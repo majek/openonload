@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -33,11 +33,6 @@
 #include <onload/tcp_helper_fns.h>
 
 #define VERB(x)
-
-#ifndef NDEBUG
-/* efab/ip_protocols.c */
-extern void ci_ipp_dump_stats(void);
-#endif
 
 
 /*--------------------------------------------------------------------

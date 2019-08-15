@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -325,12 +325,11 @@ void ci_tcp_state_reinit(ci_netif* netif, ci_tcp_state* ts)
 }
 
 
-#ifndef __KERNEL__
-ci_tcp_state* ci_tcp_get_state_buf_from_cache(ci_netif *netif)
+#if ! defined(__KERNEL__) && CI_CFG_FD_CACHING
+ci_tcp_state* ci_tcp_get_state_buf_from_cache(ci_netif *netif, int pid)
 {
   ci_tcp_state *ts = NULL;
 
-#if CI_CFG_FD_CACHING
   if( ci_ni_dllist_not_empty(netif, &netif->state->active_cache.cache) ) {
     /* Take the first entry from the cache.  However, do not take it
      * if the ep's pid does not match current pid which may happen if
@@ -344,7 +343,7 @@ ci_tcp_state* ci_tcp_get_state_buf_from_cache(ci_netif *netif)
       ci_assert_nflags(ts->s.b.sb_aflags, CI_SB_AFLAG_IN_CACHE_NO_FD);
       /* We have an FD cached if the cached endpoint has been reused by
        * other process let's restore state */
-      if( ts->cached_on_pid != getpid() ) {
+      if( ts->cached_on_pid != pid ) {
         /* This context has its own FD
          * no race with kernel file close() expected.
          * sys_close() in other process will merely decrease sys file refcount
@@ -352,7 +351,7 @@ ci_tcp_state* ci_tcp_get_state_buf_from_cache(ci_netif *netif)
          * note: concurrent accept and dup2 are not supported */
         CITP_STATS_NETIF(++netif->state->stats.active_attach_fd_reuse);
         ts->cached_on_fd = S_TO_EPS(netif,ts)->fd;
-        ts->cached_on_pid = getpid();
+        ts->cached_on_pid = pid;
       }
       else {
         ci_assert_equal(ts->cached_on_fd, S_TO_EPS(netif, ts)->fd);
@@ -367,7 +366,7 @@ ci_tcp_state* ci_tcp_get_state_buf_from_cache(ci_netif *netif)
      * guarged by the stack lock, i.e. we guarantee a sort of correctness
      * for this unsupported use-case.
      */
-    else if( ci_tcp_is_cached(ts) && ts->cached_on_pid != getpid() &&
+    else if( ci_tcp_is_cached(ts) && ts->cached_on_pid != pid &&
              (~ts->s.b.sb_aflags & CI_SB_AFLAG_IN_CACHE_NO_FD) ) {
       ci_fd_t stack_fd = ci_netif_get_driver_handle(netif);
       /* Other process put the endpoint to cache, we need to create an FD
@@ -382,7 +381,7 @@ ci_tcp_state* ci_tcp_get_state_buf_from_cache(ci_netif *netif)
       S_TO_EPS(netif, ts)->fd = rc;
       ci_atomic32_and(&ts->s.b.sb_aflags, ~CI_SB_AFLAG_IN_CACHE_NO_FD);
       ts->cached_on_fd = rc;
-      ts->cached_on_pid = getpid();
+      ts->cached_on_pid = pid;
     }
     /* Sian says that cached_on_pid is not used by the following code, so
      * we can leave it as-is even if we steal a NO_FD endpoint from another
@@ -407,7 +406,6 @@ ci_tcp_state* ci_tcp_get_state_buf_from_cache(ci_netif *netif)
 
     CITP_STATS_NETIF(++netif->state->stats.sockcache_hit);
   }
-#endif
   return ts;
 }
 #endif

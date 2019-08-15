@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -55,7 +55,8 @@
  */
 extern int /*rc*/
 cicpplos_pktbuf_defer_send(struct oo_cplane_handle* cp,
-			   ci_ip_addr_t ip, int buf_pktid, ci_ifid_t ifindex);
+			   ci_ip_addr_t ip, int buf_pktid,
+                           ci_ifid_t ifindex, int in_atomic_context);
 
 /*----------------------------------------------------------------------------
  * Pooled packet buffer support Operations

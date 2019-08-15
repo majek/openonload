@@ -135,8 +135,15 @@ cmd_mknod() {
 ######################################################################
 
 cmd_mod_params() {
-  #case "$1" in
-  #esac
+  case "$1" in
+    onload)
+      . /etc/sysconfig/openonload
+      if [ ! -z $ONLOAD_CPLANE_USER ]; then
+        echo cplane_server_uid=$(id -u $ONLOAD_CPLANE_USER) \
+             cplane_server_gid=$(id -g $ONLOAD_CPLANE_USER)
+      fi
+      ;;
+  esac
   exit 0
 }
 
@@ -202,7 +209,7 @@ cmd_configure_container() {
 ######################################################################
 
 have_stacks() {
-  [ -f /proc/driver/onload/ul_stacks ] && grep -q . /proc/driver/onload/ul_stacks
+  [ -f /proc/driver/onload/stacks_ul ] && grep -q . /proc/driver/onload/stacks_ul
 }
 
 kill_cplane() {

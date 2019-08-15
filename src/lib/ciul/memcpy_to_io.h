@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -327,7 +327,7 @@ static inline void memcpy_iov_to_ctpio(volatile uint64_t*__restrict__ dst,
   }
 
   if( in_hand_len )
-    *dst++ = in_hand.qword;
+    CTPIO_EMIT_WORD(dst, in_hand.qword);
 
   /* Pad to end of write buffer.  It isn't obvious this is desirable, but I
    * (djr) have observed cases where more writes are out-of-order when this

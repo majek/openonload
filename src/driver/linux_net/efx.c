@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -35,6 +35,9 @@
 #include <linux/ethtool.h>
 #include <linux/topology.h>
 #include <linux/gfp.h>
+#ifdef EFX_WORKAROUND_87308
+#include <asm-generic/atomic.h>
+#endif
 #ifndef EFX_USE_KCOMPAT
 #include <linux/aer.h>
 #include <linux/interrupt.h>
@@ -281,16 +284,17 @@ static unsigned int interrupt_mode;
 /* This is the requested number of CPUs to use for Receive-Side Scaling
  * (RSS), i.e. the number of CPUs among which we may distribute
  * simultaneous interrupt handling.  Or alternatively it may be set to
- * "packages", "cores" or "hyperthreads" to get one receive channel per
- * package, core or hyperthread.  The default is "cores".
+ * "packages", "cores", "hyperthreads", "numa_local_cores" or
+ * "numa_local_hyperthreads" to get one receive channel per package, core,
+ * hyperthread, numa local core or numa local hyperthread.  The default
+ * is "cores".
  *
  * Systems without MSI-X will only target one CPU via legacy or MSI
  * interrupt.
  */
 static char *rss_cpus;
 module_param(rss_cpus, charp, 0444);
-MODULE_PARM_DESC(rss_cpus, "Number of CPUs to use for Receive-Side Scaling, "
-		 "or 'packages', 'cores' or 'hyperthreads'");
+MODULE_PARM_DESC(rss_cpus, "Number of CPUs to use for Receive-Side Scaling, or 'packages', 'cores', 'hyperthreads', 'numa_local_cores' or 'numa_local_hyperthreads'");
 
 #if (!defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_CPUMASK_OF_PCIBUS)) && defined(HAVE_EFX_NUM_PACKAGES)
 static bool rss_numa_local = true;
@@ -444,6 +448,25 @@ int efx_check_queue_size(struct efx_nic *efx, u32 *entries,
 
 	return 0;
 }
+
+#ifdef EFX_NOT_UPSTREAM
+/* Is Driverlink supported on this device? */
+static bool efx_dl_supported(struct efx_nic *efx)
+{
+	/* VI spreading will confuse driverlink clients, so prevent
+	 * registration if it's in use.
+	 */
+	if (efx->mcdi->fn_flags &
+	    (1 << MC_CMD_DRV_ATTACH_EXT_OUT_FLAG_TX_ONLY_VI_SPREADING_ENABLED)) {
+		netif_info(efx, drv, efx->net_dev,
+			   "Driverlink disabled: VI spreading in use\n");
+		return false;
+	}
+
+	return efx->dl_info != NULL;
+}
+#endif
+
 
 /**************************************************************************
  *
@@ -1355,10 +1378,10 @@ void efx_schedule_slow_fill(struct efx_rx_queue *rx_queue)
 {
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_USE_CANCEL_DELAYED_WORK_SYNC)
 	schedule_delayed_work(&rx_queue->slow_fill_work,
-                                msecs_to_jiffies(100));
+                                msecs_to_jiffies(1));
 #else
 	queue_delayed_work(efx_workqueue, &rx_queue->slow_fill_work,
-                                msecs_to_jiffies(100));
+                                msecs_to_jiffies(1));
 #endif
 }
 
@@ -1890,6 +1913,12 @@ static unsigned int efx_wanted_parallelism(struct efx_nic *efx)
 	} else if (strcmp(rss_cpus, "hyperthreads") == 0) {
 		efx->rss_mode = EFX_RSS_HYPERTHREADS;
 		selected = true;
+	} else if (strcmp(rss_cpus, "numa_local_cores") == 0) {
+		efx->rss_mode = EFX_RSS_NUMA_LOCAL_CORES;
+		selected = true;
+	} else if (strcmp(rss_cpus, "numa_local_hyperthreads") == 0) {
+		efx->rss_mode = EFX_RSS_NUMA_LOCAL_HYPERTHREADS;
+		selected = true;
 	} else if (sscanf(rss_cpus, "%u", &n_rxq) == 1 && n_rxq > 0) {
 		efx->rss_mode = EFX_RSS_CUSTOM;
 		selected = true;
@@ -1935,6 +1964,30 @@ static unsigned int efx_wanted_parallelism(struct efx_nic *efx)
 	case EFX_RSS_HYPERTHREADS:
 		n_rxq = num_online_cpus();
 		break;
+#if (!defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_CPUMASK_OF_PCIBUS)) && defined(HAVE_EFX_NUM_CORES)
+	case EFX_RSS_NUMA_LOCAL_CORES:
+		if (xen_domain()) {
+			netif_warn(efx, drv, net_dev,
+				   "Unable to determine CPU topology on Xen reliably. Creating rss channels for half of cores/hyperthreads.\n");
+			n_rxq = max_t(int, 1, num_online_cpus() / 2);
+		} else {
+			n_rxq = min(efx_num_cores(cpu_online_mask),
+			            efx_num_cores(cpumask_of_pcibus(efx->pci_dev->bus)));
+		}
+		break;
+#endif
+#if (!defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_CPUMASK_OF_PCIBUS))
+	case EFX_RSS_NUMA_LOCAL_HYPERTHREADS:
+		if (xen_domain()) {
+			netif_warn(efx, drv, net_dev,
+				   "Unable to determine CPU topology on Xen reliably. Creating rss channels for all cores/hyperthreads.\n");
+			n_rxq = num_online_cpus();
+		} else {
+			n_rxq = min(num_online_cpus(),
+			            cpumask_weight(cpumask_of_pcibus(efx->pci_dev->bus)));
+		}
+		break;
+#endif
 	case EFX_RSS_CUSTOM:
 		break;
 	default:
@@ -2140,8 +2193,6 @@ static int efx_probe_interrupts(struct efx_nic *efx)
 			efx_allocate_msix_channels(efx, efx->max_channels,
 						   extra_channels,
 						   parallelism);
-		efx->n_wanted_channels = n_channels +
-			EFX_MAX_EXTRA_CHANNELS - extra_channels;
 
 		for (i = 0; i < n_channels; i++)
 			xentries[i].entry = i;
@@ -2183,7 +2234,6 @@ static int efx_probe_interrupts(struct efx_nic *efx)
 		efx->tx_channel_offset = 0;
 		efx->n_xdp_channels = 0;
 		efx->xdp_channel_offset = 0;
-		efx->n_wanted_channels = 1;
 		rc = pci_enable_msi(efx->pci_dev);
 		if (rc == 0) {
 			efx_get_channel(efx, 0)->irq = efx->pci_dev->irq;
@@ -2208,8 +2258,14 @@ static int efx_probe_interrupts(struct efx_nic *efx)
 		efx->tx_channel_offset = separate_tx_channels ? 1 : 0;
 		efx->n_xdp_channels = 0;
 		efx->xdp_channel_offset = 0;
-		efx->n_wanted_channels = efx->n_channels;
 		efx->legacy_irq = efx->pci_dev->irq;
+
+		/* Warn unless this was forced by the module parameter.
+		 * We'll already have warned if that's the case.
+		 */
+		if (interrupt_mode != EFX_INT_MODE_LEGACY)
+			netif_warn(efx, drv, efx->net_dev,
+				   "Use of legacy interrupts is deprecated and will be removed in a future release\n");
 	}
 
 	/* Assign extra channels if possible, before XDP channels */
@@ -3166,6 +3222,22 @@ static int efx_start_all(struct efx_nic *efx)
 	spin_unlock_bh(&efx->stats_lock);
 
 	return 0;
+}
+
+void efx_reset_sw_stats(struct efx_nic *efx)
+{
+	struct efx_channel *channel;
+	struct efx_tx_queue *tx_queue;
+
+	efx_for_each_channel(channel, efx) {
+		efx_channel_get_rx_queue(channel)->rx_packets = 0;
+		efx_for_each_channel_tx_queue(tx_queue, channel) {
+			tx_queue->tx_packets = 0;
+			tx_queue->pushes = 0;
+			tx_queue->pio_packets = 0;
+			tx_queue->cb_packets = 0;
+		}
+	}
 }
 
 /* Quiesce the hardware and software data path, and regular activity
@@ -4275,7 +4347,11 @@ extern const struct net_device_ops_ext efx_net_device_ops_ext;
 static void efx_update_name(struct efx_nic *efx)
 {
 	strcpy(efx->name, efx->net_dev->name);
+
+#if defined(CONFIG_SFC_MTD) && !defined(EFX_WORKAROUND_87308)
 	efx_mtd_rename(efx);
+#endif
+
 	efx_set_channel_names(efx);
 #ifdef CONFIG_SFC_DEBUGFS
 	mutex_lock(&efx->debugfs_symlink_mutex);
@@ -4305,9 +4381,17 @@ static int efx_netdev_event(struct notifier_block *this,
 	struct net_device *net_dev = info->dev;
 #endif
 
-	if ((net_dev->netdev_ops == &efx_netdev_ops) &&
-	    event == NETDEV_CHANGENAME)
-		efx_update_name(netdev_priv(net_dev));
+	if (event == NETDEV_CHANGENAME &&
+	    (net_dev->netdev_ops == &efx_netdev_ops)) {
+		struct efx_nic *efx = netdev_priv(net_dev);
+
+		efx_update_name(efx);
+
+#if defined(CONFIG_SFC_MTD) && defined(EFX_WORKAROUND_87308)
+		if (atomic_xchg(&efx->mtds_probed_flag, 1) == 0)
+			(void)efx_mtd_probe(efx);
+#endif
+	}
 
 	return NOTIFY_DONE;
 }
@@ -4599,6 +4683,7 @@ void efx_reset_down(struct efx_nic *efx, enum reset_type method)
  * engines are not restarted, pending a RESET_DISABLE. */
 int efx_reset_up(struct efx_nic *efx, enum reset_type method, bool ok)
 {
+	u32 attach_flags;
 	int rc;
 
 	EFX_ASSERT_RESET_SERIALISED(efx);
@@ -4645,11 +4730,14 @@ int efx_reset_up(struct efx_nic *efx, enum reset_type method, bool ok)
 	 * here that aren't the result of an MC reset, it is still safe to
 	 * perform the attach operation.
 	 */
-	rc = efx_mcdi_drv_attach(efx, true, MC_CMD_FW_DONT_CARE, NULL, NULL);
+	rc = efx_mcdi_drv_attach(efx, true, MC_CMD_FW_DONT_CARE, &attach_flags);
 	if (rc) /* not fatal: the PF will still work */
 		netif_warn(efx, probe, efx->net_dev,
 			   "failed to re-attach driver to MCPU rc=%d, PPS & NCSI may malfunction\n",
 			   rc);
+	else
+		/* Store new attach flags. */
+		efx->mcdi->fn_flags = attach_flags;
 
 	rc = efx->type->vswitching_restore(efx);
 	if (rc) /* not fatal; the PF will still work fine */
@@ -4992,6 +5080,10 @@ static int efx_init_struct(struct efx_nic *efx,
 	spin_lock_init(&efx->biu_lock);
 #ifdef CONFIG_SFC_MTD
 	INIT_LIST_HEAD(&efx->mtd_list);
+#ifdef EFX_WORKAROUND_87308
+	atomic_set(&efx->mtds_probed_flag, 0);
+	INIT_DELAYED_WORK(&efx->mtd_creation_work, efx_mtd_creation_work);
+#endif
 #endif
 	INIT_WORK(&efx->reset_work, efx_reset_work);
 	INIT_DELAYED_WORK(&efx->monitor_work, efx_monitor);
@@ -5063,6 +5155,10 @@ static int efx_init_struct(struct efx_nic *efx,
 		efx->msi_context[i].efx = efx;
 		efx->msi_context[i].index = i;
 	}
+
+	if (interrupt_mode == EFX_INT_MODE_LEGACY)
+		netif_warn(efx, drv, efx->net_dev,
+			   "Use of legacy interrupts is deprecated and will be removed in a future release\n");
 
 	/* Higher numbered interrupt modes are less capable! */
 	BUG_ON(efx->type->max_interrupt_mode > efx->type->min_interrupt_mode);
@@ -5478,12 +5574,23 @@ static void efx_pci_remove(struct pci_dev *pci_dev)
 	/* Allow any queued efx_resets() to complete */
 	rtnl_unlock();
 
+#if defined(CONFIG_SFC_MTD) && defined(EFX_WORKAROUND_87308)
+	(void)cancel_delayed_work_sync(&efx->mtd_creation_work);
+#endif
 
 	if (efx->type->sriov_fini)
 		efx->type->sriov_fini(efx);
 	efx_unregister_netdev(efx);
 
+#ifdef CONFIG_SFC_MTD
+#ifdef EFX_WORKAROUND_87308
+	if (atomic_read(&efx->mtds_probed_flag) == 1)
+		efx_mtd_remove(efx);
+#else
 	efx_mtd_remove(efx);
+#endif
+#endif
+
 	efx_fini_debugfs_channels(efx);
 
 	efx_pci_remove_main(efx);
@@ -5752,10 +5859,17 @@ static int efx_pci_probe(struct pci_dev *pci_dev,
 	if (PCI_FUNC(pci_dev->devfn) == 0)
 		efx_mcdi_log_puts(efx, "probe");
 
+#ifdef CONFIG_SFC_MTD
+#ifdef EFX_WORKAROUND_87308
+	schedule_delayed_work(&efx->mtd_creation_work, 5 * HZ);
+#else
 	/* Try to create MTDs, but allow this to fail */
 	rtnl_lock();
 	rc = efx_mtd_probe(efx);
 	rtnl_unlock();
+#endif
+#endif
+
 #if defined(EFX_USE_KCOMPAT) && defined(EFX_HAVE_MTD_TABLE)
 	if (rc == -EBUSY)
 		netif_warn(efx, probe, efx->net_dev,
@@ -5768,11 +5882,7 @@ static int efx_pci_probe(struct pci_dev *pci_dev,
 			   "failed to create MTDs (%d)\n", rc);
 
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_PCI_AER)
-	rc = pci_enable_pcie_error_reporting(pci_dev);
-	if (rc && rc != -EINVAL)
-		netif_notice(efx, probe, efx->net_dev,
-			"notice: PCIE error reporting unavailable (code %d).\n",
-			rc);
+	(void)pci_enable_pcie_error_reporting(pci_dev);
 #endif
 
 	if (efx->type->udp_tnl_push_ports)
@@ -6250,8 +6360,11 @@ const struct net_device_ops efx_netdev_ops = {
 #endif
 #endif
 
-#if defined(EFX_USE_KCOMPAT) && defined(EFX_HAVE_NET_DEVICE_OPS_EXTENDED)
+#if defined(EFX_USE_KCOMPAT) && defined(EFX_HAVE_NDO_SIZE)
 	.ndo_size		= sizeof(struct net_device_ops),
+#endif
+#if defined(EFX_USE_KCOMPAT) && defined(EFX_HAVE_NDO_SIZE_RH)
+	.ndo_size_rh		= sizeof(struct net_device_ops),
 #endif
 };
 

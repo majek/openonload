@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -210,14 +210,6 @@ static inline int iommu_unmap_my(struct iommu_domain *domain,
 #define netdev_notifier_info_to_dev(info) (info)
 #endif
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,23)
-#define EFRM_VMA_HAS_NOPAGE
-#endif
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,27)
-#define EFRM_VMA_HAS_ACCESS
-#endif
-
 #ifndef NOPAGE_SIGBUS
 #  define NOPAGE_SIGBUS (NULL)
 #endif
@@ -251,6 +243,12 @@ get_user_pages_onload_compat(unsigned long start, unsigned long nr_pages,
    *                     int write, int force, struct page **pages,
    *                     struct vm_area_struct **vmas);
    *
+   * 4.4.(>=168): EFRM_GUP_RCLONG_TASK_COMBINEDFLAGS
+   * long get_user_pages(struct task_struct *tsk, struct mm_struct *mm,
+   *                     unsigned long start, unsigned long nr_pages,
+   *                     unsigned int gup_flags, struct page **pages,
+   *                     struct vm_area_struct **vmas)
+   *
    * Intermediate (up to 4.9.0): (would be EFRM_GUP_RCLONG_NOTASK_SEPARATEFLAGS)
    * long get_user_pages(unsigned long start, unsigned long nr_pages,
    *                     int write, int force, struct page **pages,
@@ -271,11 +269,14 @@ get_user_pages_onload_compat(unsigned long start, unsigned long nr_pages,
 #endif
 
   return EFRM_GUP_RC_CAST get_user_pages(
-#if defined(EFRM_GUP_RCINT_TASK_SEPARATEFLAGS) || defined(EFRM_GUP_RCLONG_TASK_SEPARATEFLAGS)
+#if defined(EFRM_GUP_RCINT_TASK_SEPARATEFLAGS) ||    \
+    defined(EFRM_GUP_RCLONG_TASK_SEPARATEFLAGS) ||   \
+    defined(EFRM_GUP_RCLONG_TASK_COMBINEDFLAGS)
                                          current, current->mm,
 #endif
                                          start, EFRM_GUP_NRPAGES_CAST nr_pages,
-#ifdef EFRM_GUP_RCLONG_NOTASK_COMBINEDFLAGS
+#if defined(EFRM_GUP_RCLONG_NOTASK_COMBINEDFLAGS) || \
+    defined(EFRM_GUP_RCLONG_TASK_COMBINEDFLAGS)
                                          gup_flags,
 #else
                                          gup_flags & FOLL_WRITE, 

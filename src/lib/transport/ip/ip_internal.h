@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -52,7 +52,21 @@
  * the same trick as for ONLOAD_MSG_WARM above.
  */
 #define ONLOAD_MSG_ONEPKT 0
+
+
+/* Compat for linux-5.1.  We do not support 32-bit kernels, so no
+ * conditionals are needed here. */
+#ifndef SO_RCVTIMEO
+#define SO_RCVTIMEO SO_RCVTIMEO_OLD
 #endif
+#ifndef SO_SNDTIMEO
+#define SO_SNDTIMEO SO_SNDTIMEO_OLD
+#endif
+#ifndef SO_TIMESTAMP
+#define SO_TIMESTAMP SO_TIMESTAMP_OLD
+#endif
+
+#endif /*__KERNEL__*/
 
 
 /**********************************************************************
