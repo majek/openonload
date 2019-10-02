@@ -12,11 +12,7 @@
 case "$1" in
   start)
     /sbin/modprobe onload
-    /sbin/onload_tool mknod sfc_char
-    /sbin/onload_tool mknod onload
-    /sbin/onload_tool mknod onload onload_epoll
     /sbin/modprobe sfc_affinity
-    /sbin/onload_tool mknod sfc_affinity
     # sfc_affinity will overwrite your IRQ core affinitiy settings
     # so we do not do this by default.  It is however required if you wish
     # Onload to affinitise interrupts.

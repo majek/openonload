@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -281,7 +281,6 @@ cicp_user_retrieve(ci_netif*                    ni,
 {
   struct cp_fwd_key key;
   struct cp_fwd_data data;
-  int rc;
   uint32_t daddr_be32 = ipcache->ip.ip_daddr_be32;
 
   /* This function must be called when "the route is unusable".  I.e. when
@@ -308,12 +307,8 @@ cicp_user_retrieve(ci_netif*                    ni,
 
   key.ifindex = sock_cp->so_bindtodevice;
   if( CI_IP_IS_MULTICAST(daddr_be32) ) {
-    if( sock_cp->sock_cp_flags & OO_SCP_NO_MULTICAST ) {
-      ipcache->status = retrrc_alienroute;
-      ipcache->hwport = CI_HWPORT_ID_BAD;
-      ipcache->intf_i = -1;
-      return;
-    }
+    if( sock_cp->sock_cp_flags & OO_SCP_NO_MULTICAST )
+      goto alien_route;
 
     /* In linux, SO_BINDTODEVICE has the priority over IP_MULTICAST_IF */
     if( key.ifindex == 0 )
@@ -336,11 +331,13 @@ cicp_user_retrieve(ci_netif*                    ni,
 #endif
     key.flag |= CP_FWD_KEY_REQ_WAIT;
 
-  rc = cicp_user_resolve(ni, &ipcache->mac_integrity, &key, &data);
-  if( rc == 0 && key.src == 0 &&
+  if( cicp_user_resolve(ni, &ipcache->mac_integrity, &key, &data) != 0 )
+    goto alien_route;
+
+  if( key.src == 0 &&
       ! (sock_cp->sock_cp_flags & OO_SCP_UDP_WILD) ) {
     key.src = data.src;
-    rc = cicp_user_resolve(ni, &ipcache->mac_integrity, &key, &data);
+    cicp_user_resolve(ni, &ipcache->mac_integrity, &key, &data);
   }
 
   switch( data.ifindex ) {
@@ -351,9 +348,7 @@ cicp_user_retrieve(ci_netif*                    ni,
       ipcache->intf_i = OO_INTF_I_LOOPBACK;
       return;
     case CI_IFID_BAD:
-      ipcache->status = retrrc_alienroute;
-      ipcache->intf_i = -1;
-      return;
+      goto alien_route;
     default:
     {
       cicp_hwport_mask_t hwports = 0;
@@ -362,13 +357,11 @@ cicp_user_retrieve(ci_netif*                    ni,
           (data.hwports & ~(ci_netif_get_hwport_mask(ni))) == 0 )
         break;
       /* Check bond */
-      rc = oo_cp_find_llap(ni->cplane, data.ifindex, NULL/*mtu*/,
+      if( oo_cp_find_llap(ni->cplane, data.ifindex, NULL/*mtu*/,
                            NULL /*tx_hwports*/, &hwports /*rx_hwports*/,
-                           NULL/*mac*/, NULL /*encap*/);
-      if( rc != 0 || (hwports & ~(ci_netif_get_hwport_mask(ni))) ) {
-        ipcache->status = retrrc_alienroute;
-        ipcache->intf_i = -1;
-      }
+                           NULL/*mac*/, NULL /*encap*/) != 0 ||
+          (hwports & ~(ci_netif_get_hwport_mask(ni))) )
+        goto alien_route;
       break;
     }
   }
@@ -376,12 +369,9 @@ cicp_user_retrieve(ci_netif*                    ni,
   ipcache->encap = data.encap;
 #if CI_CFG_TEAMING
   if( ipcache->encap.type & CICP_LLAP_TYPE_USES_HASH ) {
-     if( cicp_user_bond_hash_get_hwport(ni, ipcache, data.hwports,
-                                    sock_cp->lport_be16, daddr_be32) != 0 ) {
-      ipcache->status = retrrc_alienroute;
-      ipcache->intf_i = -1;
-      return;
-    }
+    if( cicp_user_bond_hash_get_hwport(ni, ipcache, data.hwports,
+                                       sock_cp->lport_be16, daddr_be32) != 0 )
+      goto alien_route;
   }
   else
 #endif
@@ -391,11 +381,8 @@ cicp_user_retrieve(ci_netif*                    ni,
   ipcache->ip_saddr.ip4 = key.src == INADDR_ANY ? data.src : key.src;
   ipcache->ifindex = data.ifindex;
   ipcache->nexthop.ip4 = data.next_hop;
-  if( ! ci_ip_cache_is_onloadable(ni, ipcache)) {
-    ipcache->status = retrrc_alienroute;
-    ipcache->intf_i = -1;
-    return;
-  }
+  if( ! ci_ip_cache_is_onloadable(ni, ipcache))
+    goto alien_route;
 
   /* Layout the Ethernet header, and set the source mac.
    * Route resolution already issues ARP request, so there is no need to
@@ -410,6 +397,13 @@ cicp_user_retrieve(ci_netif*                    ni,
     ipcache->ip.ip_ttl = sock_cp->ip_mcast_ttl;
   else
     ipcache->ip.ip_ttl = sock_cp->ip_ttl;
+  return;
+
+ alien_route:
+  ipcache->status = retrrc_alienroute;
+  ipcache->hwport = CI_HWPORT_ID_BAD;
+  ipcache->intf_i = -1;
+  return;
 }
 
 

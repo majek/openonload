@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -134,8 +134,11 @@ ci_inline ci_uint16 efhw_mcdi_read(char *addr)
 #define EFHW_MCDI_DECLARE_BUF(_name, _len)				\
 	ci_dword_t _name[DIV_ROUND_UP((_len), 4)]
 
+#define EFHW_MCDI_INITIALISE_BUF_SIZE(_name, _name_size)		\
+	memset(_name, 0, _name_size)
+
 #define EFHW_MCDI_INITIALISE_BUF(_name)				\
-	memset(_name, 0, sizeof(_name))
+	EFHW_MCDI_INITIALISE_BUF_SIZE(_name, sizeof(_name))
 
 #define EFHW_MCDI_DWORD(_buf, _field)					\
 	efhw_mcdi_readl(_EFHW_MCDI_DWORD_FIELD((_buf), _field))

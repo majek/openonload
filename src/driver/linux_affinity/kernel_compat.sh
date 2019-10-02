@@ -137,7 +137,8 @@ EFRM_NET_HAS_USER_NS			member	struct_net user_ns	include/net/net_namespace.h
 
 EFRM_HAVE_PRANDOM_U32			symbol  prandom_u32             include/linux/random.h
 
-EFRM_HAVE_NEW_FAULT			memtype struct_vm_operations_struct	fault	include/linux/mm.h	int (*)(struct vm_fault *vmf)
+EFRM_HAVE_OLD_FAULT			memtype struct_vm_operations_struct	fault	include/linux/mm.h	int (*)(struct vm_area_struct *vma, struct vm_fault *vmf)
+EFRM_HAVE_NEW_FAULT			memtype struct_vm_operations_struct	fault	include/linux/mm.h	vm_fault_t (*)(struct vm_fault *vmf)
 
 EFRM_HAVE_SCHED_TASK_H			file	include/linux/sched/task.h
 EFRM_HAVE_CRED_H			file	include/linux/cred.h
@@ -149,6 +150,7 @@ EFRM_HAVE_NF_NET_HOOK	symbol	nf_register_net_hook	include/linux/netfilter.h
 
 EFRM_GUP_RCINT_TASK_SEPARATEFLAGS symtype get_user_pages include/linux/mm.h int(struct task_struct *, struct mm_struct *, unsigned long, int, int, int, struct page **, struct vm_area_struct **)
 EFRM_GUP_RCLONG_TASK_SEPARATEFLAGS symtype get_user_pages include/linux/mm.h long(struct task_struct *, struct mm_struct *, unsigned long, unsigned long, int, int, struct page **, struct vm_area_struct **)
+EFRM_GUP_RCLONG_TASK_COMBINEDFLAGS symtype get_user_pages include/linux/mm.h long(struct task_struct *, struct mm_struct *, unsigned long, unsigned long, unsigned int, struct page **, struct vm_area_struct **)
 EFRM_GUP_RCLONG_NOTASK_COMBINEDFLAGS symtype get_user_pages include/linux/mm.h long(unsigned long, unsigned long, unsigned int, struct page **, struct vm_area_struct **)
 
 EFRM_HAVE_USERMODEHELPER_SETUP		symbol	call_usermodehelper_setup	include/linux/kmod.h
@@ -166,6 +168,10 @@ EFRM_HAVE_KERNEL_PARAM_OPS		symbol kernel_param_ops	include/linux/moduleparam.h
 
 EFRM_HAVE_TIMER_SETUP                   symbol timer_setup include/linux/timer.h
 
+EFRM_DO_COREDUMP_BINFMTS_SIGNR          symtype	do_coredump	include/linux/binfmts.h	void(long, int, struct pt_regs*)
+EFRM_DO_COREDUMP_COREDUMP_SIGNR         symtype	do_coredump	include/linux/coredump.h	void(long, int, struct pt_regs*)
+
+EFRM_ACCESS_OK_HAS_2_ARGS    custom
 
 # TODO move onload-related stuff from net kernel_compat
 " | egrep -v -e '^#' -e '^$' | sed 's/[ \t][ \t]*/:/g'
@@ -528,6 +534,17 @@ void (*dtor)(void*, kmem_cache_t *, unsigned long))) *kernel_compat_dummy = \
 "
 }
 
+function do_EFRM_ACCESS_OK_HAS_2_ARGS
+{
+    test_compile "
+#include <linux/uaccess.h>
+
+int func(unsigned long addr, unsigned long size)
+{
+    return access_ok(addr, size);
+}
+"
+}
 
 quiet=false
 verbose=false

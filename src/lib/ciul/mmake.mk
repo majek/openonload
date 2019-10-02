@@ -44,6 +44,9 @@ LIB_SRCS	+=		\
 		checksum.c	\
 		capabilities.c	\
 		ctpio.c
+
+# librt is needed on old glibc, e.g. on RHEL 6
+MMAKE_DIR_LINKFLAGS	:= $(MMAKE_DIR_LINKFLAGS) -lrt
 endif
 
 
@@ -107,13 +110,14 @@ $(objd)$(MMAKE_OBJ_PREFIX)vi_init.o: $(objd)efch_intf_ver.h
 #
 ifdef MMAKE_USE_KBUILD
 all:
-	 $(MAKE) $(MMAKE_KBUILD_ARGS) SUBDIRS=$(BUILDPATH)/lib/ciul _module_$(BUILDPATH)/lib/ciul
+	 $(MAKE) $(MMAKE_KBUILD_ARGS) KBUILD_EXTMOD=$(BUILDPATH)/lib/ciul _module_$(BUILDPATH)/lib/ciul
 clean:
 	@$(MakeClean)
-	rm -f lib.a
+	rm -f ci_ul_lib.o
 endif
 
 ifdef MMAKE_IN_KBUILD
 LIB_OBJS := $(LIB_SRCS:%.c=%.o)
-lib-y    := $(LIB_OBJS)
+ci_ul_lib-y    := $(LIB_OBJS)
+obj-m := ci_ul_lib.o
 endif

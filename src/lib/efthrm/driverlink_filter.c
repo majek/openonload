@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -67,37 +67,22 @@
  */
 
 #ifndef NDEBUG
-
-  static void 
-  dlfilter_dump_la( efx_dlfilter_cb_t*, const char * pfx,
-                    efx_dlfilt_local_addr_t* la, ci_uint32 type );
   static void
   dlfilter_dump_entry( efx_dlfilter_cb_t* fcb, const char * pfx, 
-		       efx_dlfilt_entry_t* ent );
-
-# define dlfilter_check_la(la)                  \
-  do {                                          \
-    ci_assert((la) != NULL);                    \
-    ci_assert((la)->ref_count != -1);           \
-  } while(0)
-
-# define dlfilter_check_entry(ent) { do { ci_assert((ent)); \
-  if( ((ent)->state & EFAB_DLFILT_STATE_MASK) == EFAB_DLFILT_EMPTY) { \
-    dlfilter_dump_entry("Filt:", (ent)); ci_assert(0); }} while(0); }
-
-#else
-
-# define dlfilter_check_la(la)         do{}while(0)
-# define dlfilter_check_entry(ent)     do{}while(0)
-
+		       int idx, efx_dlfilt_entry_t* ent );
 #endif
 
+/* dlfilter_lookup will lookup the exact set of parameters provided. */
 static int dlfilter_lookup(efx_dlfilter_cb_t*, ci_uint32 laddr,
                            ci_uint16 lport, ci_uint32 raddr,
                            ci_uint16 rport, ci_uint8 protocol, int* thr_id);
-
-
-#define EFAB_DLFILT_ADDR(cb,i) (&(cb)->la_table[(i)])
+/* dlfilter_full_lookup will first try an exact parameter lookup, but if that
+ * fails it will fall back to a wild match lookup, ignoring the raddr/rport.
+ */
+static int dlfilter_full_lookup(efx_dlfilter_cb_t* fcb,
+                                ci_uint32 laddr, ci_uint16 lport,
+                                ci_uint32 raddr, ci_uint16 rport,
+                                ci_uint8 protocol, int* thr_id );
 
 #define EFAB_DLFILT_ENTRY_MASK (EFAB_DLFILT_ENTRY_COUNT-1)
 
@@ -110,14 +95,6 @@ static int dlfilter_lookup(efx_dlfilter_cb_t*, ci_uint32 laddr,
 #define EFAB_DLFILT_ENTRY_EMPTY(e) \
   (EFAB_DLFILT_ENTRY_STATE(e)==EFAB_DLFILT_EMPTY) 
 
-#define EFAB_DLFILT_UNUSED_IDX 0xffff
-
-#define EFAB_DLFILT_LADDR_IDX(fcb, la)  ((la) - (fcb)->la_table)
-
-
-/* *************************************************************
- * Local address table 
- */
 
 static const char* dlfilt_addr_str(ci_uint32 addr_be32)
 {
@@ -128,58 +105,6 @@ static const char* dlfilt_addr_str(ci_uint32 addr_be32)
   ci_format_ip4_addr(strbuf[strbuf_i], addr_be32);
   return strbuf[strbuf_i];
 }
-
-
-/* Lookup [addr_be32] in the local address list. 
- * \return pointer to found record or NULL if nothing found
- * \note Caller who is going to use the returned value should lock the
- *       filter manager lock.  When the function is used as a simple
- *       check for address existance, lock is not requiered (or we hope so).
- */
-ci_inline efx_dlfilt_local_addr_t*
-dlfilter_get_known_local_addr( efx_dlfilter_cb_t* fcb, ci_uint32 addr_be32 )
-{
-  efx_dlfilt_local_addr_t* la;
-
-  CI_DLLIST_FOR_EACH2(efx_dlfilt_local_addr_t, la, link, &fcb->la_used ) { 
-    dlfilter_check_la(la);
-    if( la->addr_be32 == addr_be32 )
-      return la;
-  }
-  return NULL;
-}
-
-/* Lookup the local address record for [laddr] & return in [la_out]
- * and then lookup a filter. 
- * returns >=0 if successful (in which case *la_out is valid) or
- * or < 0 if failed (in which case *la_out is valid if non-zero)
- */
-ci_inline int 
-dlfilter_full_lookup( efx_dlfilter_cb_t* fcb,
-		      ci_uint32 laddr, ci_uint16 lport,
-		      ci_uint32 raddr, ci_uint16 rport, 
-		      ci_uint8 protocol, int* thr_id )  
-{
-  int rc;
-
-  ci_assert( thr_id );
-  ci_assert(fcb);
-
-  /* if we don't know the address we're highly unlikely to have a
-   * filter!
-   * There is race condition here, since we are not locked to access
-   * la_used list.  As long as we do not modify the list, we just ignore
-   * the issue. */
-  if( 0 == dlfilter_get_known_local_addr( fcb, laddr ))
-    return -ENOENT;
-
-  if( 0 > (rc = dlfilter_lookup(fcb, laddr, lport, raddr, rport, protocol, 
-				thr_id)))
-    rc = dlfilter_lookup( fcb, laddr, lport,  0, 0, protocol, thr_id );
-  VERB(ci_log("%s: rc:%d thr_id:%x", __FUNCTION__, rc, *thr_id));
-  return rc;
-}
-
 
 
 /* ************************************************************
@@ -420,79 +345,6 @@ static int dlfilter_handle_icmp(struct net* netns, int ifindex,
   return 1;
 }
 
-/* ************************************************************
- * Local Address functions
- */
-
-/* Free-up one local address record  */
-ci_inline int
-dlfilter_free_addr( efx_dlfilter_cb_t* fcb, efx_dlfilt_local_addr_t* la )
-{
-  ci_assert(fcb);
-  dlfilter_check_la(la);
-
-  OO_DEBUG_DLF(ci_log(LPF " free_addr: %d (%s)",
-                      (int) EFAB_DLFILT_LADDR_IDX(fcb, la), 
-                      dlfilt_addr_str(la->addr_be32)));
-  ci_dllist_remove( &la->link );
-  la->ref_count = -1;
-  ci_dllist_push_tail( &fcb->la_free, &la->link );
-  return 0;
-}
-
-
-/* Conditionally add a local address record.  Will add 
- * the record if non such record exists already - the lookup
- * includes the prefix, which must be >= 0 & <= 32. 
- */
-static efx_dlfilt_local_addr_t*
-dlfilter_add_local_addr(efx_dlfilter_cb_t* fcb, ci_uint32 addr_be32)
-{
-  efx_dlfilt_local_addr_t* la;
-
-  /* do an exact-match look-up */
-  if( (la = dlfilter_get_known_local_addr(fcb, addr_be32)) != NULL ) {
-    ci_dllist_remove( &la->link );
-    ci_dllist_push( &fcb->la_used, &la->link );
-    return la;
-  }
-
-  if( ci_dllist_is_empty(&fcb->la_free)) {
-    ci_log("%s: out of slots (addr="CI_IP_PRINTF_FORMAT")", __FUNCTION__,
-           CI_IP_PRINTF_ARGS(&addr_be32));
-    return NULL;
-  }
-
-  la = CI_CONTAINER(efx_dlfilt_local_addr_t,link,ci_dllist_pop(&fcb->la_free));
-  ci_dllist_push(&fcb->la_used, &la->link);
-  la->ref_count = 0;
-  la->addr_be32 = addr_be32;
-  return la;
-}
-
-
-ci_inline void
-dlfilter_addr_refcount_inc( efx_dlfilt_local_addr_t* la )
-{
-  dlfilter_check_la(la);
-  ++la->ref_count;
-}
-
-/* remove one ref count from the local address entry
- * & the local address resource when the ref count
- * hits 0
- */
-ci_inline int 
-dlfilter_addr_refcount_dec( efx_dlfilter_cb_t* fcb, 
-			    efx_dlfilt_local_addr_t* la )
-{
-  ci_assert(fcb);
-  dlfilter_check_la(la);
-
-  if( --la->ref_count == 0 )
-    dlfilter_free_addr(fcb, la);
-  return 0;
-}
 
 /* *************************************************************
  * Filter management
@@ -526,26 +378,22 @@ dlfilter_match( efx_dlfilter_cb_t* fcb, efx_dlfilt_entry_t* ent,
 		ci_uint32 laddr, ci_uint16 lport, ci_uint32 raddr,
 		ci_uint32 rport, ci_uint8 protocol )
 {
-  efx_dlfilt_local_addr_t* la;
-
   ci_assert(fcb);
   ci_assert(ent);
 
   if( !EFAB_DLFILT_ENTRY_IN_USE(ent) )
     return -1;
-  la = EFAB_DLFILT_ADDR( fcb, ent->laddr_idx );
-  dlfilter_check_la(la);
 
   if( rport | raddr ) {
     /* not wildcard */
     return (int)((raddr - ent->raddr_be32) |
-                 (laddr - la->addr_be32)   |
+                 (laddr - ent->laddr_be32)   |
                  (rport - ent->rport_be16) |
                  (lport - ent->lport_be16) |
                  (protocol - ent->ip_protocol));
   }
   else {
-    return (int)( (laddr - la->addr_be32)   |
+    return (int)( (laddr - ent->laddr_be32)   |
                   (lport - ent->lport_be16) |
                   (protocol - ent->ip_protocol));
   }
@@ -603,22 +451,35 @@ dlfilter_lookup( efx_dlfilter_cb_t* fcb, ci_uint32 laddr, ci_uint16 lport,
 }
 
 
+static int
+dlfilter_full_lookup(efx_dlfilter_cb_t* fcb, ci_uint32 laddr, ci_uint16 lport,
+                     ci_uint32 raddr, ci_uint16 rport, ci_uint8 protocol,
+                     int* thr_id )
+{
+  int rc;
+
+  ci_assert( thr_id );
+  ci_assert(fcb);
+
+  if( 0 > (rc = dlfilter_lookup(fcb, laddr, lport, raddr, rport, protocol,
+                                thr_id)))
+    rc = dlfilter_lookup( fcb, laddr, lport,  0, 0, protocol, thr_id );
+  VERB(ci_log("%s: rc:%d thr_id:%x", __FUNCTION__, rc, *thr_id));
+  return rc;
+}
+
 
 /* Insert a new entry in the hash table & the index table */
 static int
-dlfilter_insert(efx_dlfilter_cb_t* fcb, efx_dlfilt_local_addr_t* la, 
-                ci_uint32 laddr, ci_uint16 lport, 
-                ci_uint32 raddr, ci_uint16 rport, 
-                ci_uint8 protocol, int thr_id, unsigned* handle_out)
+dlfilter_insert(efx_dlfilter_cb_t* fcb, ci_uint32 laddr, ci_uint16 lport,
+                ci_uint32 raddr, ci_uint16 rport, ci_uint8 protocol,
+                int thr_id, unsigned* handle_out)
 {
   unsigned first, hash1, hash2, h1, h2;
 #ifndef NDEBUG
   unsigned located;
 #endif
 
-  dlfilter_check_la(la);
-  dlfilter_addr_refcount_inc( la );
-  ci_assert( la->addr_be32 == laddr );
   ci_assert(protocol == IPPROTO_TCP || protocol == IPPROTO_UDP);
   ci_assert_nequal(thr_id, CI_ID_POOL_ID_NONE);
 
@@ -642,7 +503,6 @@ dlfilter_insert(efx_dlfilter_cb_t* fcb, efx_dlfilt_local_addr_t* la,
 		       (unsigned) CI_BSWAP_BE16(rport), 
 		       dlfilt_addr_str(laddr),
 		       (unsigned) CI_BSWAP_BE16(lport)));
-      dlfilter_addr_refcount_dec( fcb, la );
       return -ESRCH;
     }
     hash1 = (hash1 + hash2) & EFAB_DLFILT_ENTRY_MASK;
@@ -651,7 +511,6 @@ dlfilter_insert(efx_dlfilter_cb_t* fcb, efx_dlfilt_local_addr_t* la,
 	     protocol != IPPROTO_UDP ? "TC" : "UD",
 	     dlfilt_addr_str(raddr), (unsigned) CI_BSWAP_BE16(rport),
 	     dlfilt_addr_str(laddr), (unsigned) CI_BSWAP_BE16(lport));
-      dlfilter_addr_refcount_dec( fcb, la );
 #ifndef NDEBUG
       dlfilter_dump_on_error(fcb);
 #endif
@@ -683,7 +542,7 @@ dlfilter_insert(efx_dlfilter_cb_t* fcb, efx_dlfilt_local_addr_t* la,
             + EFAB_DLFILT_ENTRY_ROUTE(&fcb->table[hash1]);
   fcb->table[hash1].raddr_be32 = raddr;
   fcb->table[hash1].rport_be16 = rport;
-  fcb->table[hash1].laddr_idx = (ci_int16) EFAB_DLFILT_LADDR_IDX(fcb, la);
+  fcb->table[hash1].laddr_be32 = laddr;
   fcb->table[hash1].lport_be16 = lport;
   fcb->table[hash1].ip_protocol = protocol;
   fcb->table[hash1].thr_id = thr_id;
@@ -697,7 +556,6 @@ dlfilter_insert(efx_dlfilter_cb_t* fcb, efx_dlfilt_local_addr_t* la,
 void efx_dlfilter_remove(efx_dlfilter_cb_t* fcb, unsigned handle)
 {
   efx_dlfilt_entry_t *ent;
-  efx_dlfilt_local_addr_t *la;
   unsigned hash1, hash2, first;
 
   ci_assert(handle != EFX_DLFILTER_HANDLE_BAD);
@@ -705,13 +563,11 @@ void efx_dlfilter_remove(efx_dlfilter_cb_t* fcb, unsigned handle)
 
   ent = &fcb->table[handle];
   ci_assert( EFAB_DLFILT_ENTRY_IN_USE(ent) );
-  la = &fcb->la_table[ ent->laddr_idx ];
-  dlfilter_check_la(la);
 
-  hash1 = first = dlfilter_hash1(la->addr_be32, ent->lport_be16, 
+  hash1 = first = dlfilter_hash1(ent->laddr_be32, ent->lport_be16,
 				 ent->raddr_be32, ent->rport_be16, 
 				 ent->ip_protocol );
-  hash2 = dlfilter_hash2(la->addr_be32, ent->lport_be16, 
+  hash2 = dlfilter_hash2(ent->laddr_be32, ent->lport_be16,
 			 ent->raddr_be32, ent->rport_be16, 
 			 ent->ip_protocol );
   while( 1 ) {
@@ -720,8 +576,6 @@ void efx_dlfilter_remove(efx_dlfilter_cb_t* fcb, unsigned handle)
     /* st gets the state, must not be EMPTY */
     ci_assert( !EFAB_DLFILT_ENTRY_EMPTY(ent) );
     ci_assert( EFAB_DLFILT_ENTRY_ROUTE(ent) );
-    la = &fcb->la_table[ ent->laddr_idx ];
-    dlfilter_check_la(la);
     --ent->state;
 
     if( hash1 == handle )
@@ -735,8 +589,7 @@ void efx_dlfilter_remove(efx_dlfilter_cb_t* fcb, unsigned handle)
      * at removal) */
     if( !EFAB_DLFILT_ENTRY_ROUTE(ent)) {
       if( EFAB_DLFILT_ENTRY_STATE(ent) != EFAB_DLFILT_TOMBSTONE ) {
-	dlfilter_dump_la( fcb, "ERROR", la, 0xffffffff );
-	dlfilter_dump_entry( fcb, "ERROR", ent );
+	dlfilter_dump_entry( fcb, "ERROR", hash1, ent );
 	ci_log( "ERROR state = %#x", ent->state );
 	ci_assert( EFAB_DLFILT_ENTRY_STATE(ent) == EFAB_DLFILT_TOMBSTONE );
       }
@@ -748,8 +601,6 @@ void efx_dlfilter_remove(efx_dlfilter_cb_t* fcb, unsigned handle)
        * freed-up */
       ent->state = EFAB_DLFILT_EMPTY;
       fcb->used_slots--;
-      /* la may be released in the next call */
-      dlfilter_addr_refcount_dec(fcb, la);
     }
     hash1 = (hash1 + hash2) & EFAB_DLFILT_ENTRY_MASK;
     /* If we do a full check of the table then we're in trouble 
@@ -764,7 +615,7 @@ void efx_dlfilter_remove(efx_dlfilter_cb_t* fcb, unsigned handle)
                       ent->ip_protocol != IPPROTO_UDP ? "TCP" : "UDP",
                       dlfilt_addr_str(ent->raddr_be32), 
                       (unsigned) CI_BSWAP_BE16(ent->rport_be16),
-                      dlfilt_addr_str(la->addr_be32), 
+                      dlfilt_addr_str(ent->laddr_be32),
                       (unsigned) CI_BSWAP_BE16(ent->lport_be16),
                       ent->state, hash1, hash2));
 
@@ -774,8 +625,6 @@ void efx_dlfilter_remove(efx_dlfilter_cb_t* fcb, unsigned handle)
   } else {
     ent->state = EFAB_DLFILT_EMPTY;
     fcb->used_slots--;
-    /* la may be released in the next call */
-    dlfilter_addr_refcount_dec( fcb, la );
   }
 }
 
@@ -785,15 +634,10 @@ void efx_dlfilter_add(efx_dlfilter_cb_t* fcb, unsigned protocol,
                       unsigned raddr, ci_uint16 rport, int thr_id,
                       unsigned* handle_out)
 {
-  efx_dlfilt_local_addr_t* la;
-
   ci_assert(protocol == IPPROTO_TCP || protocol == IPPROTO_UDP);
 
   *handle_out = EFX_DLFILTER_HANDLE_BAD;
-  if( (la = dlfilter_add_local_addr(fcb, laddr)) == NULL )
-    return;
-  dlfilter_check_la(la);
-  dlfilter_insert(fcb, la, laddr, lport,  raddr, rport,
+  dlfilter_insert(fcb, laddr, lport,  raddr, rport,
                   protocol, thr_id, handle_out);
 }
 
@@ -808,16 +652,6 @@ dlfilter_init(efx_dlfilter_cb_t* fcb, void* ctx,
 
   memset(fcb, 0, sizeof(*fcb));
 
-  ci_dllist_init(&fcb->la_free);
-  ci_dllist_init(&fcb->la_used);
-
-  /* build the free-list for the local address table */
-  for( ctr = 0; ctr < EFAB_DLFILT_LA_COUNT; ctr++ ) {
-    fcb->la_table[ctr].ref_count = -1;
-    ci_dllist_push_tail( &fcb->la_free, 
-			 &fcb->la_table[ctr].link );
-  }
-
   /* set up the main control block */
 #ifndef NDEBUG
   if( !CI_IS_POW2( EFAB_DLFILT_ENTRY_COUNT )) {
@@ -829,10 +663,6 @@ dlfilter_init(efx_dlfilter_cb_t* fcb, void* ctx,
 
   for( ctr = 0; ctr < EFAB_DLFILT_ENTRY_COUNT; ctr++ )
     fcb->table[ctr].state = EFAB_DLFILT_EMPTY;
-
-#if CI_CFG_NET_DHCP_FILTER
-  fcb->dhcp_filter = NULL;
-#endif
 
   /* no filters yet */
   fcb->used_slots = 0;
@@ -915,28 +745,6 @@ int efx_dlfilter_handler(struct net* netns, int ifindex, efx_dlfilter_cb_t* fcb,
   if( CI_UNLIKELY( CI_IP4_FRAG_OFFSET(ip) ))
     return 0;
 
-#if CI_CFG_NET_DHCP_FILTER
-  if( ip->ip_protocol == IPPROTO_UDP ) {
-    ci_udp_hdr* udp;
-    efx_dlfilter_dhcp_hook_t dhcp_filter_fn = fcb->dhcp_filter;
-
-    /* No point checking anything else if no DHCP filter hook is registered */
-    if( dhcp_filter_fn == NULL )
-      return 0;
-
-    if( CI_UNLIKELY(ip_paylen < sizeof(ci_udp_hdr)) )
-      return 0;
-
-    /* We're only interested in stuff sent to the DHCP client port, 68 */
-    udp = (ci_udp_hdr*)((char*)ip + ip_hlen);
-    if( CI_LIKELY( udp->udp_dest_be16 != CI_BSWAPC_BE16(68) ) )
-      return 0;
-  
-    /* OK, let the filter hook function decide what to do with it */
-    return (dhcp_filter_fn)(hdr, ip_hdr, len);
-  }
-#endif
-
   /* ICMP only, no fragments */
   if( ip->ip_protocol == IPPROTO_ICMP ) {
     if(CI_UNLIKELY( ip->ip_frag_off_be16 & CI_BSWAPC_BE16(0xafff) ))
@@ -968,141 +776,38 @@ int efx_dlfilter_handler(struct net* netns, int ifindex, efx_dlfilter_cb_t* fcb,
 
 #ifndef NDEBUG
 
-#define __DLF_LA_DUMP_HDR \
-  " Idx St.  Address          RC"
-#define __DLF_LA_DUMP_FMT(u) "%s %3d " #u " %15s %3d"
-
-static void 
-dlfilter_dump_la( efx_dlfilter_cb_t* fcb,
-                  const char * pfx, efx_dlfilt_local_addr_t* la,
-		  ci_uint32 dump_type )
-{
-  ci_assert(la);
-  (void)dump_type; /* unused */
-
-  if( la->ref_count == -1 ) {
-    ci_log( __DLF_LA_DUMP_FMT(Free), pfx ? pfx : "",
-            (int) EFAB_DLFILT_LADDR_IDX(fcb, la),
-	    dlfilt_addr_str(la->addr_be32),
-	    la->ref_count);
-  } else {
-    ci_log( __DLF_LA_DUMP_FMT(Used), pfx ? pfx : "",
-            (int) EFAB_DLFILT_LADDR_IDX(fcb, la),
-	    dlfilt_addr_str(la->addr_be32),
-	    la->ref_count);
-  }
-}
-
 #define __DLF_ENT_DUMP_HDR \
-  "  St Rt R.Addr    RPort LA L.Addr         LPort Pr THR"
+  "  Idx   St Rt R.Addr    RPort L.Addr         LPort Pr THR"
 #define __DLF_ENT_DUMP_FMT \
-  "%s %2d %2d %8s %4u %2d %15s %5u %2d %08x"
+  "%s %5d %2d %2d %8s %4u %15s %5u %2d %08x"
 
 static void dlfilter_dump_entry( efx_dlfilter_cb_t* fcb, const char * pfx, 
-				 efx_dlfilt_entry_t* ent )
+				 int idx, efx_dlfilt_entry_t* ent )
 {
   ci_assert(fcb);
   ci_assert(ent);
-  ci_log( __DLF_ENT_DUMP_FMT, pfx ? pfx : "",
-	  ent->state >> EFAB_DLFILT_STATE_SHIFT, 
-	  ent->state & ~EFAB_DLFILT_STATE_MASK,
-	  dlfilt_addr_str(ent->raddr_be32), CI_BSWAP_BE16(ent->rport_be16),
-	  ent->laddr_idx, 
-	  dlfilt_addr_str(fcb->la_table[ent->laddr_idx].addr_be32),
-	  CI_BSWAP_BE16(ent->lport_be16),  ent->ip_protocol,
-	  ent->thr_id );
+  ci_log(__DLF_ENT_DUMP_FMT, pfx ? pfx : "", idx,
+         ent->state >> EFAB_DLFILT_STATE_SHIFT, 
+         ent->state & ~EFAB_DLFILT_STATE_MASK,
+         dlfilt_addr_str(ent->raddr_be32), CI_BSWAP_BE16(ent->rport_be16),
+         dlfilt_addr_str(ent->laddr_be32), CI_BSWAP_BE16(ent->lport_be16),
+         ent->ip_protocol, ent->thr_id);
 }
 
 
-static void dlfilter_dump_lat_free( efx_dlfilter_cb_t* fcb,
-				    ci_uint32 dump_type )
-{
-  char strbuf[16];
-  efx_dlfilt_local_addr_t* la;
-  int ctr = 0;
-
-  if( !(dump_type & EFAB_DLFILT_DUMP_LACB_FREE) )
-    return;
-
-  ci_log(" Free local addresses:");
-  CI_DLLIST_FOR_EACH2( efx_dlfilt_local_addr_t, 
-		       la, link, &fcb->la_free ) { 
-    sprintf( strbuf, " %2d :", ++ctr );
-    dlfilter_dump_la( fcb, strbuf, la, dump_type );
-  }
-  return;
-}
-
-static void dlfilter_dump_lat_used( efx_dlfilter_cb_t* fcb,
-				    ci_uint32 dump_type )
-{
-  char strbuf[16];
-  efx_dlfilt_local_addr_t* la;
-  int ctr = 0;
-
-  ci_assert(fcb);
-
-  if( !(dump_type & EFAB_DLFILT_DUMP_LACB_USED) )
-    return;
-
-  ci_log(" Used local addresses:");
-  CI_DLLIST_FOR_EACH2( efx_dlfilt_local_addr_t, 
-		       la, link, &fcb->la_used ) { 
-    sprintf( strbuf, " %2d :", ++ctr );
-    dlfilter_dump_la( fcb, strbuf, la, dump_type );
-  }
-  return;
-}
-
-static void dlfilter_dump_la_table( efx_dlfilter_cb_t* fcb,
-				    ci_uint32 dump_type )
+void efx_dlfilter_dump(efx_dlfilter_cb_t* fcb)
 {
   int ctr;
-  ci_log("Local address CB");
-  ci_log(" Local address table:");
-  ci_log( __DLF_LA_DUMP_HDR);
-  for( ctr = 0; ctr < EFAB_DLFILT_LA_COUNT; ctr++ ) {
-    if( !(dump_type & EFAB_DLFILT_DUMP_ACTIVE) ||
-	((dump_type & EFAB_DLFILT_DUMP_ACTIVE) &&
-	 (fcb->la_table[ctr].ref_count != -1)))
-      dlfilter_dump_la( fcb, 0, &fcb->la_table[ctr], dump_type );
-  }
-}
-
-static void dlfilter_dump_entry_table( efx_dlfilter_cb_t* fcb,
-				       ci_uint32 dump_type )
-{
-  int ctr;
-
   ci_assert(fcb);
 
+  ci_log("Master CB");
+  ci_log("Used slots:%d", fcb->used_slots);
   ci_log("Filter table");
   ci_log( __DLF_ENT_DUMP_HDR);
   for( ctr = 0; ctr < EFAB_DLFILT_ENTRY_COUNT; ctr++ ) {
-    if( !(dump_type & EFAB_DLFILT_DUMP_ACTIVE) || 
-	((dump_type & EFAB_DLFILT_DUMP_ACTIVE) &&
-	 (fcb->table[ctr].state != EFAB_DLFILT_EMPTY)))
-      dlfilter_dump_entry( fcb, 0, &fcb->table[ctr] );
+    if( fcb->table[ctr].state != EFAB_DLFILT_EMPTY )
+      dlfilter_dump_entry(fcb, 0, ctr, &fcb->table[ctr]);
   }
-}
-
-
-void efx_dlfilter_dump(efx_dlfilter_cb_t* fcb, unsigned dump_type)
-{
-  ci_assert(fcb);
-
-  if( dump_type ) {
-    ci_log("Master CB");
-    ci_log("Used slots:%d", fcb->used_slots);
-  }
-  if( dump_type & EFAB_DLFILT_DUMP_LAT )	
-    dlfilter_dump_la_table( fcb, dump_type );
-  if( dump_type & EFAB_DLFILT_DUMP_LACB_FREE )	
-    dlfilter_dump_lat_free( fcb, dump_type );
-  if( dump_type & EFAB_DLFILT_DUMP_LACB_USED )	
-    dlfilter_dump_lat_used( fcb, dump_type );
-  if( dump_type & EFAB_DLFILT_DUMP_ENTRYT )	
-    dlfilter_dump_entry_table( fcb, dump_type );
 }
 #endif
 

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -131,9 +131,14 @@ struct citp_epoll_member {
   ci_uint64             fdi_seq;    /*!< fdi->seq */
   int                   fd;         /*!< Onload fd */
   ci_sleep_seq_t        reported_sleep_seq;
-  /*!< indicates after which eitem on ready list socket we should look
-   * on other and os sockets */
-  int                   poll_end;
+
+  int                   flags;
+/*!< indicates after which eitem on ready list socket we should look
+ * on other and os sockets */
+#define CITP_EITEM_FLAG_POLL_END    1
+/*!< this eitem is (or was) a non-home member of the epoll set,
+ * and it was added to the kernel epoll set. */
+#define CITP_EITEM_FLAG_OS_SYNC     2
 };
 
 

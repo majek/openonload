@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -116,7 +116,6 @@ static int ci_sock_bindtodevice(ci_netif* ni, ci_sock_cmn* s,
 {
   ci_ifid_t ifindex;
   struct ifreq ifr;
-  int rc;
 
   if( optlen == 0 || ((char*)optval)[0] == '\0' ) {
     /* Unbind. */
@@ -149,10 +148,12 @@ static int ci_sock_bindtodevice(ci_netif* ni, ci_sock_cmn* s,
     return -ENODEV;
   }
 
-  rc = ci_sock_rx_bind2dev(ni, s, ifindex);
-  if( rc == 0 )
-    s->cp.so_bindtodevice = ifindex;
-  return rc;
+  /* We set cp.so_bindtodevice even if we will fail later, because "fail"
+   * means "hand over" here.  In case of real handover, it is harmless to
+   * set cp.so_bindtodevice.  In complicated cases, such as TCP listen,
+   * we want to remember this value and report it via getsockopt(). */
+  s->cp.so_bindtodevice = ifindex;
+  return ci_sock_rx_bind2dev(ni, s, ifindex);
 
  handover:
   /* You might be tempted to think "Handing a connected TCP socket to the

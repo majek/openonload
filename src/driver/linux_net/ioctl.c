@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -672,6 +672,7 @@ efx_ioctl_dump(struct efx_nic *efx, union efx_ioctl_data __user *useraddr)
 }
 #endif
 
+#ifdef EFX_NOT_UPSTREAM
 static int efx_ioctl_sfctool(struct efx_nic *efx,
 			     union efx_ioctl_data __user *useraddr)
 {
@@ -686,6 +687,7 @@ static int efx_ioctl_sfctool(struct efx_nic *efx,
 
 	return efx_sfctool(efx, ethcmd, sfctool.data);
 }
+#endif
 
 /*****************************************************************************/
 
@@ -828,8 +830,10 @@ int efx_private_ioctl(struct efx_nic *efx, u16 cmd,
 	case EFX_DUMP:
 		return efx_ioctl_dump(efx, user_data);
 #endif
+#ifdef EFX_NOT_UPSTREAM
 	case EFX_SFCTOOL:
 		return efx_ioctl_sfctool(efx, user_data);
+#endif
 	default:
 		netif_err(efx, drv, efx->net_dev,
 			  "unknown private ioctl cmd %x\n", cmd);

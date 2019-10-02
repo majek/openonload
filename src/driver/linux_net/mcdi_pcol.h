@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -2783,6 +2783,8 @@
 #define        MC_CMD_DRV_ATTACH_IN_WANT_VI_SPREADING_WIDTH 1
 #define        MC_CMD_DRV_ATTACH_IN_WANT_V2_LINKCHANGES_LBN 4
 #define        MC_CMD_DRV_ATTACH_IN_WANT_V2_LINKCHANGES_WIDTH 1
+#define        MC_CMD_DRV_ATTACH_IN_WANT_TX_ONLY_SPREADING_LBN 5
+#define        MC_CMD_DRV_ATTACH_IN_WANT_TX_ONLY_SPREADING_WIDTH 1
 /* 1 to set new state, or 0 to just report the existing state */
 #define       MC_CMD_DRV_ATTACH_IN_UPDATE_OFST 4
 #define       MC_CMD_DRV_ATTACH_IN_UPDATE_LEN 4
@@ -2820,6 +2822,73 @@
 /* enum: Only this option is allowed for non-admin functions */
 #define          MC_CMD_FW_DONT_CARE 0xffffffff
 
+/* MC_CMD_DRV_ATTACH_IN_V2 msgrequest: Updated DRV_ATTACH to include driver
+ * version
+ */
+#define    MC_CMD_DRV_ATTACH_IN_V2_LEN 32
+/* new state to set if UPDATE=1 */
+#define       MC_CMD_DRV_ATTACH_IN_V2_NEW_STATE_OFST 0
+#define       MC_CMD_DRV_ATTACH_IN_V2_NEW_STATE_LEN 4
+/*             MC_CMD_DRV_ATTACH_LBN 0 */
+/*             MC_CMD_DRV_ATTACH_WIDTH 1 */
+#define        MC_CMD_DRV_ATTACH_IN_V2_ATTACH_LBN 0
+#define        MC_CMD_DRV_ATTACH_IN_V2_ATTACH_WIDTH 1
+/*             MC_CMD_DRV_PREBOOT_LBN 1 */
+/*             MC_CMD_DRV_PREBOOT_WIDTH 1 */
+#define        MC_CMD_DRV_ATTACH_IN_V2_PREBOOT_LBN 1
+#define        MC_CMD_DRV_ATTACH_IN_V2_PREBOOT_WIDTH 1
+#define        MC_CMD_DRV_ATTACH_IN_V2_SUBVARIANT_AWARE_LBN 2
+#define        MC_CMD_DRV_ATTACH_IN_V2_SUBVARIANT_AWARE_WIDTH 1
+#define        MC_CMD_DRV_ATTACH_IN_V2_WANT_VI_SPREADING_LBN 3
+#define        MC_CMD_DRV_ATTACH_IN_V2_WANT_VI_SPREADING_WIDTH 1
+#define        MC_CMD_DRV_ATTACH_IN_V2_WANT_V2_LINKCHANGES_LBN 4
+#define        MC_CMD_DRV_ATTACH_IN_V2_WANT_V2_LINKCHANGES_WIDTH 1
+#define        MC_CMD_DRV_ATTACH_IN_V2_WANT_RX_VI_SPREADING_INHIBIT_LBN 5
+#define        MC_CMD_DRV_ATTACH_IN_V2_WANT_RX_VI_SPREADING_INHIBIT_WIDTH 1
+#define        MC_CMD_DRV_ATTACH_IN_V2_WANT_TX_ONLY_SPREADING_LBN 5
+#define        MC_CMD_DRV_ATTACH_IN_V2_WANT_TX_ONLY_SPREADING_WIDTH 1
+/* 1 to set new state, or 0 to just report the existing state */
+#define       MC_CMD_DRV_ATTACH_IN_V2_UPDATE_OFST 4
+#define       MC_CMD_DRV_ATTACH_IN_V2_UPDATE_LEN 4
+/* preferred datapath firmware (for Huntington; ignored for Siena) */
+#define       MC_CMD_DRV_ATTACH_IN_V2_FIRMWARE_ID_OFST 8
+#define       MC_CMD_DRV_ATTACH_IN_V2_FIRMWARE_ID_LEN 4
+/* enum: Prefer to use full featured firmware */
+/*               MC_CMD_FW_FULL_FEATURED 0x0 */
+/* enum: Prefer to use firmware with fewer features but lower latency */
+/*               MC_CMD_FW_LOW_LATENCY 0x1 */
+/* enum: Prefer to use firmware for SolarCapture packed stream mode */
+/*               MC_CMD_FW_PACKED_STREAM 0x2 */
+/* enum: Prefer to use firmware with fewer features and simpler TX event
+ * batching but higher TX packet rate
+ */
+/*               MC_CMD_FW_HIGH_TX_RATE 0x3 */
+/* enum: Reserved value */
+/*               MC_CMD_FW_PACKED_STREAM_HASH_MODE_1 0x4 */
+/* enum: Prefer to use firmware with additional "rules engine" filtering
+ * support
+ */
+/*               MC_CMD_FW_RULES_ENGINE 0x5 */
+/* enum: Prefer to use firmware with additional DPDK support */
+/*               MC_CMD_FW_DPDK 0x6 */
+/* enum: Prefer to use "l3xudp" custom datapath firmware (see SF-119495-PD and
+ * bug69716)
+ */
+/*               MC_CMD_FW_L3XUDP 0x7 */
+/* enum: Requests that the MC keep whatever datapath firmware is currently
+ * running. It's used for test purposes, where we want to be able to shmboot
+ * special test firmware variants. This option is only recognised in eftest
+ * (i.e. non-production) builds.
+ */
+/*               MC_CMD_FW_KEEP_CURRENT_EFTEST_ONLY 0xfffffffe */
+/* enum: Only this option is allowed for non-admin functions */
+/*               MC_CMD_FW_DONT_CARE 0xffffffff */
+/* Version of the driver to be reported by management protocols (e.g. NC-SI)
+ * handled by the NIC. This is a zero-terminated ASCII string.
+ */
+#define       MC_CMD_DRV_ATTACH_IN_V2_DRIVER_VERSION_OFST 12
+#define       MC_CMD_DRV_ATTACH_IN_V2_DRIVER_VERSION_LEN 20
+
 /* MC_CMD_DRV_ATTACH_OUT msgresponse */
 #define    MC_CMD_DRV_ATTACH_OUT_LEN 4
 /* previous or existing state, see the bitmask at NEW_STATE */
@@ -2851,6 +2920,11 @@
  * input.
  */
 #define          MC_CMD_DRV_ATTACH_EXT_OUT_FLAG_VI_SPREADING_ENABLED 0x4
+/* enum: If set, indicates that TX only spreading is enabled. Even-numbered
+ * TXQs will use one engine, and odd-numbered TXQs will use the other.
+ * This also has the effect that only even-numbered RXQs will receive traffic.
+ */
+#define          MC_CMD_DRV_ATTACH_EXT_OUT_FLAG_TX_ONLY_VI_SPREADING_ENABLED 0x5
 
 
 /***********************************/
@@ -7013,6 +7087,14 @@
  * subset of the information stored in this partition.
  */
 #define          NVRAM_PARTITION_TYPE_FRU_INFORMATION 0x1d00
+/* enum: Bundle image partition */
+#define          NVRAM_PARTITION_TYPE_BUNDLE 0x1e00
+/* enum: Bundle metadata partition that holds additional information related to
+ * a bundle update in TLV format
+ */
+#define          NVRAM_PARTITION_TYPE_BUNDLE_METADATA 0x1e01
+/* enum: Bundle update non-volatile log output partition */
+#define          NVRAM_PARTITION_TYPE_BUNDLE_LOG 0x1e02
 /* enum: Start of reserved value range (firmware may use for any purpose) */
 #define          NVRAM_PARTITION_TYPE_RESERVED_VALUES_MIN 0xff00
 /* enum: End of reserved value range (firmware may use for any purpose) */
@@ -7659,6 +7741,8 @@
 #define        MC_CMD_INIT_RXQ_EXT_IN_FLAG_WANT_OUTER_CLASSES_WIDTH 1
 #define        MC_CMD_INIT_RXQ_EXT_IN_FLAG_FORCE_EV_MERGING_LBN 19
 #define        MC_CMD_INIT_RXQ_EXT_IN_FLAG_FORCE_EV_MERGING_WIDTH 1
+#define        MC_CMD_INIT_RXQ_EXT_IN_FLAG_NO_CONT_EV_LBN 20
+#define        MC_CMD_INIT_RXQ_EXT_IN_FLAG_NO_CONT_EV_WIDTH 1
 /* Owner ID to use if in buffer mode (zero if physical) */
 #define       MC_CMD_INIT_RXQ_EXT_IN_OWNER_ID_OFST 20
 #define       MC_CMD_INIT_RXQ_EXT_IN_OWNER_ID_LEN 4
@@ -7741,6 +7825,8 @@
 #define        MC_CMD_INIT_RXQ_V3_IN_FLAG_WANT_OUTER_CLASSES_WIDTH 1
 #define        MC_CMD_INIT_RXQ_V3_IN_FLAG_FORCE_EV_MERGING_LBN 19
 #define        MC_CMD_INIT_RXQ_V3_IN_FLAG_FORCE_EV_MERGING_WIDTH 1
+#define        MC_CMD_INIT_RXQ_V3_IN_FLAG_NO_CONT_EV_LBN 20
+#define        MC_CMD_INIT_RXQ_V3_IN_FLAG_NO_CONT_EV_WIDTH 1
 /* Owner ID to use if in buffer mode (zero if physical) */
 #define       MC_CMD_INIT_RXQ_V3_IN_OWNER_ID_OFST 20
 #define       MC_CMD_INIT_RXQ_V3_IN_OWNER_ID_LEN 4
@@ -11111,6 +11197,8 @@
 #define        MC_CMD_GET_CAPABILITIES_V4_OUT_VI_SPREADING_WIDTH 1
 #define        MC_CMD_GET_CAPABILITIES_V4_OUT_RXDP_HLB_IDLE_LBN 25
 #define        MC_CMD_GET_CAPABILITIES_V4_OUT_RXDP_HLB_IDLE_WIDTH 1
+#define        MC_CMD_GET_CAPABILITIES_V4_OUT_INIT_RXQ_NO_CONT_EV_LBN 26
+#define        MC_CMD_GET_CAPABILITIES_V4_OUT_INIT_RXQ_NO_CONT_EV_WIDTH 1
 /* Number of FATSOv2 contexts per datapath supported by this NIC. Not present
  * on older firmware (check the length).
  */

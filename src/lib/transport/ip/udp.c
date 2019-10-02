@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -139,7 +139,7 @@ ci_fd_t ci_udp_ep_ctor(citp_socket* ep, ci_netif* netif, int domain, int type)
   if (!us) {
     ci_netif_unlock(netif);
     LOG_E(ci_log("%s: [%d] out of socket buffers", __FUNCTION__,NI_ID(netif)));
-    return -ENOMEM;
+    return -EMFILE;
   }
 
   /* It's required to set protocol before ci_tcp_helper_sock_attach()

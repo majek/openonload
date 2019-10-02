@@ -47,14 +47,15 @@ $(objd)$(MMAKE_OBJ_PREFIX)version.o: $(objd)cp_intf_ver.h
 #
 ifdef MMAKE_USE_KBUILD
 all:
-	 $(MAKE) $(MMAKE_KBUILD_ARGS) SUBDIRS=$(BUILDPATH)/lib/cplane _module_$(BUILDPATH)/lib/cplane
+	 $(MAKE) $(MMAKE_KBUILD_ARGS) KBUILD_EXTMOD=$(BUILDPATH)/lib/cplane _module_$(BUILDPATH)/lib/cplane
 clean:
 	@$(MakeClean)
-	rm -f cp_intf_ver.h lib.a
+	rm -f cp_intf_ver.h cplane_lib.o
 endif
 
 ifdef MMAKE_IN_KBUILD
 LIB_OBJS := $(LIB_SRCS:%.c=%.o)
-lib-y    := $(LIB_OBJS)
+cplane_lib-y    := $(LIB_OBJS)
+obj-m    := cplane_lib.o
 endif
 

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -239,7 +239,8 @@
   ((ts)->tcpflags & CI_TCPT_FLAG_FIN_PENDING      ? "FIN_PENDING ":"")
 
 
-#define CI_SOCK_FLAGS_FMT  "%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s"
+#define CI_SOCK_FLAGS_FMT \
+  "%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s"
 #define CI_SOCK_FLAGS_PRI_ARG(s)                                        \
   ((s)->s_aflags & CI_SOCK_AFLAG_CORK     ? "CORK ":""),                \
   ((s)->s_aflags & CI_SOCK_AFLAG_NEED_SHUT_RD ? "SHUTRD ":""),          \
@@ -264,6 +265,12 @@
   ((s)->s_flags & CI_SOCK_FLAG_SCALPASSIVE ? "SCALPASSIVE ":""),        \
   ((s)->s_flags & CI_SOCK_FLAG_MAC_FILTER ? "MAC_FILTER ":""),          \
   ((s)->s_flags & CI_SOCK_FLAG_REUSEPORT  ? "REUSEPORT ":""),           \
+  ((s)->s_flags & CI_SOCK_FLAG_BOUND_ALIEN  ? "BOUND_ALIEN ":""),       \
+  ((s)->s_flags & CI_SOCK_FLAG_CONNECT_MUST_BIND  ? "CONNECT_MUST_BIND ":""),   \
+  ((s)->s_flags & CI_SOCK_FLAG_PMTU_DO  ? "PMTU_DO ":""),               \
+  ((s)->s_flags & CI_SOCK_FLAG_ALWAYS_DF  ? "ALWAYS_DF ":""),           \
+  ((s)->s_flags & CI_SOCK_FLAG_SET_IP_TTL  ? "IP_TTL ":""),             \
+  ((s)->s_flags & CI_SOCK_FLAG_DEFERRED_BIND  ? "DEFERRED_BIND ":""),   \
   ((s)->cp.sock_cp_flags & OO_SCP_NO_MULTICAST ? "NOMCAST ":"")
 
 

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -350,7 +350,8 @@ ci_inline ci_uint64 ci_bswap64(ci_uint64 v)
 
 
 /* TODO */
-#define ci_prefetch(addr)  do{}while(0)
+#define ci_prefetch(addr)      do{}while(0)
+#define ci_prefetch_ppc(addr)  do{}while(0)
 
 
 #endif /* __CI_TOOLS_GCC_AARCH64_H__ */

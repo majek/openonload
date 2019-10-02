@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -31,7 +31,13 @@ struct oo_cplane_handle {
 
   struct net* cp_netns;
 
+  /* Communicate with the cp_server: */
   struct pid* server_pid;
+  struct file* server_file;
+
+  spinlock_t msg_lock;
+  wait_queue_head_t msg_wq;
+  struct list_head msg;
 
   /* Unlike all other members of this structure, this link is protected by
    * the global cp_lock, not by cp_handle_lock below. */

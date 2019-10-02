@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -377,6 +377,7 @@ int efx_init_irq_moderation(struct efx_nic *efx, unsigned int tx_usecs,
 void efx_get_irq_moderation(struct efx_nic *efx, unsigned int *tx_usecs,
 			    unsigned int *rx_usecs, bool *rx_adaptive);
 void efx_set_stats_period(struct efx_nic *efx, unsigned int period_ms);
+void efx_reset_sw_stats(struct efx_nic *efx);
 #ifdef EFX_NOT_UPSTREAM
 extern int efx_target_num_vis;
 #endif
@@ -411,6 +412,9 @@ static inline int efx_mtd_probe(struct efx_nic *efx)
 }
 void efx_mtd_rename(struct efx_nic *efx);
 void efx_mtd_remove(struct efx_nic *efx);
+#ifdef EFX_WORKAROUND_87308
+void efx_mtd_creation_work(struct work_struct *data);
+#endif
 #else
 static inline int efx_mtd_probe(struct efx_nic *efx) { return 0; }
 static inline void efx_mtd_rename(struct efx_nic *efx) {}

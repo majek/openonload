@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -344,11 +344,13 @@ static int siena_map_reset_flags(u32 *flags)
 
 	if ((*flags & SIENA_RESET_MC) == SIENA_RESET_MC) {
 		*flags &= ~SIENA_RESET_MC;
+		*flags &= ~ETH_RESET_MAC;
 		return RESET_TYPE_WORLD;
 	}
 
 	if ((*flags & SIENA_RESET_PORT) == SIENA_RESET_PORT) {
 		*flags &= ~SIENA_RESET_PORT;
+		*flags &= ~ETH_RESET_MAC;
 		return RESET_TYPE_ALL;
 	}
 
@@ -859,25 +861,24 @@ static size_t siena_describe_nic_stats(struct efx_nic *efx, u8 *names)
 				      siena_stat_mask, names);
 }
 
-static int siena_try_update_nic_stats(struct efx_nic *efx)
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_USE_NETDEV_STATS64)
+static size_t siena_update_nic_stats(struct efx_nic *efx, u64 *full_stats,
+				     struct rtnl_link_stats64 *core_stats)
+#else
+static size_t siena_update_nic_stats(struct efx_nic *efx, u64 *full_stats,
+				     struct net_device_stats *core_stats)
+#endif
+	__acquires(efx->stats_lock)
 {
 	struct siena_nic_data *nic_data = efx->nic_data;
+	__le64 mc_stats[MC_CMD_MAC_NSTATS];
 	u64 *stats = nic_data->stats;
-	__le64 *dma_stats;
-	__le64 generation_start, generation_end;
 
-	dma_stats = efx->stats_buffer.addr;
+	spin_lock_bh(&efx->stats_lock);
 
-	generation_end = dma_stats[efx->num_mac_stats - 1];
-	if (generation_end == EFX_MC_STATS_GENERATION_INVALID)
-		return 0;
-	rmb();
+	efx_nic_copy_stats(efx, mc_stats);
 	efx_nic_update_stats(siena_stat_desc, SIENA_STAT_COUNT, siena_stat_mask,
-			     stats, efx->stats_buffer.addr, false);
-	rmb();
-	generation_start = dma_stats[MC_CMD_MAC_GENERATION_START];
-	if (generation_end != generation_start)
-		return -EAGAIN;
+			     stats, efx->mc_initial_stats, mc_stats);
 
 	/* Update derived statistics */
 	efx_nic_fix_nodesc_drop_stat(efx,
@@ -894,31 +895,6 @@ static int siena_try_update_nic_stats(struct efx_nic *efx)
 			     stats[SIENA_STAT_rx_bytes] -
 			     stats[SIENA_STAT_rx_bad_bytes]);
 	efx_update_sw_stats(efx, stats);
-	return 0;
-}
-
-#if !defined(EFX_USE_KCOMPAT) || defined(EFX_USE_NETDEV_STATS64)
-static size_t siena_update_nic_stats(struct efx_nic *efx, u64 *full_stats,
-				     struct rtnl_link_stats64 *core_stats)
-#else
-static size_t siena_update_nic_stats(struct efx_nic *efx, u64 *full_stats,
-				     struct net_device_stats *core_stats)
-#endif
-	__acquires(efx->stats_lock)
-{
-	struct siena_nic_data *nic_data = efx->nic_data;
-	u64 *stats = nic_data->stats;
-	int retry;
-
-	spin_lock_bh(&efx->stats_lock);
-
-	/* If we're unlucky enough to read statistics wduring the DMA, wait
-	 * up to 10ms for it to finish (typically takes <500us) */
-	for (retry = 0; retry < 100; ++retry) {
-		if (siena_try_update_nic_stats(efx) == 0)
-			break;
-		udelay(100);
-	}
 
 	if (full_stats)
 		memcpy(full_stats, stats, sizeof(u64) * SIENA_STAT_COUNT);
@@ -951,6 +927,17 @@ static size_t siena_update_nic_stats(struct efx_nic *efx, u64 *full_stats,
 	}
 
 	return SIENA_STAT_COUNT;
+}
+
+static void siena_pull_stats(struct efx_nic *efx)
+{
+	efx_mcdi_mac_pull_stats(efx);
+	if (!efx->stats_initialised) {
+		efx_reset_sw_stats(efx);
+		efx_ptp_reset_stats(efx);
+		efx_nic_reset_stats(efx);
+		efx->stats_initialised = true;
+	}
 }
 
 static int siena_mac_reconfigure(struct efx_nic *efx,
@@ -1122,6 +1109,7 @@ static void siena_mcdi_reboot_detected(struct efx_nic *efx)
 	/* MAC statistics have been cleared on the NIC; clear the local
 	 * copies that we update with efx_update_diff_stat().
 	 */
+	efx->stats_initialised = false;
 	nic_data->stats[SIENA_STAT_tx_good_bytes] = 0;
 	nic_data->stats[SIENA_STAT_rx_good_bytes] = 0;
 }
@@ -1345,7 +1333,7 @@ const struct efx_nic_type siena_a0_nic_type = {
 	.describe_stats = siena_describe_nic_stats,
 	.update_stats = siena_update_nic_stats,
 	.start_stats = efx_mcdi_mac_start_stats,
-	.pull_stats = efx_mcdi_mac_pull_stats,
+	.pull_stats = siena_pull_stats,
 	.stop_stats = efx_mcdi_mac_stop_stats,
 	.update_stats_period = efx_mcdi_mac_update_stats_period,
 	.set_id_led = efx_mcdi_set_id_led,

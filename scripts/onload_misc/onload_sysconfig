@@ -37,3 +37,13 @@ SFC_AFFINITY_USER=root
 SFC_AFFINITY_GROUP=root
 SFC_AFFINITY_MODE=666
 
+
+# onload_cp_server user.
+#
+# The following setting controls the user which will run the Onload control
+# plane server process. The user must exist, and does not need any privileges.
+#
+# If the setting is not defined, the server will run as root.
+
+#ONLOAD_CPLANE_USER=onload_cplane
+

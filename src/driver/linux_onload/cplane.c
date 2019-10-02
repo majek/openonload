@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -23,6 +23,7 @@
 #include <linux/spinlock.h>
 #include <linux/moduleparam.h>
 #include <linux/log2.h>
+#include <linux/highuid.h>
 #include <net/neighbour.h>
 #include <net/arp.h>
 #include "../linux_resource/kernel_compat.h"
@@ -51,6 +52,15 @@ int cplane_route_request_limit = 1000;
 #define CP_ROUTE_REQ_TIMEOUT_DEFAULT_MS 200
 int cplane_route_request_timeout_ms = CP_ROUTE_REQ_TIMEOUT_DEFAULT_MS;
 unsigned long cplane_route_request_timeout_jiffies;
+
+/* Module parameters to set uid/gid.
+ *
+ * FIXME: the default is root, for compatibility with historic behaviour. For
+ * the next release, the module parameters should be made mandatory so that
+ * we are more secure by default.
+ */
+int cplane_server_uid = 0;
+int cplane_server_gid = 0;
 
 /* Parsed cplane parameters */
 int cplane_server_params_array_num = 0;
@@ -333,6 +343,72 @@ void cp_release(struct oo_cplane_handle* cp)
   }
 }
 
+
+/* /dev/onload file operations: read and poll: */
+
+struct cp_message {
+  struct list_head link;
+  ssize_t buflen;
+  char buf[0];
+};
+
+/* See DEFINE_FOP_READ in lib/efthrm/tcp_helper_linux.c for the "proper way"
+ * of doing this for all possible kernels.  We do not need iov&async
+ * support here, so we do the easy way. */
+ssize_t cp_fop_read(struct file* file, char __user* buf,
+                    size_t len, loff_t* off)
+{
+  ci_private_t* priv = (ci_private_t*) file->private_data;
+  struct oo_cplane_handle* cp;
+  struct cp_message* msg;
+  int rc = cp_acquire_from_priv_if_server(priv, &cp);
+
+  if( rc != 0 )
+    return rc;
+
+  spin_lock_bh(&cp->msg_lock);
+  if( list_empty(&cp->msg) ) {
+    spin_unlock_bh(&cp->msg_lock);
+    cp_release(cp);
+    return 0;
+  }
+  msg = list_entry(cp->msg.prev, struct cp_message, link);
+  list_del(&msg->link);
+  spin_unlock_bh(&cp->msg_lock);
+
+  /* Cplane server MUST proved valid and large buffer */
+  ci_assert_ge(len, msg->buflen);
+  len = CI_MIN(len, msg->buflen);
+  if( copy_to_user(buf, msg->buf, len) )
+    len = -EFAULT;
+
+  kfree(msg);
+  cp_release(cp);
+  return len;
+}
+
+unsigned cp_fop_poll(struct file* file, poll_table* wait)
+{
+  ci_private_t* priv = (ci_private_t*) file->private_data;
+  struct oo_cplane_handle* cp;
+  int rc = cp_acquire_from_priv_if_server(priv, &cp);
+  unsigned ret = 0;
+
+  if( rc != 0 )
+    return POLLERR;
+
+  poll_wait(file, &cp->msg_wq, wait);
+
+  /* list_empty does not need msg_lock, only a read barrier */
+  ci_rmb();
+  if( ! list_empty(&cp->msg) )
+    ret = POLLIN | POLLRDNORM;
+
+  cp_release(cp);
+  return ret;
+}
+
+
 static struct cp_vm_private_data*
 cp_get_vm_data(const struct vm_area_struct* vma)
 {
@@ -363,15 +439,28 @@ static void vm_op_close(struct vm_area_struct* vma)
     if( cp_vm_data->cp_vm_flags & CP_VM_PRIV_FLAG_SERVERLINK ) {
       struct oo_cplane_handle* cp = cp_vm_data->cp;
       struct pid* server_pid = cp->server_pid;
+      struct file* server_file = cp->server_file;
+      struct cp_message* msg;
+      struct cp_message* t;
 
       ci_assert(server_pid);
 
       /* Interlock with cp_kill_work(). */
       spin_lock_bh(&cp->cp_handle_lock);
       cp->server_pid = NULL;
+      cp->server_file = NULL;
       spin_unlock_bh(&cp->cp_handle_lock);
 
       put_pid(server_pid);
+      fput(server_file);
+
+      /* Free undelivered messages */
+      spin_lock_bh(&cp->msg_lock);
+      list_for_each_entry_safe(msg, t, &cp->msg, link) {
+        list_del(&msg->link);
+        kfree(msg);
+      }
+      spin_unlock_bh(&cp->msg_lock);
     }
 
     kfree(cp_vm_data);
@@ -403,12 +492,12 @@ static int cp_fault_fwd_rw(struct vm_area_struct *vma, struct vm_fault *vmf)
   return 0;
 }
 
-static int vm_op_fault(
-#ifndef EFRM_HAVE_NEW_FAULT
+static vm_fault_t vm_op_fault(
+#ifdef EFRM_HAVE_OLD_FAULT
                        struct vm_area_struct *vma,
 #endif
                        struct vm_fault *vmf) {
-#ifdef EFRM_HAVE_NEW_FAULT
+#ifndef EFRM_HAVE_OLD_FAULT
   struct vm_area_struct *vma = vmf->vma;
 #endif
   struct oo_cplane_handle* cp = cp_get_vm_data(vma)->cp;
@@ -437,7 +526,8 @@ static struct vm_operations_struct vm_ops = {
 };
 
 static int
-cp_mmap_mib(struct oo_cplane_handle* cp, struct vm_area_struct* vma)
+cp_mmap_mib(struct file* file, struct oo_cplane_handle* cp,
+            struct vm_area_struct* vma)
 {
   unsigned long bytes = vma->vm_end - vma->vm_start;
 
@@ -507,9 +597,10 @@ cp_mmap_mib(struct oo_cplane_handle* cp, struct vm_area_struct* vma)
     /* get_pid() needn't be done inside the spinlock, so we drop the lock
      * first. */
     cp->server_pid = task_pid(current);
+    cp->server_file = file;
     spin_unlock_bh(&cp->cp_handle_lock);
     get_pid(cp->server_pid);
-
+    get_file(file);
 
     /* Since the association of the kernel state with the UL server has
      * happened here in the mmap() handler, we wish to break that association
@@ -662,6 +753,10 @@ static struct oo_cplane_handle* __cp_acquire_from_netns(struct net* netns)
   atomic_inc(&new_cplane_inst->refcount);
   INIT_LIST_HEAD(&new_cplane_inst->fwd_req);
 
+  spin_lock_init(&new_cplane_inst->msg_lock);
+  init_waitqueue_head(&new_cplane_inst->msg_wq);
+  INIT_LIST_HEAD(&new_cplane_inst->msg);
+
   /* cicpplos_ctor() must be called with CAP_NET_RAW. */
   new_cplane_inst->cppl.cp = new_cplane_inst;
   orig_creds = oo_cplane_empower_cap_net_raw(netns);
@@ -811,8 +906,9 @@ cp_acquire_from_priv_if_server(ci_private_t* priv,
 
 
 int
-oo_cplane_mmap(ci_private_t* priv, struct vm_area_struct* vma)
+oo_cplane_mmap(struct file* file, struct vm_area_struct* vma)
 {
+  ci_private_t* priv = (ci_private_t*) file->private_data;
   struct oo_cplane_handle* cp;
   struct cp_vm_private_data* cp_vm_data;
   int rc;
@@ -834,7 +930,7 @@ oo_cplane_mmap(ci_private_t* priv, struct vm_area_struct* vma)
 
   switch( OO_MMAP_ID(VMA_OFFSET(vma)) ) {
     case OO_MMAP_CPLANE_ID_MIB:
-      rc = cp_mmap_mib(cp, vma);
+      rc = cp_mmap_mib(file, cp, vma);
       break;
     case OO_MMAP_CPLANE_ID_FWD_RW:
       rc = cp_mmap_fwd_rw(cp, vma);
@@ -902,7 +998,9 @@ static int cp_send_sig_info(int sig, struct siginfo* info, struct pid* pid)
  retry:
   task = pid_task(pid, PIDTYPE_PID);
   if( task != NULL ) {
-    rc = send_sig_info(sig, info, task);
+    /* From linux-4.20, kernel_siginfo should be used instead of siginfo.
+     * They are basically the same, so we just cast it. */
+    rc = send_sig_info(sig, (void*)info, task);
     if( rc == -ESRCH )
       goto retry;
   }
@@ -911,30 +1009,40 @@ static int cp_send_sig_info(int sig, struct siginfo* info, struct pid* pid)
   return rc;
 }
 
+static int cp_fwd_resolve(struct oo_cplane_handle* cp,
+                          ci_uint32 id, struct cp_fwd_key* key)
+{
+  struct {
+    struct cp_message meta;
+    struct cp_helper_msg data;
+  }  __attribute__((packed)) * msg = kmalloc(sizeof(*msg), GFP_ATOMIC);
+  if( msg == NULL )
+    return -ENOMEM;
+  msg->data.id = id;
+  memcpy(&msg->data.key, key, sizeof(*key));
+
+  msg->meta.buflen = sizeof(struct cp_helper_msg);
+  spin_lock_bh(&cp->msg_lock);
+  list_add(&msg->meta.link, &cp->msg);
+  spin_unlock_bh(&cp->msg_lock);
+  /* spin_unlock implies write barrier, see cp_fop_poll() */
+
+  wake_up_poll(&cp->msg_wq, POLLIN | POLLRDNORM);
+  return 0;
+}
+
 int oo_op_route_resolve(struct oo_cplane_handle* cp,
                         struct cp_fwd_key* key)
 {
-  struct cp_mibs* mib = &cp->mib[0];
-  struct siginfo info = {};
   int rc;
   struct cp_fwd_req* req;
 
   if( cp == NULL )
     return -ENOMEM;
 
-  info.si_signo = mib->dim->fwd_req_sig;
-  /* si_code MUST be negative to force copy_siginfo copy the key properly */
-  { CI_BUILD_ASSERT(CP_FWD_FLAG_REQ == 0x80000000); }
-  info.si_code = CP_FWD_FLAG_REQ;
-  memcpy(cp_siginfo2key(&info), key, sizeof(*key));
   if( ! (key->flag & CP_FWD_KEY_REQ_WAIT) ) {
     atomic_inc(&cp->stats.fwd_req_nonblock);
-    spin_lock_bh(&cp->cp_handle_lock);
-    if( cp->server_pid != NULL )
-      rc = cp_send_sig_info(info.si_signo, &info, cp->server_pid);
-    else
-      rc = -ESRCH;
-    spin_unlock_bh(&cp->cp_handle_lock);
+    rc = cp_fwd_resolve(cp, 0, key);
     return rc;
   }
 
@@ -946,18 +1054,12 @@ int oo_op_route_resolve(struct oo_cplane_handle* cp,
   init_completion(&req->compl);
   spin_lock_bh(&cp->cp_handle_lock);
   req->id = cp->fwd_req_id++ & CP_FWD_FLAG_REQ_MASK;
-  info.si_code |= req->id;
-  if( cp->server_pid != NULL )
-    rc = cp_send_sig_info(info.si_signo, &info, cp->server_pid);
-  else
-    rc = -ESRCH;
-  if( rc != 0 ) {
-    spin_unlock_bh(&cp->cp_handle_lock);
-    kfree(req);
-    return rc;
-  }
   list_add_tail(&req->link, &cp->fwd_req);
   spin_unlock_bh(&cp->cp_handle_lock);
+
+  rc = cp_fwd_resolve(cp, req->id, key);
+  if( rc < 0 )
+    return rc;
 
   wait_for_completion_interruptible_timeout(
                                 &req->compl,
@@ -1121,6 +1223,11 @@ static int verinfo2arp_req(struct oo_cplane_handle* cp,
   data = cp_get_fwd_data(mib, verinfo);
 
   ifindex = data->ifindex;
+  ci_assert_impl(cp_fwd_version_matches(mib, verinfo),
+                 ifindex != CI_IFID_BAD && ifindex != CI_IFID_LOOP);
+  if( ifindex == CI_IFID_BAD || ifindex == CI_IFID_LOOP )
+    return -ENOENT;
+
   *nexthop_out = data->next_hop;
   ci_rmb();
   if( ! cp_fwd_version_matches(mib, verinfo) )
@@ -1146,13 +1253,14 @@ int __oo_cp_arp_resolve(struct oo_cplane_handle* cp,
   rc = verinfo2arp_req(cp, op, &dev, &next_hop);
   if( rc != 0 )
     return rc;
-  rc = -ENOMEM;
 
   neigh = neigh_lookup(&arp_tbl, &next_hop, dev);
   if( neigh == NULL ) {
     neigh = neigh_create(&arp_tbl, &next_hop, dev);
-    if(CI_UNLIKELY( neigh == NULL ))
+    if(CI_UNLIKELY( IS_ERR(neigh) )) {
+      rc = PTR_ERR(neigh);
       goto fail;
+    }
   }
 
   /* We should not ask to re-resolve ARP if it is REACHABLE or in the
@@ -1311,8 +1419,14 @@ static int cp_spawn_server(ci_uint32 flags)
 {
   /* The maximum number of parameters that we'll stick on the end of the
    * command line, after building up the invariable and user-specified
-   * arguments.  This includes the terminating NULL. */
-  const int DIRECT_PARAM_MAX = 5;
+   * arguments.  This includes parameter names, parameter values and
+   * the terminating NULL.
+   *
+   * The value can be decremented by 1, because CP_SPAWN_SERVER_SWITCH_NS
+   * and CP_SPAWN_SERVER_BOOTSTRAP can't be used together, but let's be
+   * safe.
+   */
+  const int DIRECT_PARAM_MAX = 9;
 
   char* ns_file_path = NULL;
   char* path = cp_get_server_path();
@@ -1320,6 +1434,9 @@ static int cp_spawn_server(ci_uint32 flags)
   char* local_argv[LOCAL_ARGV_N];
 #define LOCAL_STRLEN 200
   char local_str[LOCAL_STRLEN];
+#define UID_STRLEN 7
+  char uid_str[UID_STRLEN];
+  char gid_str[UID_STRLEN];
   char* str = NULL;
   char** argv;
   char* envp[] = { NULL };
@@ -1334,6 +1451,8 @@ static int cp_spawn_server(ci_uint32 flags)
   ci_assert(current);
 
   ci_assert(flags & (CP_SPAWN_SERVER_SWITCH_NS | CP_SPAWN_SERVER_BOOTSTRAP));
+  ci_assert((flags & (CP_SPAWN_SERVER_SWITCH_NS | CP_SPAWN_SERVER_BOOTSTRAP))
+            != (CP_SPAWN_SERVER_SWITCH_NS | CP_SPAWN_SERVER_BOOTSTRAP));
   if( cplane_spawn_server && ! (flags & CP_SPAWN_SERVER_BOOTSTRAP) &&
       current->nsproxy->net_ns == &init_net &&
       cplane_server_grace_timeout != 0 ) {
@@ -1391,6 +1510,7 @@ static int cp_spawn_server(ci_uint32 flags)
          sizeof(cplane_server_const_params));
   direct_param_base = 1 + num + CP_SERVER_CONST_PARAM_NUM;
   direct_param = 0;
+
   if( flags & CP_SPAWN_SERVER_SWITCH_NS ) {
     argv[direct_param_base + direct_param++] = "--"CPLANE_SERVER_NS_CMDLINE_OPT;
     argv[direct_param_base + direct_param++] = ns_file_path;
@@ -1400,6 +1520,18 @@ static int cp_spawn_server(ci_uint32 flags)
 #if !CI_CFG_IPV6
   argv[direct_param_base + direct_param++] = "--"CPLANE_SERVER_NO_IPV6;
 #endif
+  if( cplane_server_uid ) {
+    snprintf(uid_str, UID_STRLEN, "%u", cplane_server_uid);
+    argv[direct_param_base + direct_param++] = "--"CPLANE_SERVER_UID;
+    argv[direct_param_base + direct_param++] = uid_str;
+  }
+  if( cplane_server_gid ) {
+    snprintf(gid_str, UID_STRLEN, "%u", cplane_server_gid);
+    argv[direct_param_base + direct_param++] = "--"CPLANE_SERVER_GID;
+    argv[direct_param_base + direct_param++] = gid_str;
+  }
+#undef UID_STRLEN
+
   argv[direct_param_base + direct_param++] = NULL;
   ci_assert_le(direct_param, DIRECT_PARAM_MAX);
 

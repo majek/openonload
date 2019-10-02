@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -262,3 +262,23 @@ void efx_mtd_rename(struct efx_nic *efx)
 	list_for_each_entry(part, &efx->mtd_list, node)
 		efx->type->mtd_rename(part);
 }
+
+#if defined(EFX_WORKAROUND_87308)
+void efx_mtd_creation_work(struct work_struct *data)
+{
+#if !defined(EFX_USE_KCOMPAT) || !defined(EFX_NEED_WORK_API_WRAPPERS)
+	struct efx_nic *efx = container_of(data, struct efx_nic,
+					   mtd_creation_work.work);
+#else
+	struct efx_nic *efx = container_of(data, struct efx_nic,
+					   mtd_creation_work);
+#endif
+
+	if (atomic_xchg(&efx->mtds_probed_flag, 1) != 0)
+		return;
+
+	rtnl_lock();
+	(void)efx_mtd_probe(efx);
+	rtnl_unlock();
+}
+#endif

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -42,11 +42,6 @@
 #include <ci/driver/efab/hardware.h>
 
 
-static int oo_use_vlans = 1;
-module_param(oo_use_vlans, int, S_IRUGO);
-MODULE_PARM_DESC(oo_use_vlans,
-                 "Do use VLANs in Onload stack (on by default)");
-
 static int oo_bond_poll_peak = (HZ/100);
 module_param(oo_bond_poll_peak, int, S_IRUGO | S_IWUSR);
 MODULE_PARM_DESC(oo_bond_poll_peak,
@@ -58,28 +53,6 @@ module_param(oo_bond_peak_polls, int, S_IRUGO | S_IWUSR);
 MODULE_PARM_DESC(oo_bond_peak_polls,
                  "Number of times to poll /sys at \"peak-rate\" before "
                  "reverting to base rate");
-
-
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,27)
-/* Define vlan_dev_real_dev() and vlan_dev_vlan_id()
- * if they are not defined. */
-#ifndef VLAN_DEV_INFO
-#define VLAN_DEV_INFO(netdev) vlan_dev_info(netdev)
-#endif
-#ifndef vlan_dev_real_dev
-static inline struct net_device *
-vlan_dev_real_dev(const struct net_device *dev)
-{
-	return VLAN_DEV_INFO(dev)->real_dev;
-}
-#endif
-#ifndef vlan_dev_vlan_id
-static inline u16 vlan_dev_vlan_id(const struct net_device *dev)
-{
-	return VLAN_DEV_INFO(dev)->vlan_id;
-}
-#endif
-#endif
 
 
 #if CI_CFG_TEAMING

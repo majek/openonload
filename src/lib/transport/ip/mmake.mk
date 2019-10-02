@@ -163,15 +163,16 @@ $(objd)$(MMAKE_OBJ_PREFIX)netif_debug.o: $(objd)uk_intf_ver.h
 #
 ifdef MMAKE_USE_KBUILD
 all:
-	 $(MAKE) $(MMAKE_KBUILD_ARGS) SUBDIRS=$(BUILDPATH)/lib/transport/ip _module_$(BUILDPATH)/lib/transport/ip
+	 $(MAKE) $(MMAKE_KBUILD_ARGS) KBUILD_EXTMOD=$(BUILDPATH)/lib/transport/ip _module_$(BUILDPATH)/lib/transport/ip
 clean:
 	@$(MakeClean)
-	rm -f uk_intf_ver.h lib.a
+	rm -f uk_intf_ver.h ci_ip_lib.o
 endif
 
 ifdef MMAKE_IN_KBUILD
 LIB_OBJS := $(LIB_SRCS:%.c=%.o)
-lib-y    := $(LIB_OBJS)
+ci_ip_lib-y    := $(LIB_OBJS)
+obj-m := ci_ip_lib.o
 endif
 
 

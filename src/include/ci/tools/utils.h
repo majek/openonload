@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -134,6 +134,10 @@ ci_toeplitz_hash_ul(const ci_uint8 *key, const ci_uint8* sse_key,
                     const ci_uint8 *input, int n);
 #endif
 
+
+
+#ifndef __KERNEL__
+
 /**********************************************************************
  * system info
  **********************************************************************/ 
@@ -148,8 +152,6 @@ extern unsigned ci_cpu_khz CI_HV;
   /*! Get the processor speed.  Returns -ve error code on failure. */
 extern int ci_get_cpu_khz(unsigned* cpu_khz_out) CI_HF;
 
-
-#ifndef __KERNEL__
 
   /*! You must have called ci_get_cpu_khz() before calling this if you want
   ** a useful answer. */

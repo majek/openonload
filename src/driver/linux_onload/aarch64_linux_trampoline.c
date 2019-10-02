@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -13,6 +13,8 @@
 ** GNU General Public License for more details.
 */
 
+
+#include "onload_kernel_compat.h"
 
 #include <onload/linux_onload_internal.h>
 #include <onload/linux_trampoline.h>
@@ -358,7 +360,7 @@ tramp_close_begin(int fd, ci_uintptr_t *tramp_entry_out,
       read_unlock (&oo_mm_tbl_lock);
 
       if( *tramp_entry_out != 0 &&
-          access_ok(VERIFY_READ, *tramp_entry_out, 1)) {
+          efab_access_ok(*tramp_entry_out, 1)) {
         fput(f);
         return true;
       }

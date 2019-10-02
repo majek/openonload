@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -246,6 +246,7 @@ linux_efrm_nic_ctor(struct linux_efhw_nic *lnic, struct efx_dl_device *dl_device
 	lnic->efrm_nic.efhw_nic.pci_dev = dev;
 	lnic->efrm_nic.efhw_nic.net_dev = net_dev;
 	lnic->efrm_nic.efhw_nic.bus_number = dev->bus->number;
+	lnic->efrm_nic.efhw_nic.domain = pci_domain_nr(dev->bus);
 	lnic->efrm_nic.efhw_nic.ctr_ap_dma_addr =
 		pci_resource_start(dev, nic->ctr_ap_bar);
 	EFRM_ASSERT(efrm_nic_bar_is_good(nic, dev));
@@ -318,6 +319,7 @@ linux_efrm_nic_reclaim(struct linux_efhw_nic *lnic,
 	efrm_shutdown_resource_filter(&old_pci_dev->dev);
 
 	/* Bring up new state. */
+	nic->domain = pci_domain_nr(dev->bus);
 	nic->bus_number = dev->bus->number;
 	nic->ifindex = net_dev->ifindex;
 	if (dev_type->arch == EFHW_ARCH_EF10) {
@@ -378,7 +380,8 @@ efrm_nic_matches_device(struct efhw_nic* nic, const struct pci_dev* dev,
 			const struct efhw_device_type* dev_type)
 {
 	struct pci_dev* nic_dev = efhw_nic_get_pci_dev(nic);
-	int result = nic->bus_number	   == dev->bus->number	 &&
+	int result = nic->domain           == pci_domain_nr(dev->bus) &&
+		     nic->bus_number	   == dev->bus->number	 &&
 		     nic_dev->devfn	   == dev->devfn	 &&
 		     nic_dev->device	   == dev->device	 &&
 		     nic->devtype.arch	   == dev_type->arch	 &&

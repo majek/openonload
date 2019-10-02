@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -345,7 +345,7 @@ cicppl_arp_pkt_tx_queue(struct work_struct *data)
 extern int /*rc*/
 cicpplos_pktbuf_defer_send(struct oo_cplane_handle* cp,
                            ci_ip_addr_t ip, int pendable_pktid, 
-                           ci_ifid_t ifindex)
+                           ci_ifid_t ifindex, int in_atomic_context)
 /* schedule a workqueue task to send IP packet using the raw socket */
 {
   struct cicp_raw_sock_work_parcel *wp = ci_atomic_alloc(sizeof(*wp));
@@ -356,7 +356,7 @@ cicpplos_pktbuf_defer_send(struct oo_cplane_handle* cp,
     wp->ifindex = ifindex;
     wp->ip = ip;
     INIT_WORK(&wp->wqi, cicppl_arp_pkt_tx_queue);
-    if( !in_atomic() )
+    if( ! in_atomic_context )
       cicppl_arp_pkt_tx_queue(&wp->wqi);
     else
       ci_verify(schedule_work(&wp->wqi) != 0);

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -512,15 +512,19 @@ static void ci_tcp_inherit_options(ci_netif* ni, ci_sock_cmn* s,
     if( NI_OPTS(ni).accept_inherit_nonblock )
       inherited_sbflags |= CI_SB_AFLAG_O_NONBLOCK | CI_SB_AFLAG_O_NDELAY;
 
-    ci_assert((ts->s.s_aflags & inherited_sflags) == 0);
+    /* TCP no delay option is set on socket buffer init if we're forcing it */
+    if( NI_OPTS(ni).tcp_force_nodelay == 1 )
+      ci_assert_equal(ts->s.s_aflags & inherited_sflags,
+                      CI_SOCK_AFLAG_NODELAY);
+    else
+      ci_assert_equal(ts->s.s_aflags & inherited_sflags, 0);
+
     ci_atomic32_or(&ts->s.s_aflags, s->s_aflags & inherited_sflags);
 
-    if( NI_OPTS(ni).tcp_force_nodelay == 1 )
-      ci_bit_set(&ts->s.s_aflags, CI_SOCK_AFLAG_NODELAY_BIT);
-    else if( NI_OPTS(ni).tcp_force_nodelay == 2 )
+    if( NI_OPTS(ni).tcp_force_nodelay == 2 )
       ci_bit_clear(&ts->s.s_aflags, CI_SOCK_AFLAG_NODELAY_BIT);
 
-    ci_assert((ts->s.b.sb_aflags & inherited_sbflags) == 0);
+    ci_assert_equal(ts->s.b.sb_aflags & inherited_sbflags, 0);
     ci_atomic32_or(&ts->s.b.sb_aflags, s->b.sb_aflags & inherited_sbflags);
 
     ci_assert_equal((ts->s.s_flags & CI_SOCK_FLAG_TCP_INHERITED),
@@ -650,12 +654,12 @@ int ci_tcp_listenq_try_promote(ci_netif* netif, ci_tcp_socket_listen* tls,
       }
 #endif
       if( ts == NULL ) {
-        LOG_TV(ci_log("%s: [%d] out of socket buffers",
+        LOG_U(ci_log("%s: [%d] out of socket buffers",
                       __FUNCTION__, NI_ID(netif)));
         CITP_STATS_TCP_LISTEN(++tls->stats.n_acceptq_no_sock);
-        CI_SET_SO_ERROR(&tls->s, ENOMEM);
+        CI_SET_SO_ERROR(&tls->s, EMFILE);
         citp_waitable_wake(netif, &tls->s.b, CI_SB_FLAG_WAKE_RX);
-        return -ENOMEM;
+        return -EMFILE;
       }
 
 
@@ -722,6 +726,20 @@ int ci_tcp_listenq_try_promote(ci_netif* netif, ci_tcp_socket_listen* tls,
        */
       if( ! scalable )
         ci_tcp_set_addr_on_promote(netif, ts, tsr, tls);
+
+      /* Remove fd from global fd_states list and push it to listen-socket's
+       * fd_states list in scalable case.
+       */
+      if( scalable ) {
+        ci_assert(ci_netif_is_locked(netif));
+        ci_ni_dllist_remove_safe(netif, &ts->epcache_fd_link);
+        ci_ni_dllist_concurrent_push(netif, &tls->epcache.fd_states,
+                                     &ts->epcache_fd_link);
+
+        LOG_EP(ci_log(LPF LNT_FMT" acceptq: move fd %d from global fd_states"
+                      " list to listen-socket's list", LNT_PRI_ARGS(netif, tls),
+                      ts->cached_on_fd));
+      }
 
       LOG_EP(ci_log("Cached fd %d from cached to connected", ts->cached_on_fd));
       ci_ni_dllist_push(netif, &tls->epcache_connected, &ts->epcache_link);

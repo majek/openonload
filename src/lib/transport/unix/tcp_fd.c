@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -126,7 +126,7 @@ static ci_fd_t citp_tcp_ep_acquire_fd(ci_netif* netif, ci_tcp_state* ts,
 
 #if CI_CFG_FD_CACHING
   from_cache = ci_tcp_is_cached(ts);
-  pid_matches = ts->cached_on_pid == getpid();
+  pid_matches = ts->cached_on_pid == citp_getpid();
 
   /* It is possible that someone is concurrently trying to dup2/3 onto the
    * cached fd we're using.  We need to ensure that the NO_FD flag does not
@@ -178,7 +178,7 @@ static ci_fd_t citp_tcp_ep_acquire_fd(ci_netif* netif, ci_tcp_state* ts,
   }
   else {
     /* Got endpoint with fd belonging to current process */
-    ci_assert_equal(ts->cached_on_pid, getpid());
+    ci_assert_equal(ts->cached_on_pid, citp_getpid());
 
     fd = ts->cached_on_fd;
 
@@ -223,20 +223,18 @@ ci_fd_t ci_tcp_ep_ctor(citp_socket* ep, ci_netif* netif, int domain, int type)
   ci_assert(netif);
 
   ci_netif_lock(netif);
+#if CI_CFG_FD_CACHING
   if( domain == AF_INET )
-    ts = ci_tcp_get_state_buf_from_cache(netif);
+    ts = ci_tcp_get_state_buf_from_cache(netif, citp_getpid());
+#endif
   if( ts == NULL )
     ts = ci_tcp_get_state_buf(netif);
-#if ! CI_CFG_FD_CACHING
-  else
-    ci_assert(0);
-#endif
 
   ci_netif_unlock(netif);
 
   if( ts == NULL ) {
     LOG_E(ci_log("%s: [%d] out of socket buffers", __FUNCTION__,NI_ID(netif)));
-    return -ENOMEM;
+    return -EMFILE;
   }
 
   fd = citp_tcp_ep_acquire_fd(netif, ts, NULL, domain, type,
@@ -382,7 +380,7 @@ static void citp_tcp_close(citp_fdinfo* fdinfo)
       while( l != ci_ni_dllist_end(ni, &tls->epcache.fd_states) ) {
         ci_tcp_state* ts = CI_CONTAINER(ci_tcp_state, epcache_fd_link, l);
         ci_ni_dllist_iter(ni, l);
-        if( ts->cached_on_pid == getpid() &&
+        if( ts->cached_on_pid == citp_getpid() &&
             S_TO_EPS(epi->sock.netif, ts)->fd != CI_FD_BAD) {
           /* Fixme: should we move all the content of
            * ci_tcp_listen_uncache_fds() here? */
@@ -787,7 +785,7 @@ redo:
      * and are able to fixup state to reflect it coming from our cache */
     ci_assert_nflags(ts->s.b.sb_aflags, CI_SB_AFLAG_IN_CACHE_NO_FD);
     ts->cached_on_fd = S_TO_EPS(ni,ts)->fd;
-    ts->cached_on_pid = getpid();
+    ts->cached_on_pid = citp_getpid();
   }
   from_cache = ci_tcp_is_cached(ts);
   if( from_cache ) {
@@ -1202,7 +1200,7 @@ static void citp_tcp_close_cached(citp_fdinfo* fdinfo,
     ci_assert_equal(fdinfo->fd, S_TO_EPS(netif, ts)->fd);
 
   ts->cached_on_fd = fdinfo->fd;
-  ts->cached_on_pid = getpid();
+  ts->cached_on_pid = citp_getpid();
 
   ci_assert(!(s->b.sb_aflags & CI_SB_AFLAG_NOT_READY));
   ci_atomic32_or(&s->b.sb_aflags, CI_SB_AFLAG_NOT_READY | CI_SB_AFLAG_IN_CACHE

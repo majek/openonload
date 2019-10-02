@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -78,8 +78,12 @@ efrm_rss_context_alloc_and_init(struct efrm_pd *pd,
 		0x6d, 0x5a, 0x6d, 0x5a, 0x6d, 0x5a, 0x6d, 0x5a,
 		0x6d, 0x5a, 0x6d, 0x5a, 0x6d, 0x5a, 0x6d, 0x5a,
 	};
+        /* With some hardware and/or firmware variants only
+         * default mode is supported.  If any other mode is
+         * asked for - fail. */
 	if (num_qs > 1 && rss_mode != EFRM_RSS_MODE_DEFAULT &&
-	    !(efrm_client_get_nic(client)->flags & NIC_FLAG_ADDITIONAL_RSS_MODES))
+	    (!(efrm_client_get_nic(client)->flags & NIC_FLAG_ADDITIONAL_RSS_MODES) ||
+	     (efrm_client_get_nic(client)->flags & NIC_FLAG_RX_RSS_LIMITED)))
 		return -EOPNOTSUPP;
 
 	rss_context->rss_mode = rss_mode;

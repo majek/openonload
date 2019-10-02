@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -53,6 +53,7 @@
 #define EFX_WORKAROUND_63680
 #endif
 
+#define EFX_WORKAROUND_87308 1
 
 /* Moderation timer access must go through MCDI */
 #define EFX_EF10_WORKAROUND_61265(efx)					\

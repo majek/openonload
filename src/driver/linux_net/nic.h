@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -379,6 +379,7 @@ enum {
  *	%MC_CMD_GET_CAPABILITIES response)
  * @datapath_caps2: Further capabilities of datapath firmware (FLAGS2 field of
  *	%MC_CMD_GET_CAPABILITIES_V2 response)
+ * @must_reprobe_sensors: Flag: sensors have yet to be reprobed after MC reboot
  * @must_probe_vswitching: Flag: vswitching has yet to be setup after MC reboot
  * @pf_index: The number for this PF, or the parent PF if this is a VF
 #ifdef CONFIG_SFC_SRIOV
@@ -423,6 +424,7 @@ struct efx_ef10_nic_data {
 	bool must_check_datapath_caps;
 	u32 datapath_caps;
 	u32 datapath_caps2;
+	bool must_reprobe_sensors;
 	bool must_probe_vswitching;
 	unsigned int pf_index;
 	unsigned int vf_index;
@@ -492,6 +494,7 @@ int efx_ptp_change_mode(struct efx_nic *efx, bool enable_wanted,
 int efx_ptp_tx(struct efx_nic *efx, struct sk_buff *skb);
 void efx_ptp_event(struct efx_nic *efx, efx_qword_t *ev);
 size_t efx_ptp_describe_stats(struct efx_nic *efx, u8 *strings);
+void efx_ptp_reset_stats(struct efx_nic *efx);
 size_t efx_ptp_update_stats(struct efx_nic *efx, u64 *stats);
 void efx_time_sync_event(struct efx_channel *channel, efx_qword_t *ev);
 void __efx_rx_skb_attach_timestamp(struct efx_channel *channel,
@@ -530,6 +533,7 @@ static inline int efx_ptp_tx(struct efx_nic *efx, struct sk_buff *skb) { return 
 static inline void efx_ptp_event(struct efx_nic *efx, efx_qword_t *ev) {}
 static inline size_t efx_ptp_describe_stats(struct efx_nic *efx, u8 *strings)
 { return 0; }
+static inline void efx_ptp_reset_stats(struct efx_nic *efx) {}
 static inline size_t efx_ptp_update_stats(struct efx_nic *efx, u64 *stats)
 { return 0; }
 static inline void efx_rx_skb_attach_timestamp(struct efx_channel *channel,
@@ -816,11 +820,18 @@ int efx_farch_test_table(struct efx_nic *efx,
 size_t efx_nic_get_regs_len(struct efx_nic *efx);
 void efx_nic_get_regs(struct efx_nic *efx, void *buf);
 
+#define EFX_MC_STATS_GENERATION_INVALID ((__force __le64)(-1))
+
 size_t efx_nic_describe_stats(const struct efx_hw_stat_desc *desc, size_t count,
 			      const unsigned long *mask, u8 *names);
+int efx_nic_copy_stats(struct efx_nic *efx, __le64 *dest);
+static inline int efx_nic_reset_stats(struct efx_nic *efx)
+{
+	return efx_nic_copy_stats(efx, efx->mc_initial_stats);
+}
 void efx_nic_update_stats(const struct efx_hw_stat_desc *desc, size_t count,
 			  const unsigned long *mask, u64 *stats,
-			  const void *dma_buf, bool accumulate);
+			  const void *mc_initial_stats, const void *mc_stats);
 void efx_nic_fix_nodesc_drop_stat(struct efx_nic *efx, u64 *stat);
 
 #define EFX_MAX_FLUSH_TIME 5000

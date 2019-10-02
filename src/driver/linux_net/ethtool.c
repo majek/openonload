@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -188,7 +188,7 @@ static int efx_ethtool_phys_id_loop(struct net_device *net_dev, u32 count)
 }
 #endif
 
-#if defined(EFX_USE_KCOMPAT) && !defined(EFX_HAVE_ETHTOOL_LINKSETTINGS)
+#if defined(EFX_USE_KCOMPAT) && !defined(EFX_HAVE_ETHTOOL_LINKSETTINGS) || defined(EFX_HAVE_ETHTOOL_LEGACY)
 /* This must be called with rtnl_lock held. */
 static int efx_ethtool_get_settings(struct net_device *net_dev,
 				    struct ethtool_cmd *ecmd)
@@ -736,7 +736,7 @@ static void efx_ethtool_self_test(struct net_device *net_dev,
 	/* We need rx buffers and interrupts. */
 	already_up = (efx->net_dev->flags & IFF_UP);
 	if (!already_up) {
-		rc = dev_open(efx->net_dev);
+		rc = dev_open(efx->net_dev, NULL);
 		if (rc) {
 			netif_err(efx, drv, efx->net_dev,
 				  "failed opening device.\n");
@@ -1028,13 +1028,27 @@ static int efx_ethtool_reset(struct net_device *net_dev, u32 *flags)
 #endif
 {
 	struct efx_nic *efx = netdev_priv(net_dev);
+	u32 reset_flags = *flags;
 	int rc;
 
-	rc = efx->type->map_reset_flags(flags);
-	if (rc < 0)
-		return rc;
+	rc = efx->type->map_reset_flags(&reset_flags);
+	if (rc >= 0) {
+		rc = efx_reset(efx, rc);
+		/* update *flags if reset succeeded */
+		if (!rc)
+			*flags = reset_flags;
+	}
 
-	return efx_reset(efx, rc);
+	if (*flags & ETH_RESET_MAC) {
+		netif_info(efx, drv, efx->net_dev,
+			   "Resetting statistics.\n");
+		efx->stats_initialised = false;
+		efx->type->pull_stats(efx);
+		*flags &= ~ETH_RESET_MAC;
+		rc = 0;
+	}
+
+	return rc;
 }
 
 /* MAC address mask including only I/G bit */
@@ -2254,7 +2268,7 @@ int efx_sfctool_set_fecparam(struct efx_nic *efx,
 }
 
 const struct ethtool_ops efx_ethtool_ops = {
-#if defined(EFX_USE_KCOMPAT) && !defined(EFX_HAVE_ETHTOOL_LINKSETTINGS)
+#if defined(EFX_USE_KCOMPAT) && !defined(EFX_HAVE_ETHTOOL_LINKSETTINGS) || defined(EFX_HAVE_ETHTOOL_LEGACY)
 	.get_settings		= efx_ethtool_get_settings,
 	.set_settings		= efx_ethtool_set_settings,
 #endif

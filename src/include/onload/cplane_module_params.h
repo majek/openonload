@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -28,6 +28,8 @@ extern char* cplane_server_params;
 extern int cplane_server_grace_timeout;
 extern int cplane_route_request_limit;
 extern int cplane_route_request_timeout_ms;
+extern int cplane_server_uid;
+extern int cplane_server_gid;
 
 extern int cplane_server_path_set(const char* val,
                                   ONLOAD_MPC_CONST struct kernel_param*);

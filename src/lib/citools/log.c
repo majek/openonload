@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -49,59 +49,11 @@ int    ci_log_options		   = 0;
 const char* ci_log_prefix     = CI_LOG_PREFIX_DEFAULT;
 static int ci_log_prefix_len = sizeof(CI_LOG_PREFIX_DEFAULT) - 1;
 
-#if defined(__linux__) && defined(__KERNEL__)
-/* This little helper-function returns the amount of stack space left before
- * encroaching the red-zone (once we get into here, the next IRQ will trigger a
- * kernel panic, so it is effectively unusable)
- */
-static inline size_t
-stack_space_left (void) {
-#ifdef __x86_64__
-  return 0x10000;  /* FIXME: how do I do this on x86-64?? */
-#else
-  ci_uintptr_t stack = (ci_uintptr_t) __builtin_frame_address(0);
-  ci_uintptr_t stack_offs = stack & (THREAD_SIZE-1);
-  return stack_offs - (THREAD_SIZE/8);
-#endif
-}
-#endif
-
 
 void ci_vlog(const char* fmt, va_list args)
 {
   int n = 0;
-
-#ifdef __KERNEL__
-  /* On Linux kernel we need to be very careful with stack use.  Putting an
-   * array of CI_LOG_MAX_LINE on stack can be bad, so:
-   *  1 - use the stack if we determine there's enough space free
-   *      (we use C99's clever dynamically sized automatic arrays for this)
-   *  2 - if stack is too small, try to kalloc some memory.
-   *  3 - If we can't even do that, use a static array.  This risks being
-   *      overwritten by concurrent logs so we might lose log messages in
-   *      low memory conditions.  Unfortunate, but preferable to kernel panics
-   *      due to stack exhaustion.
-   */
-  char *heap_line = NULL;
-  static char static_line [CI_LOG_MAX_LINE];
-  char stack_line [ stack_space_left() < (CI_LOG_MAX_LINE + 128)
-                    ? 0
-                    : CI_LOG_MAX_LINE ];
-  char *line = stack_line;
-
-  if (sizeof stack_line == 0) {
-    /* Uh-oh - no space on stack.  Try to kalloc it */
-    printk ("WARNING: Low stack space in %s - using kmalloc\n", __FUNCTION__);
-    line = heap_line = kmalloc (CI_LOG_MAX_LINE, GFP_ATOMIC);
-    if (!line) {
-      /* Even that failed - fall back to static */
-      printk ("WARNING: kmalloc failed in %s\n", __FUNCTION__);
-      line = static_line;
-    }
-  }
-#else
   char line[CI_LOG_MAX_LINE];
-#endif
 
   ci_assert(ci_log_prefix);
   ci_assert(fmt);
@@ -161,13 +113,6 @@ void ci_vlog(const char* fmt, va_list args)
 #endif
 
   ci_log_fn(line);
-
-#ifdef __KERNEL__
-  /* It's possible we did a kalloc above - if so we'd better free it
-   * (Note: we're allowed to pass NULL to kfree)
-   */
-  kfree (heap_line);
-#endif
 }
 
 

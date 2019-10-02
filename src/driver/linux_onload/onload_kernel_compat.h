@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -21,6 +21,7 @@
 #include <driver/linux_affinity/autocompat.h>
 #include <linux/file.h>
 #include <linux/signal.h>
+#include <linux/uaccess.h>
 
 #ifndef current_fsuid
 #define current_fsuid() current->fsuid
@@ -110,6 +111,16 @@ ci_call_usermodehelper(char *path, char **argv, char **envp, int wait);
   init_timer(timer);                            \
   (timer)->data = 0;                            \
   (timer)->function = &callback;
+#endif
+
+
+/* In linux-5.0 access_ok() lost its first parameter.
+ * See bug 85932 comment 7 why we can't redefine access_ok().
+ */
+#ifndef EFRM_ACCESS_OK_HAS_2_ARGS
+#define efab_access_ok(addr, size) access_ok(VERIFY_WRITE, addr, size)
+#else
+#define efab_access_ok access_ok
 #endif
 
 #endif /* __ONLOAD_KERNEL_COMPAT_H__ */

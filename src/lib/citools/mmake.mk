@@ -42,7 +42,7 @@ LIB_SRCS	:= \
 		namespace.c
 
 ifeq ($(DRIVER),1)
-LIB_SRCS	+= drv_log_fn.c drv_get_cpu_khz.c memleak_debug.c
+LIB_SRCS	+= drv_log_fn.c memleak_debug.c
 LIB_SRCS	+= drv_thread.c
 else
 LIB_SRCS	+= cithread.c get_cpu_khz.c log_fn.c log_file.c
@@ -93,14 +93,15 @@ endif
 #
 ifdef MMAKE_USE_KBUILD
 all:
-	$(MAKE) $(MMAKE_KBUILD_ARGS) SUBDIRS=$(BUILDPATH)/lib/citools _module_$(BUILDPATH)/lib/citools
+	$(MAKE) $(MMAKE_KBUILD_ARGS) KBUILD_EXTMOD=$(BUILDPATH)/lib/citools _module_$(BUILDPATH)/lib/citools
 
 clean:
 	@$(MakeClean)
-	rm -f lib.a
+	rm -f citools_lib.o
 endif
 
 ifdef MMAKE_IN_KBUILD
 LIB_OBJS := $(LIB_SRCS:%.c=%.o)
-lib-y    := $(LIB_OBJS)
+citools_lib-y    := $(LIB_OBJS)
+obj-m := citools_lib.o
 endif

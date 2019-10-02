@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -29,6 +29,7 @@
 #include "ip_internal.h"
 #include "netif_tx.h"
 #include "tcp_rx.h"
+#include "udp_internal.h"
 #include <ci/tools/pktdump.h>
 #include <etherfabric/timer.h>
 #include <etherfabric/vi.h>
@@ -62,6 +63,7 @@ struct oo_rx_future {
   union {
     /* Protocol-specific states of partially handled packet go here */
     struct ci_tcp_rx_future tcp;
+    struct ci_udp_rx_future udp;
   };
 };
 
@@ -341,15 +343,15 @@ static void handle_rx_pkt(ci_netif* netif, struct ci_netif_poll_state* ps,
     if( oo_tcpdump_check(netif, pkt, pkt->intf_i) )
       oo_tcpdump_dump_pkt(netif, pkt);
 
-    /* Hardware will not deliver us fragments.  Check for valid IP length.*/
-    not_fast = ip_tot_len > pkt->pay_len - oo_pre_l3_len(pkt);
-
-    /* NB. If you want to check for fragments, add this:
-    **
-    **  (ip->ip_frag_off_be16 & ~CI_IP4_FRAG_DONT)
-    */
+    /* Hardware should not deliver us fragments when using scalable
+     * filters, but it happens in some corner cases.  We can't handle them.
+     * Also check for valid IP length for non-fragmented packets.*/
+    not_fast = (ip->ip_frag_off_be16 &
+                (CI_IP4_OFFSET_MASK | CI_IP4_FRAG_MORE)) |
+               (ip_tot_len > pkt->pay_len - oo_pre_l3_len(pkt));
 
     hdr_size = CI_IP4_IHL(ip);
+
     /* Accepting but ignoring IP options.
     ** Quick parse to check there is no badness
      */
@@ -435,7 +437,11 @@ static void handle_rx_pkt(ci_netif* netif, struct ci_netif_poll_state* ps,
                      (int) ip->ip_protocol));
     }
     else {
-      /*! \todo IP slow path.  Don't want to deal with this yet. */
+      /*! \todo IP slow path.  Don't want to deal with this yet.
+       * 
+       * It is probably bad idea to print all IP fragments, but we should
+       * not receive them in the first place.
+       */
       LOG_U(CI_RLLOG(10, LPF "[%d] IP HARD "
                      "(ihl_ver=%x ihl=%d frag=%x ip_len=%d frame_len=%d)"
                      PKT_DBG_FMT,
@@ -591,8 +597,12 @@ ci_inline int handle_rx_pre_future(ci_netif* ni, ci_ip_pkt_fmt* pkt,
       pkt->pf.udp.rx_hw_stamp.tv_sec = stamp.tv_sec;
       pkt->pf.udp.rx_hw_stamp.tv_nsec = stamp.tv_nsec;
 #endif
-      /* We should also do some protocol handling now */
       CI_IPV4_STATS_INC_IN_DELIVERS( ni );
+      if( ip_payload_offset + sizeof(ci_udp_hdr) <= valid_bytes )
+        ci_udp_handle_rx_pre_future(ni, pkt, payload, ip_paylen,
+                                    CI_ETHERTYPE_IP, &future->udp);
+      else
+        future->udp.socket = NULL;
       return FUTURE_UDP4;
     }
 #endif
@@ -624,13 +634,14 @@ ci_inline void rollback_rx_future(ci_netif* ni, ci_ip_pkt_fmt* pkt, int status,
   CI_DEBUG(pkt->pkt_eth_payload_off = 0xff);
 
   /* Should we add official macros to decrease these counters? */
-  CITP_STATS_NETIF_ADD(ni, rx_evs, -1);
   if( status & FUTURE_IP4 ) {
     __CI_NETIF_STATS_DEC(ni, ipv4, in_recvs);
     __CI_NETIF_STATS_DEC(ni, ipv4, in_delivers);
+    if( status & FUTURE_TCP )
+      ci_tcp_rollback_rx_future(ni, &future->tcp);
+    else
+      ci_udp_rollback_rx_future(ni, &future->udp);
   }
-  if( status & FUTURE_TCP )
-    ci_tcp_rollback_rx_future(ni, &future->tcp);
 }
 
 
@@ -683,7 +694,8 @@ ci_inline void handle_rx_post_future(ci_netif* ni,
         ci_tcp_handle_rx_post_future(ni, ps, pkt, payload, len, &future->tcp);
 #if CI_CFG_UDP
       else
-        ci_udp_handle_rx(ni, pkt, payload, len, CI_ETHERTYPE_IP);
+        ci_udp_handle_rx_post_future(ni, pkt, payload, len, CI_ETHERTYPE_IP,
+                                     &future->udp);
 #endif
     }
     else {
@@ -1370,8 +1382,8 @@ have_events:
         CITP_STATS_NETIF_INC(ni, rx_evs);
         OO_PP_INIT(ni, pp, EF_EVENT_RX_RQ_ID(ev[i]));
         pkt = PKT_CHK(ni, pp);
-        ci_prefetch(pkt->dma_start);
-        ci_prefetch(pkt);
+        ci_prefetch_ppc(pkt->dma_start);
+        ci_prefetch_ppc(pkt);
         ci_assert_equal(pkt->intf_i, intf_i);
         if( s.rx_pkt != NULL ) {
           ci_parse_rx_vlan(s.rx_pkt);
@@ -1419,8 +1431,8 @@ have_events:
         for( j = 0; j < n_ids; ++j ) {
           OO_PP_INIT(ni, pp, ids[j]);
           pkt = PKT_CHK(ni, pp);
-          ci_prefetch(pkt->dma_start);
-          ci_prefetch(pkt);
+          ci_prefetch_ppc(pkt->dma_start);
+          ci_prefetch_ppc(pkt);
           ci_assert_equal(pkt->intf_i, intf_i);
           if( s.rx_pkt != NULL ) {
             ci_parse_rx_vlan(s.rx_pkt);
@@ -1623,7 +1635,7 @@ int ci_netif_poll_intf_fast(ci_netif* ni, int intf_i, ci_uint64 now_frc)
 
 int ci_netif_poll_intf_future(ci_netif* ni, int intf_i, ci_uint64 start_frc)
 {
-  int i, rc = 0, n_evs, status;
+  int i, rc = 0, status;
   struct oo_rx_future future;
   ci_uint64 now_frc, max_spin;
   ef_vi* evq = &ni->nic_hw[intf_i].vi;
@@ -1654,13 +1666,21 @@ int ci_netif_poll_intf_future(ci_netif* ni, int intf_i, ci_uint64 start_frc)
    * failure/removal or a bug which prevents us getting the event.
    */
   max_spin = IPTIMER_STATE(ni)->khz / 10000;
-  while( (n_evs = ef_eventq_poll(evq, ev, EF_VI_EVENT_POLL_MIN_EVS)) == 0 ) {
+  ci_prefetch(pkt->dma_start + CI_CACHE_LINE_SIZE);
+  while( (rc = ef_eventq_poll(evq, ev, EF_VI_EVENT_POLL_MIN_EVS)) == 0 ) {
     ci_frc64(&now_frc);
     if( now_frc - start_frc > max_spin ) {
       rollback_rx_future(ni, pkt, status, &future);
       return 0;
     }
   }
+
+  /* The first and second lines should already be cached. Empirically, on some
+   * some platforms, there seems to be a small advantage to prefetching a couple
+   * more at this point, ahead of copying the packet data.
+   */
+  for( i = 2; i < 5; ++i )
+    ci_prefetch(pkt->dma_start + i * CI_CACHE_LINE_SIZE);
 
   ++ni->state->in_poll;
   if( EF_EVENT_TYPE(ev[0]) == EF_EVENT_TYPE_RX ) {
@@ -1669,11 +1689,18 @@ int ci_netif_poll_intf_future(ci_netif* ni, int intf_i, ci_uint64 start_frc)
                                                        == EF_EVENT_FLAG_SOP ) {
       pkt->pay_len = EF_EVENT_RX_BYTES(ev[0]) - evq->rx_prefix_len;
       oo_offbuf_init(&pkt->buf, PKT_START(pkt), pkt->pay_len);
+
+      CITP_STATS_NETIF_INC(ni, rx_evs);
       handle_rx_post_future(ni, &ps, pkt, status, &future);
-      for( i = 1; i < n_evs; ++i )
-        ev[i - 1] = ev[i];
-      --n_evs;
-      rc = 1;
+      if(CI_UNLIKELY( rc > 1 )) {
+        /* We have handled the first event, so remove it from the array and
+         * handle the rest normally. Add one to the returned count to include
+         * the one handled here.
+         */
+        for( i = 1; i < rc; ++i )
+          ev[i - 1] = ev[i];
+        rc = 1 + ci_netif_poll_evq(ni, &ps, intf_i, rc - 1);
+      }
       goto handled;
     }
   }
@@ -1681,10 +1708,9 @@ int ci_netif_poll_intf_future(ci_netif* ni, int intf_i, ci_uint64 start_frc)
 
   rollback_rx_future(ni, pkt, status, &future);
 
-handled:
-  if( n_evs != 0 )
-    rc += ci_netif_poll_evq(ni, &ps, intf_i, n_evs);
+  rc = ci_netif_poll_evq(ni, &ps, intf_i, rc);
   if( rc != 0 ) {
+handled:
     process_post_poll_list(ni);
     ni->state->poll_work_outstanding = 1;
   }

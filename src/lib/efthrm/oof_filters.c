@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -4349,10 +4349,14 @@ oof_tproxy_filter_update(struct oof_manager* fm, struct oof_tproxy* ft)
   struct oof_local_interface_details* lid;
   int i;
 
-  CI_BUILD_ASSERT(oo_filter_spec.addr.ethertype.mac ==
-                  oo_filter_spec.addr.mac.mac);
-  CI_BUILD_ASSERT(oo_filter_spec.addr.ipproto.mac ==
-                  oo_filter_spec.addr.mac.mac);
+  CI_BUILD_ASSERT(CI_MEMBER_OFFSET(struct oo_hw_filter_spec,
+                                   addr.ethertype.mac) ==
+                  CI_MEMBER_OFFSET(struct oo_hw_filter_spec,
+                                   addr.mac.mac));
+  CI_BUILD_ASSERT(CI_MEMBER_OFFSET(struct oo_hw_filter_spec,
+                                   addr.ipproto.mac) ==
+                  CI_MEMBER_OFFSET(struct oo_hw_filter_spec,
+                                   addr.mac.mac));
 
   ci_assert(spin_is_locked(&fm->fm_inner_lock));
   ci_assert(mutex_is_locked(&fm->fm_outer_lock));

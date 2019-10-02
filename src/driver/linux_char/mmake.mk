@@ -66,6 +66,6 @@ LIB_OBJS := $(LIB_SRCS:%.c=%.o)
 
 obj-m := $(CHAR_TARGET) 
 
-sfc_char-objs := $(CHAR_TARGET_SRCS:%.c=%.o) $(BUILD)/lib/citools/lib.a
+sfc_char-objs := $(CHAR_TARGET_SRCS:%.c=%.o) $(BUILD)/lib/citools/citools_lib.o
 
 endif # MMAKE_IN_KBUILD

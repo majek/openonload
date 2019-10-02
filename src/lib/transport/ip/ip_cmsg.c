@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -75,7 +75,11 @@ void ci_put_cmsg(struct cmsg_state *cmsg_state,
 
   if( data_len > data_space ) {
     *cmsg_state->p_msg_flags |= MSG_CTRUNC;
+    cmsg_state->cmsg_bytes_used = cmsg_state->msg->msg_controllen;
     data_len = data_space;
+  }
+  else {
+    cmsg_state->cmsg_bytes_used += CMSG_SPACE(data_len);
   }
 
   cmsg_state->cm->cmsg_len   = CMSG_LEN(data_len);
@@ -84,7 +88,6 @@ void ci_put_cmsg(struct cmsg_state *cmsg_state,
 
   memcpy(CMSG_DATA(cmsg_state->cm), data, data_len);
 
-  cmsg_state->cmsg_bytes_used += CMSG_SPACE(data_len);
 
   if( *cmsg_state->p_msg_flags & MSG_CTRUNC )
     return;

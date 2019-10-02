@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -695,12 +695,15 @@ typedef struct {
 # define CI_IP_TIME_MAX_FRCSHIFT     31u     /* largest tick shift    */
 
   ci_uint32   khz;                     /* processor speed in khz */
-  ci_uint64   ci_ip_time_ms2tick_fxp;  /* ticks expressed in 1/(2^32) of ms */
+                                       /* ticks expressed in 1/(2^32) of ms */
+  ci_uint64   ci_ip_time_ms2tick_fxp CI_ALIGN(8);
   /* list of timers currently firing */
   ci_ni_dllist_t  fire_list;
   /* holds the timer wheels in a flat array */
   ci_ni_dllist_t  warray[CI_IPTIME_WHEELSIZE];  
 
+  /* bitmask of non-empty buckets in the lowest weel */
+  ci_uint64 busy_mask[4] CI_ALIGN(8);
 } ci_ip_timer_state;
 
 
@@ -2222,12 +2225,12 @@ struct oo_tcp_socket_metrics {
   ci_uint8          state;
   ci_uint8          flags;
   /* Metrics */
+  ci_uint8          retrans_adjust;
   oo_metrics_intvl  tx_time;
   oo_metrics_intvl  rx_time;
   oo_metrics_intvl  idle_time;
   oo_metrics_intvl  app_time;
   ci_uint32         conn_id;
-  ci_uint8          retrans_adjust;
 };
 
 

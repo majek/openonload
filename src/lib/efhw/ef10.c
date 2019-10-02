@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -904,8 +904,12 @@ _ef10_mcdi_cmd_event_queue_enable(struct efhw_nic *nic,
 	int rc, i;
 	EFHW_MCDI_DECLARE_BUF(out, MC_CMD_INIT_EVQ_V2_OUT_LEN);
 	size_t out_size;
-	EFHW_MCDI_DECLARE_BUF(in, MC_CMD_INIT_EVQ_V2_IN_LEN(n_pages));
-	EFHW_MCDI_INITIALISE_BUF(in);
+	size_t in_size = MC_CMD_INIT_EVQ_V2_IN_LEN(n_pages);
+	EFHW_MCDI_DECLARE_BUF(in,
+		MC_CMD_INIT_EVQ_V2_IN_LEN(MC_CMD_INIT_EVQ_V2_IN_DMA_ADDR_MAXNUM));
+	EFHW_MCDI_INITIALISE_BUF_SIZE(in, in_size);
+
+	EFHW_ASSERT(n_pages <= MC_CMD_INIT_EVQ_V2_IN_DMA_ADDR_MAXNUM);
 
 	EFHW_MCDI_SET_DWORD(in, INIT_EVQ_IN_SIZE, evq_size);
 	EFHW_MCDI_SET_DWORD(in, INIT_EVQ_IN_INSTANCE, evq);
@@ -964,7 +968,7 @@ _ef10_mcdi_cmd_event_queue_enable(struct efhw_nic *nic,
 	EFHW_ASSERT(evq >= 0);
 	EFHW_ASSERT(evq < nic->num_evqs);
 
-	rc = ef10_mcdi_rpc(nic, MC_CMD_INIT_EVQ, sizeof(in), sizeof(out),
+	rc = ef10_mcdi_rpc(nic, MC_CMD_INIT_EVQ, in_size, sizeof(out),
 			   &out_size, in, &out);
 	if( nic->flags & NIC_FLAG_EVQ_V2 )
 		MCDI_CHECK(MC_CMD_INIT_EVQ_V2, rc, out_size, 0);
@@ -1963,9 +1967,14 @@ _ef10_mcdi_cmd_buffer_table_program(struct efhw_nic *nic, dma_addr_t *dma_addrs,
 	 */
 	int i, rc;
 	size_t out_size;
+	size_t in_size = MC_CMD_PROGRAM_BUFTBL_ENTRIES_IN_LEN(n_entries);
 	EFHW_MCDI_DECLARE_BUF(in, 
-			      MC_CMD_PROGRAM_BUFTBL_ENTRIES_IN_LEN(n_entries));
-	EFHW_MCDI_INITIALISE_BUF(in);
+		MC_CMD_PROGRAM_BUFTBL_ENTRIES_IN_LEN(
+			MC_CMD_PROGRAM_BUFTBL_ENTRIES_IN_ENTRY_MAXNUM));
+	EFHW_MCDI_INITIALISE_BUF_SIZE(in, in_size);
+
+	EFHW_ASSERT(n_entries <=
+		    MC_CMD_PROGRAM_BUFTBL_ENTRIES_IN_ENTRY_MAXNUM);
 
 	EFHW_MCDI_SET_DWORD(in, PROGRAM_BUFTBL_ENTRIES_IN_HANDLE, handle);
 	EFHW_MCDI_SET_DWORD(in, PROGRAM_BUFTBL_ENTRIES_IN_FIRSTID, first_entry);
@@ -1984,7 +1993,7 @@ _ef10_mcdi_cmd_buffer_table_program(struct efhw_nic *nic, dma_addr_t *dma_addrs,
 		EFHW_MCDI_SET_ARRAY_QWORD(in, PROGRAM_BUFTBL_ENTRIES_IN_ENTRY,
 					  i, dma_addrs[i]);
 
-	rc = ef10_mcdi_rpc(nic, MC_CMD_PROGRAM_BUFTBL_ENTRIES, sizeof(in), 0,
+	rc = ef10_mcdi_rpc(nic, MC_CMD_PROGRAM_BUFTBL_ENTRIES, in_size, 0,
 			   &out_size, in, NULL);
 	MCDI_CHECK(MC_CMD_PROGRAM_BUFTBL_ENTRIES, rc, out_size, 1);
 	return rc;

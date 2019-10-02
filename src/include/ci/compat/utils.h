@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -181,8 +181,7 @@
  * Get pointer to struct from pointer to member
  **********************************************************************/
 
-#define CI_MEMBER_OFFSET(c_type, mbr_name)  \
-  ((ci_uint32) (ci_uintptr_t)(&((c_type*)0)->mbr_name))
+#define CI_MEMBER_OFFSET __builtin_offsetof
 
 #define CI_MEMBER_SIZE(c_type, mbr_name)        \
   sizeof(((c_type*)0)->mbr_name)

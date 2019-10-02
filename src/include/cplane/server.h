@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -40,6 +40,8 @@
 #define CPLANE_SERVER_FORCE_BONDING_NETLINK "force-bonding-netlink"
 #define CPLANE_SERVER_BOOTSTRAP "bootstrap"
 #define CPLANE_SERVER_NO_IPV6 "no-ipv6"
+#define CPLANE_SERVER_UID "uid"
+#define CPLANE_SERVER_GID "gid"
 
 /* To make a string from a macro number (such as CI_CFG_MAX_HWPORTS), use
  * STRINGIFY(CI_CFG_MAX_HWPORTS). */
@@ -47,18 +49,14 @@
 #define OO_STRINGIFY(x) OO_STRINGIFY1(x)
 
 /* Mask for forward request id, as used between server and module. */
-#define CP_FWD_FLAG_REQ      0x80000000
 #define CP_FWD_FLAG_REQ_MASK 0x03ffffff
 
 
 #include <cplane/mib.h> /* for cp_fwd_key */
-static inline struct cp_fwd_key* cp_siginfo2key(siginfo_t* info)
-{
-/* Linux sometimes overwrites ._kill._pid field when sending a signal. */
-#define CP_SIGINFO_REQ_OFFSET 64
-  CI_BUILD_ASSERT(sizeof(info->_sifields) >=
-                  sizeof(struct cp_fwd_key) + CP_SIGINFO_REQ_OFFSET);
-  return (void*)((ci_uintptr_t)&info->_sifields + CP_SIGINFO_REQ_OFFSET);
-}
+/* message from in-kernel cplane helper to the cplane server */
+struct cp_helper_msg {
+  struct cp_fwd_key key;
+  ci_uint32 id;
+};
 
 #endif /* defined(__ONLOAD_CPLANE_SERVER_H__) */

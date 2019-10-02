@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -788,6 +788,10 @@ int efx_mcdi_mon_probe(struct efx_nic *efx)
 	u32 mask;
 	int rc, i, j, type;
 
+	/* Do not probe twice */
+	if (hwmon->dma_buf.addr)
+		return 0;
+
 	/* Find out how many sensors are present */
 	n_sensors = 0;
 	page = 0;
@@ -973,11 +977,13 @@ void efx_mcdi_mon_remove(struct efx_nic *efx)
 	struct efx_mcdi_mon *hwmon = efx_mcdi_mon(efx);
 
 	efx_mcdi_mon_remove_files(&efx->pci_dev->dev, hwmon);
-	kfree(hwmon->attrs);
-	hwmon->attrs = NULL;
 	if (!IS_ERR_OR_NULL(hwmon->device))
 		hwmon_device_unregister(hwmon->device);
+	if (hwmon->attrs)
+		kfree(hwmon->attrs);
+	hwmon->attrs = NULL;
 	efx_nic_free_buffer(efx, &hwmon->dma_buf);
+	hwmon->n_attrs = 0;
 }
 
 #endif /* CONFIG_SFC_MCDI_MON */

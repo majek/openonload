@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -3201,6 +3201,8 @@ tcp_helper_alloc_to_aw_pool(tcp_helper_resource_t* rs,
 
   rc = ci_netif_get_active_wild_list(ni, idx, laddr_be32, &list);
   if( rc < 0 ) {
+    aw->s.b.sb_aflags |= CI_SB_AFLAG_ORPHAN;
+    efab_tcp_helper_drop_os_socket(rs, ci_netif_ep_get(ni, W_SP(&aw->s.b)));
     citp_waitable_obj_free(ni, &aw->s.b);
     return rc;
   }
@@ -6966,6 +6968,7 @@ efab_tcp_helper_netif_lock_callback(eplock_helper_t* epl, ci_uint64 lock_val,
   ci_uint64 flags_set;
   ci_uint64 after_unlock_flags = 0;
   int intf_i;
+  int/*bool*/ pkt_waiter_retried = 0;
 
   ci_assert(ci_netif_is_locked(ni));
 
@@ -6974,6 +6977,7 @@ efab_tcp_helper_netif_lock_callback(eplock_helper_t* epl, ci_uint64 lock_val,
     if( in_dl_context )
       ni->flags |= CI_NETIF_FLAG_IN_DL_CONTEXT;
 
+ again:
     lock_val = ci_netif_unlock_slow_common(ni, lock_val);
 
     /* Get flags set and clear them.  NB. Its possible no flags were set
@@ -7080,6 +7084,17 @@ efab_tcp_helper_netif_lock_callback(eplock_helper_t* epl, ci_uint64 lock_val,
         OO_DEBUG_TCPH(ci_log("%s: [%u] defer CLOSE_ENDPOINT to trusted lock",
                              __FUNCTION__, thr->id));
       }
+    }
+
+    /* We can free some packets while closing endpoints, etc.  Check this
+     * condition again, but do it only once. */
+    if( ! pkt_waiter_retried &&
+        (ni->state->lock.lock & CI_EPLOCK_NETIF_IS_PKT_WAITER) &&
+        ci_netif_pkt_tx_can_alloc_now(ni) ) {
+      /* Call ci_netif_unlock_slow_common() again to handle PKT_WAITER
+       * flag.  */
+      pkt_waiter_retried = 1;
+      goto again;
     }
 
     /* IN_DL_CONTEXT flag should be removed under the stack lock - so we

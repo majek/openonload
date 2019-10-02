@@ -4,6 +4,10 @@ TEST_APPS	:= efforward efrss efsink \
 		   efsink_packed efforward_packed eflatency stats \
 		   efjumborx $(EFSEND_APPS)
 
+ifeq (${PLATFORM},gnu_x86_64)
+	TEST_APPS += efrink_controller efrink_consumer
+endif
+
 TARGETS		:= $(TEST_APPS:%=$(AppPattern))
 
 
@@ -37,6 +41,8 @@ $(EFSEND_APPS): MMAKE_LIB_DEPS += $(CITOOLS_LIB_DEPEND)
 
 eflatency: MMAKE_LIBS     += $(LINK_CITOOLS_LIB)
 eflatency: MMAKE_LIB_DEPS += $(CITOOLS_LIB_DEPEND)
+
+efrink_controller: efrink_controller.o utils.o
 
 stats: stats.py
 	cp $< $@

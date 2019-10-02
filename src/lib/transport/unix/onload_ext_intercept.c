@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -536,7 +536,12 @@ int onload_socket_unicast_nonaccel(int domain, int type, int protocol)
 
   Log_CALL(ci_log("%s(%d, %d, %d)", __FUNCTION__, domain, type, protocol));
 
-  if( (domain == AF_INET) && (type == SOCK_DGRAM) &&
+#if CI_CFG_IPV6 || CI_CFG_FAKE_IPV6
+  if( (domain == AF_INET || domain == AF_INET6) &&
+#else
+  if( (domain == AF_INET) &&
+#endif
+      (type == SOCK_DGRAM) &&
       ((protocol == 0) || (protocol == IPPROTO_UDP))) {
     fd = onload_socket(domain, type, protocol);
 

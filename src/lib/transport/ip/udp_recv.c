@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -347,7 +347,7 @@ static int ci_udp_recvmsg_get(ci_udp_recv_info* rinf, ci_iovec_ptr* piov)
     goto recv_q_is_empty;
 
 #if defined(__linux__) && !defined(__KERNEL__)
-  if( msg != NULL && msg->msg_controllen != 0 ) {
+  if( msg != NULL ) {
     if( CI_UNLIKELY(us->s.cmsg_flags != 0 ) )
       ci_ip_cmsg_recv(ni, us, pkt, msg, 0, &rinf->msg_flags);
     else
@@ -355,6 +355,7 @@ static int ci_udp_recvmsg_get(ci_udp_recv_info* rinf, ci_iovec_ptr* piov)
   }
 #endif
   us->stamp = pkt->tstamp_frc;
+  us->s.pkt.intf_i = pkt->intf_i;
 
   rc = oo_copy_pkt_to_iovec_no_adv(ni, pkt, piov, pkt->pf.udp.pay_len);
 
@@ -649,6 +650,8 @@ struct recvmsg_spinstate {
   int do_spin;
   int spin_limit_by_so;
   ci_uint32 timeout;
+  uint32_t poison;
+  const volatile uint32_t* future;
 #ifndef __KERNEL__
   citp_signal_info* si;
 #endif
@@ -737,12 +740,10 @@ ci_udp_recvmsg_block(ci_udp_iomsg_args* a, ci_netif* ni, ci_udp_state* us,
 
 
 ci_inline int
-ci_udp_recvmsg_socklocked_spin(ci_udp_iomsg_args* a,
-                               ci_netif* ni, ci_udp_state* us,
+ci_udp_recvmsg_socklocked_spin(ci_netif* ni, ci_udp_state* us,
                                struct recvmsg_spinstate* spin_state)
 {
   ci_uint64 now_frc;
-  int intf_i;
 
   ci_frc64(&now_frc);
   if( now_frc - spin_state->start_frc < spin_state->max_spin ) {
@@ -750,18 +751,28 @@ ci_udp_recvmsg_socklocked_spin(ci_udp_iomsg_args* a,
     ni->state->stats.spin_udp_recv++;
 #endif
     if( ci_netif_may_poll(ni) ) {
-      OO_STACK_FOR_EACH_INTF_I(ni, intf_i)
-        if( ci_netif_intf_has_event(ni, intf_i) && ci_netif_trylock(ni) ) {
-          ci_netif_poll_intf_fast(ni, intf_i, now_frc);
-          ci_netif_unlock(ni);
-          if( ci_udp_recv_q_not_empty(&us->recv_q) )
-            return 0;
+      if( spin_state->future == NULL )
+        spin_state->future = ci_netif_intf_rx_future(ni, us->s.pkt.intf_i,
+                                                     &spin_state->poison);
+
+      if( *spin_state->future != CI_PKT_RX_POISON && ci_netif_trylock(ni) ) {
+        if( ! ci_netif_poll_intf_future(ni, us->s.pkt.intf_i, now_frc) ) {
+          /* If PftF failed (e.g. IPv6) then we still need to be able to
+           * consume the packet (it might not be in the evq just yet, but it
+           * will be one of these times) */
+          ci_netif_poll(ni);
         }
+        ci_netif_unlock(ni);
+        spin_state->future = NULL;
+        return 0;
+      }
       if( ni->state->poll_work_outstanding ||
-          ci_netif_need_timer_prime(ni, now_frc) )
+          ci_netif_need_poll_spinning(ni, now_frc) )
         if( ci_netif_trylock(ni) ) {
           ci_netif_poll(ni);
           ci_netif_unlock(ni);
+          spin_state->future = NULL;
+          return 0;
         }
       if( ! ni->state->is_spinner )
         ni->state->is_spinner = 1;
@@ -903,6 +914,8 @@ ci_udp_recvmsg_common(ci_udp_recv_info *rinf)
       oo_per_thread_get()->spinstate & (1 << ONLOAD_SPIN_UDP_RECV);
 
     if( spin_state.do_spin ) {
+      spin_state.poison = CI_PKT_RX_POISON;
+      spin_state.future = NULL;
       spin_state.schedule_frc = spin_state.start_frc;
       spin_state.max_spin = us->s.b.spin_cycles;
       if( us->s.so.rcvtimeo_msec ) {
@@ -917,7 +930,7 @@ ci_udp_recvmsg_common(ci_udp_recv_info *rinf)
   }
 
   if( spin_state.do_spin ) {
-    rc = ci_udp_recvmsg_socklocked_spin(rinf->a, ni, us, &spin_state);
+    rc = ci_udp_recvmsg_socklocked_spin(ni, us, &spin_state);
     if( rc == 0 )
       goto check_ul_recv_q;
     else if( rc < 0 ) {
@@ -1427,6 +1440,8 @@ int ci_udp_zc_recv(ci_udp_iomsg_args* a, struct onload_zc_recv_args* args)
     if( spin_state.do_spin ) {
       spin_state.si = citp_signal_get_specific_inited();
       spin_state.max_spin = us->s.b.spin_cycles;
+      spin_state.poison = CI_PKT_RX_POISON;
+      spin_state.future = NULL;
 
       if( us->s.so.rcvtimeo_msec ) {
         ci_uint64 max_so_spin = (ci_uint64)us->s.so.rcvtimeo_msec *
@@ -1440,7 +1455,7 @@ int ci_udp_zc_recv(ci_udp_iomsg_args* a, struct onload_zc_recv_args* args)
   }
 
   if( spin_state.do_spin ) {
-    rc = ci_udp_recvmsg_socklocked_spin(a, ni, us, &spin_state);
+    rc = ci_udp_recvmsg_socklocked_spin(ni, us, &spin_state);
     /* 0 => ul maybe readable 
      * 1 => spin complete 
      * -ve => error 

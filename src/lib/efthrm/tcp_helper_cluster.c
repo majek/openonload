@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -1120,8 +1120,10 @@ static int tcp_helper_cluster_thc_flags(const ci_netif_config_opts* ni_opts)
     /* Scalable on IP_TRANSPARENT active-open sockets (and maybe on
      * passive-open).  This was the original use case for MAC filters in
      * Onload.  Multiple RSS contexts are required in these modes, so we set a
-     * flag that we will check when creating those. */
-    flags |= THC_FLAG_TPROXY;
+     * flag that we will check when creating those.
+     * As all active RSS scalable filter modes, rss transparent active can be
+     * combined with shared local ports feature. */
+    flags |= THC_FLAG_TPROXY | maybe_prealloc_lports;
     break;
   default:
     ci_assert(0);

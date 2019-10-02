@@ -108,10 +108,10 @@ endif
 
 ifeq ($(strip $(CI_PREBUILT_IPDRV)),)
 onload-objs  := $(IP_TARGET_SRCS:%.c=%.o) $($(ARCH)_TARGET_SRCS:%.c=%.o)
-onload-objs  += $(BUILD)/lib/transport/ip/lib.a	\
-		$(BUILD)/lib/cplane/lib.a \
-		$(BUILD)/lib/citools/lib.a	\
-		$(BUILD)/lib/ciul/lib.a
+onload-objs  += $(BUILD)/lib/transport/ip/ci_ip_lib.o	\
+		$(BUILD)/lib/cplane/cplane_lib.o \
+		$(BUILD)/lib/citools/citools_lib.o	\
+		$(BUILD)/lib/ciul/ci_ul_lib.o
 
 ifdef OFE_TREE
 ifdef CONFIG_X86_64

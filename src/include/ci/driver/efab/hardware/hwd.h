@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -42,6 +42,7 @@
 #define HW_ACC_RW1C HW_ACC_RWC1
 #define HW_ACC_RCW HW_ACC_RWC
 #define HW_ACC_ROF 12
+#define HW_ACC_COR HW_ACC_RC
 
 #define HWD_ACC_MAX_ENTRIES 4
 #define HWD_ACC_ENTRY_DEFAULT 0

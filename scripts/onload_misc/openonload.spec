@@ -34,7 +34,7 @@
 #    --define "build_profile <profile>"
 
 
-%define pkgversion 201811
+%define pkgversion 201811-u1
 
 %{!?kernel:  %{expand: %%define kernel %%(uname -r)}}
 %{!?target_cpu:  %{expand: %%define target_cpu %{_host_cpu}}}
@@ -103,12 +103,12 @@ Source0		: openonload-%{pkgversion}.tgz
 BuildRoot   	: %{_builddir}/%{name}-root
 AutoReqProv	: no
 ExclusiveArch	: i386 i586 i686 x86_64 ppc64
-BuildRequires	: gawk gcc sed make bash libpcap-devel python-devel automake libtool autoconf
-# The glibc packages we need depend on distro and platform
+BuildRequires	: gawk gcc sed make bash libpcap-devel automake libtool autoconf
+# The glibc, python-devel, and libcap packages we need depend on distro and platform
 %if %{redhat}
-BuildRequires	: glibc-common 
+BuildRequires	: glibc-common python2-devel libcap
 %else
-BuildRequires	: glibc-devel glibc
+BuildRequires	: glibc-devel glibc python-devel libcap2
 %ifarch x86_64
 %if %{build32}
 BuildRequires   : glibc-devel-32bit
@@ -166,7 +166,7 @@ This package comprises the kernel module components of OpenOnload.
 }
 
 export KPATH=%{kpath}
-%ifarch x86_64 
+%ifarch x86_64
 ./scripts/onload_build %{?build_profile:--build-profile %build_profile} \
   --kernelver "%{kernel}" %{?debug:--debug}
 %else
@@ -219,20 +219,37 @@ fi
 ldconfig -n /usr/lib /usr/lib64
 
 %post kmod-%{kverrel}
-depmod -a "%{kernel}"
-if [ -f  "/boot/initramfs-%{kernel}.img" ]; then
-  if which dracut >/dev/null 2>&1; then
-    kver=$(dracut --help |grep kver)
-    if [ -n "$kver" ]; then
-      dracut -f --kver "%{kernel}"
-    else
-      dracut -f "/boot/initramfs-%{kernel}.img" "%{kernel}"
+# If the weak-modules script is present this will handle running depmod and
+# dracut for required kernels.
+if [ -x "/sbin/weak-modules" ]; then
+  for m in sfc sfc_resource sfc_char onload sfc_affinity; do
+    echo "/lib/modules/%{kernel}/extra/$m.ko"
+  done | /sbin/weak-modules --verbose --add-modules
+else
+  depmod -a "%{kernel}"
+  if [ -f  "/boot/initramfs-%{kernel}.img" ]; then
+    if which dracut >/dev/null 2>&1; then
+      kver=$(dracut --help |grep kver)
+      if [ -n "$kver" ]; then
+        dracut -f --kver "%{kernel}"
+      else
+        dracut -f "/boot/initramfs-%{kernel}.img" "%{kernel}"
+      fi
     fi
   fi
 fi
 
 %postun kmod-%{kverrel}
-depmod -a "%{kernel}"
+if [ "$1" = 0 ]; then  # Erase, not upgrade
+  if [ -x "/sbin/weak-modules" ]; then
+    for m in sfc sfc_resource sfc_char onload sfc_affinity; do
+      echo "/lib/modules/%{kernel}/extra/$m.ko"
+    done | /sbin/weak-modules --verbose --remove-modules
+  else
+    depmod -a "%{kernel}"
+  fi
+fi
+
 
 %clean
 rm -fR $RPM_BUILD_ROOT
@@ -275,7 +292,7 @@ rm -fR $RPM_BUILD_ROOT
 - Added fix for MRG trace and vanilla kernel variants
 
 * Mon Feb 13 2012 Mark Spender <mspender@solarflare.com> 201202
-- Added depenency fix for MRG rt kernels and RHEL 4 kernel variants  
+- Added depenency fix for MRG rt kernels and RHEL 4 kernel variants
 
 * Thu Apr 28 2011 David Riddoch <driddoch@solarflare.com> 201104
 - Added kernel module meta-data to help 3rd party modules.

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -400,19 +400,6 @@ ci_tcp_recvmsg_get(struct tcp_recv_info *rinf)
 }
 
 
-ci_inline const volatile uint32_t*
-next_future_location(ci_netif* ni, int intf_i, const uint32_t* poison)
-{
-  ci_ip_pkt_fmt* pkt;
-
-  ci_assert(*poison == CI_PKT_RX_POISON);
-
-  pkt = ci_netif_intf_may_poll_future(ni, intf_i) ?
-        ci_netif_intf_next_rx_pkt(ni, intf_i) : NULL;
-  return pkt ? ci_netif_poison_location(pkt) : poison;
-}
-
-
 /* Returns >0 if socket is readable.  Returns 0 if spin times-out.  Returns
  * -ve error code otherwise.
  */
@@ -437,7 +424,7 @@ static int ci_tcp_recvmsg_spin(ci_netif* ni, ci_tcp_state* ts,
    * which always contains the "poison" value.
    */
   const uint32_t poison = CI_PKT_RX_POISON;
-  const volatile uint32_t* future = next_future_location(ni, intf_i, &poison);
+  const volatile uint32_t* future = ci_netif_intf_rx_future(ni, intf_i, &poison);
 
   if( ts->s.so.rcvtimeo_msec ) {
     ci_uint64 max_so_spin = (ci_uint64)ts->s.so.rcvtimeo_msec *
@@ -458,7 +445,7 @@ static int ci_tcp_recvmsg_spin(ci_netif* ni, ci_tcp_state* ts,
         ci_netif_unlock(ni);
         if( tcp_rcv_usr(ts) )
           goto out;
-        future = next_future_location(ni, intf_i, &poison);
+        future = ci_netif_intf_rx_future(ni, intf_i, &poison);
       }
 
       if( ni->state->poll_work_outstanding ||
@@ -469,7 +456,7 @@ static int ci_tcp_recvmsg_spin(ci_netif* ni, ci_tcp_state* ts,
         }
         if( tcp_rcv_usr(ts) )
           goto out;
-        future = next_future_location(ni, intf_i, &poison);
+        future = ci_netif_intf_rx_future(ni, intf_i, &poison);
       }
       else if( ! ni->state->is_spinner )
         ni->state->is_spinner = 1;
@@ -522,7 +509,7 @@ ci_tcp_fill_recv_timestamp(struct tcp_recv_info* rinf)
   ci_tcp_state* ts = rinf->a->ts;
   ci_msghdr* msg = rinf->a->msg;
 
-  if( msg != NULL && msg->msg_controllen != 0 ) {
+  if( msg != NULL ) {
     struct cmsg_state cmsg_state;
     if( CI_UNLIKELY( ts->s.cmsg_flags & CI_IP_CMSG_TIMESTAMP_ANY ) ) {
       cmsg_state.msg = msg;

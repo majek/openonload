@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2018  Solarflare Communications Inc.
+** Copyright 2005-2019  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -60,9 +60,22 @@
     __attribute__((unused))
 #endif
 
-/* verifies compile time expression is 0 or positive - no-op for runtime expressions */
+/* verifies compile time expression is 0 or positive -
+ * no-op for runtime expressions */
+#if __GNUC__ * 100 + __GNUC_MINOR__ >= 409
+#define CI_BUILD_ASSERT_CONSTANT_NON_NEGATIVE(c) \
+  do {                                                              \
+    char __CI_BUILD_ASSERT_NAME(__LINE__)                           \
+         [ __builtin_choose_expr(__builtin_constant_p(c), (c), 0)]  \
+         __attribute__((unused));                                   \
+  } while(0)
+#else
+  /* RHEL6 and RHEL7 complain on the code above:
+   * error: first argument to ‘__builtin_choose_expr’ not a constant
+   */
 #define CI_BUILD_ASSERT_CONSTANT_NON_NEGATIVE(c) \
   do {(void) sizeof(struct { int x[(int)(c)]; });} while(0)
+#endif
 
 #ifdef _PREFAST_
 
