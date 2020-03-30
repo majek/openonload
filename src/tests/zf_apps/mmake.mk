@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: BSD-2-Clause
+# X-SPDX-Copyright-Text: (c) Solarflare Communications Inc
 SUBDIRS := static \
 	   shared
 
@@ -44,6 +46,8 @@ $(STATIC_MMAKE_OBJ_PREFIX)%.o : %.c
 
 $(SHARED_TARGETS): shared/%: $(SHARED_MMAKE_OBJ_PREFIX)%.o
 $(STATIC_TARGETS): static/%: $(STATIC_MMAKE_OBJ_PREFIX)%.o
+
+shared/zfmultipingpong static/zfmultipingpong: MMAKE_LIBS += $(LINK_CITOOLS_LIB)
 
 $(TARGETS):
 		@(libs="$(MMAKE_LIBS)"; $(MMakeLinkCApp))

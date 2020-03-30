@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 #ifndef __ONLOAD_OOF_INTERFACE_H__
 #define __ONLOAD_OOF_INTERFACE_H__
 
@@ -110,7 +97,7 @@ oof_socket_can_update_stack(struct oof_manager* fm, struct oof_socket* skf,
 
 extern void
 oof_socket_update_sharer_details(struct oof_manager*, struct oof_socket*,
-                                 unsigned raddr, int rport);
+                                 ci_addr_t raddr, int rport);
 
 extern int
 oof_socket_share(struct oof_manager*, struct oof_socket* skf,
@@ -124,8 +111,8 @@ extern int
 oof_socket_del_sw(struct oof_manager*, struct oof_socket*);
 
 extern int
-oof_udp_connect(struct oof_manager*, struct oof_socket*,
-                unsigned laddr, unsigned raddr, int rport);
+oof_udp_connect(struct oof_manager*, struct oof_socket*, int af_space,
+                ci_addr_t laddr, ci_addr_t raddr, int rport);
 
 extern int
 oof_socket_mcast_add(struct oof_manager*, struct oof_socket*,
@@ -213,14 +200,9 @@ oof_cb_sw_filter_remove(struct oof_socket* skf, int af,
 struct ci_netif_s;
 extern void oof_cb_sw_filter_apply(struct ci_netif_s* ni);
 
-extern struct oof_socket*
-oof_cb_sw_filter_lookup(struct tcp_helper_resource_s*,
-                        unsigned laddr, int lport,
-                        unsigned raddr, int rport, int protocol);
-
 extern void
 oof_dl_filter_set(struct oo_hw_filter* filter, int stack_id, int protocol,
-                  unsigned saddr, int sport, unsigned daddr, int dport);
+                  ci_addr_t saddr, int sport, ci_addr_t daddr, int dport);
 
 extern void
 oof_dl_filter_del(struct oo_hw_filter* filter);

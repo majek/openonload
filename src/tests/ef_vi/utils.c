@@ -1,52 +1,10 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** Redistribution and use in source and binary forms, with or without
-** modification, are permitted provided that the following conditions are
-** met:
-**
-** * Redistributions of source code must retain the above copyright notice,
-**   this list of conditions and the following disclaimer.
-**
-** * Redistributions in binary form must reproduce the above copyright
-**   notice, this list of conditions and the following disclaimer in the
-**   documentation and/or other materials provided with the distribution.
-**
-** THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS
-** IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
-** TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A
-** PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
-** HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-** SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED
-** TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
-** PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
-** LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
-** NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
-** SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-*/
-
-
+/* SPDX-License-Identifier: BSD-2-Clause */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 #define _GNU_SOURCE 1
 
 #include <etherfabric/vi.h>
 #include "utils.h"
+#include <ci/app.h>
 
 #include <net/if.h>
 #include <assert.h>
@@ -58,49 +16,6 @@
 #include <ifaddrs.h>
 #include <arpa/inet.h>
 #include <stddef.h>
-
-
-static int hostport_parse(struct addrinfo* addr, const char* s_in)
-{
-  struct addrinfo hints;
-  struct addrinfo* ai;
-  const char* host;
-  const char* port;
-  char *s, *p;
-  int rc = -EINVAL;
-
-  /* Split the host:port string on the final colon */
-  host = s = strdup(s_in);
-  p = strrchr(host, ':');
-  if( p == NULL )
-    goto out;
-  port = p + 1;
-  /* There must be something after the final colon */
-  if( *port == '\0' )
-    goto out;
-  /* Terminate the host string */
-  *p = '\0';
-
-  hints.ai_flags = AI_NUMERICSERV;
-  hints.ai_family = AF_UNSPEC;
-  hints.ai_socktype = 0;
-  hints.ai_protocol = 0;
-  hints.ai_addrlen = 0;
-  hints.ai_addr = NULL;
-  hints.ai_canonname = NULL;
-  hints.ai_next = NULL;
-  rc = getaddrinfo(host, port, &hints, &ai);
-  if( rc == 0 ) {
-    memcpy(addr, ai, sizeof(struct addrinfo));
-  } else {
-    fprintf(stderr, "ERROR: getaddrinfo(\"%s\", \"%s\") returned %d %s\n",
-            host, port, rc, gai_strerror(rc));
-    rc = -EINVAL;
-  }
- out:
-  free(s);
-  return rc;
-}
 
 
 /* Parses a parameter of the form "param=val,", advancing *arg beyond the comma
@@ -130,7 +45,11 @@ static int consume_parameter(char **arg)
 
 int filter_parse(ef_filter_spec* fs, const char* s_in)
 {
-  struct addrinfo laddr, raddr;
+  union {
+    struct sockaddr_storage ss;
+    struct sockaddr_in s4;
+    struct sockaddr_in6 s6;
+  } laddr, raddr;
   const char* type;
   const char* hostport;
   char* vlan;
@@ -171,22 +90,20 @@ int filter_parse(ef_filter_spec* fs, const char* s_in)
     if( strchr(remainder, ',') ) {
       hostport = strtok(remainder, ",");
       remainder = strtok(NULL, "");
-      TRY(hostport_parse(&laddr, hostport));
-      TRY(hostport_parse(&raddr, remainder));
-      if( laddr.ai_family == AF_INET && raddr.ai_family == AF_INET ) {
-        struct sockaddr_in *lsin, *rsin;
-        lsin = (struct sockaddr_in *)laddr.ai_addr;
-        rsin = (struct sockaddr_in *)raddr.ai_addr;
-        TRY(ef_filter_spec_set_ip4_full(fs, protocol, lsin->sin_addr.s_addr,
-                                        lsin->sin_port, rsin->sin_addr.s_addr,
-                                        rsin->sin_port));
-      } else if( laddr.ai_family == AF_INET6 && raddr.ai_family == AF_INET6 ) {
-        struct sockaddr_in6 *lsin6, *rsin6;
-        lsin6 = (struct sockaddr_in6 *)laddr.ai_addr;
-        rsin6 = (struct sockaddr_in6 *)raddr.ai_addr;
-        TRY(ef_filter_spec_set_ip6_full(fs, protocol, &lsin6->sin6_addr,
-                                        lsin6->sin6_port, &rsin6->sin6_addr,
-                                        rsin6->sin6_port));
+      TRY(ci_hostport_to_sockaddr(AF_UNSPEC, hostport, &laddr.ss));
+      TRY(ci_hostport_to_sockaddr(laddr.ss.ss_family, remainder, &raddr.ss));
+      if( laddr.ss.ss_family == AF_INET && raddr.ss.ss_family == AF_INET ) {
+        TRY(ef_filter_spec_set_ip4_full(fs, protocol,
+                                        laddr.s4.sin_addr.s_addr,
+                                        laddr.s4.sin_port,
+                                        raddr.s4.sin_addr.s_addr,
+                                        raddr.s4.sin_port));
+      } else if( laddr.ss.ss_family == AF_INET6 &&
+                 raddr.ss.ss_family == AF_INET6 ) {
+        TRY(ef_filter_spec_set_ip6_full(fs, protocol, &laddr.s6.sin6_addr,
+                                        laddr.s6.sin6_port,
+                                        &raddr.s6.sin6_addr,
+                                        raddr.s6.sin6_port));
       } else {
         fprintf(stderr, "ERROR: invalid families in local/remote hosts\n");
         goto out;
@@ -194,15 +111,14 @@ int filter_parse(ef_filter_spec* fs, const char* s_in)
       rc = 0;
     }
     else {
-      TRY(hostport_parse(&laddr, strtok(remainder, ",")));
-      if( laddr.ai_family == AF_INET ) {
-        struct sockaddr_in *lsin = (struct sockaddr_in *)laddr.ai_addr;
-        TRY(ef_filter_spec_set_ip4_local(fs, protocol, lsin->sin_addr.s_addr,
-                                         lsin->sin_port));
-      } else if( laddr.ai_family == AF_INET6 ) {
-        struct sockaddr_in6 *lsin6 = (struct sockaddr_in6 *)laddr.ai_addr;
-        TRY(ef_filter_spec_set_ip6_local(fs, protocol, &lsin6->sin6_addr,
-                                         lsin6->sin6_port));
+      TRY(ci_hostport_to_sockaddr(AF_UNSPEC, strtok(remainder, ","), &laddr.ss));
+      if( laddr.ss.ss_family == AF_INET ) {
+        TRY(ef_filter_spec_set_ip4_local(fs, protocol,
+                                         laddr.s4.sin_addr.s_addr,
+                                         laddr.s4.sin_port));
+      } else if( laddr.ss.ss_family == AF_INET6 ) {
+        TRY(ef_filter_spec_set_ip6_local(fs, protocol, &laddr.s6.sin6_addr,
+                                         laddr.s6.sin6_port));
       } else {
         fprintf(stderr, "ERROR: invalid family in local host\n");
         goto out;
@@ -456,6 +372,7 @@ int getaddrinfo_storage(int family, const char* host, const char* port,
   }
   TEST( ai->ai_addrlen <= sizeof(*sas) );
   memcpy(sas, ai->ai_addr, ai->ai_addrlen);
+  freeaddrinfo(ai);
   return 0;
 }
 
@@ -553,6 +470,7 @@ int parse_host(const char* s, struct in_addr* ip_out)
     return 0;
   sin = (const struct sockaddr_in*) ai->ai_addr;
   *ip_out = sin->sin_addr;
+  freeaddrinfo(ai);
   return 1;
 }
 

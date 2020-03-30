@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_SOURCE>
@@ -27,13 +14,22 @@
 /*! \cidoxg_lib_transport_ip */
 
 #include <ci/internal/transport_config_opt.h>
-#include <onload/hash.h>
 #include "ip_internal.h"
+#include <onload/hash.h>
 #include "netif_table.h"
 
+#define CI_NETIF_FILTER_ID_TO_SOCK_ID(ni, filter_id)            \
+  OO_SP_FROM_INT((ni), (ni)->filter_table->table[filter_id].id)
 
-int ci_netif_filter_lookup(ci_netif* netif, unsigned laddr, unsigned lport,
-			   unsigned raddr, unsigned rport, unsigned protocol)
+#if CI_CFG_IPV6
+#define CI_NETIF_IP6_FILTER_ID_TO_SOCK_ID(ni, filter_id)            \
+  OO_SP_FROM_INT((ni), (ni)->ip6_filter_table->table[filter_id].id)
+#endif
+
+/* Returns table entry index, or -1 if lookup failed. */
+static int
+ci_ip4_netif_filter_lookup(ci_netif* netif, unsigned laddr, unsigned lport,
+                           unsigned raddr, unsigned rport, unsigned protocol)
 {
   unsigned hash1, hash2 = 0;
   ci_netif_filter_table* tbl;
@@ -44,15 +40,15 @@ int ci_netif_filter_lookup(ci_netif* netif, unsigned laddr, unsigned lport,
   ci_assert(netif->filter_table);
 
   tbl = netif->filter_table;
-  hash1 = onload_hash1(AF_INET, tbl->table_size_mask, &laddr, lport,
-                       &raddr, rport, protocol);
+  hash1 = __onload_hash1(tbl->table_size_mask, laddr, lport,
+                       raddr, rport, protocol);
   first = hash1;
 
   LOG_NV(log("tbl_lookup: %s %s:%u->%s:%u hash=%u:%u at=%u",
 	     CI_IP_PROTOCOL_STR(protocol),
 	     ip_addr_str(laddr), (unsigned) CI_BSWAP_BE16(lport),
 	     ip_addr_str(raddr), (unsigned) CI_BSWAP_BE16(rport),
-	     first, onload_hash2(AF_INET, &laddr, lport, &raddr, rport, protocol),
+	     first, __onload_hash2(laddr, lport, raddr, rport, protocol),
 	     hash1));
 
   while( 1 ) {
@@ -70,7 +66,7 @@ int ci_netif_filter_lookup(ci_netif* netif, unsigned laddr, unsigned lport,
     /* We defer calculating hash2 until it's needed, just to make the fast
      * case that little bit faster. */
     if( hash1 == first )
-      hash2 = onload_hash2(AF_INET, &laddr, lport, &raddr, rport, protocol);
+      hash2 = __onload_hash2(laddr, lport, raddr, rport, protocol);
     hash1 = (hash1 + hash2) & tbl->table_size_mask;
     if( hash1 == first ) {
       LOG_E(ci_log(FN_FMT "ERROR: LOOP %s:%u->%s:%u hash=%u:%u",
@@ -83,21 +79,51 @@ int ci_netif_filter_lookup(ci_netif* netif, unsigned laddr, unsigned lport,
   return -ENOENT;
 }
 
-
-int ci_netif_listener_lookup(ci_netif* netif, unsigned laddr, unsigned lport)
+/* Sometimes user is not interested in particular entry id; they may be
+ * interested in yes/no.  This functions looks up in both IPv4 and IPv6
+ * tables and returns the answer. */
+oo_sp
+ci_netif_filter_lookup(ci_netif* netif, int af_space,
+                           ci_addr_t laddr, unsigned lport,
+                           ci_addr_t raddr, unsigned rport,
+                           unsigned protocol)
 {
-  int rc = ci_netif_filter_lookup(netif, laddr, lport, 0, 0, IPPROTO_TCP);
-  if( rc < 0 )
-    rc = ci_netif_filter_lookup(netif, 0, lport, 0, 0, IPPROTO_TCP);
-  return rc;
+  int rc = -ENOENT;
+
+#if CI_CFG_IPV6
+  if( IS_AF_SPACE_IP6(af_space) ) {
+    rc = ci_ip6_netif_filter_lookup(netif, laddr, lport,
+                                    raddr, rport, protocol);
+    if( rc >= 0 )
+      return CI_NETIF_IP6_FILTER_ID_TO_SOCK_ID(netif, rc);
+  }
+
+  if( IS_AF_SPACE_IP4(af_space) )
+#endif
+    rc = ci_ip4_netif_filter_lookup(netif, laddr.ip4, lport,
+                                    raddr.ip4, rport, protocol);
+  if( rc >= 0 )
+    return CI_NETIF_FILTER_ID_TO_SOCK_ID(netif, rc);
+  return OO_SP_NULL;
+}
+
+int ci_netif_listener_lookup(ci_netif* netif, int af_space,
+                             ci_addr_t laddr, unsigned lport)
+{
+  oo_sp sock = ci_netif_filter_lookup(netif, af_space, laddr, lport,
+                                      addr_any, 0, IPPROTO_TCP);
+  if( OO_SP_IS_NULL(sock) )
+    sock = ci_netif_filter_lookup(netif, af_space, addr_any, lport,
+                                  addr_any, 0, IPPROTO_TCP);
+  return sock;
 }
 
 
 ci_uint32
-ci_netif_filter_hash(ci_netif* ni, unsigned laddr, unsigned lport,
-                     unsigned raddr, unsigned rport, unsigned protocol)
+ci_netif_filter_hash(ci_netif* ni, ci_addr_t laddr, unsigned lport,
+                     ci_addr_t raddr, unsigned rport, unsigned protocol)
 {
-  return onload_hash3(AF_INET, &laddr, lport, &raddr, rport, protocol);
+  return onload_hash3(laddr, lport, raddr, rport, protocol);
 }
 
 
@@ -110,10 +136,56 @@ ci_inline int ci_sock_intf_check(ci_netif* ni, ci_sock_cmn* s,
 }
 
 
+static inline unsigned
+laddr_xor(int af, const void* laddr_ptr)
+{
+  ci_assert(laddr_ptr != NULL);
+#if CI_CFG_IPV6
+  if( af == AF_INET6 )
+    return onload_addr_xor(*(ci_addr_t*)laddr_ptr);
+  else
+#endif
+    return *(const unsigned*)laddr_ptr;
+}
+static inline unsigned
+raddr_xor(int af, const void* raddr_ptr)
+{
+#if CI_CFG_IPV6
+  if( af == AF_INET6 )
+    return raddr_ptr == NULL ? 0 : onload_addr_xor(*(ci_addr_t*)raddr_ptr);
+  else
+#endif
+    return *(const unsigned*)raddr_ptr;
+}
+
+static inline unsigned
+common_hash1(int af, unsigned size_mask,
+             const void* laddr_ptr, unsigned lport,
+             const void* raddr_ptr, unsigned rport, unsigned protocol)
+{
+  return __onload_hash1(size_mask, laddr_xor(af, laddr_ptr), lport,
+                        raddr_xor(af, raddr_ptr), rport, protocol);
+}
+static inline unsigned
+common_hash2(int af, const void* laddr_ptr, unsigned lport,
+             const void* raddr_ptr, unsigned rport, unsigned protocol)
+{
+  return __onload_hash2(laddr_xor(af, laddr_ptr), lport,
+                        raddr_xor(af, raddr_ptr), rport, protocol);
+}
+static inline unsigned
+common_hash3(int af, const void* laddr_ptr, unsigned lport,
+             const void* raddr_ptr, unsigned rport, unsigned protocol)
+{
+  return __onload_hash3(laddr_xor(af, laddr_ptr), lport,
+                        raddr_xor(af, raddr_ptr), rport, protocol);
+}
+
 static int
-for_each_match_common(ci_netif* ni,
-                      ci_addr_t laddr, unsigned lport,
-                      ci_addr_t raddr, unsigned rport,
+for_each_match_common(ci_netif* ni, int af,
+                      const void* laddr_ptr, unsigned lport,
+                      /* raddr_ptr==NULL means [::] */
+                      const void* raddr_ptr, unsigned rport,
                       unsigned protocol, int intf_i, int vlan,
                       int (*callback)(ci_sock_cmn*, void*),
                       void* callback_arg, ci_uint32* hash_out)
@@ -124,31 +196,36 @@ for_each_match_common(ci_netif* ni,
 #endif
   unsigned hash1, hash2 = 0;
   unsigned first, table_size_mask;
-  int af;
-  void *laddr_ptr, *raddr_ptr;
+
+  /* We MUST NOT use CI_ADDR_FROM_IP4() in NDEBUG build!
+   * It is REALLY SLOW!  We use it for logging only. */
+  CI_DEBUG(ci_addr_t laddr;)
+  CI_DEBUG(ci_addr_t raddr;)
 
   tbl = ni->filter_table;
 
 #if CI_CFG_IPV6
-  if ( CI_IS_ADDR_IP6(laddr) ) {
-    af = AF_INET6;
+  if( af == AF_INET6 ) {
     ip6_tbl = ni->ip6_filter_table;
     table_size_mask = ip6_tbl->table_size_mask;
-    laddr_ptr = laddr.ip6;
-    raddr_ptr = raddr.ip6;
+#ifndef NDEBUG
+    laddr = *((ci_addr_t*)laddr_ptr);
+    raddr = raddr_ptr == NULL ? addr_any : *((ci_addr_t*)raddr_ptr);
+#endif
   } else
 #endif
   {
-    af = AF_INET;
     tbl = ni->filter_table;
     table_size_mask = tbl->table_size_mask;
-    laddr_ptr = &laddr.ip4;
-    raddr_ptr = &raddr.ip4;
+#ifndef NDEBUG
+    laddr = CI_ADDR_FROM_IP4(*((ci_ip_addr_t*)laddr_ptr));
+    raddr = CI_ADDR_FROM_IP4(*((ci_ip_addr_t*)raddr_ptr));
+#endif
   }
 
   if( hash_out != NULL )
-    *hash_out = onload_hash3(af, laddr_ptr, lport, raddr_ptr, rport, protocol);
-  hash1 = onload_hash1(af, table_size_mask, laddr_ptr, lport,
+    *hash_out = common_hash3(af, laddr_ptr, lport, raddr_ptr, rport, protocol);
+  hash1 = common_hash1(af, table_size_mask, laddr_ptr, lport,
                        raddr_ptr, rport, protocol);
   first = hash1;
 
@@ -156,7 +233,7 @@ for_each_match_common(ci_netif* ni,
              __FUNCTION__, CI_IP_PROTOCOL_STR(protocol),
 	     IPX_ARG(AF_IP(laddr)), (unsigned) CI_BSWAP_BE16(lport),
 	     IPX_ARG(AF_IP(raddr)), (unsigned) CI_BSWAP_BE16(rport),
-	     first, onload_hash2(af, laddr_ptr, lport, raddr_ptr, rport, protocol),
+	     first, common_hash2(af, laddr_ptr, lport, raddr_ptr, rport, protocol),
 	     hash1));
 
   while( 1 ) {
@@ -177,30 +254,41 @@ for_each_match_common(ci_netif* ni,
       ci_sock_cmn* s = ID_TO_SOCK(ni, id);
 #if CI_CFG_IPV6
       if ( af == AF_INET6 ) {
-        if( !memcmp(laddr.ip6, ip6_tbl->table[hash1].laddr, sizeof(ci_ip6_addr_t)) &&
-            !memcmp(raddr.ip6, sock_ip6_raddr(s), sizeof(ci_ip6_addr_t)) &&
-            lport == sock_lport_be16(s) && rport == sock_rport_be16(s) &&
-            protocol == sock_protocol(s)) {
+        if( memcmp(laddr_ptr, ip6_tbl->table[hash1].laddr,
+                   sizeof(ci_ip6_addr_t)) == 0 &&
+            lport == sock_lport_be16(s) &&
+            protocol == sock_protocol(s) &&
+            ( (raddr_ptr == NULL && !(s->s_flags & CI_SOCK_FLAG_CONNECTED)) ||
+              (raddr_ptr != NULL &&
+               memcmp(raddr_ptr, sock_ip6_raddr(s),
+                      sizeof(ci_ip6_addr_t)) == 0 &&
+               rport == sock_rport_be16(s)) )
+          )
           is_match = 1;
-
-          LOG_NV(ci_log("match %s: %s " IPX_PORT_FMT "->"
-                        IPX_PORT_FMT " hash=%u:%u at=%u",
-                        __FUNCTION__, CI_IP_PROTOCOL_STR(protocol),
-                        IPX_ARG(AF_IP(laddr)), (unsigned) CI_BSWAP_BE16(lport),
-                        IPX_ARG(AF_IP(raddr)), (unsigned) CI_BSWAP_BE16(rport),
-                        first, onload_hash2(af, laddr_ptr, lport, raddr_ptr,
-                        rport, protocol), hash1));
-        }
       } else
 #endif
       {
-        if( ((laddr.ip4 - tbl->table[hash1].laddr) |
+        ci_ip_addr_t laddr_ip4 = *((ci_ip_addr_t*)laddr_ptr);
+        ci_ip_addr_t raddr_ip4 = *((ci_ip_addr_t*)raddr_ptr);
+        /* Non-connected IPv6 socket bound to :: can receiver both IPv4 and
+         * IPv6 packets, but it has IPv4 ipcache, so its sock_raddr_be32()
+         * is 0 and can be used without checking for
+         * CI_SOCK_FLAG_CONNECTED. */
+        if( ((laddr_ip4 - tbl->table[hash1].laddr) |
             (lport      - sock_lport_be16(s)     ) |
-            (raddr.ip4  - sock_raddr_be32(s)     ) |
+            (raddr_ip4  - sock_raddr_be32(s)     ) |
             (rport      - sock_rport_be16(s)     ) |
             (protocol   - sock_protocol(s)       )) == 0 )
           is_match = 1;
       }
+      LOG_NV(ci_log("%s match=%d: %s " IPX_PORT_FMT "->"
+                    IPX_PORT_FMT " hash=%u:%u at=%u",
+                    __FUNCTION__, is_match, CI_IP_PROTOCOL_STR(protocol),
+                    IPX_ARG(AF_IP(laddr)), (unsigned) CI_BSWAP_BE16(lport),
+                    IPX_ARG(AF_IP(raddr)), (unsigned) CI_BSWAP_BE16(rport),
+                    first, common_hash2(af, laddr_ptr, lport, raddr_ptr,
+                    rport, protocol), hash1));
+
       if(is_match && CI_LIKELY( (s->rx_bind2dev_ifindex == CI_IFID_BAD ||
                      ci_sock_intf_check(ni, s, intf_i, vlan)) ))
         if( callback(s, callback_arg) != 0 )
@@ -211,7 +299,7 @@ for_each_match_common(ci_netif* ni,
     /* We defer calculating hash2 until it's needed, just to make the fast
     ** case that little bit faster. */
     if( hash1 == first )
-      hash2 = onload_hash2(af, laddr_ptr, lport, raddr_ptr, rport, protocol);
+      hash2 = common_hash2(af, laddr_ptr, lport, raddr_ptr, rport, protocol);
     hash1 = (hash1 + hash2) & table_size_mask;
     if( hash1 == first ) {
       LOG_NV(ci_log(FN_FMT "ITERATE FULL " IPX_PORT_FMT "->"
@@ -233,23 +321,26 @@ ci_netif_filter_for_each_match(ci_netif* ni,
                                int (*callback)(ci_sock_cmn*, void*),
                                void* callback_arg, ci_uint32* hash_out)
 {
-  return for_each_match_common(ni, CI_ADDR_FROM_IP4(laddr), lport,
-                               CI_ADDR_FROM_IP4(raddr), rport, protocol, intf_i,
+  return for_each_match_common(ni, AF_INET, &laddr, lport, &raddr, rport,
+                               protocol, intf_i,
                                vlan, callback, callback_arg, hash_out);
 }
 
 
+#if CI_CFG_IPV6
 int
 ci_netif_filter_for_each_match_ip6(ci_netif* ni,
-                                   ci_addr_t laddr, unsigned lport,
-                                   ci_addr_t raddr, unsigned rport,
+                                   const ci_addr_t* laddr, unsigned lport,
+                                   const ci_addr_t* raddr, unsigned rport,
                                    unsigned protocol, int intf_i, int vlan,
                                    int (*callback)(ci_sock_cmn*, void*),
                                    void* callback_arg, ci_uint32* hash_out)
 {
-  return for_each_match_common(ni, laddr, lport, raddr, rport, protocol, intf_i,
+  return for_each_match_common(ni, AF_INET6, laddr, lport, raddr,
+                               rport, protocol, intf_i,
                                vlan, callback, callback_arg, hash_out);
 }
+#endif
 
 
 /* Insert for either TCP or UDP */
@@ -267,9 +358,9 @@ ci_ip4_netif_filter_insert(ci_netif_filter_table* tbl,
 #endif
   unsigned first;
 
-  hash1 = onload_hash1(AF_INET, tbl->table_size_mask, &laddr, lport,
-                       &raddr, rport, protocol);
-  hash2 = onload_hash2(AF_INET, &laddr, lport, &raddr, rport, protocol);
+  hash1 = __onload_hash1(tbl->table_size_mask, laddr, lport,
+                         raddr, rport, protocol);
+  hash2 = __onload_hash2(laddr, lport, raddr, rport, protocol);
   first = hash1;
 
   /* Find a free slot. */
@@ -390,9 +481,9 @@ ci_ip4_netif_filter_remove(ci_netif_filter_table* tbl,
 #endif
             );
 
-  hash1 = onload_hash1(AF_INET, tbl->table_size_mask, &laddr, lport,
-                       &raddr, rport, protocol);
-  hash2 = onload_hash2(AF_INET, &laddr, lport, &raddr, rport, protocol);
+  hash1 = __onload_hash1(tbl->table_size_mask, laddr, lport,
+                         raddr, rport, protocol);
+  hash2 = __onload_hash2(laddr, lport, raddr, rport, protocol);
   first = hash1;
 
   LOG_TC(ci_log("%s: [%d:%d] REMOVE %s %s:%u->%s:%u hash=%u:%u",
@@ -437,6 +528,7 @@ ci_netif_filter_insert(ci_netif* netif, oo_sp tcp_id, int af_space,
                        unsigned protocol)
 {
   ci_netif_filter_table* ip4_tbl;
+  int rc = 0;
 #if CI_CFG_IPV6
   ci_ip6_netif_filter_table* ip6_tbl;
 #endif
@@ -449,18 +541,27 @@ ci_netif_filter_insert(ci_netif* netif, oo_sp tcp_id, int af_space,
     ci_assert(netif->ip6_filter_table);
     ip6_tbl = netif->ip6_filter_table;
 
-    return ci_ip6_netif_filter_insert(ip6_tbl, netif, tcp_id, laddr, lport,
+    rc = ci_ip6_netif_filter_insert(ip6_tbl, netif, tcp_id, laddr, lport,
                                       raddr, rport, protocol);
+    if( rc < 0 )
+      return rc;
   }
-  else
+
+  if( IS_AF_SPACE_IP4(af_space) )
 #endif
   {
     ci_assert(netif->filter_table);
     ip4_tbl = netif->filter_table;
 
-    return ci_ip4_netif_filter_insert(ip4_tbl, netif, tcp_id, laddr.ip4, lport,
-                                      raddr.ip4, rport, protocol);
+    rc = ci_ip4_netif_filter_insert(ip4_tbl, netif, tcp_id, laddr.ip4, lport,
+                                     raddr.ip4, rport, protocol);
+    /* Fixme: should we roll back the IPv6 insertion when trying to listen
+     * in the both worlds, and IPv4 fails? */
+    if( rc < 0 )
+      return rc;
   }
+
+  return 0;
 }
 
 void
@@ -481,17 +582,18 @@ ci_netif_filter_remove(ci_netif* netif, oo_sp sock_p, int af_space,
     ci_assert(netif->ip6_filter_table);
     ip6_tbl = netif->ip6_filter_table;
 
-    return ci_ip6_netif_filter_remove(ip6_tbl, netif, sock_p, laddr, lport,
-                                      raddr, rport, protocol);
+    ci_ip6_netif_filter_remove(ip6_tbl, netif, sock_p, laddr, lport,
+                               raddr, rport, protocol);
   }
-  else
+
+  if( IS_AF_SPACE_IP4(af_space) )
 #endif
   {
     ci_assert(netif->filter_table);
     ip4_tbl = netif->filter_table;
 
-    return ci_ip4_netif_filter_remove(ip4_tbl, netif, sock_p, laddr.ip4, lport,
-                                      raddr.ip4, rport, protocol);
+    ci_ip4_netif_filter_remove(ip4_tbl, netif, sock_p, laddr.ip4, lport,
+                               raddr.ip4, rport, protocol);
   }
 }
 
@@ -521,44 +623,66 @@ void ci_netif_filter_init(ci_netif_filter_table* tbl, int size_lg2)
 
 #endif
 
-ci_sock_cmn* __ci_netif_filter_lookup(ci_netif* netif, unsigned laddr, 
-				      unsigned lport, unsigned raddr, 
-				      unsigned rport, unsigned protocol)
+int
+__ci_ip4_netif_filter_lookup(ci_netif* netif,
+                             unsigned laddr, unsigned lport,
+                             unsigned raddr, unsigned rport,
+                             unsigned protocol)
 {
   int rc;
 
   /* try full lookup */
-  rc = ci_netif_filter_lookup(netif, laddr, lport,  raddr, rport, protocol);
+  rc = ci_ip4_netif_filter_lookup(netif, laddr, lport,  raddr, rport, protocol);
   LOG_NV(log(LPF "FULL LOOKUP %s:%u->%s:%u rc=%d",
 	     ip_addr_str(laddr), (unsigned) CI_BSWAP_BE16(lport),
 	     ip_addr_str(raddr), (unsigned) CI_BSWAP_BE16(rport),
 	     rc));    
 
   if(CI_LIKELY( rc >= 0 ))
-    return ID_TO_SOCK(netif, netif->filter_table->table[rc].id);
+    return rc;
 
   /* try wildcard lookup */
   raddr = rport = 0;
-  rc = ci_netif_filter_lookup(netif, laddr, lport, raddr, rport, protocol);
+  rc = ci_ip4_netif_filter_lookup(netif, laddr, lport, raddr, rport, protocol);
   LOG_NV(log(LPF "WILD LOOKUP %s:%u->%s:%u rc=%d",
 	    ip_addr_str(laddr), (unsigned) CI_BSWAP_BE16(lport),
 	    ip_addr_str(raddr), (unsigned) CI_BSWAP_BE16(rport),
 	    rc));
 
   if(CI_LIKELY( rc >= 0 ))
-    return ID_TO_SOCK(netif, netif->filter_table->table[rc].id);
- 
+    return rc;
+
+  return -ENOENT;
+}
+
+ci_sock_cmn*
+__ci_netif_filter_lookup(ci_netif* netif, int af_space,
+                         ci_addr_t laddr, unsigned lport,
+                         ci_addr_t raddr, unsigned rport,
+                         unsigned protocol)
+{
+  int rc;
+
+#if CI_CFG_IPV6
+  if( IS_AF_SPACE_IP6(af_space) ) {
+    rc = __ci_ip6_netif_filter_lookup(netif, laddr, lport, raddr, rport,
+                                      protocol);
+    if(CI_LIKELY( rc >= 0 ))
+      return ID_TO_SOCK(netif, netif->ip6_filter_table->table[rc].id);
+  }
+
+  if( IS_AF_SPACE_IP4(af_space) )
+#endif
+  {
+    rc = __ci_ip4_netif_filter_lookup(netif, laddr.ip4, lport, raddr.ip4, rport,
+                                      protocol);
+    if(CI_LIKELY( rc >= 0 ))
+      return ID_TO_SOCK(netif, netif->filter_table->table[rc].id);
+  }
+
   return 0;
 }
 
-
-int ci_netif_filter_check(ci_netif* netif,
-			  unsigned laddr, unsigned lport,
-			  unsigned raddr, unsigned rport,
-			  unsigned protocol)
-{
-  return ci_netif_filter_lookup(netif, laddr, lport,  raddr, rport, protocol);
-}
 
 /**********************************************************************
  **********************************************************************
@@ -590,9 +714,9 @@ void ci_netif_filter_dump(ci_netif* ni)
       unsigned raddr = sock_raddr_be32(s);
       int rport = sock_rport_be16(s);
       int protocol = sock_protocol(s);
-      unsigned hash1 = onload_hash1(AF_INET, tbl->table_size_mask, &laddr, lport,
-                                    &raddr, rport, protocol);
-      unsigned hash2 = onload_hash2(AF_INET, &laddr, lport, &raddr, rport, protocol);
+      unsigned hash1 = __onload_hash1(tbl->table_size_mask, laddr, lport,
+                                      raddr, rport, protocol);
+      unsigned hash2 = __onload_hash2(laddr, lport, raddr, rport, protocol);
       log("%010d id=%-10d rt_ct=%d %s "CI_IP_PRINTF_FORMAT":%d "
           CI_IP_PRINTF_FORMAT":%d %010d:%010d",
 	  i, id, tbl->table[i].route_count, CI_IP_PROTOCOL_STR(protocol),

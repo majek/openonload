@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 #include <driver/linux_onload/onload_kernel_compat.h>
 
 #include <onload/debug.h>
@@ -63,86 +50,6 @@ void oo_timesync_wait_for_cpu_khz_to_stabilize(void)
 }
 
 
-#if BITS_PER_LONG != 64
-/* The following division functions are a simplied version of the
- * algorithm found in
- * http://www.hackersdelight.org/HDcode/newCode/divDouble.c.txt */
-
-/* Divide 64 bits dividend and 32 bits divisor and return 32 bits
- * quotient */
-static ci_uint32 div_64dd_32ds_32qt(ci_uint64 dividend, ci_uint32 divisor)
-{
-  ci_uint32 low, high, quotient = 0, c = 32;
-  ci_uint64 d = (ci_uint64)divisor << 31;
-
-  low = dividend & 0xffffffff;
-  high = dividend >> 32;
-
-  while( dividend > 0xffffffff ) {
-    quotient <<= 1;
-    if( dividend >= d ) {
-      dividend -= d;
-      quotient |= 1;
-    }
-    d >>= 1;
-    c--;
-  }
-  quotient <<= c;
-  if( ! dividend )
-    return quotient;
-  low = dividend;
-  return quotient | (low / divisor);
-}
-
-
-/* Divide 64 bits dividend and 32 bits divisor and return 64 bits
- * quotient */
-static ci_uint64 div_64dd_32ds_64qt(ci_uint64 dividend, ci_uint32 divisor)
-{
-  ci_uint32 low, high, high1;
-
-  low = dividend & 0xffffffff;
-  high = dividend >> 32;
-
-  if( ! high )
-    return low / divisor;
-
-  high1 = high % divisor;
-  high /= divisor;
-  low = div_64dd_32ds_32qt((ci_uint64)high1 << 32 | low, divisor);
-
-  return (ci_uint64)high << 32 | low;
-}
-#endif
-
-
-/* Divide 64 bits dividend and 64 bits divisor and return 64 bits
- * quotient */
-static ci_uint64 div_64dd_64ds_64qt(ci_uint64 dividend, ci_uint64 divisor)
-{
-#if BITS_PER_LONG == 64
-  return dividend / divisor;
-#else
-  ci_uint32 high;
-  ci_uint64 quotient;
-  int n;
-
-  high = divisor >> 32;
-  if( ! high )
-    return div_64dd_32ds_64qt(dividend, divisor);
-
-  n = 1 + fls(high);
-  quotient = div_64dd_32ds_64qt(dividend >> n, divisor >> n);
-
-  if( quotient != 0 )
-    quotient--;
-  if( (dividend - quotient * divisor) >= divisor )
-    quotient++;
-  return quotient;
-#endif
-}
-
-
 static void oo_timesync_stabilize_cpu_khz(struct oo_timesync* oo_ts)
 {
   static int cpu_khz_warned = 0;
@@ -161,8 +68,8 @@ static void oo_timesync_stabilize_cpu_khz(struct oo_timesync* oo_ts)
    * dividing first as that can introduce large errors when
    * smoothed_ticks is in the same order as smoothed_ns.  Note: we
    * cannot use doubles in kernel. */
-  oo_timesync_cpu_khz = div_64dd_64ds_64qt((ci_uint64)oo_ts->smoothed_ticks *
-                                           1000000, oo_ts->smoothed_ns);
+  oo_timesync_cpu_khz = (ci_uint64)oo_ts->smoothed_ticks * 1000000 /
+                        oo_ts->smoothed_ns;
 
   /* Warn if the oo_timesync_cpu_khz computation over or under flowed. */
   if( oo_timesync_cpu_khz < 400000 || oo_timesync_cpu_khz > 10000000 )

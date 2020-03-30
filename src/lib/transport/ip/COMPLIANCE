@@ -1,3 +1,5 @@
+.. SPDX-License-Identifier: Solarflare-Binary
+.. X-SPDX-Copyright-Text: (c) Solarflare Communications Inc
 
 This file describes:
 1.  the status of the IP/TCP stack's compliance to various RFCs.

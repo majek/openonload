@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 
 #ifndef __CI_INTERNAL_IPTIMER_H__
 #define __CI_INTERNAL_IPTIMER_H__
@@ -152,7 +139,7 @@ ci_inline void ci_ip_timer_modify(ci_netif* ni, ci_ip_timer* ts, ci_iptime_t t)
 ci_inline void ci_ip_timer_init(ci_netif* netif, ci_ip_timer* t,
                                 oo_p t_sp, const char* name) {
   OO_P_ADD(t_sp, CI_MEMBER_OFFSET(ci_ip_timer, link));
-  ci_assert(CI_NETIF_PTR(netif, t_sp) == (char*) &t->link);
+  ci_assert_equal(CI_NETIF_PTR(netif, t_sp), (char*) &t->link);
   ci_ni_dllist_link_init(netif, &t->link, t_sp, name);
   ci_ni_dllist_self_link(netif, &t->link);
 }

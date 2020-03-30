@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 ** <L5_PRIVATE L5_SOURCE>
 **   Copyright: (c) Level 5 Networks Limited.
@@ -788,23 +775,21 @@ void efab_free_ephemeral_port(struct efab_ephemeral_port_keeper* keeper)
  * is non-zero we will bind to that port, and "ephemeral" becomes something of
  * a misnomer. */
 int
-efab_alloc_ephemeral_port(ci_uint32 laddr_be32, ci_uint16 lport_be16,
+efab_alloc_ephemeral_port(ci_addr_t laddr, ci_uint16 lport_be16,
                           struct efab_ephemeral_port_keeper** keeper_out)
 {
   struct efab_ephemeral_port_keeper* keeper;
-  struct sockaddr_in addr = {
-    .sin_family      = AF_INET,
-    .sin_addr.s_addr = laddr_be32,
-    .sin_port        = lport_be16,
-  };
+  struct sockaddr_storage addr;
   int rc;
 
+  addr = ci_make_sockaddr_storage_from_addr(lport_be16, laddr);
+
   keeper = kmalloc(sizeof(*keeper), GFP_KERNEL);
-  keeper->laddr_be32 = laddr_be32;
+  keeper->laddr = laddr;
   keeper->next = NULL;
   keeper->global_next = NULL;
 
-  rc = sock_create(AF_INET, SOCK_STREAM, 0, &keeper->sock);
+  rc = sock_create(addr.ss_family, SOCK_STREAM, 0, &keeper->sock);
   if( rc != 0 ) {
     LOG_TC(ci_log("%s: Failed to create socket: rc=%d", __FUNCTION__, rc));
     goto fail1;

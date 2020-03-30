@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_HEADER >
@@ -34,18 +21,18 @@
 #error "This is a driver module."
 #endif
 
-#include <ci/net/ipv4.h>
+#include <ci/net/ipvx.h>
 
 
 /*! struct containing ptrs into icmp data area and 
  * addressing & protocol data from an ICMP pkt */
 typedef struct {
-  const ci_ip4_hdr *ip; /*< IP PDU holding ICMP message */
+  const ci_ipx_hdr_t* ipx; /*< IP PDU holding ICMP message */
   ci_icmp_hdr *icmp;    /*< ICMP header in IP PDU */
   ci_uint8* data;       /*< ICMP reply data following header */
+  ci_addr_t saddr;      /*< dest IP of IP PDU in ICMP reply data */
+  ci_addr_t daddr;      /*< src IP of IP PDU in ICMP reply data */
   int data_len;         /*< ICMP len if icmp set & whole IP PDU in reply */
-  ci_uint32 saddr_be32; /*< dest IP of IP PDU in ICMP reply data */
-  ci_uint32 daddr_be32; /*< src IP of IP PDU in ICMP reply data */
   ci_uint16 sport_be16; /*< dest port of TCP/UDP IP PDU in ICMP reply data */
   ci_uint16 dport_be16; /*< src port of TCP/UDP IP PDU in ICMP reply data */
   ci_uint8  protocol;   /*< protocol of IP PDU in ICMP reply data */

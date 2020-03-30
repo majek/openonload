@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-2.0 OR Solarflare-Binary
+# X-SPDX-Copyright-Text: (c) Solarflare Communications Inc
 ######################################################################
 # Sanity checks (correct build path and platform?)
 #

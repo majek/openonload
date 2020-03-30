@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_HEADER >
@@ -30,44 +17,6 @@
 #define __ONLOAD_DEBUG_OPS_H__
 
 # include <onload/unix_intf.h>
-
-
-/*! dump inode for a file descriptor */
-ci_inline int
-oo_debug_dump_inode(ci_fd_t fp, int fd) 
-{
-  int rc;
-  ci_debug_onload_op_t op;
-  op.what = __CI_DEBUG_OP_DUMP_INODE__;
-  op.u.fd = fd;
-  rc = oo_debug_op(fp, &op);
-  return rc;
-}
-
-/*! debug trampolines */
-ci_inline int
-oo_debug_trampoline(ci_fd_t fp, ci_uintptr_t * io) 
-{					
-  int rc;                               
-  ci_debug_onload_op_t op;			
-  op.what = __CI_DEBUG_OP_TRAMPOLINE__;	
-  op.u.tramp_debug = *io;		
-  rc = oo_debug_op(fp, &op);		
-  *io = op.u.tramp_debug;		
-  return rc;                            
-}
-
-
-ci_inline int
-oo_debug_fds_dump(ci_fd_t fp, ci_uint32 pid)
-{					
-  int rc;				
-  ci_debug_onload_op_t op;			
-  op.what = __CI_DEBUG_OP_FDS_DUMP__;	
-  op.u.fds_dump_pid = (pid);		
-  rc = oo_debug_op(fp, &op);		
-  return rc;				
-}
 
 
 typedef struct {

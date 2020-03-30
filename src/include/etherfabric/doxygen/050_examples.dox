@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /****************************************************************************
  * Copyright 2004-2005: Level 5 Networks Inc.
  * Copyright 2005-2018: Solarflare Communications Inc,
@@ -39,15 +41,15 @@
  *************************************************************************/
 /*! \page example Worked Example
 
-This part of the documentation examines a simplified version of \ref 
-eflatency. This is a small application which listens for packets and 
+This part of the documentation examines a simplified version of \ref
+eflatency. This is a small application which listens for packets and
 replies, with as low latency as possible.
 
-This documentation discusses the tradeoffs that have been chosen, some 
-performance issues to avoid, and some possible additions that have been 
+This documentation discusses the tradeoffs that have been chosen, some
+performance issues to avoid, and some possible additions that have been
 omitted for clarity.
 
-See also the supplied code for \ref eflatency , which includes many of 
+See also the supplied code for \ref eflatency , which includes many of
 these improvements.
 
 \section example_setup Setup
@@ -70,13 +72,13 @@ static void do_init(int ifindex){
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 The following improvements could be made:
-- check the return values from these functions, in case the card has run 
+- check the return values from these functions, in case the card has run
   out of resources and is unable to allocate more virtual interfaces
 - offer physical buffer mode here.
 
 \section example_buffers Creating Packet buffers
 
-The next step is to allocate a memory region and register it for packet 
+The next step is to allocate a memory region and register it for packet
 buffers.
 
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~{.c}
@@ -90,19 +92,19 @@ buffers.
 
 This is all that is strictly necessary to set up the packet buffers.
 
-However, the packet buffer is 2048 bytes long, whereas the normal MTU size 
-for a transmitted packet is only 1500 bytes. There is some spare memory in 
-each packet buffer. Performance can be improved by using this space to 
-cache some of the packet meta-data, so that it does not have to be 
+However, the packet buffer is 2048 bytes long, whereas the normal MTU size
+for a transmitted packet is only 1500 bytes. There is some spare memory in
+each packet buffer. Performance can be improved by using this space to
+cache some of the packet meta-data, so that it does not have to be
 recalculated:
 
-- The DMA address of the packet is cached. It is determined by getting the 
-  DMA address of the base of the memory chunk, and then incrementing in 2KB 
+- The DMA address of the packet is cached. It is determined by getting the
+  DMA address of the base of the memory chunk, and then incrementing in 2KB
   chunks.
 
 - The packet ID is also cached.
 
-A structure is used to store the cached meta-data and a few pointers in 
+A structure is used to store the cached meta-data and a few pointers in
 the buffer. An array is used to track all the buffers:
 
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~{.c}
@@ -131,12 +133,12 @@ struct pkt_buf {
     }
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-\note When receiving, the hardware will only fill up to 1824 bytes per 
+\note When receiving, the hardware will only fill up to 1824 bytes per
 buffer. Larger jumbo frames are split across multiple buffers.
 
 \section example_filters Adding Filters
 
-Next, a filter is specified and added, so that the virtual interface 
+Next, a filter is specified and added, so that the virtual interface
 receives traffic. Assuming there is a sockaddr to work from:
 
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~{.c}
@@ -151,10 +153,10 @@ receives traffic. Assuming there is a sockaddr to work from:
 
 \section example_receive Receiving packets
 
-At this point, packets will start arriving at the interface, be diverted 
+At this point, packets will start arriving at the interface, be diverted
 to the application, and immediately be dropped.
 
-So the next step is to push some packet buffers to the RX descriptor ring, 
+So the next step is to push some packet buffers to the RX descriptor ring,
 to receive the incoming packets.
 
 For efficiency, the code pushes packet buffers eight at a time.
@@ -173,12 +175,12 @@ void rx_post( int n ) {
 }
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-So now, there are packet buffers on the descriptor ring. But once they are 
+So now, there are packet buffers on the descriptor ring. But once they are
 filled, the application will start dropping again.
 
 \section example_events Handling Events
 
-The next step is to handle these incoming packets, by polling the event 
+The next step is to handle these incoming packets, by polling the event
 queue.
 
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~{.c}
@@ -207,16 +209,16 @@ void rx_wait(void) {
 } } }
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-This code is calling a `handle_rx_packet()` function, passing it the 
-packet id (which corresponds directly to the `pkt_bufs` array - see \ref 
-example_buffers) and the length of data. The body of this function is not 
+This code is calling a `handle_rx_packet()` function, passing it the
+packet id (which corresponds directly to the `pkt_bufs` array - see \ref
+example_buffers) and the length of data. The body of this function is not
 shown, but it should do the following:
 
-- note that this packet buffer has been consumed, and so is ready to be 
+- note that this packet buffer has been consumed, and so is ready to be
   re-posted:
 
-  - the `rx_post()` function(see \ref example_receive) must also be 
-    updated to use this information, so a buffer is not re-posted until it 
+  - the `rx_post()` function(see \ref example_receive) must also be
+    updated to use this information, so a buffer is not re-posted until it
     is marked as consumed
 
 - ensure that the received packet is processed according to the purpose of
@@ -235,23 +237,23 @@ shown, but it should do the following:
 
 \section example_transmit Transmitting packets
 
-The next step is to implement the transmit side. The hard part is filling 
-out the payload, and getting all the fields of IP and UDP correct. (%ef_vi 
-is usually used to transmit UDP, as it's a much simpler protocol to 
+The next step is to implement the transmit side. The hard part is filling
+out the payload, and getting all the fields of IP and UDP correct. (%ef_vi
+is usually used to transmit UDP, as it's a much simpler protocol to
 implement than TCP.)
 
-There's some sample code to fill out the headers in the functions 
+There's some sample code to fill out the headers in the functions
 `ci_*_hdr_init()`, which can be found in `src/lib/citools/ippacket.c`.
 
-After that, to transmit one of the `pb` structures (see \ref 
+After that, to transmit one of the `pb` structures (see \ref
 example_buffers), a single function call is needed:
 
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~{.c}
 ef_vi_transmit(&vi, pb->dma_buf_addr, frame_length, 0);
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-But the application must also keep track of when that buffer is used, and 
-when it is free. This means adding some complexity to the poll loop (see 
+But the application must also keep track of when that buffer is used, and
+when it is free. This means adding some complexity to the poll loop (see
 \ref example_events). The absolute minimum is:
 
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~{.c}
@@ -260,17 +262,17 @@ when it is free. This means adding some complexity to the poll loop (see
           break;
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-This is only sufficient if the TX buffers and the RX buffers are from 
+This is only sufficient if the TX buffers and the RX buffers are from
 different pools.
 
-\note In ping pong there is only ever one outstanding send. The 
-application does not transmit another packet until the remote side has 
-processed the current one, and so the application does not even need to 
+\note In ping pong there is only ever one outstanding send. The
+application does not transmit another packet until the remote side has
+processed the current one, and so the application does not even need to
 keep track of its state.
 
-One option would be to free up sent buffers, to a pool ready to be filled 
-with data.  Other applications may instead fill a few packet buffers with 
-data, and then transmit them as and when, only keeping track to make sure 
+One option would be to free up sent buffers, to a pool ready to be filled
+with data.  Other applications may instead fill a few packet buffers with
+data, and then transmit them as and when, only keeping track to make sure
 that the TX ring never overfills.
 
 */

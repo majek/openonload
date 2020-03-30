@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_SOURCE>
@@ -140,7 +127,7 @@ void ci_netif_dmaq_shove2(ci_netif* ni, int intf_i, int is_fresh)
 }
 
 
-void ci_netif_send(ci_netif* netif, ci_ip_pkt_fmt* pkt)
+void __ci_netif_send(ci_netif* netif, ci_ip_pkt_fmt* pkt)
 {
   int intf_i, rc;
   oo_pktq* dmaq;
@@ -156,8 +143,9 @@ void ci_netif_send(ci_netif* netif, ci_ip_pkt_fmt* pkt)
   ci_assert(pkt);
   ci_assert(pkt->intf_i >= 0);
   ci_assert(pkt->intf_i < CI_CFG_MAX_INTERFACES);
+  ci_assert_flags(pkt->flags, CI_PKT_FLAG_TX_PENDING);
 
-  __ci_netif_dmaq_insert_prep_pkt(netif, pkt);
+  ___ci_netif_dmaq_insert_prep_pkt(netif, pkt);
 
   LOG_NT(log("%s: [%d] id=%d nseg=%d 0:["EF_ADDR_FMT":%d] dhost="
              CI_MAC_PRINTF_FORMAT, __FUNCTION__, NI_ID(netif),

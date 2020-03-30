@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file terminate.c exit_group() syscall substitution.
 ** <L5_PRIVATE L5_SOURCE>
@@ -56,15 +43,8 @@ static inline void efab_signal_wake_up(struct task_struct* t)
    * kick_process is not exported prior to 2.6.31, and there is almost
    * no way to copy it. */
   wq.private = t;
-#if LINUX_VERSION_CODE > KERNEL_VERSION(2,6,30)
   if( !default_wake_function(&wq, TASK_WAKEKILL | TASK_INTERRUPTIBLE, 0, NULL) )
       kick_process(t);
-#else
-#ifndef TASK_WAKEKILL
-#define TASK_WAKEKILL (TASK_STOPPED | TASK_TRACED)
-#endif
-  default_wake_function(&wq, TASK_WAKEKILL | TASK_INTERRUPTIBLE, 0, NULL);
-#endif
 }
 
 
@@ -77,16 +57,6 @@ static void efab_zap_other_threads(struct task_struct *p)
   struct task_struct *t;
 
   p->signal->group_stop_count = 0;
-# if LINUX_VERSION_CODE <= KERNEL_VERSION(2,6,24)
-# if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,10)
-  p->signal->flags = SIGNAL_GROUP_EXIT;
-# endif
-# endif
-
-# if LINUX_VERSION_CODE <= KERNEL_VERSION(2,6,22)
-  if( thread_group_empty(p) )
-    return;
-# endif
 
   for (t = next_thread(p); t != p; t = next_thread(t)) {
     /*
@@ -95,15 +65,7 @@ static void efab_zap_other_threads(struct task_struct *p)
     if (t->exit_state)
       continue;
 
-# if LINUX_VERSION_CODE <= KERNEL_VERSION(2,6,20)
-    if (t != p->group_leader)
-      t->exit_signal = -1;
-#   endif
-
     sigaddset(&t->pending.signal, SIGKILL);
-#   if LINUX_VERSION_CODE <= KERNEL_VERSION(2,6,14)
-    rm_from_queue(SIG_KERNEL_STOP_MASK, &t->pending);
-#   endif
     efab_signal_wake_up(t);
   }
 }
@@ -224,7 +186,11 @@ efab_terminate_lock_all_stacks(tcp_helper_resource_t *stacks[],
   ci_assert_ge(sizeof(get_lock) * 8, stacks_num);
 
   /* Take all netif locks.  We should not do this simultaneously
-   * with other processes 
+   * with other processes to avoid classic deadlock when one process holds
+   * the lock for stack1 and another holds the lock for stack2, and each
+   * one wants another lock.
+   *
+   * One-stack case is deliberately moved out of this mutex.
    */
   TERM_DEBUG("%s: %d get exit_netifs_lock", __FUNCTION__, current->pid);
   mutex_lock(&exit_netifs_lock);
@@ -298,12 +264,6 @@ static void efab_exit_group(int *status_p)
   if( (sig->flags & SIGNAL_GROUP_EXIT) || (sig->group_exit_task != NULL) )
     *status_p = sig->group_exit_code;
   else {
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,17)
-#define TASKLIST_IS_NON_RCU
-#endif
-#ifdef TASKLIST_IS_NON_RCU
-    read_lock(&tasklist_lock);
-#endif
     spin_lock_irq(&sighand->siglock);
 
     if( (sig->flags & SIGNAL_GROUP_EXIT) || (sig->group_exit_task != NULL) ) {
@@ -317,9 +277,6 @@ static void efab_exit_group(int *status_p)
     }
 
     spin_unlock_irq(&sighand->siglock);
-#ifdef TASKLIST_IS_NON_RCU
-    read_unlock(&tasklist_lock);
-#endif
 
     /* Now we should wait for threads to receive SIGKILL and exit.
      * TODO: ideally, do something like wait_consider_task(). */
@@ -328,18 +285,12 @@ static void efab_exit_group(int *status_p)
       found = 0;
 
       tsk = current;
-#ifdef TASKLIST_IS_NON_RCU
-      read_lock(&tasklist_lock);
-#endif
       while_each_thread(current, tsk) {
-        if( tsk->exit_code == 0 ) {
+        if( ! (tsk->state & TASK_DEAD) ) {
           found = 1;
           break;
         }
       }
-#ifdef TASKLIST_IS_NON_RCU
-      read_unlock(&tasklist_lock);
-#endif
 
       /* timeout=1 shows much better results than just shedule()
        * since we free CPU for some time and the thread is able to
@@ -350,6 +301,11 @@ static void efab_exit_group(int *status_p)
       tries++;
     } while (found && tries < HZ/2);
     TERM_DEBUG("found=%d tries=%d", found, tries);
+#ifndef NDEBUG
+    if( found )
+      ci_log("%s() pid=%d failed to wait for all threads to die",
+             __func__, current->pid);
+#endif
   }
 }
 

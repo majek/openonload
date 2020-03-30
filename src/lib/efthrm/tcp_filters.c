@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /*
 ** Copyright 2005-2012  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
@@ -215,26 +202,51 @@ oo_hw_filter_set_hwport(struct oo_hw_filter* oofilter, int hwport,
     case OO_HW_FILTER_TYPE_IP_PROTO:
       /* As in the case of the ethertype filter above, we have to populate
        * [spec] ourselves. */
-      spec.ether_type = CI_ETHERTYPE_IP;
       spec.ip_proto = oo_filter_spec->addr.ipproto.p;
+      spec.ether_type = oo_filter_spec->addr.ipproto.ethertype;
       spec.match_flags |= EFX_FILTER_MATCH_ETHER_TYPE |
                           EFX_FILTER_MATCH_IP_PROTO;
       replace = true;
       break;
 
     case OO_HW_FILTER_TYPE_IP:
-      if( oo_filter_spec->addr.ip.saddr != 0 )
-        rc = efx_filter_set_ipv4_full(&spec,
-                                      oo_filter_spec->addr.ip.protocol,
-                                      oo_filter_spec->addr.ip.daddr,
-                                      oo_filter_spec->addr.ip.dport,
-                                      oo_filter_spec->addr.ip.saddr,
-                                      oo_filter_spec->addr.ip.sport);
+#if CI_CFG_IPV6
+      if( IS_AF_INET6(oo_filter_spec->addr.ip.af) ) {
+        struct in6_addr saddr;
+        struct in6_addr daddr;
+
+        memcpy(&saddr, oo_filter_spec->addr.ip.saddr, sizeof(saddr));
+        memcpy(&daddr, oo_filter_spec->addr.ip.daddr, sizeof(daddr));
+
+        if( oo_filter_spec->addr.ip.sport != 0 )
+          rc = efx_filter_set_ipv6_full(&spec,
+                                        oo_filter_spec->addr.ip.protocol,
+                                        daddr,
+                                        oo_filter_spec->addr.ip.dport,
+                                        saddr,
+                                        oo_filter_spec->addr.ip.sport);
+        else
+          rc = efx_filter_set_ipv6_local(&spec,
+                                         oo_filter_spec->addr.ip.protocol,
+                                         daddr,
+                                         oo_filter_spec->addr.ip.dport);
+      }
       else
-        rc = efx_filter_set_ipv4_local(&spec,
-                                       oo_filter_spec->addr.ip.protocol,
-                                       oo_filter_spec->addr.ip.daddr,
-                                       oo_filter_spec->addr.ip.dport);
+#endif
+      {
+        if( oo_filter_spec->addr.ip.sport != 0 )
+          rc = efx_filter_set_ipv4_full(&spec,
+                                        oo_filter_spec->addr.ip.protocol,
+                                        oo_filter_spec->addr.ip.daddr[0],
+                                        oo_filter_spec->addr.ip.dport,
+                                        oo_filter_spec->addr.ip.saddr[0],
+                                        oo_filter_spec->addr.ip.sport);
+        else
+          rc = efx_filter_set_ipv4_local(&spec,
+                                         oo_filter_spec->addr.ip.protocol,
+                                         oo_filter_spec->addr.ip.daddr[0],
+                                         oo_filter_spec->addr.ip.dport);
+      }
       ci_assert_equal(rc, 0);
       break;
 

@@ -1,24 +1,67 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 #include <ci/internal/transport_config_opt.h>
-#include <onload/hash.h>
 #include "ip_internal.h"
+#include <onload/hash.h>
 #include "netif_table.h"
 
 #if CI_CFG_IPV6
+
+int ci_ip6_netif_filter_lookup(ci_netif* netif,
+                               ci_addr_t laddr, unsigned lport,
+                               ci_addr_t raddr, unsigned rport,
+                               unsigned protocol)
+{
+  unsigned hash1, hash2 = 0;
+  unsigned first;
+  ci_ip6_netif_filter_table* tbl;
+
+  ci_assert(netif);
+  ci_assert(ci_netif_is_locked(netif));
+  ci_assert(netif->ip6_filter_table);
+
+  tbl = netif->ip6_filter_table;
+
+  hash1 = onload_hash1(tbl->table_size_mask, laddr, lport,
+                       raddr, rport, protocol);
+  first = hash1;
+
+  LOG_NV(log("%s: %s " IPX_PORT_FMT "->" IPX_PORT_FMT " hash=%u:%u at=%u",
+             __func__, CI_IP_PROTOCOL_STR(protocol),
+             IPX_ARG(AF_IP(laddr)), (unsigned) CI_BSWAP_BE16(lport),
+             IPX_ARG(AF_IP(raddr)), (unsigned) CI_BSWAP_BE16(rport),
+             first,
+             onload_hash2(laddr, lport, raddr, rport, protocol),
+             hash1));
+
+  while( 1 ) {
+    int id = tbl->table[hash1].id;
+    if( CI_LIKELY(id >= 0) ) {
+      ci_sock_cmn* s = ID_TO_SOCK(netif, id);
+      if( ((lport    - sock_lport_be16(s)     ) |
+           (rport    - sock_rport_be16(s)     ) |
+           (protocol - sock_protocol(s)       )) == 0 &&
+          memcmp(laddr.ip6, tbl->table[hash1].laddr, sizeof(laddr)) == 0 &&
+          memcmp(raddr.ip6, sock_ip6_raddr(s), sizeof(raddr)) == 0 )
+        return hash1;
+    }
+    if( id == EMPTY )  break;
+    /* We defer calculating hash2 until it's needed, just to make the fast
+     * case that little bit faster. */
+    if( hash1 == first )
+      hash2 = onload_hash2(laddr, lport, raddr, rport, protocol);
+    hash1 = (hash1 + hash2) & tbl->table_size_mask;
+    if( hash1 == first ) {
+      LOG_E(ci_log(FN_FMT "ERROR: LOOP " IPX_PORT_FMT "->" IPX_PORT_FMT
+                   " hash=%u:%u", FN_PRI_ARGS(netif),
+                   IPX_ARG(AF_IP(laddr)), lport,
+                   IPX_ARG(AF_IP(raddr)), rport, hash1, hash2));
+      return -ELOOP;
+    }
+  }
+
+  return -ENOENT;
+}
 
 int
 ci_ip6_netif_filter_insert(ci_ip6_netif_filter_table* tbl,
@@ -33,20 +76,15 @@ ci_ip6_netif_filter_insert(ci_ip6_netif_filter_table* tbl,
   unsigned hops = 1;
 #endif
   unsigned first, table_size_mask;
-  char laddr_str[CI_INET6_ADDRSTRLEN], raddr_str[CI_INET6_ADDRSTRLEN];
-  int af = AF_INET6;
 
   ci_assert(netif);
   ci_assert(ci_netif_is_locked(netif));
 
   table_size_mask = tbl->table_size_mask;
 
-  ci_get_ip_str(laddr, laddr_str, sizeof(laddr_str));
-  ci_get_ip_str(raddr, raddr_str, sizeof(raddr_str));
-
-  hash1 = onload_hash1(af, table_size_mask, laddr.ip6, lport,
-                       raddr.ip6, rport, protocol);
-  hash2 = onload_hash2(af, laddr.ip6, lport, raddr.ip6, rport, protocol);
+  hash1 = onload_hash1(table_size_mask, laddr, lport,
+                       raddr, rport, protocol);
+  hash2 = onload_hash2(laddr, lport, raddr, rport, protocol);
   first = hash1;
 
   /* Find a free slot. */
@@ -64,11 +102,11 @@ ci_ip6_netif_filter_insert(ci_ip6_netif_filter_table* tbl,
     if( hash1 == first ) {
       ci_sock_cmn *s = SP_TO_SOCK_CMN(netif, tcp_id);
       if( ! (s->s_flags & CI_SOCK_FLAG_SW_FILTER_FULL) ) {
-        LOG_E(ci_log(FN_FMT "%d FULL %s %s:%u->%s:%u hops=%u",
-                     FN_PRI_ARGS(netif),
+        LOG_E(ci_log(FN_FMT "%d FULL %s " IPX_PORT_FMT "->" IPX_PORT_FMT
+                     " hops=%u", FN_PRI_ARGS(netif),
                      OO_SP_FMT(tcp_id), CI_IP_PROTOCOL_STR(protocol),
-                     laddr_str, (unsigned) CI_BSWAP_BE16(lport),
-                     raddr_str, (unsigned) CI_BSWAP_BE16(rport),
+                     IPX_ARG(AF_IP(laddr)), (unsigned) CI_BSWAP_BE16(lport),
+                     IPX_ARG(AF_IP(raddr)), (unsigned) CI_BSWAP_BE16(rport),
                      hops));
         s->s_flags |= CI_SOCK_FLAG_SW_FILTER_FULL;
       }
@@ -79,20 +117,34 @@ ci_ip6_netif_filter_insert(ci_ip6_netif_filter_table* tbl,
   }
 
   /* Now insert the new entry. */
-  LOG_TC(ci_log(FN_FMT "%d INSERT %s %s:%u->%s:%u hash=%u:%u at=%u "
+  LOG_TC(ci_log(FN_FMT "%d INSERT %s " IPX_PORT_FMT "->" IPX_PORT_FMT
+                " hash=%u:%u at=%u "
 		"over=%d hops=%u", FN_PRI_ARGS(netif), OO_SP_FMT(tcp_id),
                 CI_IP_PROTOCOL_STR(protocol),
-		laddr_str, (unsigned) CI_BSWAP_BE16(lport),
-		raddr_str, (unsigned) CI_BSWAP_BE16(rport),
+		IPX_ARG(AF_IP(laddr)), (unsigned) CI_BSWAP_BE16(lport),
+		IPX_ARG(AF_IP(raddr)), (unsigned) CI_BSWAP_BE16(rport),
 		first, hash2, hash1, entry->id, hops));
 
+#if CI_CFG_STATS_NETIF
+  if( hops > netif->state->stats.ipv6_table_max_hops )
+    netif->state->stats.ipv6_table_max_hops = hops;
+  /* Keep a rolling average of the number of hops per entry. */
+  if( netif->state->stats.ipv6_table_mean_hops == 0 )
+    netif->state->stats.ipv6_table_mean_hops = 1;
+  netif->state->stats.ipv6_table_mean_hops =
+    (netif->state->stats.ipv6_table_mean_hops * 9 + hops) / 10;
+
+  if( entry->id == EMPTY )
+    ++netif->state->stats.ipv6_table_n_slots;
+  ++netif->state->stats.ipv6_table_n_entries;
+#endif
   entry->id = OO_SP_TO_INT(tcp_id);
   memcpy(entry->laddr, laddr.ip6, sizeof(entry->laddr));
   return 0;
 }
 
 static void
-__ci_ip6_netif_filter_remove(ci_ip6_netif_filter_table* tbl,
+__ci_ip6_netif_filter_remove(ci_ip6_netif_filter_table* tbl, ci_netif* ni,
                              unsigned hash1, unsigned hash2,
                              int hops, unsigned last_tbl_i)
 {
@@ -108,14 +160,22 @@ __ci_ip6_netif_filter_remove(ci_ip6_netif_filter_table* tbl,
     ci_assert(entry->id != EMPTY);
     ci_assert(entry->route_count > 0);
     if( --entry->route_count == 0 && entry->id == TOMBSTONE ) {
+      CITP_STATS_NETIF(--ni->state->stats.ipv6_table_n_slots);
       entry->id = EMPTY;
     }
     tbl_i = (tbl_i + hash2) & table_size_mask;
   }
   ci_assert(tbl_i == last_tbl_i);
 
+  CITP_STATS_NETIF(--ni->state->stats.ipv6_table_n_entries);
   entry = &tbl->table[tbl_i];
-  entry->id = ( entry->route_count == 0 ) ? EMPTY : TOMBSTONE;
+  if( entry->route_count == 0 ) {
+    CITP_STATS_NETIF(--ni->state->stats.ipv6_table_n_slots);
+    entry->id = EMPTY;
+  }
+  else {
+    entry->id = TOMBSTONE;
+  }
 }
 
 void
@@ -127,9 +187,8 @@ ci_ip6_netif_filter_remove(ci_ip6_netif_filter_table* tbl,
 {
   ci_ip6_netif_filter_table_entry* entry;
   unsigned hash1, hash2, tbl_i;
-  int hops = 0, af = AF_INET6;
+  int hops = 0;
   unsigned first, table_size_mask;
-  char laddr_str[CI_INET6_ADDRSTRLEN], raddr_str[CI_INET6_ADDRSTRLEN];
 
   ci_assert(ci_netif_is_locked(netif)
 #ifdef __KERNEL__
@@ -142,19 +201,16 @@ ci_ip6_netif_filter_remove(ci_ip6_netif_filter_table* tbl,
 
   table_size_mask = tbl->table_size_mask;
 
-  hash1 = onload_hash1(af, table_size_mask, laddr.ip6, lport,
-                       raddr.ip6, rport, protocol);
-  hash2 = onload_hash2(af, laddr.ip6, lport, raddr.ip6, rport, protocol);
+  hash1 = onload_hash1(table_size_mask, laddr, lport,
+                       raddr, rport, protocol);
+  hash2 = onload_hash2(laddr, lport, raddr, rport, protocol);
   first = hash1;
 
-  ci_get_ip_str(laddr, laddr_str, sizeof(laddr_str));
-  ci_get_ip_str(raddr, raddr_str, sizeof(raddr_str));
-
-  LOG_TC(ci_log("%s: [%d:%d] REMOVE %s %s:%u->%s:%u hash=%u:%u",
-                __FUNCTION__, NI_ID(netif), OO_SP_FMT(sock_p),
+  LOG_TC(ci_log("%s: [%d:%d] REMOVE %s " IPX_PORT_FMT "->" IPX_PORT_FMT
+                " hash=%u:%u", __FUNCTION__, NI_ID(netif), OO_SP_FMT(sock_p),
                 CI_IP_PROTOCOL_STR(protocol),
-		            laddr_str, (unsigned) CI_BSWAP_BE16(lport),
-		            raddr_str, (unsigned) CI_BSWAP_BE16(rport),
+                IPX_ARG(AF_IP(laddr)), (unsigned) CI_BSWAP_BE16(lport),
+                IPX_ARG(AF_IP(raddr)), (unsigned) CI_BSWAP_BE16(rport),
 		            hash1, hash2));
 
   tbl_i = hash1;
@@ -173,16 +229,16 @@ ci_ip6_netif_filter_remove(ci_ip6_netif_filter_table* tbl,
     tbl_i = (tbl_i + hash2) & table_size_mask;
     ++hops;
     if( tbl_i == first ) {
-      LOG_E(ci_log(FN_FMT "ERROR: LOOP [%d] %s %s:%u->%s:%u",
+      LOG_E(ci_log(FN_FMT "ERROR: LOOP [%d] %s " IPX_PORT_FMT "->" IPX_PORT_FMT,
                    FN_PRI_ARGS(netif), OO_SP_FMT(sock_p),
                    CI_IP_PROTOCOL_STR(protocol),
-                   laddr_str, (unsigned) CI_BSWAP_BE16(lport),
-                   raddr_str, (unsigned) CI_BSWAP_BE16(rport)));
+                   IPX_ARG(AF_IP(laddr)), (unsigned) CI_BSWAP_BE16(lport),
+                   IPX_ARG(AF_IP(raddr)), (unsigned) CI_BSWAP_BE16(rport)));
       return;
     }
   }
 
-  __ci_ip6_netif_filter_remove(tbl, hash1, hash2, hops, tbl_i);
+  __ci_ip6_netif_filter_remove(tbl, netif, hash1, hash2, hops, tbl_i);
 }
 
 #ifdef __ci_driver__
@@ -207,6 +263,33 @@ void ci_ip6_netif_filter_init(ci_ip6_netif_filter_table* tbl, int size_lg2)
 
 #endif /* __ci_driver__ */
 
+int
+__ci_ip6_netif_filter_lookup(ci_netif* netif,
+                             ci_addr_t laddr, unsigned lport,
+                             ci_addr_t raddr, unsigned rport,
+                             unsigned protocol)
+{
+  int rc;
+
+  /* try full lookup */
+  rc = ci_ip6_netif_filter_lookup(netif, laddr, lport,  raddr, rport, protocol);
+  LOG_NV(log(LPF "FULL LOOKUP " IPX_PORT_FMT "->" IPX_PORT_FMT " rc=%d",
+             IPX_ARG(AF_IP(laddr)), CI_BSWAP_BE16(lport),
+             IPX_ARG(AF_IP(raddr)), CI_BSWAP_BE16(rport), rc));
+  if(CI_LIKELY( rc >= 0 ))
+    return rc;
+
+  /* try wildcard lookup */
+  rc = ci_ip6_netif_filter_lookup(netif, laddr, lport, addr_any, 0, protocol);
+  LOG_NV(log(LPF "WILD LOOKUP " IPX_PORT_FMT "->"IPX_PORT_FMT" rc=%d",
+             IPX_ARG(AF_IP(laddr)), CI_BSWAP_BE16(lport),
+             IPX_ARG(AF_IP(addr_any)), 0, rc));
+  if(CI_LIKELY( rc >= 0 ))
+    return rc;
+
+  return -ENOENT;
+}
+
 void ci_ip6_netif_filter_dump(ci_netif* ni)
 {
   int id;
@@ -216,24 +299,28 @@ void ci_ip6_netif_filter_dump(ci_netif* ni)
   ci_assert(ni);
   ip6_tbl = ni->ip6_filter_table;
 
+  log("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++");
+#if CI_CFG_STATS_NETIF
+  log(FN_FMT "size=%d n_entries=%i n_slots=%i max=%i mean=%i", FN_PRI_ARGS(ni),
+      ip6_tbl->table_size_mask + 1, ni->state->stats.ipv6_table_n_entries,
+      ni->state->stats.ipv6_table_n_slots, ni->state->stats.ipv6_table_max_hops,
+      ni->state->stats.ipv6_table_mean_hops);
+#endif
+
   for( i = 0; i <= ip6_tbl->table_size_mask; ++i ) {
     id = ip6_tbl->table[i].id;
     if( CI_LIKELY(id >= 0) ) {
       ci_sock_cmn* s = ID_TO_SOCK(ni, id);
-      ci_ip6_addr_t *laddr_ip6 = &ip6_tbl->table[i].laddr;
+      ci_addr_t laddr = CI_ADDR_FROM_IP6(&ip6_tbl->table[i].laddr);
       int lport = sock_lport_be16(s);
-      ci_ip6_addr_t *raddr_ip6 = &sock_ip6_raddr(s);
+      ci_addr_t raddr = sock_raddr(s);
       int rport = sock_rport_be16(s);
       int protocol = sock_protocol(s);
-      unsigned hash1 = onload_hash1(AF_INET6, ip6_tbl->table_size_mask,
-                                    laddr_ip6, lport, raddr_ip6, rport,
+      unsigned hash1 = onload_hash1(ip6_tbl->table_size_mask,
+                                    laddr, lport, raddr, rport,
                                     protocol);
-      unsigned hash2 = onload_hash2(AF_INET6, laddr_ip6, lport,
-                                    raddr_ip6, rport, protocol);
-      ci_addr_t laddr, raddr;
-
-      memcpy(laddr.ip6, laddr_ip6, sizeof(laddr.ip6));
-      memcpy(raddr.ip6, raddr_ip6, sizeof(raddr.ip6));
+      unsigned hash2 = onload_hash2(laddr, lport,
+                                    raddr, rport, protocol);
 
       log("%010d id=%-10d rt_ct=%d %s %s:%d %s:%d %010u:%010u",
           i, id, ip6_tbl->table[i].route_count, CI_IP_PROTOCOL_STR(protocol),

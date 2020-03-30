@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /*
 ** Copyright 2005-2012  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
@@ -100,13 +87,6 @@ const int max_hardware_init_repeats = 1;
  *
  *--------------------------------------------------------------------*/
 
-#ifdef CONFIG_SFC_RESOURCE_VF
-int claim_vf = 1;
-module_param(claim_vf, int, S_IRUGO);
-MODULE_PARM_DESC(claim_vf, "Set to 0 to prevent this driver from binding "
-		 "to virtual functions");
-#endif
-
 int pio = 1;
 module_param(pio, int, S_IRUGO);
 MODULE_PARM_DESC(pio,
@@ -118,6 +98,43 @@ EXPORT_SYMBOL(efrm_is_pio_enabled);
 #ifdef HAS_COMPAT_PAT_WC
 static int compat_pat_wc_inited = 0;
 #endif
+
+/*********************************************************************
+ *
+ * Export efrm_find_ksym()
+ *
+ *********************************************************************/
+
+#ifdef ERFM_HAVE_NEW_KALLSYMS
+
+struct efrm_ksym_name {
+	const char *name;
+	void *addr;
+};
+static int efrm_check_ksym(void *data, const char *name, struct module *mod,
+			  unsigned long addr)
+{
+	struct efrm_ksym_name *t = data;
+	if( strcmp(t->name, name) == 0 ) {
+		t->addr = (void *)addr;
+		return 1;
+	}
+	return 0;
+}
+void *efrm_find_ksym(const char *name)
+{
+	struct efrm_ksym_name t;
+
+	t.name = name;
+	t.addr = NULL;
+	mutex_lock(&module_mutex);
+	kallsyms_on_each_symbol(efrm_check_ksym, &t);
+	mutex_unlock(&module_mutex);
+	return t.addr;
+}
+EXPORT_SYMBOL(efrm_find_ksym);
+
+#endif  /* ERFM_HAVE_NEW_KALLSYMS */
 
 /*--------------------------------------------------------------------
  *
@@ -541,14 +558,6 @@ efrm_nic_add(struct efx_dl_device *dl_device, unsigned flags,
 	nic->rx_prefix_len = rx_prefix_len;
 	nic->rx_usr_buf_size = rx_usr_buf_size;
 
-	/* Tell the resource manager about the parameters for this nic.  This
-	 * must be done once the resource manager can identify the nic, ie
-	 * after it's been registered with the driver.
-	 */
-#ifdef CONFIG_SFC_RESOURCE_VF
-	efrm_vf_init_nic_params(&efrm_nic->efhw_nic, res_dim);
-#endif
-
 	/* There is a race here: we need to clear [nic->resetting] so that
 	 * efhw_nic_init_hardware() can do MCDI, but that means that any
 	 * existing clients can also attempt MCDI, potentially before
@@ -583,10 +592,6 @@ efrm_nic_add(struct efx_dl_device *dl_device, unsigned flags,
 			 pci_name(dev) ? pci_name(dev) : "?", rc);
 	}
 
-#ifdef CONFIG_SFC_RESOURCE_VF
-        efrm_resource_manager_add_total(EFRM_RESOURCE_VF,
-                                        res_dim->vf_count);
-#endif
         efrm_resource_manager_add_total(EFRM_RESOURCE_VI,
                                         efrm_nic->max_vis);
         efrm_resource_manager_add_total(EFRM_RESOURCE_PD,
@@ -655,9 +660,6 @@ efrm_nic_unplug(struct efhw_nic* nic, struct efx_dl_device *dl_device)
 static void efrm_nic_shutdown(struct linux_efhw_nic *lnic)
 {
 	struct efhw_nic *nic = &lnic->efrm_nic.efhw_nic;
-#ifdef CONFIG_SFC_RESOURCE_VF
-        unsigned vi_base, vi_scale, vf_count;
-#endif
 
 	EFRM_TRACE("%s:", __func__);
 	EFRM_ASSERT(nic);
@@ -665,12 +667,6 @@ static void efrm_nic_shutdown(struct linux_efhw_nic *lnic)
 	efrm_vi_wait_nic_complete_flushes(nic);
 	linux_efrm_nic_dtor(lnic);
 
-#ifdef CONFIG_SFC_RESOURCE_VF
-        efrm_vf_nic_params(nic, &vi_base, &vi_scale, &vf_count);
-
-        efrm_resource_manager_del_total(EFRM_RESOURCE_VF,
-                                        vf_count);
-#endif
         efrm_resource_manager_del_total(EFRM_RESOURCE_VI,
                                         lnic->efrm_nic.max_vis);
         efrm_resource_manager_del_total(EFRM_RESOURCE_PD,
@@ -762,10 +758,6 @@ static int init_sfc_resource(void)
 	if (rc < 0)
 		goto failed_driverlink;
 
-#ifdef CONFIG_SFC_RESOURCE_VF
-	efrm_vf_driver_init();
-#endif
-
 #ifdef HAS_COMPAT_PAT_WC
 	compat_pat_wc_inited = 0;
 	if (pio)
@@ -796,10 +788,6 @@ static void cleanup_sfc_resource(void)
 		compat_pat_wc_inited = 0;
 		compat_pat_wc_shutdown();
 	}
-#endif
-
-#ifdef CONFIG_SFC_RESOURCE_VF
-	efrm_vf_driver_fini();
 #endif
 
 	/* Unregister from driverlink first, free

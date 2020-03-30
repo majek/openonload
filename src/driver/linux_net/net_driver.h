@@ -1,18 +1,3 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
 /****************************************************************************
  * Driver for Solarflare network controllers and boards
  * Copyright 2005-2006 Fen Systems Ltd.
@@ -94,7 +79,7 @@
  *
  **************************************************************************/
 
-#define EFX_DRIVER_VERSION	"4.15.3.1011"
+#define EFX_DRIVER_VERSION	"4.15.4.1003"
 
 #ifdef DEBUG
 #define EFX_WARN_ON_ONCE_PARANOID(x) WARN_ON_ONCE(x)
@@ -533,11 +518,9 @@ struct efx_rx_queue {
 	unsigned int max_fill;
 	unsigned int fast_fill_trigger;
 	unsigned int min_fill;
-	unsigned int min_overfill;
 	unsigned int recycle_count;
-	struct delayed_work slow_fill_work;
 	unsigned int slow_fill_count;
-	unsigned int failed_flush_count;
+	struct delayed_work slow_fill_work;
 	/* Statistics to supplement MAC stats */
 	unsigned long rx_packets;
 #if defined(EFX_NOT_UPSTREAM)
@@ -551,6 +534,7 @@ struct efx_rx_queue {
 #endif
 	struct sk_buff *skb_cache[SKB_CACHE_SIZE];
 	unsigned int skb_cache_next_unused;
+	unsigned int failed_flush_count;
 
 #ifdef CONFIG_SFC_DEBUGFS
 	struct dentry *debug_dir;
@@ -1376,6 +1360,7 @@ struct efx_vport {
  * @num_mac_stats: Number of MAC stats reported by firmware (MAC_STATS_NUM_STATS
  *	field of %MC_CMD_GET_CAPABILITIES_V4 response, or %MC_CMD_MAC_NSTATS)
  * @stats_buffer: DMA buffer for statistics
+ * @mc_initial_stats: Buffer for statistics as they were when probing the device
  * @phy_type: PHY type
  * @phy_op: PHY interface
  * @phy_data: PHY private data (including PHY-specific stats)

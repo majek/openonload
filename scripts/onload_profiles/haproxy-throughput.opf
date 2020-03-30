@@ -1,7 +1,0 @@
-# OpenOnload profile for HAProxy running at the highest scale, e.g. for use
-# with Internet traffic
-
-onload_import haproxy
-
-onload_import throughput
-onload_import wan-traffic

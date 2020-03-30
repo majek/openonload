@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 ** <L5_PRIVATE L5_SOURCE>
 **   Copyright: (c) Level 5 Networks Limited.
@@ -25,7 +12,6 @@
 #include <ci/internal/transport_config_opt.h>
 # include <onload/linux_onload_internal.h>
 # include <onload/linux_onload.h>
-# include <onload/linux_sock_ops.h>
 # include <onload/linux_trampoline.h>
 #include <onload/tcp_helper_endpoint.h>
 #include <onload/tcp_helper_fns.h>
@@ -35,12 +21,19 @@
 #include <onload/version.h>
 #include <onload/dshm.h>
 #include <onload/nic.h>
+#if CI_CFG_BPF && ! defined NO_BPF
+#include <onload/bpf_internal.h>
+#endif
 #ifdef ONLOAD_OFE
 #include "ofe/onload.h"
 #endif
 #include "onload_kernel_compat.h"
 #include <onload/cplane_driver.h>
+#include <ci/efrm/vi_resource_manager.h>
+#include <ci/efrm/efrm_client.h>
 #include "oof_impl.h"
+#include "tcp_helper_resource.h"
+#include "tcp_helper_stats_dump.h"
 
 int
 efab_ioctl_get_ep(ci_private_t* priv, oo_sp sockp,
@@ -186,6 +179,33 @@ efab_tcp_helper_sock_attach_common(tcp_helper_resource_t* trs,
   return rc;
 }
 
+/* We always need an OS socket for UDP endpoints.
+ * We don't want a backing socket for TCP endpoints in the next cases:
+ * - sockets will be cached.
+ * - sockets with local shared ports and IP_TRANSPARENT set, as we can't
+ * tell that yet, unless we're in a stack configuration that doesn't
+ * support IP_TRANSPARENT.
+ *
+ * We could always defer creation of OS sockets for TCP, as we have to
+ * support that for the IP_TRANSPARENT case, but until this feature has
+ * matured a bit we'll err on the side of caution and only use it where it
+ * might actually be needed.
+ * Note: in scalable active (non transparent mode) we always create OS backing
+ * socket to reserve their own local ip/port
+ */
+static int /*bool*/
+efab_tcp_helper_os_sock_is_needed(ci_netif* netif, int fd_type)
+{
+  if( ((NI_OPTS(netif).scalable_filter_enable !=
+       CITP_SCALABLE_FILTERS_ENABLE)
+#if CI_CFG_FD_CACHING
+      && (NI_OPTS(netif).sock_cache_max == 0 )
+#endif
+      ) || (fd_type == CI_PRIV_TYPE_UDP_EP) )
+    return 1;
+
+  return 0;
+}
 
 /* This ioctl may be entered with or without the stack lock.  This has two
  * immediate implications:
@@ -231,21 +251,10 @@ efab_tcp_helper_sock_attach(ci_private_t* priv, void *arg)
 
   flags = efab_tcp_helper_sock_attach_setup_flags(&sock_type);
 
-  /* We always need an OS socket for UDP endpoints, so grab one here.  In the
-   * TCP case we don't want a backing socket for sockets with IP_TRANSPARENT
-   * set, but we can't tell that yet, unless we're in a stack configuration
-   * that doesn't support IP_TRANSPARENT.
-   *
-   * We could always defer creation of OS sockets for TCP, as we have to
-   * support that for the IP_TRANSPARENT case, but until this feature has
-   * matured a bit we'll err on the side of caution and only use it where it
-   * might actually be needed.
-   * Note: in scalable active (non transparent mode) we always create OS backing
-   * socket to reserve their own local ip/port
+  /* We always need an OS socket for UDP endpoints.
+   * Creation of the OS socket may be deferred for all TCP cases.
    */
-  if( (NI_OPTS(&trs->netif).scalable_filter_enable !=
-       CITP_SCALABLE_FILTERS_ENABLE) ||
-      (fd_type == CI_PRIV_TYPE_UDP_EP) ) {
+  if( efab_tcp_helper_os_sock_is_needed(&trs->netif, fd_type) ) {
     rc = efab_create_os_socket(trs, ep, op->domain, sock_type, flags);
     if( rc < 0 ) {
       efab_tcp_helper_close_endpoint(trs, ep->id);
@@ -1098,19 +1107,6 @@ efab_tcp_helper_clear_epcache_rsop(ci_private_t* priv, void *unused)
 }
 #endif
 static int
-cicp_user_defer_send_rsop(ci_private_t *priv, void *arg)
-{
-  cp_user_defer_send_t *op = arg;
-  if (priv->thr == NULL)
-    return -EINVAL;
-  op->rc = cicp_user_defer_send(&priv->thr->netif, op->retrieve_rc,
-                                &op->os_rc, op->pkt, op->ifindex,
-                                op->next_hop);
-  /* We ALWAYS want os_rc in the UL, so we always return 0 and ioctl handler
-   * copies os_rc to UL. */
-  return 0;
-}
-static int
 efab_eplock_unlock_and_wake_rsop(ci_private_t *priv, void *unused)
 {
   if (priv->thr == NULL)
@@ -1149,25 +1145,28 @@ oo_ioctl_debug_op(ci_private_t *priv, void *arg)
   if( !ci_is_sysadmin() )  return -EPERM;
 
   switch( op->what ) {
-  case __CI_DEBUG_OP_DUMP_INODE__:
-    rc = efab_linux_dump_inode(op->u.fd);
-    break;
-  case __CI_DEBUG_OP_TRAMPOLINE__:
-    rc = efab_linux_trampoline_debug(&op->u.tramp_debug);
-    break;
-  case __CI_DEBUG_OP_FDS_DUMP__:
-    rc = efab_fds_dump(op->u.fds_dump_pid);
+  case __CI_DEBUG_OP_KILL_STACK__:
+    rc = tcp_helper_kill_stack_by_id(op->u.stack_id);
     break;
   case __CI_DEBUG_OP_DUMP_STACK__:
   case __CI_DEBUG_OP_NETSTAT_STACK__:
-    rc = tcp_helper_dump_stack(op->u.dump_stack.stack_id, 
+  case __CI_DEBUG_OP_NETIF_DUMP__:
+  case __CI_DEBUG_OP_NETIF_DUMP_EXTRA__:
+  case __CI_DEBUG_OP_DUMP_SOCKETS__:
+  case __CI_DEBUG_OP_STACK_STATS__:
+  case __CI_DEBUG_OP_STACK_MORE_STATS__:
+  case __CI_DEBUG_OP_IP_STATS__:
+  case __CI_DEBUG_OP_TCP_STATS__:
+  case __CI_DEBUG_OP_TCP_EXT_STATS__:
+  case __CI_DEBUG_OP_UDP_STATS__:
+  case __CI_DEBUG_OP_NETIF_CONFIG_OPTS_DUMP__:
+  case __CI_DEBUG_OP_STACK_TIME__:
+  case __CI_DEBUG_OP_VI_INFO__:
+    rc = tcp_helper_dump_stack(op->u.dump_stack.stack_id,
                                op->u.dump_stack.orphan_only,
                                CI_USER_PTR_GET(op->u.dump_stack.user_buf),
                                op->u.dump_stack.user_buf_len,
                                op->what);
-    break;
-  case __CI_DEBUG_OP_KILL_STACK__:
-    rc = tcp_helper_kill_stack_by_id(op->u.stack_id);
     break;
   default:
     rc = -EINVAL;
@@ -1395,12 +1394,46 @@ static int efab_tcp_helper_alloc_active_wild_rsop(ci_private_t *priv,
 
   if( trs->netif.state->active_wild_n <
       NI_OPTS(&trs->netif).tcp_shared_local_ports_max )
-    return tcp_helper_increase_active_wild_pool(trs, aaw->laddr_be32);
+    return tcp_helper_increase_active_wild_pool(trs, aaw->laddr);
 
   return -ENOBUFS;
 }
 
 
+
+static int efab_tcp_helper_evq_poll_rsop(ci_private_t *priv, void* arg)
+{
+  tcp_helper_resource_t* trs = priv->thr;
+  ci_uint32 *vp = arg;
+
+  if( trs == NULL ) {
+    LOG_E(ci_log("%s: ERROR: not attached to a stack", __FUNCTION__));
+    return -EINVAL;
+  }
+
+  return ci_netif_evq_poll(&trs->netif, *vp);
+}
+
+
+static int efab_tcp_helper_bpf_bind_rsop(ci_private_t* priv, void* arg)
+{
+#if CI_CFG_BPF && !defined NO_BPF
+  ci_hwport_id_t hwport;
+  tcp_helper_resource_t* trs = priv->thr;
+  oo_bpf_bind_t* bind = arg;
+  if( bind->intf_i < 0 || bind->intf_i >= CI_CFG_MAX_INTERFACES )
+    return -EINVAL;
+  hwport = trs->netif.intf_i_to_hwport[bind->intf_i];
+  if( hwport == CI_HWPORT_ID_BAD )
+    return -EINVAL;
+  return ook_get_prog_fd_for_onload(bind->attach_point, trs->name, hwport);
+#else
+  /* It's possible to achieve a userspace which thinks it might be BPF-capable
+   * but a kernelspace which knows it isn't. If userspace manages to call
+   * this, therefore, we want to pretend that nothing's attached. */
+  return -ENOENT;
+#endif
+}
 
 
 /* "Donation" shared memory ioctls. */
@@ -1471,7 +1504,15 @@ static int oo_cplane_ipmod(ci_private_t *priv, void *arg)
   if( mib_id < 0 || mib_id > 1)
     return -EINVAL;
 
+  ci_assert(priv->priv_cp);
+  if( priv->priv_cp == NULL )
+    return -EINVAL;
+
   mib = &priv->priv_cp->mib[mib_id];
+
+  ci_assert(mib->dim);
+  if( mib->dim == NULL )
+    return -EINVAL;
 
 #if CI_CFG_IPV6
   rowid_max = (af == AF_INET) ? mib->dim->ipif_max : mib->dim->ip6if_max;
@@ -1555,6 +1596,48 @@ int oo_cp_notify_llap_monitors_rsop(ci_private_t *priv, void *arg)
 }
 
 
+static int oo_cp_check_veth_acceleration_rsop(ci_private_t *priv, void *arg)
+{
+  ci_ifid_t ifindex = *(ci_ifid_t*) arg;
+  struct oo_cplane_handle* cp;
+
+  int rc = cp_acquire_from_priv_if_server(priv, &cp);
+  if( rc != 0 )
+    return rc;
+
+  rc = oo_cp_check_veth_acceleration(cp, ifindex);
+  cp_release(cp);
+  return rc;
+}
+
+
+static int oo_cp_select_instance_rsop(ci_private_t *priv, void *arg)
+{
+  return oo_cp_select_instance(priv, *(ci_uint32*) arg);
+}
+
+
+static int oo_veth_acceleration_enabled_rsop(ci_private_t *priv, void *arg)
+{
+  return oo_accelerate_veth;
+}
+
+
+static int oo_cp_init_kernel_mibs_rsop(ci_private_t *priv, void *arg)
+{
+  cp_fwd_table_id* fwd_table_id = (cp_fwd_table_id*) arg;
+  struct oo_cplane_handle* cp;
+
+  int rc = cp_acquire_from_priv_if_server(priv, &cp);
+  if( rc != 0 )
+    return rc;
+
+  rc = oo_cp_init_kernel_mibs(cp, fwd_table_id);
+  cp_release(cp);
+  return rc;
+}
+
+
 /*************************************************************************
  * ATTENTION! ACHTUNG! ATENCION!                                         *
  * This table MUST be synchronised with enum of OO_OP_* operations!      *
@@ -1585,6 +1668,9 @@ oo_operations_table_t oo_operations[] = {
   op(OO_IOC_OOF_CP_LLAP_MOD,   oo_cplane_llapmod),
   op(OO_IOC_OOF_CP_LLAP_UPDATE_FILTERS, oo_cplane_llap_update_filters),
   op(OO_IOC_CP_NOTIFY_LLAP_MONITORS,   oo_cp_notify_llap_monitors_rsop),
+  op(OO_IOC_CP_CHECK_VETH_ACCELERATION, oo_cp_check_veth_acceleration_rsop),
+  op(OO_IOC_CP_SELECT_INSTANCE, oo_cp_select_instance_rsop),
+  op(OO_IOC_CP_INIT_KERNEL_MIBS, oo_cp_init_kernel_mibs_rsop),
 
   /* include/onload/ioctl.h: */
   op(OO_IOC_DBG_GET_STACK_INFO, efab_tcp_helper_get_info),
@@ -1650,8 +1736,6 @@ oo_operations_table_t oo_operations[] = {
   op(OO_IOC_TCP_CLOSE_OS_SOCK,     efab_tcp_helper_set_tcp_close_os_sock_rsop),
   op(OO_IOC_OS_POLLERR_CLEAR,      efab_tcp_helper_os_pollerr_clear),
 
-  op(OO_IOC_CP_USER_DEFER_SEND,    cicp_user_defer_send_rsop),
-
   op(OO_IOC_EPLOCK_WAKE,      efab_eplock_unlock_and_wake_rsop),
   op(OO_IOC_EPLOCK_LOCK_WAIT, efab_eplock_lock_wait_rsop),
 
@@ -1674,6 +1758,11 @@ oo_operations_table_t oo_operations[] = {
   op(OO_IOC_ALLOC_ACTIVE_WILD, efab_tcp_helper_alloc_active_wild_rsop),
 
 
+  op(OO_IOC_VETH_ACCELERATION_ENABLED, oo_veth_acceleration_enabled_rsop),
+
+  op(OO_IOC_EVQ_POLL, efab_tcp_helper_evq_poll_rsop),
+
+  op(OO_IOC_BPF_BIND, efab_tcp_helper_bpf_bind_rsop),
 /* Here come non contigous operations only, their position need to match
  * index accoriding to their placeholder */
   op(OO_IOC_CHECK_VERSION, oo_version_check_rsop),

@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 
 
 FTL_DECLARE(STRUCT_OO_PKTQ)
@@ -33,7 +20,6 @@ FTL_DECLARE(STRUCT_EF_VI_RXQ_STATE)
 FTL_DECLARE(STRUCT_EF_VI_STATE)
 #if CI_CFG_SUPPORT_STATS_COLLECTION
 FTL_DECLARE(STRUCT_IPV4_STATS)
-FTL_DECLARE(STRUCT_ICMP_STATS)
 FTL_DECLARE(STRUCT_UDP_STATS)
 FTL_DECLARE(STRUCT_IP_STATS)
 #endif
@@ -47,6 +33,7 @@ FTL_DECLARE(UNION_SLEEP_SEQ)
 FTL_DECLARE(STRUCT_WAITABLE)
 FTL_DECLARE(STRUCT_ETHER_HDR)
 FTL_DECLARE(STRUCT_IP4_HDR)
+FTL_DECLARE(UNION_IPX_HDR)
 FTL_DECLARE(STRUCT_IP4_PSEUDO_HDR)
 FTL_DECLARE(STRUCT_CICP_VERINFO)
 FTL_DECLARE(STRUCT_PMTU_STATE)

@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /****************************************************************************
  * Driver for Solarflare network controllers -
  *          resource management for Xen backend, OpenOnload, etc
@@ -65,13 +52,13 @@
 
 /* Allocate a set of IO pages, map them into the specified NIC (nic)
  * and initialise the efhw_iopages structure (p).  The pages will be
- * contiguous in the kernel address space but not in the device
- * address space.  The number of pages allocated is 1<<order.  The
+ * contiguous in the kernel address space and can be contiguous in the
+ * device address space.  The number of pages allocated is 1<<order. The
  * caller must release the pages using efhw_iopages_free when they is
  * no longer needed.  Returns zero on success or a negative error
  * number on failure. */
 extern int efhw_iopages_alloc(struct pci_dev *pci_dev, struct efhw_iopages *p,
-			      unsigned order,
+			      unsigned order, int phys_cont_only,
 			      efhw_iommu_domain *vf_domain,
 			      unsigned long iova_base);
 

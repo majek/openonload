@@ -1,18 +1,3 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
 /****************************************************************************
  * Driver for Solarflare network controllers and boards
  * Copyright 2008-2017 Solarflare Communications Inc.
@@ -209,12 +194,11 @@ int efx_mcdi_init(struct efx_nic *efx)
 	 * fail with EPERM if we are not the primary PF. In this case the
 	 * caller should retry with variant "don't care".
 	 */
-	rc = efx_mcdi_drv_attach(efx, true, MC_CMD_FW_LOW_LATENCY,
-				 &efx->mcdi->fn_flags);
-	if (rc == -EPERM) {
-		rc = efx_mcdi_drv_attach(efx, true, MC_CMD_FW_DONT_CARE,
-					 &efx->mcdi->fn_flags);
-	}
+	rc = efx_mcdi_drv_attach(efx, MC_CMD_FW_LOW_LATENCY,
+				 &efx->mcdi->fn_flags, false);
+	if (rc == -EPERM)
+		rc = efx_mcdi_drv_attach(efx, MC_CMD_FW_DONT_CARE,
+					 &efx->mcdi->fn_flags, false);
 	if (rc) {
 		netif_err(efx, probe, efx->net_dev,
 			  "Unable to register driver with MCPU\n");
@@ -476,7 +460,7 @@ static int efx_mcdi_errno(struct efx_nic *efx, unsigned int mcdi_err)
 	case MC_CMD_ERR_NO_EVB_PORT:
 		if (efx->type->is_vf)
 			return -EAGAIN;
-		/* Drop through. */
+		/* Fall through */
 	default:
 		return -EPROTO;
 	}
@@ -1703,7 +1687,7 @@ fail:
 
 static int efx_mcdi_drv_attach_attempt(struct efx_nic *efx,
 				       u32 fw_variant, u32 new_state,
-				       u32 *flags)
+				       u32 *flags, bool reattach)
 {
 	MCDI_DECLARE_BUF(inbuf, MC_CMD_DRV_ATTACH_IN_V2_LEN);
 	MCDI_DECLARE_BUF(outbuf, MC_CMD_DRV_ATTACH_EXT_OUT_LEN);
@@ -1735,11 +1719,11 @@ static int efx_mcdi_drv_attach_attempt(struct efx_nic *efx,
 		return rc;
 	}
 
-	if (rc || outlen < MC_CMD_DRV_ATTACH_OUT_LEN) {
+	if (!reattach && (rc || outlen < MC_CMD_DRV_ATTACH_OUT_LEN)) {
+		efx_mcdi_display_error(efx, MC_CMD_DRV_ATTACH, sizeof(inbuf),
+				       outbuf, outlen, rc);
 		if (outlen < MC_CMD_DRV_ATTACH_OUT_LEN)
 			rc = -EIO;
-		netif_err(efx, probe, efx->net_dev,
-			  "efx_mcdi_drv_attach failed (fatal): %d\n", rc);
 		return rc;
 	}
 
@@ -1747,7 +1731,8 @@ static int efx_mcdi_drv_attach_attempt(struct efx_nic *efx,
 		/* Were we already attached? */
 		u32 old_state = MCDI_DWORD(outbuf, DRV_ATTACH_OUT_OLD_STATE);
 
-		if (old_state & (1 << MC_CMD_DRV_ATTACH_IN_ATTACH_LBN))
+		if ((old_state & (1 << MC_CMD_DRV_ATTACH_IN_ATTACH_LBN)) &&
+		    !reattach)
 			netif_warn(efx, probe, efx->net_dev,
 				   "efx_mcdi_drv_attach attached when already attached\n");
 	}
@@ -1775,11 +1760,12 @@ static bool efx_mcdi_drv_attach_bad_spreading(u32 flags)
 
 int efx_mcdi_drv_detach(struct efx_nic *efx)
 {
-	return efx_mcdi_drv_attach_attempt(efx, MC_CMD_FW_DONT_CARE, 0, NULL);
+	return efx_mcdi_drv_attach_attempt(efx, MC_CMD_FW_DONT_CARE, 0, NULL,
+					   false);
 }
 
-int efx_mcdi_drv_attach(struct efx_nic *efx, bool driver_operating,
-			u32 fw_variant, u32 *out_flags)
+int efx_mcdi_drv_attach(struct efx_nic *efx, u32 fw_variant, u32 *out_flags,
+			bool reattach)
 {
 #ifdef EFX_NOT_UPSTREAM
 	bool request_spreading = false;
@@ -1801,7 +1787,7 @@ int efx_mcdi_drv_attach(struct efx_nic *efx, bool driver_operating,
 	}
 #endif
 
-	rc = efx_mcdi_drv_attach_attempt(efx, fw_variant, in, &flags);
+	rc = efx_mcdi_drv_attach_attempt(efx, fw_variant, in, &flags, reattach);
 
 #ifdef EFX_NOT_UPSTREAM
 	/* If we requested spreading and the firmware failed to provide that
@@ -1815,7 +1801,7 @@ int efx_mcdi_drv_attach(struct efx_nic *efx, bool driver_operating,
 		/* Retry without asking for spreading. */
 		in &= ~(1 << MC_CMD_DRV_ATTACH_IN_WANT_TX_ONLY_SPREADING_LBN);
 		rc = efx_mcdi_drv_attach_attempt(efx, fw_variant,
-						 in, &flags);
+						 in, &flags, reattach);
 	}
 #endif
 

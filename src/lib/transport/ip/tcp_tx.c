@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_SOURCE>
@@ -58,7 +45,7 @@ ci_inline void ci_ip_tcp_list_to_dmaq(ci_netif* ni, ci_tcp_state* ts,
     pkt = PKT_CHK(ni, pp);
     pp = pkt->next;
 #if CI_CFG_TIMESTAMPING
-    if( (ts->s.timestamping_flags & ONLOAD_SOF_TIMESTAMPING_TX_HARDWARE) &&
+    if( onload_timestamping_want_tx_nic(ts->s.timestamping_flags) &&
         CI_TCP_PAYLEN(oo_tx_ip_hdr(pkt), TX_PKT_TCP(pkt)) != 0 )
       pkt->flags |= CI_PKT_FLAG_TX_TIMESTAMPED;
 #endif
@@ -144,8 +131,8 @@ static void ci_ip_tcp_list_to_dmaq_striping(ci_netif* ni, ci_tcp_state* ts,
   do {
     pkt = PKT_CHK(ni, pp);
 #if CI_CFG_TIMESTAMPING
-    if( ts->s.timestamping_flags & ONLOAD_SOF_TIMESTAMPING_TX_HARDWARE &&
-        CI_TCP_PAYLEN(oo_tx_ip_hdr(pkt), TX_PKT_TCP(pkt)) != 0 )
+    if( onload_timestamping_want_tx_nic(ts->s.timestamping_flags) &&
+        CI_TCP_PAYLEN(oo_tx_ip_hdr(pkt), TX_PKT_IPX_TCP(af, pkt)) != 0 )
       pkt->flags |= CI_PKT_FLAG_TX_TIMESTAMPED;
 #endif
     ci_ip_set_mac_and_port(ni, &ts->s.pkt, pkt);
@@ -241,12 +228,13 @@ static void ci_ip_send_tcp_list(ci_netif* ni, ci_tcp_state* ts,
                                 oo_pkt_p head_id, ci_ip_pkt_fmt* tail_pkt)
 {
   ci_ip_pkt_fmt* pkt;
+  int af = ipcache_af(&ts->s.pkt);
   
   ci_assert(ci_netif_is_locked(ni));
   ci_assert(~ts->s.pkt.flags & CI_IP_CACHE_IS_LOCALROUTE);
 
   if(CI_LIKELY( ts->s.pkt.status == retrrc_success &&
-                oo_cp_verinfo_is_valid(ni->cplane, &ts->s.pkt.mac_integrity) )) {
+                oo_cp_ipcache_is_valid(ni, &ts->s.pkt) )) {
 fast:
 #if CI_CFG_PORT_STRIPING
     if( ts->tcpflags & CI_TCPT_FLAG_STRIPE ) {
@@ -258,31 +246,31 @@ fast:
       ci_ip_tcp_list_to_dmaq(ni, ts, head_id, tail_pkt);
   }
   else {
-    /* Update the ipcache first - ask for ARP as early as possible. */
     int prev_mtu = ts->s.pkt.mtu;
 
+    /* Update the ipcache first - ask for ARP as early as possible. */
     cicp_user_retrieve(ni, &ts->s.pkt, &ts->s.cp);
 
-    if( ts->s.pkt.status == retrrc_success ) {
-      if( ts->s.pkt.mtu != prev_mtu )
-        CI_PMTU_TIMER_NOW(ni, &ts->pmtus);
-    }
+    if( ts->s.pkt.status == retrrc_success && ts->s.pkt.mtu != prev_mtu )
+      ci_tcp_tx_change_mss(ni, ts);
 
     if(CI_UNLIKELY( ts->tcpflags & CI_TCPT_FLAG_MSG_WARM ))
       return;
 
     do {
       if( ts->s.pkt.status == retrrc_success &&
-          oo_cp_verinfo_is_valid(ni->cplane, &ts->s.pkt.mac_integrity) )
+          oo_cp_ipcache_is_valid(ni, &ts->s.pkt) )
         goto fast;
 
       pkt = PKT_CHK(ni, head_id);
       head_id = pkt->next;
 
 #if CI_CFG_TIMESTAMPING
-      if( (ts->s.timestamping_flags & ONLOAD_SOF_TIMESTAMPING_TX_HARDWARE) &&
-          CI_TCP_PAYLEN(oo_tx_ip_hdr(pkt), TX_PKT_TCP(pkt)) != 0 )
+      if( onload_timestamping_want_tx_nic(ts->s.timestamping_flags) &&
+          CI_TCP_PAYLEN(oo_tx_ip_hdr(pkt), TX_PKT_IPX_TCP(af, pkt)) != 0 )
         pkt->flags |= CI_PKT_FLAG_TX_TIMESTAMPED;
+#else
+      (void)af;
 #endif
 
       ci_ip_send_tcp_slow(ni, ts, pkt);
@@ -353,6 +341,7 @@ static int ci_tcp_tx_opt_sack(ci_uint8** opt, int used_length,
   ci_uint32 *sack_blocks;
   int block = 0;
   ci_uint32 start_be32, end_be32;
+  int af = ipcache_af(&ts->s.pkt);
 
   ci_assert(ts->tcpflags & CI_TCPT_FLAG_SACK);
 
@@ -388,7 +377,7 @@ static int ci_tcp_tx_opt_sack(ci_uint8** opt, int used_length,
     if( ! OO_PP_EQ(ts->dsack_block, OO_PP_NULL) &&
         used_length + 4 + 8 * 2  < CI_TCP_MAX_OPTS_LEN) {
       pkt = PKT_CHK(netif, ts->dsack_block);
-      start_be32 = PKT_TCP_HDR(pkt)->tcp_seq_be32;
+      start_be32 = PKT_IPX_TCP_HDR(af, pkt)->tcp_seq_be32;
       end_be32 = CI_BSWAP_BE32(PKT_TCP_RX_ROB(pkt)->end_block_seq);
       ADD_SACK_BLOCK(ts->dsack_block, 1, "DSACK companion SACKing");
     }
@@ -404,7 +393,7 @@ static int ci_tcp_tx_opt_sack(ci_uint8** opt, int used_length,
       pkt = PKT_CHK(netif, ts->last_sack[i]);
       if( j > 0 && OO_PP_EQ(OO_PKT_P(pkt), used[0]) )
         continue;
-      start_be32 = PKT_TCP_HDR(pkt)->tcp_seq_be32;
+      start_be32 = PKT_IPX_TCP_HDR(af, pkt)->tcp_seq_be32;
       end_be32 = CI_BSWAP_BE32(PKT_TCP_RX_ROB(pkt)->end_block_seq);
       ADD_SACK_BLOCK(ts->last_sack[i], 1, "SACKing (last_sack)");
     }
@@ -422,7 +411,7 @@ static int ci_tcp_tx_opt_sack(ci_uint8** opt, int used_length,
       if( OO_PP_EQ(cid, used[i]) )
         goto next_block;
     }
-    start_be32 = PKT_TCP_HDR(pkt)->tcp_seq_be32;
+    start_be32 = PKT_IPX_TCP_HDR(af, pkt)->tcp_seq_be32;
     end_be32 = CI_BSWAP_BE32(PKT_TCP_RX_ROB(pkt)->end_block_seq);
     ADD_SACK_BLOCK(cid, 1, "SACKing (ROB)");
   next_block:
@@ -637,21 +626,23 @@ void ci_tcp_enqueue_no_data(ci_tcp_state* ts, ci_netif* netif,
                             ci_ip_pkt_fmt* pkt)
 {
   ci_tcp_hdr* thdr;
-  int optlen = tcp_outgoing_opts_len(ts);
+  int af = ipcache_af(&ts->s.pkt);
+  int optlen = tcp_ipx_outgoing_opts_len(af, ts);
 
   ci_assert(ts);
   ci_assert(netif);
   ASSERT_VALID_PKT_ID(netif, OO_PKT_P(pkt));
   /* ASSERT_VALID_PKT(netif, pkt); iov_len may be -4 */
   ci_assert(pkt->refcount == 1 ); /* packet will be consumed. */
-  ci_assert(TS_TCP(ts)->tcp_flags & (CI_TCP_FLAG_SYN|CI_TCP_FLAG_FIN));
+  ci_assert(TS_IPX_TCP(ts)->tcp_flags & (CI_TCP_FLAG_SYN|CI_TCP_FLAG_FIN));
 
   oo_tx_pkt_layout_init(pkt);
+  ci_ipcache_update_flowlabel(netif, &ts->s);
   ci_pkt_init_from_ipcache(pkt, &ts->s.pkt);
 
   /* options for connection negotiation */
-  thdr = PKT_TCP_HDR(pkt);
-  if( TS_TCP(ts)->tcp_flags & CI_TCP_FLAG_SYN ) {
+  thdr = PKT_IPX_TCP_HDR(af, pkt);
+  if( TS_IPX_TCP(ts)->tcp_flags & CI_TCP_FLAG_SYN ) {
     ci_uint8* opt = CI_TCP_HDR_OPTS(thdr);
     opt += optlen;
     optlen += ci_tcp_tx_insert_syn_options(netif, ts->amss,
@@ -664,7 +655,7 @@ void ci_tcp_enqueue_no_data(ci_tcp_state* ts, ci_netif* netif,
 
   CI_TCP_HDR_SET_LEN(thdr, sizeof(*thdr) + optlen);
 
-  pkt->buf_len = ( oo_tx_ether_hdr_size(pkt) + sizeof(ci_ip4_hdr)
+  pkt->buf_len = ( oo_tx_ether_hdr_size(pkt) + CI_IPX_HDR_SIZE(af)
                    + sizeof(ci_tcp_hdr) + optlen );
   pkt->pay_len = pkt->buf_len;
   oo_offbuf_init(&pkt->buf, PKT_START(pkt) + pkt->buf_len, 0);
@@ -681,7 +672,8 @@ void ci_tcp_enqueue_no_data(ci_tcp_state* ts, ci_netif* netif,
 
   LOG_TC(log(LNTS_FMT "enqueue ["CI_TCP_FLAGS_FMT"] seq=%x",
              LNTS_PRI_ARGS(netif, ts),
-             CI_TCP_HDR_FLAGS_PRI_ARG(TX_PKT_TCP(pkt)), tcp_enq_nxt(ts) - 1));
+             CI_TCP_HDR_FLAGS_PRI_ARG(TX_PKT_IPX_TCP(af, pkt)),
+             tcp_enq_nxt(ts) - 1));
 
   ci_tcp_tx_advance(ts, netif);
 }
@@ -693,6 +685,7 @@ int ci_tcp_send_sim_synack(ci_netif* netif, ci_tcp_state *ts)
   ci_tcp_hdr* tcp;
   int optlen = 0;
   ci_uint8* opt;
+  int af = ipcache_af(&ts->s.pkt);
 
   ci_assert(netif);
   ci_assert(ts);
@@ -702,7 +695,7 @@ int ci_tcp_send_sim_synack(ci_netif* netif, ci_tcp_state *ts)
   ci_assert(ci_ip_queue_is_valid(netif, &ts->retrans));
 
   pkt = PKT_CHK(netif, ts->retrans.head);
-  tcp = TX_PKT_TCP(pkt);
+  tcp = TX_PKT_IPX_TCP(af, pkt);
 
   /* check first packet on txq is the SYN */
   ci_assert(tcp->tcp_flags & CI_TCP_FLAG_SYN);
@@ -736,7 +729,7 @@ int ci_tcp_send_sim_synack(ci_netif* netif, ci_tcp_state *ts)
 
   LOG_TC(log(LNTS_FMT "simultaneous SYN-ACK ["CI_TCP_FLAGS_FMT"]",
              LNTS_PRI_ARGS(netif, ts),
-             CI_TCP_HDR_FLAGS_PRI_ARG(TX_PKT_TCP(pkt))));
+             CI_TCP_HDR_FLAGS_PRI_ARG(TX_PKT_IPX_TCP(af, pkt))));
 
   /* Set length of the first (single) segment */
   pkt->buf_len = pkt->pay_len = 
@@ -762,10 +755,11 @@ int ci_tcp_synrecv_send(ci_netif* netif, ci_tcp_socket_listen* tls,
 {
   ci_ip_cached_hdrs ipcache_storage;
   ci_tcp_hdr* thdr;
-  ci_ip4_hdr* iphdr;
+  ci_ipx_hdr_t* iphdr;
   ci_uint8* opt;
   ci_uint32 seq;
   int rc, optlen;
+  int af = CI_IS_ADDR_IP6(tsr->l_addr) ? AF_INET6 : AF_INET;
 
   ci_assert(netif);
   ci_assert(tls);
@@ -777,8 +771,8 @@ int ci_tcp_synrecv_send(ci_netif* netif, ci_tcp_socket_listen* tls,
               ipcache->status == retrrc_nomac ||
               (ipcache->status == retrrc_localroute &&
                (ipcache->flags & CI_IP_CACHE_IS_LOCALROUTE)));
-    ci_assert_equal(ipcache->ip.ip_daddr_be32, tsr->r_addr);
-    ci_assert_equal(ipcache->ip_saddr.ip4, tsr->l_addr);
+    ci_assert(CI_IPX_ADDR_EQ(ipcache_raddr(ipcache), tsr->r_addr));
+    ci_assert(CI_IPX_ADDR_EQ(ipcache_laddr(ipcache), tsr->l_addr));
     ci_assert_equal(ipcache->dport_be16, tsr->r_port);
   }
 
@@ -794,18 +788,29 @@ int ci_tcp_synrecv_send(ci_netif* netif, ci_tcp_socket_listen* tls,
 
   /* hdrs for SYN-ACK */
   oo_tx_pkt_layout_init(pkt);
-  oo_tx_ether_type_set(pkt, CI_ETHERTYPE_IP);
-  iphdr = oo_tx_ip_hdr(pkt);
-  ci_ip_hdr_init_fixed(iphdr, IPPROTO_TCP, CI_IP_DFLT_TTL, CI_IP_DFLT_TOS);
-  iphdr->ip_saddr_be32 = tsr->l_addr;
-  iphdr->ip_daddr_be32 = tsr->r_addr;
+  iphdr = oo_tx_ipx_hdr(af, pkt);
+#if CI_CFG_IPV6
+  if( CI_IS_ADDR_IP6(tsr->l_addr) ) {
+    oo_tx_ether_type_set(pkt, CI_ETHERTYPE_IP6);
+  }
+  else
+#endif
+  {
+    oo_tx_ether_type_set(pkt, CI_ETHERTYPE_IP);
+    iphdr->ip4.ip_check_be16 = 0;
+    iphdr->ip4.ip_id_be16 = 0;
+  }
+  ci_ipx_hdr_init_fixed(oo_tx_ipx_hdr(af, pkt), af, IPPROTO_TCP, CI_IP_DFLT_TTL,
+                        sock_tos_tclass(af, &tls->s));
+  TX_PKT_SET_SADDR(af, pkt, tsr->l_addr);
+  TX_PKT_SET_DADDR(af, pkt, tsr->r_addr);
 
   /* If sending or retransmitting a SYN, we want to use the ISN.  Otherwise
   ** the only sequence number that can be sent from SYNRECV is the ISN+1.
   */
   seq = (tcp_flags & CI_TCP_FLAG_SYN) ? tsr->snd_isn : tsr->snd_isn + 1;
 
-  thdr = PKT_TCP_HDR(pkt);
+  thdr = PKT_IPX_TCP_HDR(af, pkt);
   thdr->tcp_urg_ptr_be16 = 0;
   thdr->tcp_source_be16 = sock_lport_be16(&tls->s);
   thdr->tcp_dest_be16   = tsr->r_port;
@@ -829,18 +834,28 @@ int ci_tcp_synrecv_send(ci_netif* netif, ci_tcp_socket_listen* tls,
 
   if( ipcache == NULL ) {
     ipcache = &ipcache_storage;
-    ci_ip_cache_init(ipcache);
+    ci_ip_cache_init(ipcache, CI_ADDR_AF(tsr->l_addr));
     ci_ip_send_pkt_lookup(netif, &tls->s.cp, pkt, ipcache);
   }
+
+#if CI_CFG_IPV6
+  if( IS_AF_INET6(af) && tls->s.s_flags & CI_SOCK_FLAG_AUTOFLOWLABEL_REQ ) {
+    ci_uint32 flowlabel = ci_make_flowlabel(netif, tsr->l_addr,
+        thdr->tcp_source_be16, tsr->r_addr, thdr->tcp_dest_be16, IPPROTO_TCP);
+    ci_ip6_set_flowlabel_be32(&ipcache->ipx.ip6, flowlabel);
+    TX_PKT_SET_FLOWLABEL(af, pkt, flowlabel);
+  }
+#endif
 
   if( (tcp_flags & CI_TCP_FLAG_SYN) &&
       (ipcache->status == retrrc_success ||
        ipcache->status == retrrc_nomac ||
        OO_SP_NOT_NULL(tsr->local_peer)) ) {
-    tsr->amss = ci_tcp_amss(netif, &tls->c, ipcache->mtu, __func__);
+    tsr->amss = ci_tcp_amss(netif, &tls->c, ipcache, __func__);
     optlen += ci_tcp_tx_insert_syn_options(netif, tsr->amss,
                                            tsr->tcpopts.flags,
                                            tsr->rcv_wscl, &opt);
+    pkt->pf.tcp_tx.sock_id = OO_SP_NULL;
   }
   /* NB. If [ipcache->status] has some other value, then packet won't be
    * sent in any case.
@@ -850,12 +865,11 @@ int ci_tcp_synrecv_send(ci_netif* netif, ci_tcp_socket_listen* tls,
                                                   tsr->rcv_wscl);
   thdr->tcp_window_be16 = CI_BSWAP_BE16(thdr->tcp_window_be16);
 
-  iphdr->ip_check_be16 = 0;
-  iphdr->ip_id_be16 = 0;
-  ci_tcp_ip_hdr_init(iphdr, sizeof(ci_ip4_hdr) + sizeof(ci_tcp_hdr) + optlen);
+  ci_tcp_ipx_hdr_init(af, iphdr,
+                      CI_IPX_HDR_SIZE(af) + sizeof(ci_tcp_hdr) + optlen);
   CI_TCP_HDR_SET_LEN(thdr, sizeof(*thdr) + optlen);
 
-  pkt->buf_len = ( oo_tx_ether_hdr_size(pkt) + sizeof(ci_ip4_hdr)
+  pkt->buf_len = ( oo_tx_ether_hdr_size(pkt) + CI_IPX_HDR_SIZE(af)
                    + sizeof(ci_tcp_hdr) + optlen );
   pkt->pay_len = pkt->buf_len;
 
@@ -880,7 +894,8 @@ int ci_tcp_synrecv_send(ci_netif* netif, ci_tcp_socket_listen* tls,
 int ci_tcp_retrans_one(ci_tcp_state* ts, ci_netif* netif, ci_ip_pkt_fmt* pkt)
 {
   ci_tcp_hdr* tcp;
-  ci_ip4_hdr* iphdr;
+  int af = ipcache_af(&ts->s.pkt);
+
   ci_assert(ts);
   ci_assert(netif);
 
@@ -900,8 +915,7 @@ int ci_tcp_retrans_one(ci_tcp_state* ts, ci_netif* netif, ci_ip_pkt_fmt* pkt)
   CITP_STATS_NETIF_INC(netif, retransmits);
   ++ts->stats.total_retrans;
 
-  iphdr = oo_tx_ip_hdr(pkt);
-  tcp = TX_PKT_TCP(pkt);
+  tcp = TX_PKT_IPX_TCP(af, pkt);
 
   /* To retransmit a packet it has to have already been sent.  And we
   ** should only retransmit segments that consume sequence space.
@@ -912,8 +926,8 @@ int ci_tcp_retrans_one(ci_tcp_state* ts, ci_netif* netif, ci_ip_pkt_fmt* pkt)
   /* The sequence space consumed should match the bytes in the buffer
   ** (unless it contains a SYN or FIN).
   */
-  if (!(tcp->tcp_flags & (CI_TCP_FLAG_SYN|CI_TCP_FLAG_FIN)))
-    ci_assert_equal(sizeof(ci_ip4_hdr) + sizeof(*tcp) + CI_TCP_HDR_OPT_LEN(tcp)
+  if ( af == AF_INET && !(tcp->tcp_flags & (CI_TCP_FLAG_SYN|CI_TCP_FLAG_FIN)))
+    ci_assert_equal(CI_IPX_HDR_SIZE(af) + sizeof(*tcp) + CI_TCP_HDR_OPT_LEN(tcp)
                     + SEQ_SUB(pkt->pf.tcp_tx.end_seq, pkt->pf.tcp_tx.start_seq),
                     oo_tx_l3_len(pkt));
 
@@ -932,16 +946,15 @@ int ci_tcp_retrans_one(ci_tcp_state* ts, ci_netif* netif, ci_ip_pkt_fmt* pkt)
 
   /* Finish-off the TCP header (using latest ack and window). */
   tcp->tcp_ack_be32 = CI_BSWAP_BE32(tcp_rcv_nxt(ts));
-  tcp->tcp_window_be16 = TS_TCP(ts)->tcp_window_be16;
+  tcp->tcp_window_be16 = TS_IPX_TCP(ts)->tcp_window_be16;
 
-  ci_tcp_ip_hdr_init(iphdr, oo_tx_l3_len(pkt));
+  ci_tcp_ipx_hdr_init(af, oo_tx_ipx_hdr(af, pkt), oo_tx_l3_len(pkt));
 
   LOG_TL(log(LNT_FMT "RETRANSMIT id=%d ["CI_TCP_FLAGS_FMT"] s=%08x-%08x "
              "paylen=%d", LNT_PRI_ARGS(netif,ts), OO_PKT_FMT(pkt),
              CI_TCP_HDR_FLAGS_PRI_ARG(tcp), pkt->pf.tcp_tx.start_seq,
              pkt->pf.tcp_tx.end_seq,
-             CI_BSWAP_BE16(iphdr->ip_tot_len_be16) -
-             (CI_IP4_IHL(iphdr) + CI_TCP_HDR_LEN(tcp)));
+             ci_tx_pkt_ipx_tcp_payload_len(af, pkt));
          log(LNT_FMT"  "TCP_RCV_FMT,
              LNT_PRI_ARGS(netif, ts), TCP_RCV_PRI_ARG(ts));
          log(LNT_FMT"  "TCP_SND_FMT,
@@ -954,7 +967,7 @@ int ci_tcp_retrans_one(ci_tcp_state* ts, ci_netif* netif, ci_ip_pkt_fmt* pkt)
 #if CI_CFG_TIMESTAMPING
   if( (pkt->flags & (CI_PKT_FLAG_RTQ_RETRANS | CI_PKT_FLAG_TX_TIMESTAMPED)) ==
       CI_PKT_FLAG_TX_TIMESTAMPED )
-    pkt->pf.tcp_tx.first_tx_hw_stamp = pkt->tx_hw_stamp;
+    pkt->pf.tcp_tx.first_tx_hw_stamp = pkt->hw_stamp;
 #endif
   ci_tcp_tx_maybe_do_striping(pkt, ts);
   __ci_ip_send_tcp(netif, pkt, ts);
@@ -1047,7 +1060,8 @@ int ci_tcp_retrans(ci_netif* ni, ci_tcp_state* ts, int seq_limit,
     if( at_start_of_block )  ci_tcp_retrans_coalesce_block(ni, ts, pkt);
 
     seq_space = PKT_TCP_TX_SEQ_SPACE(pkt);
-    is_fin = (TX_PKT_TCP(pkt)->tcp_flags & CI_TCP_FLAG_FIN) ? 1 : 0;
+    is_fin = (TX_PKT_IPX_TCP(ipcache_af(&ts->s.pkt), pkt)->tcp_flags &
+              CI_TCP_FLAG_FIN) ? 1 : 0;
     if( seq_space - is_fin > tcp_eff_mss(ts) ) {
       /* This can happen if [eff_mss] changes.  We clear out sack info
       ** first because splitting will damage the sack data-structure.
@@ -1217,7 +1231,7 @@ static int ci_tcp_tx_handle_cork(ci_netif* ni, ci_tcp_state* ts,
   ci_assert(! (ts->tcpflags & CI_TCPT_FLAG_MSG_WARM));
   if( ts->s.tx_errno || (pkt->flags & CI_PKT_FLAG_TX_PSH_ON_ACK) ) {
     /* Push this frame out now. */
-    TX_PKT_TCP(pkt)->tcp_flags |= CI_TCP_FLAG_PSH;
+    TX_PKT_IPX_TCP(ipcache_af(&ts->s.pkt), pkt)->tcp_flags |= CI_TCP_FLAG_PSH;
     return 0;
   }
   else {
@@ -1244,7 +1258,7 @@ static int ci_tcp_tx_handle_cork(ci_netif* ni, ci_tcp_state* ts,
 static void ci_tcp_tx_advance_too_long(ci_netif* ni, ci_tcp_state* ts,
                                        ci_ip_pkt_fmt* pkt)
 {
-  const ci_tcp_hdr* tcp = TX_PKT_TCP(pkt);
+  const ci_tcp_hdr* tcp = TX_PKT_IPX_TCP(ipcache_af(&ts->s.pkt), pkt);
   int pay_len = PKT_TCP_TX_SEQ_SPACE(pkt);
   pay_len -= (tcp->tcp_flags & CI_TCP_FLAG_SYN) ? 1 : 0;
   pay_len -= (tcp->tcp_flags & CI_TCP_FLAG_FIN) ? 1 : 0;
@@ -1269,8 +1283,6 @@ void ci_tcp_tx_advance(ci_tcp_state* ts, ci_netif* ni)
 
   if( CI_UNLIKELY(ts->tcpflags & CI_TCPT_FLAG_NO_TX_ADVANCE) )
     return;
-
-  ci_tcp_metrics_on_tx(ni, ts);
 
   ci_tcp_tx_cwv_idle(ni, ts);
 
@@ -1325,11 +1337,11 @@ void ci_tcp_tx_advance_to(ci_netif* ni, ci_tcp_state* ts,
   ci_ip_pkt_fmt* last_pkt = NULL;
   oo_pkt_p id = sendq->head;
   int sent_num = 0;
+  int af = ipcache_af(&ts->s.pkt);
 
   while( 1 ) {
     ci_ip_pkt_fmt* pkt = PKT_CHK(ni, id);
-    ci_ip4_hdr* ip = oo_tx_ip_hdr(pkt);
-    ci_tcp_hdr* tcp = TX_PKT_TCP(pkt);
+    ci_tcp_hdr* tcp = TX_PKT_IPX_TCP(af, pkt);
 
     if(CI_UNLIKELY( PKT_TCP_TX_SEQ_SPACE(pkt) > tcp_eff_mss(ts) ))
       /* Likely MSS has changed (or FIN added to MSS segment).  If we're
@@ -1387,16 +1399,14 @@ void ci_tcp_tx_advance_to(ci_netif* ni, ci_tcp_state* ts,
      * segments because some old versions of Linux GRO require incrementing
      * ID in order to combine segments.
      */
-    ci_tcp_ip_hdr_init(ip, oo_tx_l3_len(pkt));
-    ip->ip_id_be16 = CI_BSWAP_BE16(ts->s.pkt.ip.ip_id_be16);
-    ++(ts->s.pkt.ip.ip_id_be16);
+    ci_tcp_ipx_hdr_init(af, oo_tx_ipx_hdr(af, pkt), oo_tx_l3_len(pkt));
 
     /* set the urgent pointer */
     ci_tcp_tx_set_urg_ptr(ts, ni, tcp);
 
     /* Finish-off the TCP header (using latest ack and window). */
     tcp->tcp_ack_be32 = CI_BSWAP_BE32(tcp_rcv_nxt(ts));
-    tcp->tcp_window_be16 = TS_TCP(ts)->tcp_window_be16;
+    tcp->tcp_window_be16 = TS_IPX_TCP(ts)->tcp_window_be16;
     ci_tcp_tx_maybe_do_striping(pkt, ts);
 
     LOG_TT(log(LNTS_FMT RCV_WND_FMT " snd=%08x-%08x-%08x enq=%08x",
@@ -1409,8 +1419,7 @@ void ci_tcp_tx_advance_to(ci_netif* ni, ci_tcp_state* ts,
                pkt->pf.tcp_tx.end_seq,
                (unsigned) CI_BSWAP_BE32(tcp->tcp_ack_be32),
                (unsigned) CI_BSWAP_BE16(tcp->tcp_window_be16),
-               CI_BSWAP_BE16(ip->ip_tot_len_be16) -
-               (CI_IP4_IHL(ip) + CI_TCP_HDR_LEN(tcp))));
+               ci_tx_pkt_ipx_tcp_payload_len(af, pkt)));
 
     tcp_snd_nxt(ts) = pkt->pf.tcp_tx.end_seq;
     sent_num++;
@@ -1531,6 +1540,7 @@ void ci_tcp_send_rst_with_flags(ci_netif* netif, ci_tcp_state* ts,
 {
   ci_ip_pkt_fmt* pkt;
   ci_tcp_hdr* tcp;
+  int af = ipcache_af(&ts->s.pkt);
 
   /* NB for CI_PKT_ALLOC_NO_REAP:
    * Reaping packets is a slow process with unguaranteed result.  In some
@@ -1553,10 +1563,12 @@ void ci_tcp_send_rst_with_flags(ci_netif* netif, ci_tcp_state* ts,
   }
 
   oo_tx_pkt_layout_init(pkt);
+  ci_ipcache_update_flowlabel(netif, &ts->s);
   ci_pkt_init_from_ipcache(pkt, &ts->s.pkt);
-  ci_tcp_ip_hdr_init(oo_tx_ip_hdr(pkt), sizeof(ci_ip4_hdr)+sizeof(ci_tcp_hdr));
+  ci_tcp_ipx_hdr_init(af, oo_tx_ipx_hdr(af, pkt),
+                      CI_IPX_HDR_SIZE(af) + sizeof(ci_tcp_hdr));
 
-  tcp = TX_PKT_TCP(pkt);
+  tcp = TX_PKT_IPX_TCP(af, pkt);
   tcp->tcp_urg_ptr_be16 = 0;
   tcp->tcp_flags = CI_TCP_FLAG_RST | extra_flags;
   tcp->tcp_seq_be32 = CI_BSWAP_BE32(tcp_snd_nxt(ts) + ts->snd_delegated);
@@ -1574,7 +1586,7 @@ void ci_tcp_send_rst_with_flags(ci_netif* netif, ci_tcp_state* ts,
             (unsigned) CI_BSWAP_BE32(tcp->tcp_ack_be32)));
 
   pkt->buf_len = pkt->pay_len = 
-    oo_tx_ether_hdr_size(pkt) + sizeof(ci_ip4_hdr) + sizeof(ci_tcp_hdr);
+    oo_tx_ether_hdr_size(pkt) + CI_IPX_HDR_SIZE(af) + sizeof(ci_tcp_hdr);
   ci_ip_send_tcp(netif, pkt, ts);
   CI_TCP_STATS_INC_OUT_SEGS(netif);
   CI_IP_SOCK_STATS_ADD_TXBYTE(ts, pkt->buf_len);
@@ -1594,9 +1606,10 @@ void ci_tcp_send_rst(ci_netif* netif, ci_tcp_state* ts)
 #ifdef __KERNEL__
 int ci_tcp_reset_untrusted(ci_netif *netif, ci_tcp_state *ts)
 {
-  ci_ip4_hdr *ip;
+  ci_ipx_hdr_t* ipx;
   ci_tcp_hdr *tcp;
-  int rc, ip_len;
+  int rc, payload_len;
+  int af = ipcache_af(&ts->s.pkt);
 
   /* local_peer might be corrupted, but from the other side there is no
    * need to send RST to the local peer. */
@@ -1609,24 +1622,45 @@ int ci_tcp_reset_untrusted(ci_netif *netif, ci_tcp_state *ts)
     return -ENOENT;
   }
 
-  ip = ci_alloc(sizeof(ci_tcp_hdr) + sizeof(ci_ip4_hdr));
-  if( !ip )
+  ipx = ci_alloc(sizeof(ci_tcp_hdr) + CI_IPX_HDR_SIZE(af));
+  if( !ipx )
     return -ENOMEM;
 
   /* Check for corrupted values in ts */
-  if( ts->outgoing_hdrs_len < sizeof(ci_tcp_hdr) + sizeof(ci_ip4_hdr) ||
-      ts->s.pkt.ip.ip_ihl_version !=
-                            CI_IP4_IHL_VERSION( sizeof(ci_ip4_hdr) ) ||
-      ts->s.pkt.ip.ip_protocol != IPPROTO_TCP ||
-      ts->s.pkt.ip.ip_frag_off_be16 != CI_IP4_FRAG_DONT )
+  if( ts->outgoing_hdrs_len < sizeof(ci_tcp_hdr) + CI_IPX_HDR_SIZE(af) ||
+      ipx_hdr_protocol(af, &ts->s.pkt.ipx) != IPPROTO_TCP ) {
+    ci_free(ipx);
     return -EFAULT;
+  }
 
-  memcpy(ip, &ts->s.pkt.ip, sizeof(ci_ip4_hdr));
-  ip_len = sizeof(ci_ip4_hdr) + sizeof(ci_tcp_hdr);
-  ip->ip_tot_len_be16 = CI_BSWAP_BE16(ip_len);
-  ci_assert_equal(ip->ip_check_be16, 0);
+#if CI_CFG_IPV6
+  if( af == AF_INET6 ) {
+    if( CI_IP6_VERSION(&ts->s.pkt.ipx.ip6) != 6 ) {
+      ci_free(ipx);
+      return -EFAULT;
+    }
+  }
+  else
+#endif
+  {
+    if( ts->s.pkt.ipx.ip4.ip_ihl_version !=
+                              CI_IP4_IHL_VERSION( sizeof(ci_ip4_hdr) ) ||
+        ts->s.pkt.ipx.ip4.ip_frag_off_be16 != CI_IP4_FRAG_DONT ) {
+      ci_free(ipx);
+      return -EFAULT;
+    }
+  }
 
-  tcp = (ci_tcp_hdr *)(ip + 1);
+  memcpy(ipx, &ts->s.pkt.ipx, CI_IPX_HDR_SIZE(af));
+  payload_len = sizeof(ci_tcp_hdr);
+  ipx_hdr_set_payload_len(af, ipx, payload_len);
+
+#if CI_CFG_IPV6
+  if( af == AF_INET )
+#endif
+  ci_assert_equal(ipx->ip4.ip_check_be16, 0);
+
+  tcp = ipx_hdr_data(af, ipx);
   tcp->tcp_urg_ptr_be16 = 0;
   tcp->tcp_flags = CI_TCP_FLAG_RST;
   tcp->tcp_seq_be32 = CI_BSWAP_BE32(tcp_snd_nxt(ts));
@@ -1637,15 +1671,16 @@ int ci_tcp_reset_untrusted(ci_netif *netif, ci_tcp_state *ts)
   CI_TCP_HDR_SET_LEN(tcp, sizeof(ci_tcp_hdr));
   tcp->tcp_check_be16 = 0;
 
-  LOG_E(ci_log(NT_FMT CI_IP_PRINTF_FORMAT":%d->"CI_IP_PRINTF_FORMAT":%d RESET",
+  LOG_E(ci_log(NT_FMT IPX_PORT_FMT "->" IPX_PORT_FMT " RESET",
                NT_PRI_ARGS(netif, ts),
-               CI_IP_PRINTF_ARGS(&ip->ip_saddr_be32),
+               IPX_ARG(AF_IP(ipx_hdr_saddr(af, ipx))),
                CI_BSWAP_BE16(tcp->tcp_source_be16),
-               CI_IP_PRINTF_ARGS(&ip->ip_daddr_be32),
+               IPX_ARG(AF_IP(ipx_hdr_daddr(af, ipx))),
                CI_BSWAP_BE16(tcp->tcp_dest_be16)));
-  rc = cicp_raw_ip_send(netif->cplane, ip, ip_len,
-                        ts->s.pkt.ifindex, ts->s.pkt.nexthop.ip4);
-  ci_free(ip);
+  rc = cicp_raw_ip_send(netif->cplane, af, ipx,
+                        CI_IPX_HDR_SIZE(af) + payload_len,
+                        ts->s.pkt.ifindex, ts->s.pkt.nexthop);
+  ci_free(ipx);
   return rc;
 }
 #endif
@@ -1662,9 +1697,10 @@ void ci_tcp_reply_with_rst(ci_netif* netif, ciip_tcp_rx_pkt* rxp)
   ci_ip_pkt_fmt* pkt = rxp->pkt;
   ci_tcp_hdr rtcp;
   ci_uint32 rtcp_endseq;
-  ci_ip4_hdr rip;
+  int af = oo_pkt_af(pkt);
+  ci_ipx_hdr_t rip;
   ci_tcp_hdr* tcp;
-  ci_ip4_hdr* ip;
+  ci_ipx_hdr_t* ip;
 
   ci_assert(netif);
   ASSERT_VALID_PKT(netif, pkt);
@@ -1672,7 +1708,7 @@ void ci_tcp_reply_with_rst(ci_netif* netif, ciip_tcp_rx_pkt* rxp)
   /* Remember some of the RX packet's properties before the packet becomes
    * invalid in the course of ci_netif_pkt_rx_to_tx(). */
   rtcp = *rxp->tcp;
-  rip = *oo_ip_hdr(pkt);
+  rip = *oo_ipx_hdr(pkt);
   rtcp_endseq = pkt->pf.tcp_rx.end_seq;
 
   if( (pkt = ci_netif_pkt_rx_to_tx(netif, pkt)) == NULL )
@@ -1682,16 +1718,32 @@ void ci_tcp_reply_with_rst(ci_netif* netif, ciip_tcp_rx_pkt* rxp)
   ** are fully kosher.  (Don't trust what they sent!)
   */
   oo_tx_pkt_layout_init(pkt);
-  oo_tx_ether_type_set(pkt, CI_ETHERTYPE_IP);
-  ip = oo_tx_ip_hdr(pkt);
-  ci_ip_hdr_init_fixed(ip, IPPROTO_TCP, CI_IP_DFLT_TTL, CI_IP_DFLT_TOS);
-  ip->ip_daddr_be32 = rip.ip_saddr_be32;
-  ip->ip_saddr_be32 = rip.ip_daddr_be32;
+  oo_tx_ether_type_set(pkt,
+                       af == AF_INET ? CI_ETHERTYPE_IP : CI_ETHERTYPE_IP6);
+  ip = oo_tx_ipx_hdr(af, pkt);
+  ci_ipx_hdr_init_fixed(ip, af, IPPROTO_TCP, CI_IP_DFLT_TTL,
+                        CI_IPX_DFLT_TOS_TCLASS(af));
+  ipx_hdr_set_daddr(af, ip, ipx_hdr_saddr(af, &rip));
+  ipx_hdr_set_saddr(af, ip, ipx_hdr_daddr(af, &rip));
 
-  tcp = (ci_tcp_hdr*) (ip + 1);  /* no IP options */
+  tcp = ipx_hdr_data(af, ip);
   tcp->tcp_urg_ptr_be16 = 0;
   tcp->tcp_source_be16 = rtcp.tcp_dest_be16;
   tcp->tcp_dest_be16 = rtcp.tcp_source_be16;
+
+#if CI_CFG_IPV6
+  {
+    ci_uint32 auto_flowlabels = NI_OPTS(netif).auto_flowlabels;
+    if( IS_AF_INET6(af) &&
+        (auto_flowlabels == CITP_IP6_AUTO_FLOW_LABEL_OPTOUT ||
+         auto_flowlabels == CITP_IP6_AUTO_FLOW_LABEL_FORCED) ) {
+      TX_PKT_SET_FLOWLABEL(af, pkt, ci_make_flowlabel(netif,
+          ipx_hdr_saddr(af, ip), tcp->tcp_source_be16, ipx_hdr_daddr(af, ip),
+          tcp->tcp_dest_be16, IPPROTO_TCP));
+    }
+  }
+#endif
+
   /* rfc793 p63-p75 describes ACK flag for RST generation
   ** if ACK flag set then use that as SEQ otherwise
   ** use 0 and fill out the ACK field of the reset segment
@@ -1707,21 +1759,19 @@ void ci_tcp_reply_with_rst(ci_netif* netif, ciip_tcp_rx_pkt* rxp)
   }
   CI_TCP_HDR_SET_LEN(tcp, sizeof(*tcp));
   tcp->tcp_window_be16 = 0;
-  ip->ip_check_be16 = 0;
-  ip->ip_id_be16 = 0;
   tcp->tcp_check_be16 = 0;
-  ci_tcp_ip_hdr_init(ip, sizeof(ci_ip4_hdr) + sizeof(ci_tcp_hdr));
+  ci_tcp_ipx_hdr_init(af, ip, CI_IPX_HDR_SIZE(af) + sizeof(ci_tcp_hdr));
 
-  LOG_TR(log(LN_FMT "RSTACK %s:%u->%s:%u s=%08x a=%08x",
-             LN_PRI_ARGS(netif), ip_addr_str(ip->ip_saddr_be32),
+  LOG_TR(log(LN_FMT "RSTACK "IPX_FMT":%u->"IPX_FMT":%u s=%08x a=%08x",
+             LN_PRI_ARGS(netif), IPX_ARG(AF_IP(ipx_hdr_saddr(af, ip))),
              (unsigned) CI_BSWAP_BE16(tcp->tcp_source_be16),
-             ip_addr_str(ip->ip_daddr_be32),
+             IPX_ARG(AF_IP(ipx_hdr_daddr(af, ip))),
              (unsigned) CI_BSWAP_BE16(tcp->tcp_dest_be16),
              (unsigned) CI_BSWAP_BE32(tcp->tcp_seq_be32),
              (unsigned) CI_BSWAP_BE32(tcp->tcp_ack_be32)));
 
   pkt->buf_len = pkt->pay_len = 
-    oo_tx_ether_hdr_size(pkt) + sizeof(ci_ip4_hdr) + sizeof(ci_tcp_hdr);
+    oo_tx_ether_hdr_size(pkt) + CI_IPX_HDR_SIZE(af) + sizeof(ci_tcp_hdr);
   if( pkt->intf_i == OO_INTF_I_LOOPBACK ) {
     ci_netif_pkt_hold(netif, pkt);
     ci_ip_local_send(netif, pkt, pkt->pf.tcp_tx.lo.rx_sock,
@@ -1730,7 +1780,7 @@ void ci_tcp_reply_with_rst(ci_netif* netif, ciip_tcp_rx_pkt* rxp)
   else {
     /* ?? TODO: should we respect here SO_BINDTODEVICE? */
     ci_ip_cached_hdrs ipcache;
-    ci_ip_cache_init(&ipcache);
+    ci_ip_cache_init(&ipcache, af);
     ci_ip_send_pkt_lookup(netif, NULL, pkt, &ipcache);
     ci_ip_send_pkt_send(netif, pkt, &ipcache);
   }
@@ -1750,6 +1800,7 @@ void ci_tcp_send_zwin_probe(ci_netif* netif, ci_tcp_state* ts)
   ci_tcp_hdr* tcp;
   ci_uint8* opt;
   int optlen = 0;
+  int af = ipcache_af(&ts->s.pkt);
 
   ci_assert(netif);
   ci_assert(ci_ip_queue_is_empty(&ts->retrans));
@@ -1763,8 +1814,9 @@ void ci_tcp_send_zwin_probe(ci_netif* netif, ci_tcp_state* ts)
   }
 
   oo_tx_pkt_layout_init(pkt);
+  ci_ipcache_update_flowlabel(netif, &ts->s);
   ci_pkt_init_from_ipcache(pkt, &ts->s.pkt);
-  tcp = TX_PKT_TCP(pkt);
+  tcp = TX_PKT_IPX_TCP(af, pkt);
   opt = CI_TCP_HDR_OPTS(tcp);
 
   /* Decrement the faststart counter by the number of bytes acked */
@@ -1784,9 +1836,9 @@ void ci_tcp_send_zwin_probe(ci_netif* netif, ci_tcp_state* ts)
 
   /* send seq with snd_una-1, to trigger an ack for unacceptable seq */
   tcp->tcp_seq_be32 = CI_BSWAP_BE32(tcp_snd_una(ts)-1);
-  ci_tcp_ip_hdr_init(oo_tx_ip_hdr(pkt),
-                     sizeof(ci_ip4_hdr) + sizeof(ci_tcp_hdr) + optlen);
-  pkt->buf_len = ( oo_tx_ether_hdr_size(pkt) + sizeof(ci_ip4_hdr)
+  ci_tcp_ipx_hdr_init(af, oo_tx_ipx_hdr(af, pkt),
+                      CI_IPX_HDR_SIZE(af) + sizeof(ci_tcp_hdr) + optlen);
+  pkt->buf_len = ( oo_tx_ether_hdr_size(pkt) + CI_IPX_HDR_SIZE(af)
                    + sizeof(ci_tcp_hdr) + optlen );
   pkt->pay_len = pkt->buf_len;
 
@@ -1795,7 +1847,7 @@ void ci_tcp_send_zwin_probe(ci_netif* netif, ci_tcp_state* ts)
 
   ci_tcp_tx_set_urg_ptr(ts, netif, tcp);
   tcp->tcp_ack_be32 = CI_BSWAP_BE32(tcp_rcv_nxt(ts));
-  tcp->tcp_window_be16 = TS_TCP(ts)->tcp_window_be16;
+  tcp->tcp_window_be16 = TS_IPX_TCP(ts)->tcp_window_be16;
 
   LOG_TT(log(LNT_FMT "ZWIN id=%i s=%08x a=%08x w=%u",
              LNT_PRI_ARGS(netif,ts), OO_PKT_FMT(pkt),
@@ -1870,6 +1922,7 @@ void ci_tcp_send_ack_rx(ci_netif* netif, ci_tcp_state* ts, ci_ip_pkt_fmt* pkt,
   ci_tcp_hdr* tcp;
   ci_uint8* opt;
   int optlen = 0;
+  int af = ipcache_af(&ts->s.pkt);
 
   CITP_STATS_NETIF_INC(netif, acks_sent);
 
@@ -1896,10 +1949,14 @@ void ci_tcp_send_ack_rx(ci_netif* netif, ci_tcp_state* ts, ci_ip_pkt_fmt* pkt,
   ci_assert( ! (pkt->flags & CI_PKT_FLAG_TX_PENDING));
 
   oo_tx_pkt_layout_init(pkt);
+  ci_ipcache_update_flowlabel(netif, &ts->s);
   ci_pkt_init_from_ipcache(pkt, &ts->s.pkt);
-  ci_assert_equal(ts->s.pkt.ip.ip_check_be16, 0); 
-  ci_assert_equal(oo_tx_ip_hdr(pkt)->ip_check_be16, 0);
-  tcp = TX_PKT_TCP(pkt);
+  if( !ipcache_is_ipv6(&ts->s.pkt) ) {
+    ci_assert_equal(ts->s.pkt.ipx.ip4.ip_check_be16, 0); 
+    ci_assert_equal(oo_tx_ip_hdr(pkt)->ip_check_be16, 0);
+  }
+
+  tcp = TX_PKT_IPX_TCP(af, pkt);
   ci_assert_equal(tcp->tcp_check_be16, 0);
   opt = CI_TCP_HDR_OPTS(tcp);
 
@@ -1928,10 +1985,10 @@ void ci_tcp_send_ack_rx(ci_netif* netif, ci_tcp_state* ts, ci_ip_pkt_fmt* pkt,
   ci_tcp_tx_set_urg_ptr(ts, netif, tcp);
 
   /* Rest of packet creation */
-  ci_tcp_ip_hdr_init(oo_tx_ip_hdr(pkt),
-                     sizeof(ci_ip4_hdr) + sizeof(ci_tcp_hdr) + optlen);
+  ci_tcp_ipx_hdr_init(af, oo_tx_ipx_hdr(af, pkt),
+                      CI_IPX_HDR_SIZE(af) + sizeof(ci_tcp_hdr) + optlen);
   tcp->tcp_ack_be32 = CI_BSWAP_BE32(tcp_rcv_nxt(ts));
-  tcp->tcp_window_be16 = TS_TCP(ts)->tcp_window_be16;
+  tcp->tcp_window_be16 = TS_IPX_TCP(ts)->tcp_window_be16;
 
   LOG_TT(log(LNT_FMT "ACK id=%i s=%08x a=%08x w(unscaled)=%u w_cur=%u",
              LNT_PRI_ARGS(netif,ts), OO_PKT_FMT(pkt),
@@ -1940,7 +1997,7 @@ void ci_tcp_send_ack_rx(ci_netif* netif, ci_tcp_state* ts, ci_ip_pkt_fmt* pkt,
              (unsigned) CI_BSWAP_BE16(tcp->tcp_window_be16),
              tcp_rcv_wnd_current(ts)));
 
-  pkt->buf_len = ( oo_tx_ether_hdr_size(pkt) + sizeof(ci_ip4_hdr)
+  pkt->buf_len = ( oo_tx_ether_hdr_size(pkt) + CI_IPX_HDR_SIZE(af)
                    + sizeof(ci_tcp_hdr) + optlen );
   pkt->pay_len = pkt->buf_len;
 
@@ -1951,35 +2008,57 @@ void ci_tcp_send_ack_rx(ci_netif* netif, ci_tcp_state* ts, ci_ip_pkt_fmt* pkt,
   ci_netif_pkt_release(netif, pkt);
 }
 
-#if CI_CFG_TAIL_DROP_PROBE
-int ci_tcp_send_taildrop_probe(ci_netif *netif, ci_tcp_state *ts)
+int/*bool*/
+ci_tcp_may_send_ack_ratelimited(ci_netif* netif, ci_tcp_state* ts)
 {
-  ci_ip_pkt_fmt *pkt;
-  ci_ip_pkt_queue *rtq = &ts->retrans;
-
-  ci_assert(ci_ip_queue_not_empty(rtq));
-  ci_assert(NI_OPTS(netif).tail_drop_probe);
-
-  /* Retransmit the tail or the retransmit queue */
-  pkt = PKT_CHK(netif, rtq->tail);
-  if( ! (pkt->flags & CI_PKT_FLAG_TX_PENDING) ) {
-    ci_tcp_retrans_one(ts, netif, pkt);
-    /* success */
+  if( ci_tcp_time_now(netif) - ts->t_last_invalid_ack >=
+      NI_CONF(netif).tconst_invalid_ack_ratelimit ) {
+    ts->t_last_invalid_ack = ci_tcp_time_now(netif);
     return 1;
   }
-  else{
-    /* tail in use, return failed */
+
+  CITP_STATS_NETIF_INC(netif, invalid_ack_limited);
+  return 0;
+}
+
+/* Return 1 if the packet have been consumed. */
+int ci_tcp_send_challenge_ack(ci_netif* netif, ci_tcp_state* ts,
+                               ci_ip_pkt_fmt* pkt)
+{
+  if( ! ci_tcp_may_send_ack_ratelimited(netif, ts) )
+    return 0;
+
+  if( netif->state->challenge_ack_time != ci_tcp_time_now(netif) ) {
+    netif->state->challenge_ack_time = ci_tcp_time_now(netif);
+    netif->state->challenge_ack_num = 0;
+  }
+  if( netif->state->challenge_ack_num >=
+      NI_CONF(netif).tconst_challenge_ack_limit ) {
+    CITP_STATS_NETIF_INC(netif, challenge_ack_limited);
     return 0;
   }
+
+  netif->state->challenge_ack_num++;
+  pkt = ci_netif_pkt_rx_to_tx(netif, pkt);
+  if( pkt == NULL ) {
+    /* Avoid more challenge ACK during this tick. */
+    netif->state->challenge_ack_num =
+                    NI_CONF(netif).tconst_challenge_ack_limit;
+    CITP_STATS_NETIF_INC(netif, challenge_ack_out_of_pkts);
+    return 1; /* The packet have been consumed in any case */
+  }
+  ci_tcp_send_ack_rx(netif, ts, pkt, 0/*sock_locked*/, 0/*update_window*/);
+  CITP_STATS_NETIF_INC(netif, challenge_ack_sent);
+  return 1;
 }
-#endif
 
 /**********************************************************************/
 /**********************************************************************/
 /**********************************************************************/
 
-void ci_ip_hdr_init_fixed(ci_ip4_hdr* ip, int protocol,
-                          unsigned ttl, unsigned tos)
+static inline void
+ci_ip_hdr_init_fixed(ci_ip4_hdr* ip, int protocol,
+                     unsigned ttl, unsigned tos)
 {
   ci_assert(ttl);
 
@@ -1988,6 +2067,30 @@ void ci_ip_hdr_init_fixed(ci_ip4_hdr* ip, int protocol,
   ip->ip_frag_off_be16 = CI_IP4_FRAG_DONT;
   ip->ip_ttl = (ci_uint8)ttl;
   ip->ip_protocol = (ci_uint8)protocol;
+}
+
+#if CI_CFG_IPV6
+static inline void
+ci_ip6_hdr_init_fixed(ci_ip6_hdr* ip6, int protocol, unsigned ttl,
+                      unsigned tclass)
+{
+  ci_assert(ttl);
+  ip6->prio_version = 6 << 4u;
+  ci_ip6_set_flowinfo(ip6, tclass, 0);
+  ip6->hop_limit = (ci_uint8)ttl;
+  ip6->next_hdr = (ci_uint8)protocol;
+}
+#endif
+
+void ci_ipx_hdr_init_fixed(ci_ipx_hdr_t* ip, int af, int protocol,
+                           unsigned ttl, unsigned tos)
+{
+#if CI_CFG_IPV6
+  if( af == AF_INET6 )
+    ci_ip6_hdr_init_fixed(&ip->ip6, protocol, ttl, tos);
+  else
+#endif
+    ci_ip_hdr_init_fixed(&ip->ip4, protocol, ttl, tos);
 }
 
 /*! \cidoxg_end */

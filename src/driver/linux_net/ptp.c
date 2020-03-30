@@ -1,18 +1,3 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
 /****************************************************************************
  * Driver for Solarflare network controllers and boards
  * Copyright 2011-2017 Solarflare Communications Inc.
@@ -2629,7 +2614,7 @@ static int efx_create_pps_worker(struct efx_ptp_data *ptp)
 	snprintf(busdevice, sizeof(busdevice), "%04x:%02x:%02x",
 		 pci_domain_nr(ptp->efx->pci_dev->bus),
 		 ptp->efx->pci_dev->bus->number,
-		 PCI_SLOT(ptp->efx->pci_dev->devfn));
+		 ptp->efx->pci_dev->devfn);
 
 	INIT_WORK(&ptp->pps_work, efx_ptp_pps_worker);
 #if defined(EFX_NOT_UPSTREAM)
@@ -3032,7 +3017,7 @@ static bool efx_ptp_rx(struct efx_channel *channel, struct sk_buff *skb)
 	unsigned int uuid_len;
 	u8 domain, *uuid;
 #endif
-	u8 *data;
+	u8 *data = skb->data;
 
 	match->expiry = jiffies + msecs_to_jiffies(PKT_EVENT_LIFETIME_MS);
 
@@ -3045,18 +3030,27 @@ static bool efx_ptp_rx(struct efx_channel *channel, struct sk_buff *skb)
 		match->vlan_tagged = !vlan_get_tag(skb, &match->vlan_tci);
 	else if ((skb->protocol == htons(ETH_P_8021Q) ||
 		  skb->protocol == htons(ETH_P_8021AD)) && pskb_may_pull(skb, VLAN_HLEN)) {
-		match->vlan_tagged = 1;
-		match->vlan_tci = skb->vlan_tci = ntohs(*((__be16 *)skb->data));
-		skb->protocol = *((__be16 *)(skb->data + 2));
-		skb_pull(skb, VLAN_HLEN);
+		/* VLAN tag has to be stripped away for Siena */
+		if (ptp->vlan_filter.num_vlan_tags != 0) {
+			match->vlan_tagged = 1;
+			match->vlan_tci = skb->vlan_tci = ntohs(*((__be16 *)skb->data));
+			skb->protocol = *((__be16 *)(skb->data + 2));
+			skb_pull(skb, VLAN_HLEN);
+		} else {
+			/* required because of the fixed offsets used below */
+			data += VLAN_HLEN;
+		}
 	}
 #endif
+
+	/* catch up with skb->data if there's a VLAN tag present */
+	if (match->vlan_tagged)
+		data += VLAN_HLEN;
 
 	/* Correct version? */
 	if (ptp->mode == MC_CMD_PTP_MODE_V1) {
 		if (!pskb_may_pull(skb, PTP_V1_MIN_LENGTH))
 			return false;
-		data = skb->data;
 		version = ntohs(*(__be16 *)&data[PTP_V1_VERSION_OFFSET]);
 		if (version != PTP_VERSION_V1) {
 			return false;
@@ -3070,7 +3064,6 @@ static bool efx_ptp_rx(struct efx_channel *channel, struct sk_buff *skb)
 	} else {
 		if (!pskb_may_pull(skb, PTP_V2_MIN_LENGTH))
 			return false;
-		data = skb->data;
 		version = data[PTP_V2_VERSION_OFFSET];
 		if ((version & PTP_VERSION_V2_MASK) != PTP_VERSION_V2) {
 			return false;

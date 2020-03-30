@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 ** <L5_PRIVATE L5_SOURCE>
 **   Copyright: (c) Level 5 Networks Limited.
@@ -246,16 +233,16 @@ static int thc_alloc(const char* cluster_name, int protocol, int port_be16,
   oo_atomic_set(&thc->thc_ref_count, 1);
   init_waitqueue_head(&thc->thr_release_done);
   thc->thc_switch_port        = 0;
-  thc->thc_switch_addr        = 0;
+  thc->thc_switch_addr        = addr_any;
 
   if( flags & THC_FLAG_PREALLOC_LPORTS ) {
     /* We know on this path that shared local ports are not per-IP, so pass
      * an address of zero here, and likewise pass NULL for the global table. */
     struct efab_ephemeral_port_head* ephemeral_ports;
-    tcp_helper_get_ephemeral_port_list(thc->thc_ephem_table, 0,
+    tcp_helper_get_ephemeral_port_list(thc->thc_ephem_table, addr_any,
                                        thc->thc_ephem_table_entries,
                                        &ephemeral_ports);
-    if( (rc = tcp_helper_alloc_ephemeral_ports(ephemeral_ports, NULL, 0,
+    if( (rc = tcp_helper_alloc_ephemeral_ports(ephemeral_ports, NULL, addr_any,
                                                ephemeral_port_count)) < 0 ) {
       tcp_helper_free_ephemeral_ports(thc->thc_ephem_table,
                                       thc->thc_ephem_table_entries);
@@ -741,7 +728,7 @@ static int thc_get_thr(tcp_helper_cluster_t* thc,
  * You cannot hold the THR_TABLE.lock when calling this function.
  */
 static int thc_get_thr_reheat(tcp_helper_cluster_t* thc,
-                              uint32_t addr,
+                              ci_addr_t addr,
                               uint16_t port,
                               int* backup_index,
                               pid_t* backup_tid_effective,
@@ -776,7 +763,8 @@ static int thc_get_thr_reheat(tcp_helper_cluster_t* thc,
      * a port, and if switch_port has been set, switch_addr was set at the
      * same time (possibly to 0).
      */
-    if( thc->thc_switch_port != port || thc->thc_switch_addr != addr ) {
+    if( thc->thc_switch_port != port ||
+        !CI_IPX_ADDR_EQ(thc->thc_switch_addr, addr) ) {
       if( 0 != thc->thc_switch_port ) {
         thc->thc_reheat_flags |= THC_REHEAT_FLAG_STICKY_MODE;
       }
@@ -1233,7 +1221,7 @@ int efab_tcp_helper_reuseport_bind(ci_private_t *priv, void *arg)
     .thc_tid_effective  = -1,
     .thc_reheat_flags   =  0,
     .thc_switch_port    =  0,
-    .thc_switch_addr    =  0,
+    .thc_switch_addr    =  addr_any,
   };
 
   if( NI_OPTS(ni).cluster_ignore == 1 ) {
@@ -1268,7 +1256,7 @@ int efab_tcp_helper_reuseport_bind(ci_private_t *priv, void *arg)
     goto unlock_sock;
   }
 
-  if( sock->s_flags & (CI_SOCK_FLAGS_SCALABLE | CI_SOCK_FLAG_MAC_FILTER) ) {
+  if( sock->s_flags & (CI_SOCK_FLAGS_SCALABLE | CI_SOCK_FLAG_STACK_FILTER) ) {
     /* This is not quite the contradiction that it seems: we certainly support
      * clustered scalable sockets, but the prohibition here is against
      * clustering of sockets that are _already_ using a MAC filter. */
@@ -1295,15 +1283,15 @@ int efab_tcp_helper_reuseport_bind(ci_private_t *priv, void *arg)
     goto unlock_sock;
   }
 
-  laddr = CI_ADDR_FROM_IP4(trb->addr_be32);
-  raddr = ip4_addr_any;
+  laddr = trb->addr;
+  raddr = addr_any;
 
   if( priv->thr->thc ) {
     /* Reserve proto:port[:ip] until bind (or close)*/
     rc = oof_socket_add(fm, oofilter,
                        OOF_SOCKET_ADD_FLAG_CLUSTERED |
                        OOF_SOCKET_ADD_FLAG_DUMMY,
-                       protocol, AF_SPACE_FLAG_IP4,
+                       protocol, sock_af_space(sock),
                        laddr, trb->port_be16, raddr, 0,
                        &ported_thc);
     if( rc > 0 )
@@ -1329,7 +1317,7 @@ int efab_tcp_helper_reuseport_bind(ci_private_t *priv, void *arg)
                       OOF_SOCKET_ADD_FLAG_CLUSTERED |
                       OOF_SOCKET_ADD_FLAG_DUMMY |
                       OOF_SOCKET_ADD_FLAG_NO_STACK,
-                      protocol, AF_SPACE_FLAG_IP4,
+                      protocol, sock_af_space(sock),
                       laddr, trb->port_be16, raddr, 0,
                       &ported_thc);
   if( rc < 0 ) /* non-clustered socket on the tuple */
@@ -1461,7 +1449,7 @@ int efab_tcp_helper_reuseport_bind(ci_private_t *priv, void *arg)
   /* Find a suitable stack within the cluster to use */
   rc = trb->cluster_hot_restart_opt == 0 ?
     thc_get_thr(thc, &dummy_oofilter, &thr) :
-    thc_get_thr_reheat(thc, trb->addr_be32, trb->port_be16,
+    thc_get_thr_reheat(thc, trb->addr, trb->port_be16,
                        &reheat_state.thr_prior_index,
                        &reheat_state.thc_tid_effective, &thr);
   if( rc != 0 ) {
@@ -1602,10 +1590,10 @@ static void thc_dump_sockets(ci_netif* netif, oo_dump_log_fn_t log,
     if( wo->waitable.state != CI_TCP_STATE_FREE ) {
       citp_waitable* w = &wo->waitable;
       ci_sock_cmn* s = CI_CONTAINER(ci_sock_cmn, b, w);
-      log(log_arg, "    %s lcl="OOF_IP4PORT" rmt="OOF_IP4PORT,
+      log(log_arg, "    %s lcl="OOF_IPXPORT" rmt="OOF_IPXPORT,
           citp_waitable_type_str(w),
-          OOFA_IP4PORT(sock_laddr_be32(s), sock_lport_be16(s)),
-          OOFA_IP4PORT(sock_raddr_be32(s), sock_rport_be16(s)));
+          OOFA_IPXPORT(sock_ipx_laddr(s), sock_lport_be16(s)),
+          OOFA_IPXPORT(sock_ipx_raddr(s), sock_rport_be16(s)));
     }
   }
 }

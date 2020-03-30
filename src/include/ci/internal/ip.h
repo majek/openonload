@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_HEADER >
@@ -48,8 +35,9 @@
 #include <etherfabric/pio.h>
 #include <etherfabric/internal/internal.h>
 #include <onload/offbuf.h>
-#include <cplane/cplane.h>
+#include <ci/tools.h>
 #include <ci/net/ipvx.h>
+#include <cplane/cplane.h>
 #include <ci/net/ethernet.h>
 #include <ci/internal/ip_shared_types.h>
 #include <ci/internal/ip_log.h>
@@ -61,8 +49,6 @@
 # include <onload/shmbuf.h>
 # include <onload/iobufset.h>
 # include <onload/eplock_resource.h>
-# include <onload/contig_shmbuf.h>
-
 #endif
 
 #include <etherfabric/base.h>
@@ -161,11 +147,8 @@ extern const char* oo_uk_intf_ver;
 
 
 extern void
-ci_pmtu_state_init(ci_netif* ni, ci_sock_cmn *s, ci_pmtu_state_t* pmtus,
-                   int func_code);
-extern void
-ci_pmtu_state_reinit(ci_netif* ni, ci_sock_cmn *s, ci_pmtu_state_t* pmtus);
-
+ci_pmtu_state_init(ci_netif* ni, ci_sock_cmn *s, oo_p pmtu_sp,
+                   ci_pmtu_state_t* pmtus, int func_code);
 extern void ci_pmtu_set(ci_netif *ni, ci_pmtu_state_t *pmtus, unsigned pmtu);
 
 /*! IP timer callback for Path MTU discovery process */
@@ -198,17 +181,37 @@ extern void ci_pmtu_update_slow(ci_netif *ni, ci_pmtu_state_t *pmtus,
 /*! Initializes an IP cache
  *  (to use this macro include <ci/internal/cplane_ops.h>)
  */
-#define ci_ip_cache_init_common(ipcache)                        \
+#define ci_ip_cache_init_common(ipcache, af)                    \
 do {                                                            \
+  ci_ip_cache_invalidate(ipcache);                              \
   (ipcache)->status = retrrc_noroute;                           \
-  oo_cp_verinfo_init(&(ipcache)->mac_integrity);                \
   (ipcache)->intf_i = -1;                                       \
   (ipcache)->hwport = CI_HWPORT_ID_BAD;                         \
-  (ipcache)->ether_type = CI_ETHERTYPE_IP;                      \
+  (ipcache)->ether_type = ci_af2ethertype(af);                  \
   (ipcache)->flags = 0;                                         \
   (ipcache)->nexthop = addr_any;                                \
 } while (0)
-#define ci_ip_cache_init(ipcache) ci_ip_cache_init_common(ipcache)
+#define ci_ip_cache_init(ipcache, af) ci_ip_cache_init_common(ipcache, af)
+
+
+static inline cp_fwd_table_id ci_ni_fwd_table_id(ci_netif* ni)
+{
+  /* UL does not know its fwd-table ID, and could not be trusted to pass it
+   * around as a parameter in any case.  Instead, the mapping of the fwd table
+   * in the mib is arranged to be the correct one by the kernel.  In the
+   * kernel, on the other hand, there is no such magic mapping, which would be
+   * impossible as there's only a single handle per control plane instance.
+   * This function papers over that distinction, thus avoiding the need to have
+   * CI_KERNEL_ARG()s sitting all over the place.  It returns a deliberately-
+   * invalid value at UL, so that we trip assertions in case we ever try to use
+   * it by mistake. */
+
+#ifdef __KERNEL__
+  return ni->cplane->cplane_id;
+#else
+  return CP_FWD_TABLE_ID_INVALID;
+#endif
+}
 
 
 /*! Invalidates a ci_ip_cached_hdrs struct i.e. all state becomes out-of-date.
@@ -216,7 +219,24 @@ do {                                                            \
 ci_inline void
 ci_ip_cache_invalidate(ci_ip_cached_hdrs*  ipcache)
 {
-  oo_cp_verinfo_init(&ipcache->mac_integrity);
+  oo_cp_verinfo_init(&ipcache->fwd_ver);
+  oo_cp_verinfo_init(&ipcache->fwd_ver_init_net);
+  ipcache->fwd_ver_init_net.id = CICP_MAC_ROWID_UNUSED;
+}
+
+
+static inline int
+oo_cp_ipcache_is_valid(ci_netif* ni, ci_ip_cached_hdrs* ipcache)
+{
+  int rc = oo_cp_verinfo_is_valid(ni->cplane, &ipcache->fwd_ver,
+                                  ci_ni_fwd_table_id(ni));
+  if( rc && ipcache->fwd_ver_init_net.id != CICP_MAC_ROWID_UNUSED ) {
+    rc = ni->cplane_init_net != NULL &&
+         oo_cp_verinfo_is_valid(ni->cplane_init_net,
+                                &ipcache->fwd_ver_init_net,
+                                ci_ni_fwd_table_id(ni));
+  }
+  return rc;
 }
 
 
@@ -231,10 +251,17 @@ ci_ip_cache_invalidate(ci_ip_cached_hdrs*  ipcache)
 #define PKT_RX_BUF_OFF(pkt)                                                 \
   ((ci_uint32)(oo_offbuf_ptr(&(pkt)->buf) - CI_TCP_PAYLOAD(PKT_TCP_HDR(pkt))))
 
+#define PKT_IPX_RX_BUF_OFF(af, pkt) \
+  ((ci_uint32)(oo_offbuf_ptr(&(pkt)->buf) - \
+  CI_TCP_PAYLOAD(PKT_IPX_TCP_HDR(af, pkt))))
+
 /* Sequence number at the current buffer position. */
 #define PKT_RX_BUF_SEQ(pkt)                                     \
   (CI_BSWAP_BE32(PKT_TCP_HDR(pkt)->tcp_seq_be32) + PKT_RX_BUF_OFF(pkt))
 
+#define PKT_IPX_RX_BUF_SEQ(af, pkt) \
+  (CI_BSWAP_BE32(PKT_IPX_TCP_HDR(af, pkt)->tcp_seq_be32) + \
+  PKT_IPX_RX_BUF_OFF(af, pkt))
 
 #define PKT_TCP_RX_BUF_ASSERT_VALID(ni, pkt)            \
   OO_OFFBUF_ASSERT_VALID(&(pkt)->buf, PKT_START(pkt),   \
@@ -245,14 +272,89 @@ ci_ip_cache_invalidate(ci_ip_cached_hdrs*  ipcache)
 
 #define PKT_TCP_HDR(pkt)     ((ci_tcp_hdr*) oo_ip_data(pkt))
 
+static inline ci_tcp_hdr* ci_pkt_ipx_tcp_hdr(int af, ci_ip_pkt_fmt* pkt)
+  { return oo_ipx_data(af, pkt); }
+
+#define PKT_IPX_TCP_HDR(af, pkt) ci_pkt_ipx_tcp_hdr(af, pkt)
+
 /*! Find the amount of data in an outgoing packet */
 #define PKT_TCP_TX_SEQ_SPACE(pkt)                             \
    (SEQ_SUB((pkt)->pf.tcp_tx.end_seq, (pkt)->pf.tcp_tx.start_seq))
 
-#define TX_PKT_TCP(pkt)  ((ci_tcp_hdr*) oo_tx_ip_data(pkt))
-#define TX_PKT_UDP(pkt)  ((ci_udp_hdr*) oo_tx_ip_data(pkt))
+#define TX_PKT_TCP(pkt)  ((ci_tcp_hdr*) oo_tx_ipx_data(oo_pkt_af(pkt), pkt))
+#define TX_PKT_UDP(pkt)  ((ci_udp_hdr*) oo_tx_ipx_data(oo_pkt_af(pkt), pkt))
 #define TX_PKT_SPORT_BE16(pkt)  (((ci_uint16*) oo_tx_ip_data(pkt))[0])
 #define TX_PKT_DPORT_BE16(pkt)  (((ci_uint16*) oo_tx_ip_data(pkt))[1])
+
+#define TX_PKT_IPX_SPORT(af, pkt) (((ci_uint16*) oo_tx_ipx_data(af, pkt))[0])
+#define TX_PKT_IPX_DPORT(af, pkt) (((ci_uint16*) oo_tx_ipx_data(af, pkt))[1])
+
+#define TX_PKT_IPX_HDR(af, pkt) ((ci_ipx_hdr_t*) (oo_tx_ipx_hdr(af, pkt)))
+
+#define TX_PKT_PROTOCOL(af, pkt) ipx_hdr_protocol(af, TX_PKT_IPX_HDR(af, pkt))
+#define TX_PKT_TTL(af, pkt) ipx_hdr_ttl(af, TX_PKT_IPX_HDR(af, pkt))
+#define TX_PKT_SADDR(af, pkt) ipx_hdr_saddr(af, TX_PKT_IPX_HDR(af, pkt))
+#define TX_PKT_DADDR(af, pkt) ipx_hdr_daddr(af, TX_PKT_IPX_HDR(af, pkt))
+#define TX_PKT_SET_SADDR(af, pkt, addr) \
+    ipx_hdr_set_saddr(af, TX_PKT_IPX_HDR(af, pkt), (addr))
+#define TX_PKT_SET_DADDR(af, pkt, addr) \
+    ipx_hdr_set_daddr(af, TX_PKT_IPX_HDR(af, pkt), (addr))
+#define TX_PKT_SET_FLOWLABEL(af, pkt, flowlabel) \
+    ipx_hdr_set_flowlabel(af, TX_PKT_IPX_HDR(af, pkt), (flowlabel))
+
+#define RX_PKT_IPX_HDR(pkt) oo_ipx_hdr(pkt)
+#define RX_PKT_PROTOCOL(pkt) \
+  ipx_hdr_protocol(oo_pkt_af(pkt), RX_PKT_IPX_HDR(pkt))
+#define RX_PKT_TTL(pkt) \
+  ipx_hdr_ttl(oo_pkt_af(pkt), RX_PKT_IPX_HDR(pkt))
+#define RX_PKT_SADDR(pkt) \
+  ipx_hdr_saddr(oo_pkt_af(pkt), RX_PKT_IPX_HDR(pkt))
+#define RX_PKT_DADDR(pkt) \
+  ipx_hdr_daddr(oo_pkt_af(pkt), RX_PKT_IPX_HDR(pkt))
+#define RX_PKT_PAYLOAD_LEN(pkt) \
+  ipx_hdr_tot_len(oo_pkt_af(pkt), RX_PKT_IPX_HDR(pkt))
+
+static inline ci_udp_hdr* ci_tx_pkt_ipx_udp(int af, ci_ip_pkt_fmt* pkt)
+{
+  return oo_tx_ipx_data(af, pkt);
+}
+
+static inline ci_tcp_hdr* ci_tx_pkt_ipx_tcp(int af, ci_ip_pkt_fmt* pkt)
+{
+  return oo_tx_ipx_data(af, pkt);
+}
+
+#define TX_PKT_IPX_UDP(af, pkt) ci_tx_pkt_ipx_udp(af, pkt)
+#define TX_PKT_IPX_TCP(af, pkt) ci_tx_pkt_ipx_tcp(af, pkt)
+
+static inline void* ci_ipx_data_ptr(int af, ci_ipx_hdr_t* hdr)
+{
+#if CI_CFG_IPV6
+  if( af == AF_INET6 ) {
+    return &hdr->ip6 + 1;
+  }
+  else
+#endif
+  {
+    return (uint8_t*)&hdr->ip4 + CI_IP4_IHL(&hdr->ip4);
+  }
+}
+
+static inline ci_uint16 ci_tx_pkt_ipx_tcp_payload_len(int af, ci_ip_pkt_fmt* pkt)
+{
+  ci_uint16 len;
+#if CI_CFG_IPV6
+  if( af == AF_INET6 ) {
+    len = oo_tx_l3_len(pkt) - sizeof(ci_ip6_hdr);
+  }
+  else
+#endif
+  {
+    ci_ip4_hdr* ip = oo_tx_ip_hdr(pkt);
+    len = CI_BSWAP_BE16(ip->ip_tot_len_be16) - CI_IP4_IHL(ip);
+  }
+  return len - CI_TCP_HDR_LEN(TX_PKT_IPX_TCP(af, pkt));
+}
 
 /*! Get re-order buffer structure from TCP packet */
 #define PKT_TCP_RX_ROB(pkt) (&(pkt)->pf.tcp_rx.misc.rob)
@@ -262,11 +364,18 @@ ci_ip_cache_invalidate(ci_ip_cached_hdrs*  ipcache)
 #define PKT_TCP_TSO_TSVAL(pkt)                                          \
   CI_BSWAP_BE32(*(ci_uint32*) (CI_TCP_HDR_OPTS(PKT_TCP_HDR(pkt)) + 4))
 
+#define PKT_IPX_TCP_TSO_TSVAL(af, pkt) \
+  CI_BSWAP_BE32(*(ci_uint32*) (CI_TCP_HDR_OPTS(PKT_IPX_TCP_HDR(af, pkt)) + 4))
 
 
 /* TODO: replace PKT_UDP_HDR and PKT_IOVEC_UDP_PFX by TX-specific and
  * generic function; see oo_tx_ip_hdr() performance notes. */
 #define PKT_UDP_HDR(pkt)       ((ci_udp_hdr*)oo_ip_data(pkt))
+
+static inline ci_udp_hdr* ci_pkt_ipx_udp_hdr(int af, ci_ip_pkt_fmt* pkt)
+  { return oo_ipx_data(af, pkt); }
+
+#define PKT_IPX_UDP_HDR(af, pkt) ci_pkt_ipx_udp_hdr(af, pkt)
 
 
 /**********************************************************************
@@ -349,20 +458,44 @@ extern int  ci_netif_restore_name(ci_netif*, const char*) CI_HF;
 extern int  ci_netif_restore(ci_netif* ni, ci_fd_t fd,
 			     unsigned netif_mmap_bytes) CI_HF;
 extern int  ci_netif_dtor(ci_netif*) CI_HF;
+extern unsigned ci_netif_build_future_intf_mask(ci_netif* ni) CI_HF;
 
 extern void ci_netif_error_detected(ci_netif*, unsigned error_flag,
                                     const char* caller) CI_HF;
 
-extern int  ci_netif_poll_intf_fast(ci_netif*, int intf_i, ci_uint64 now_frc)
-  CI_HF;
+#ifndef __KERNEL__
 extern int  ci_netif_poll_intf_future(ci_netif*, int intf_i, ci_uint64 now_frc)
   CI_HF;
+#endif
 extern int  ci_netif_poll_n(ci_netif*, int max_evs) CI_HF;
 #define     ci_netif_poll(ni)  ci_netif_poll_n((ni), 0x7fffffff)
+#ifdef __KERNEL__
+/* in-kernel backend for ci_netif_evq_poll_k */
+extern int  ci_netif_evq_poll(ci_netif*, int intf);
+#else
+/* makes syscall to invoke ci_netif_evq_poll */
+extern int  ci_netif_evq_poll_k(ci_netif* ni, int intf_i);
+#endif
+
 extern void ci_netif_tx_pkt_complete(ci_netif*, struct ci_netif_poll_state*,
                                      ci_ip_pkt_fmt*);
+/* Fake TX complete function called when a packet was deferred because of
+ * no destination MAC, and dropped as a response to various error. */
+ci_inline void
+cicp_pkt_complete_fake(ci_netif* ni, ci_ip_pkt_fmt* pkt)
+{
+  ni->state->nic[pkt->intf_i].tx_bytes_removed -= TX_PKT_LEN(pkt);
+  ci_netif_tx_pkt_complete(ni, NULL, pkt);
+}
 
-extern void ci_netif_send(ci_netif*, ci_ip_pkt_fmt* pkt) CI_HF;
+
+extern void __ci_netif_send(ci_netif*, ci_ip_pkt_fmt* pkt) CI_HF;
+ci_inline void ci_netif_send(ci_netif* ni, ci_ip_pkt_fmt* pkt)
+{
+  ci_assert_nflags(pkt->flags, CI_PKT_FLAG_TX_PENDING);
+  pkt->flags |= CI_PKT_FLAG_TX_PENDING;
+  __ci_netif_send(ni, pkt);
+}
 extern void ci_netif_rx_post(ci_netif* netif, int nic_index) CI_HF;
 #ifdef __KERNEL__
 extern int  ci_netif_set_rxq_limit(ci_netif*) CI_HF;
@@ -384,6 +517,7 @@ extern int  ci_netif_timewait_try_to_free_filter(ci_netif* ni) CI_HF;
 extern void ci_netif_fin_timeout_enter(ci_netif* ni, ci_tcp_state* ts) CI_HF;
 
 extern void ci_netif_dump(ci_netif* ni) CI_HF;
+extern void ci_vi_info_dump(ci_netif* ni) CI_HF;
 extern void ci_netif_dump_to_logger(ci_netif* ni, oo_dump_log_fn_t logger,
                                     void* log_arg) CI_HF;
 extern void ci_netif_dump_vi_stats(ci_netif* ni) CI_HF;
@@ -391,6 +525,9 @@ extern void ci_netif_dump_vi_stats_to_logger(ci_netif* ni,
                                              oo_dump_log_fn_t logger,
                                              void* log_arg) CI_HF;
 extern void ci_netif_dump_extra(ci_netif* ni) CI_HF;
+extern void ci_netif_dump_extra_to_logger(ci_netif* ni,
+                                          oo_dump_log_fn_t logger,
+                                          void *log_arg) CI_HF;
 extern void ci_netif_dump_sockets(ci_netif* ni) CI_HF;
 extern void ci_netif_dump_sockets_to_logger(ci_netif* ni,
                                             oo_dump_log_fn_t logger,
@@ -402,7 +539,11 @@ extern void ci_netif_print_sockets(ci_netif* ni) CI_HF;
 extern void ci_netif_dump_dmaq(ci_netif* ni, int dump) CI_HF;
 extern void ci_netif_dump_timeoutq(ci_netif* ni) CI_HF;
 extern void ci_netif_dump_reap_list(ci_netif* ni, int verbose) CI_HF;
-extern void ci_netif_config_opts_dump(ci_netif_config_opts* opts);
+extern void ci_netif_config_opts_dump(ci_netif_config_opts* opts,
+                                      oo_dump_log_fn_t logger,
+                                      void* log_arg) CI_HF;
+extern void ci_stack_time_dump(ci_netif* ni, oo_dump_log_fn_t logger,
+                               void* log_arg) CI_HF;
 extern void ci_netif_pkt_dump_all(ci_netif* ni) CI_HF;
 extern void ci_netif_pkt_queue_dump(ci_netif* ni, ci_ip_pkt_queue* q,
                                     int is_recv, int dump) CI_HF;
@@ -587,15 +728,9 @@ extern void ci_sock_cmn_reinit(ci_netif*, ci_sock_cmn*) CI_HF;
 extern void ci_sock_cmn_dump(ci_netif*, ci_sock_cmn*, const char* pf,
                              oo_dump_log_fn_t logger, void* log_arg) CI_HF;
 
-#if CI_CFG_SOCKP_IS_PTR
-# define S_SP(ss)  ((oo_sp)CI_CONTAINER(citp_waitable_obj,waitable,&(ss)->s.b))
-# define SC_SP(s)  CI_CONTAINER(citp_waitable_obj, waitable, &(s)->b)
-# define W_SP(w)   CI_CONTAINER(citp_waitable_obj, waitable, (w))
-#else
 # define S_SP(ss)  ((ss)->s.b.bufid)
 # define SC_SP(s)  ((s)->b.bufid)
 # define W_SP(w)   ((w)->bufid)
-#endif
 
 #define S_ID(ss)   OO_SP_TO_INT(S_SP(ss))
 #define SC_ID(s)   OO_SP_TO_INT(SC_SP(s))
@@ -612,8 +747,18 @@ extern void ci_sock_cmn_dump(ci_netif*, ci_sock_cmn*, const char* pf,
   (!CI_SOCK_EXPLICIT_BIND((s)) && sock_lport_be16((s)))
 #define CI_SOCK_NOT_BOUND(s)     (!sock_lport_be16((s)))
 
-void ci_sock_set_laddr(ci_sock_cmn* s, ci_addr_t addr, ci_uint16 port);
-void ci_sock_set_raddr(ci_sock_cmn* s, ci_addr_t addr, ci_uint16 port);
+void ci_ipcache_set_saddr(ci_ip_cached_hdrs* ipcache, ci_addr_t addr);
+void ci_ipcache_set_daddr(ci_ip_cached_hdrs* ipcache, ci_addr_t addr);
+
+ci_inline void ci_sock_set_laddr(ci_sock_cmn* s, ci_addr_t addr)
+{
+  s->laddr = addr;
+}
+#define ci_sock_set_raddr(s, addr) ci_ipcache_set_daddr(&(s)->pkt, addr)
+
+void ci_sock_set_laddr_port(ci_sock_cmn* s, ci_addr_t addr, ci_uint16 port);
+void ci_sock_set_raddr_port(ci_sock_cmn* s, ci_addr_t addr, ci_uint16 port);
+
 ci_addr_t sock_laddr(ci_sock_cmn* s);
 ci_addr_t sock_raddr(ci_sock_cmn* s);
 
@@ -654,12 +799,11 @@ ci_inline ci_int32 ci_get_so_error(ci_sock_cmn *s)
 
 extern int
 ci_icmp_send(ci_netif *ni, ci_ip_pkt_fmt *tx_pkt,
-	     const ci_ip_addr_t *ref_ip_source,
-	     const ci_ip_addr_t *ref_ip_dest,
+	     const ci_addr_t saddr, const ci_addr_t daddr,
 	     const ci_mac_addr_t *mac_dest,
 	     ci_uint8 type, ci_uint8 code, ci_uint16 data_len) CI_HF;
 
-extern int __ci_icmp_send_error(ci_netif* ni, ci_ip4_hdr* rx_ip,
+extern int __ci_icmp_send_error(ci_netif* ni, int af, ci_ipx_hdr_t* ipx,
                                 struct oo_eth_hdr* rx_eth, ci_uint8 type,
                                 ci_uint8 code) CI_HF;
 
@@ -677,7 +821,7 @@ extern int __ci_icmp_send_error(ci_netif* ni, ci_ip4_hdr* rx_ip,
 #define UDP_CLR_FLAG(us,f)      ((us)->udpflags&=~(f))
 #define UDP_GET_FLAG(us,f)      ((us)->udpflags&(f))
 
-#define UDP_IP_HDR(us)          (&(us)->s.pkt.ip)
+#define UDP_IP_HDR(us)          (&(us)->s.pkt.ipx.ip4)
 
 #define udp_lport_be16(us)      (sock_lport_be16(&us->s))
 #define udp_laddr_be32(us)      (sock_laddr_be32(&us->s))
@@ -689,6 +833,12 @@ extern int __ci_icmp_send_error(ci_netif* ni, ci_ip4_hdr* rx_ip,
 #define udp_ip6_laddr(us)       (sock_ip6_laddr(&us->s))
 #define udp_ip6_raddr(us)       (sock_ip6_raddr(&us->s))
 #endif
+
+#define sock_ipx_laddr(s) ((s)->laddr)
+#define sock_ipx_raddr(s) ipcache_raddr(&(s)->pkt)
+
+#define udp_ipx_laddr(us) sock_ipx_laddr(&(us)->s)
+#define udp_ipx_raddr(us) sock_ipx_raddr(&(us)->s)
 
 #define UDP_TX_ERRNO(us)        (SOCK_TX_ERRNO(&(us)->s))
 #define UDP_RX_ERRNO(us)	(SOCK_RX_ERRNO(&(us)->s))
@@ -704,12 +854,19 @@ extern int __ci_icmp_send_error(ci_netif* ni, ci_ip4_hdr* rx_ip,
 extern void ci_udp_state_dump(ci_netif*, ci_udp_state*, const char* pf,
                               oo_dump_log_fn_t logger, void* log_arg) CI_HF;
 
-/* Set the source IP address & UDP port */
-extern void ci_udp_set_laddr(citp_socket*, ci_addr_t addr,
-                             int lport_be16) CI_HF;
+/* Set the source IP address & port */
+ci_inline void
+ci_sock_cmn_set_laddr(ci_sock_cmn* s, ci_addr_t addr, int lport_be16)
+{
+  ci_sock_set_laddr_port(s, addr, lport_be16);
+  s->cp.lport_be16 = lport_be16;
+  /* FIXIT: add IPv6 multicast support */
+  if( CI_IPX_IS_MULTICAST(addr) )
+    s->cp.laddr = ip4_addr_any;
+  else
+    s->cp.laddr = addr;
 
-/* Set the IP TOS */
-extern void ci_udp_set_tos( ci_udp_state* us, ci_uint32 tos );
+}
 
 extern void ci_udp_state_assert_valid(ci_netif*, ci_udp_state* ts,
 				      const char* file, int line) CI_HF;
@@ -720,7 +877,7 @@ extern void ci_udp_ep_assert_valid(citp_socket* ep,
 
 /*** udp_rx.c ***/
 extern void ci_udp_handle_rx(ci_netif*, ci_ip_pkt_fmt* pkt, ci_udp_hdr*,
-                             int ip_paylen, ci_uint16 ether_type) CI_HF;
+                             int ip_paylen) CI_HF;
 
 
 ci_inline 
@@ -728,13 +885,17 @@ void ci_pkt_init_from_ipcache_len(ci_ip_pkt_fmt *pkt,
                                   const ci_ip_cached_hdrs *ipcache,
                                   size_t header_len)
 {
-  ci_assert_equal(CI_IP4_IHL(&ipcache->ip), sizeof(ci_ip4_hdr));
-  ci_assert_equal(ipcache->ether_type, CI_ETHERTYPE_IP);
+  if( !ipcache_is_ipv6(ipcache) ) {
+    ci_assert_equal(CI_IP4_IHL(&ipcache->ipx.ip4), sizeof(ci_ip4_hdr));
+    ci_assert_equal(ipcache->ether_type, CI_ETHERTYPE_IP);
+  }
   oo_tx_pkt_layout_update(pkt, ipcache->ether_offset);
   memcpy(oo_tx_ether_hdr(pkt), ci_ip_cache_ether_hdr(ipcache),
          header_len + oo_tx_ether_hdr_size(pkt));
-  ci_assert_equal(CI_IP4_IHL(oo_tx_ip_hdr(pkt)), sizeof(ci_ip4_hdr));
-  ci_assert_equal(oo_tx_ether_type_get(pkt), CI_ETHERTYPE_IP);
+  if( !ipcache_is_ipv6(ipcache) ) {
+    ci_assert_equal(CI_IP4_IHL(oo_tx_ip_hdr(pkt)), sizeof(ci_ip4_hdr));
+    ci_assert_equal(oo_tx_ether_type_get(pkt), CI_ETHERTYPE_IP);
+  }
 }
 
 
@@ -743,11 +904,12 @@ void ci_pkt_init_from_ipcache(ci_ip_pkt_fmt *pkt,
                               const ci_ip_cached_hdrs *ipcache)
 {
   ci_pkt_init_from_ipcache_len(pkt, ipcache,
-                               sizeof(ci_ip4_hdr) + sizeof(ci_tcp_hdr));
+      CI_IPX_HDR_SIZE(ipcache_af(ipcache)) + sizeof(ci_tcp_hdr));
 }
 
 
 #if CI_CFG_IPV6
+void ci_init_ipcache_ip4_hdr(ci_sock_cmn* s);
 void ci_init_ipcache_ip6_hdr(ci_sock_cmn* s);
 #endif
 
@@ -804,8 +966,6 @@ extern int ci_udp_sendmsg(ci_udp_iomsg_args *a,
 extern int ci_udp_recvmsg(ci_udp_iomsg_args *a, ci_msghdr*,
                           int flags) CI_HF;
 
-extern int ci_udp_should_handover(citp_socket* ep, const struct sockaddr* addr,
-                                  ci_uint16 lport) CI_HF;
 extern void ci_udp_set_no_unicast(citp_socket* ep) CI_HF;
 
 
@@ -1046,13 +1206,16 @@ extern int ci_pipe_list_to_iovec(ci_netif* ni, struct oo_pipe* p,
 #define tcp_outgoing_opts_len(ts)               \
   ((ts)->outgoing_hdrs_len - sizeof(ci_ip4_hdr) - sizeof(ci_tcp_hdr))
 
+#define tcp_ipx_outgoing_opts_len(af, ts) \
+  ((ts)->outgoing_hdrs_len - CI_IPX_HDR_SIZE(af) - sizeof(ci_tcp_hdr))
+
 /* These names match the terminology used in the RFCs etc. */
 #define tcp_snd_una(ts)  ((ts)->snd_una)
 #define tcp_snd_nxt(ts)  ((ts)->snd_nxt)
 #define tcp_snd_wnd(ts)  SEQ_SUB((ts)->snd_max, (ts)->snd_una)
 #define tcp_snd_up(ts)   ((ts)->snd_up)
 
-#define tcp_rcv_nxt(ts)  (TS_TCP(ts)->tcp_ack_be32)
+#define tcp_rcv_nxt(ts)  (TS_IPX_TCP(ts)->tcp_ack_be32)
 #define tcp_rcv_usr(ts)  ((ts)->rcv_added - (ts)->rcv_delivered)
 #define tcp_rcv_up(ts)   ((ts)->rcv_up)
 #define tcp_rcv_wnd_advertised(ts)  ((ts)->rcv_wnd_advertised)
@@ -1066,7 +1229,7 @@ extern int ci_pipe_list_to_iovec(ci_netif* ni, struct oo_pipe* p,
   ( (ci_uint16) (tcp_snd_up(ts) - CI_BSWAP_BE32((tcp)->tcp_seq_be32)) )
 
 /* Sequence number of next data to be inserted into TX queue. */
-#define tcp_enq_nxt(ts)  (TS_TCP(ts)->tcp_seq_be32)
+#define tcp_enq_nxt(ts)  (TS_IPX_TCP(ts)->tcp_seq_be32)
 
 /* TCP urgent data definitions */
 #define tcp_urg_data(ts) ((ts)->urg_data)
@@ -1089,8 +1252,23 @@ extern int ci_pipe_list_to_iovec(ci_netif* ni, struct oo_pipe* p,
 #define TCP_TX_ERRNO(ts) (SOCK_TX_ERRNO(&(ts)->s))
 
 /* We never transmit IP options (at the moment). */
-#define S_TCP_HDR(s)  ((ci_tcp_hdr*) (&(s)->pkt.ip + 1))
+#define S_TCP_HDR(s)  ((ci_tcp_hdr*) (&(s)->pkt.ipx.ip4 + 1))
 #define TS_TCP(ts)    S_TCP_HDR(&(ts)->s)
+
+#if CI_CFG_IPV6
+#define S_IP6_TCP_HDR(s) ((ci_tcp_hdr*) (&(s)->pkt.ipx.ip6 + 1))
+#define TS_IP6_TCP(ts) S_IP6_TCP_HDR(&(ts)->s)
+#endif
+
+#if CI_CFG_IPV6
+#define S_IPX_TCP_HDR(s) ((ipcache_is_ipv6(&(s)->pkt)) ? \
+  S_IP6_TCP_HDR(s) : S_TCP_HDR(s))
+#define TS_IPX_TCP(ts) ((ipcache_is_ipv6(&(ts)->s.pkt)) ? \
+  TS_IP6_TCP(ts) : TS_TCP(ts))
+#else
+#define S_IPX_TCP_HDR(s) S_TCP_HDR(s)
+#define TS_IPX_TCP(ts) TS_TCP(ts)
+#endif
 
 /** Macro that initialises RX queue offset */
 #define TS_QUEUE_RX_SET(ts, name)				\
@@ -1118,31 +1296,71 @@ extern int ci_pipe_list_to_iovec(ci_netif* ni, struct oo_pipe* p,
 #define TCP_ACK_FORCED(ts)  ((ts)->acks_pending & CI_TCP_ACK_FORCED_FLAG)
 
 /* macros for getting source and dest addresses and ports */
-#define sock_laddr_be32(s)	((s)->pkt.ip.ip_saddr_be32)
-#define sock_raddr_be32(s)	((s)->pkt.ip.ip_daddr_be32)
-
 #if CI_CFG_IPV6
-#define sock_ip6_laddr(s)   ((s)->pkt.ip6.saddr)
-#define sock_ip6_raddr(s)   ((s)->pkt.ip6.daddr)
+#define ipcache_ttl(ipcache) (*(ipcache_is_ipv6(ipcache) ? \
+  &(ipcache)->ipx.ip6.hop_limit : &(ipcache)->ipx.ip4.ip_ttl))
+#else
+#define ipcache_ttl(ipcache) ((ipcache)->ipx.ip4.ip_ttl)
 #endif
 
 #if CI_CFG_IPV6
-#define sock_protocol(s)    (*(ipcache_is_ipv6((s)->pkt) ? \
-  ((&(s)->pkt.ip6.next_hdr)) : (&(s)->pkt.ip.ip_protocol)))
-#define sock_lport_be16(s)  ((ipcache_is_ipv6((s)->pkt) ? \
-  ((ci_uint16*) (&(s)->pkt.ip6 + 1)) : ((ci_uint16*) (&(s)->pkt.ip + 1)) )[0])
-#define sock_rport_be16(s)  ((ipcache_is_ipv6((s)->pkt) ? \
-  ((ci_uint16*) (&(s)->pkt.ip6 + 1)) : ((ci_uint16*) (&(s)->pkt.ip + 1)) )[1])
+#define ipcache_protocol(ipcache) (*(ipcache_is_ipv6(ipcache) ? \
+  &(ipcache)->ipx.ip6.next_hdr : &(ipcache)->ipx.ip4.ip_protocol))
 #else
-#define sock_protocol(s)	((s)->pkt.ip.ip_protocol)
-#define sock_lport_be16(s)	(((ci_uint16*) (&(s)->pkt.ip + 1))[0])
-#define sock_rport_be16(s)	(((ci_uint16*) (&(s)->pkt.ip + 1))[1])
+#define ipcache_protocol(ipcache) ((ipcache)->ipx.ip4.ip_protocol)
+#endif
+
+#define sock_laddr_be32(s) ((s)->laddr.ip4)
+#define sock_raddr_be32(s) ((s)->pkt.ipx.ip4.ip_daddr_be32)
+
+#if CI_CFG_IPV6
+#define sock_ip6_laddr(s) ((s)->laddr.ip6)
+#define sock_ip6_raddr(s) ((s)->pkt.ipx.ip6.daddr)
+#endif
+
+#if CI_CFG_IPV6
+#define ipcache_lport_be16(ipcache) \
+  ((ipcache_is_ipv6(ipcache) ?                    \
+    ((ci_uint16*) (&(ipcache)->ipx.ip6 + 1)) :    \
+    ((ci_uint16*) (&(ipcache)->ipx.ip4 + 1)) )[0])
+#define ipcache_rport_be16(ipcache) \
+  ((ipcache_is_ipv6(ipcache) ?                    \
+    ((ci_uint16*) (&(ipcache)->ipx.ip6 + 1)) :    \
+    ((ci_uint16*) (&(ipcache)->ipx.ip4 + 1)) )[1])
+#else
+#define ipcache_lport_be16(ipcache) (((ci_uint16*) (&(ipcache)->ipx.ip4 + 1))[0])
+#define ipcache_rport_be16(ipcache) (((ci_uint16*) (&(ipcache)->ipx.ip4 + 1))[1])
 /* NB. Above two assume no IP options (which is true for now). */
 #endif
+#define sock_lport_be16(s) ipcache_lport_be16(&(s)->pkt)
+#define sock_rport_be16(s) ipcache_rport_be16(&(s)->pkt)
+
+#define sock_protocol(s) ipcache_protocol(&(s)->pkt)
 
 #if CI_CFG_IPV6
-#define sock_af_space(s)  ((ipcache_is_ipv6((s)->pkt)) ? \
-  AF_SPACE_FLAG_IP6 : AF_SPACE_FLAG_IP4)
+#define sock_tos_tclass(af, s) (IS_AF_INET6(af) ? (s)->tclass : (s)->cp.ip_tos)
+#else
+#define sock_tos_tclass(af, s) ((s)->cp.ip_tos)
+#endif
+
+#if CI_CFG_IPV6
+ci_inline int sock_af_space(ci_sock_cmn* s)
+{
+  /* Fixme: do we want to cache sock_af_space() somewhere in the socket
+   * state? */
+  if( !CI_IS_ADDR_IP6(s->laddr) )
+    return AF_SPACE_FLAG_IP4;
+
+  /* IPv6: are we bound to a specific IPv6 address? */
+  if( !CI_IPX_ADDR_IS_ANY(s->laddr) )
+    return AF_SPACE_FLAG_IP6;
+
+  /* Bound to :::. Is V6ONLY set? */
+  if( s->s_flags & CI_SOCK_FLAG_V6ONLY )
+    return AF_SPACE_FLAG_IP6;
+  else
+    return AF_SPACE_FLAG_IP6 | AF_SPACE_FLAG_IP4;
+}
 #else
 #define sock_af_space(s)  AF_SPACE_FLAG_IP4
 #endif
@@ -1154,6 +1372,9 @@ extern int ci_pipe_list_to_iovec(ci_netif* ni, struct oo_pipe* p,
 #define tcp_ip6_laddr(ts)   sock_ip6_laddr(&(ts)->s)
 #define tcp_ip6_raddr(ts)   sock_ip6_raddr(&(ts)->s)
 #endif
+
+#define tcp_ipx_laddr(ts) sock_ipx_laddr(&(ts)->s)
+#define tcp_ipx_raddr(ts) sock_ipx_raddr(&(ts)->s)
 
 #define tcp_protocol(ts)	sock_protocol(&(ts)->s)
 #define tcp_lport_be16(ts)	sock_lport_be16(&(ts)->s)
@@ -1272,13 +1493,12 @@ ci_tcp_can_set_filter_in_ul(ci_netif *ni, ci_sock_cmn* s);
 #endif
 
 extern int
-ci_tcp_sock_set_scalable_filter(ci_netif *ni, ci_sock_cmn* s);
+ci_tcp_sock_set_stack_filter(ci_netif *ni, ci_sock_cmn* s);
 
 extern void
-ci_tcp_sock_clear_scalable_filter(ci_netif *ni, ci_tcp_state* ts);
+ci_tcp_sock_clear_stack_filter(ci_netif *ni, ci_tcp_state* ts);
 
 #if CI_CFG_FD_CACHING
-extern int /*bool*/ ci_tcp_active_wild_sharer_is_cacheable(ci_tcp_state*);
 extern int /*bool*/ ci_tcp_is_cacheable_active_wild_sharer(ci_sock_cmn*);
 #endif
 
@@ -1297,6 +1517,33 @@ extern void ci_pipe_all_fds_gone(ci_netif* netif, struct oo_pipe* p,
 /**********************************************************************
 *************************** ACTIVE WILD *******************************
 **********************************************************************/
+
+ci_inline void
+ci_addr_simple_hash(ci_addr_t addr, ci_uint32 entries,
+                    ci_uint32* hash1_out, ci_uint32* hash2_out)
+{
+  /* Convert address to uint32.  Without IPv6 there is no conversion. */
+  ci_uint32 hash0 = 0;
+#if CI_CFG_IPV6
+  if( CI_IS_ADDR_IP6(addr) ) {
+    int i;
+
+    for( i = 0; i < sizeof(ci_addr_t) / 4; i++) {
+      hash0 ^= addr.u32[i];
+    }
+  }
+  else
+#endif
+    hash0 = addr.ip4;
+
+ *hash2_out = (hash0 | 1) & (entries - 1);
+
+  /* Spread the entropy (such as it is) from the higher-order bits of the
+   * address down a bit. */
+  hash0 = CI_BSWAP_BE32(hash0);
+  hash0 = hash0 ^ (hash0 >> 8);
+ *hash1_out = hash0 & (entries - 1);
+}
 
 extern ci_active_wild* ci_active_wild_get_state_buf(ci_netif* netif);
 extern void ci_active_wild_all_fds_gone(ci_netif* ni, ci_active_wild* aw,
@@ -1324,9 +1571,12 @@ extern void citp_waitable_dump(ci_netif*, citp_waitable*, const char*) CI_HF;
 extern void citp_waitable_dump_to_logger(ci_netif* ni, citp_waitable* w,
                                          const char* pf, oo_dump_log_fn_t logger,
                                          void* log_arg) CI_HF;
-extern void citp_waitable_print_to_logger(citp_waitable*,
+extern void citp_waitable_print_to_logger(ci_netif*, citp_waitable*,
                                           oo_dump_log_fn_t logger,
                                           void* log_arg) CI_HF;
+extern void
+ci_tcp_listenq_print_to_logger(ci_netif* ni, ci_tcp_socket_listen* tls,
+                               oo_dump_log_fn_t logger, void *log_arg);
 
 
 /*********************************************************************
@@ -1347,6 +1597,7 @@ extern int ci_tcp_listenq_drop_all(ci_netif*, ci_tcp_socket_listen*) CI_HF;
 extern int ci_tcp_listenq_try_promote(ci_netif*, ci_tcp_socket_listen*,
                                       ci_tcp_state_synrecv*,
                                       ci_ip_cached_hdrs*,
+                                      ci_ip_pkt_fmt*,
                                       ci_tcp_state**) CI_HF;
 
 
@@ -1419,9 +1670,6 @@ extern void ci_tcp_reply_with_rst(ci_netif* netif, ciip_tcp_rx_pkt* rxp) CI_HF;
 extern int ci_tcp_reset_untrusted(ci_netif *netif, ci_tcp_state *ts) CI_HF;
 extern void ci_tcp_send_zwin_probe(ci_netif* netif, ci_tcp_state* ts) CI_HF;
 extern void ci_tcp_fill_small_window(ci_netif* netif, ci_tcp_state* ts) CI_HF;
-#if CI_CFG_TAIL_DROP_PROBE
-extern int ci_tcp_send_taildrop_probe(ci_netif* netif, ci_tcp_state* ts) CI_HF;
-#endif
 extern void ci_tcp_set_established_state(ci_netif*, ci_tcp_state*) CI_HF;
 extern void ci_tcp_expand_sndbuf(ci_netif*, ci_tcp_state*) CI_HF;
 extern bool ci_tcp_should_expand_sndbuf(ci_netif*, ci_tcp_state*) CI_HF;
@@ -1430,8 +1678,8 @@ extern void ci_tcp_set_slow_state(ci_netif*, ci_tcp_state*, int state) CI_HF;
 extern int ci_tcp_parse_options(ci_netif*, ciip_tcp_rx_pkt*,
 				ci_tcp_options*) CI_HF;
 
-extern void ci_ip_hdr_init_fixed(ci_ip4_hdr* ip, int protocol, unsigned ttl,
-                                 unsigned tos) CI_HF;
+extern void ci_ipx_hdr_init_fixed(ci_ipx_hdr_t* ip, int af, int protocol,
+                                  unsigned ttl, unsigned tos) CI_HF;
 
 extern void ci_tcp_send_ack_rx(ci_netif*, ci_tcp_state*, ci_ip_pkt_fmt*,
                                int sock_locked, int update_wnd) CI_HF;
@@ -1440,6 +1688,10 @@ ci_inline void ci_tcp_send_ack(ci_netif* netif, ci_tcp_state* ts,
 {
   ci_tcp_send_ack_rx(netif, ts, pkt, sock_locked, 1);
 }
+extern int ci_tcp_send_challenge_ack(ci_netif*, ci_tcp_state*,
+                                     ci_ip_pkt_fmt*) CI_HF;
+extern int/*bool*/
+ci_tcp_may_send_ack_ratelimited(ci_netif* netif, ci_tcp_state* ts) CI_HF;
 
 extern void ci_tcp_send_ack_loopback(ci_netif* netif, ci_tcp_state* ts) CI_HF;
 extern int  ci_tcp_send_wnd_update(ci_netif*, ci_tcp_state*,
@@ -1456,18 +1708,29 @@ void ci_ip6_netif_filter_init(ci_ip6_netif_filter_table* tbl,
 #endif
 
 extern ci_sock_cmn*
-__ci_netif_filter_lookup(ci_netif* netif, unsigned daddr, unsigned dport,
-			 unsigned saddr, unsigned sport, unsigned prot) CI_HF;
+__ci_netif_filter_lookup(ci_netif* netif, int af_space,
+                         ci_addr_t daddr, unsigned dport,
+                         ci_addr_t saddr, unsigned sport,
+                         unsigned prot) CI_HF;
 
-/* Returns table entry index, or -1 if lookup failed. */
+#if CI_CFG_IPV6
 extern int
-ci_netif_filter_lookup(ci_netif* netif, unsigned laddr, unsigned lport,
-		       unsigned raddr, unsigned rport, unsigned prot) CI_HF;
+ci_ip6_netif_filter_lookup(ci_netif* netif, ci_addr_t laddr, unsigned lport,
+                           ci_addr_t raddr, unsigned rport, unsigned prot) CI_HF;
+extern int
+__ci_ip6_netif_filter_lookup(ci_netif* netif, ci_addr_t laddr, unsigned lport,
+                             ci_addr_t raddr, unsigned rport, unsigned prot) CI_HF;
+#endif
+extern oo_sp
+ci_netif_filter_lookup(ci_netif* netif, int af_space,
+                           ci_addr_t laddr, unsigned lport,
+                           ci_addr_t raddr, unsigned rport,
+                           unsigned protocol);
 
-/* Returns table entry index, or -1 if lookup failed. */
-extern int
-ci_netif_listener_lookup(ci_netif* netif,
-                         unsigned laddr, unsigned lport) CI_HF;
+/* Returns socket index, or OO_SP_NULL if lookup failed. */
+extern oo_sp
+ci_netif_listener_lookup(ci_netif* netif, int af_space,
+                         ci_addr_t laddr, unsigned lport) CI_HF;
 
 /* Invokes the callback on each socket that matches the supplied addressing
  * fields.  If the callback returns non-zero, then the search is
@@ -1481,17 +1744,19 @@ ci_netif_filter_for_each_match(ci_netif*, unsigned laddr, unsigned lport,
                                int (*callback)(ci_sock_cmn*, void*),
                                void* callback_arg, ci_uint32* hash_out) CI_HF;
 
+#if CI_CFG_IPV6
 extern int
 ci_netif_filter_for_each_match_ip6(ci_netif* ni,
-                                   ci_addr_t laddr, unsigned lport,
-                                   ci_addr_t raddr, unsigned rport,
+                                   const ci_addr_t* laddr, unsigned lport,
+                                   const ci_addr_t* raddr, unsigned rport,
                                    unsigned protocol, int intf_i, int vlan,
                                    int (*callback)(ci_sock_cmn*, void*),
                                    void* callback_arg, ci_uint32* hash_out) CI_HF;
+#endif
 
 extern ci_uint32
-ci_netif_filter_hash(ci_netif* ni, unsigned laddr, unsigned lport,
-                     unsigned raddr, unsigned rport,
+ci_netif_filter_hash(ci_netif* ni, ci_addr_t laddr, unsigned lport,
+                     ci_addr_t raddr, unsigned rport,
                      unsigned protocol) CI_HF;
 
 extern int
@@ -1500,24 +1765,15 @@ ci_netif_filter_insert(ci_netif* netif, oo_sp sock_id, int af_space,
                        const ci_addr_t raddr, unsigned rport, 
                        unsigned protocol) CI_HF;
 
-extern int
-ci_netif_filter_check(ci_netif* netif,
-		      unsigned laddr, unsigned lport,
-		      unsigned raddr, unsigned rport,
-		      unsigned protocol) CI_HF;
-
 extern void 
 ci_netif_filter_remove(ci_netif* netif, oo_sp tcp_id, int af_space,
                        const ci_addr_t laddr, unsigned lport,
                        const ci_addr_t raddr, unsigned rport,
                        unsigned protocol) CI_HF;
 
-#define CI_NETIF_FILTER_ID_TO_SOCK_ID(ni, filter_id)            \
-  OO_SP_FROM_INT((ni), (ni)->filter_table->table[filter_id].id)
-
 #ifndef __KERNEL__
-extern oo_sp ci_netif_active_wild_get(ci_netif* ni, unsigned laddr,
-                                      unsigned raddr, unsigned lport,
+extern oo_sp ci_netif_active_wild_get(ci_netif* ni, ci_addr_t laddr,
+                                      ci_addr_t raddr, unsigned lport,
                                       ci_uint16* port_out,
                                       ci_uint32* prev_seq_out);
 #endif
@@ -1525,12 +1781,12 @@ extern void ci_netif_active_wild_sharer_closed(ci_netif* ni, ci_sock_cmn* s);
 #define RSS_HASH_SIZE 0x80
 #define RSS_HASH_MASK (RSS_HASH_SIZE - 1)
 extern int ci_netif_active_wild_nic_hash(ci_netif *ni,
-                                         ci_uint32 laddr, ci_uint16 lport,
-                                         ci_uint32 raddr, ci_uint16 rport);
+                                         ci_addr_t laddr, ci_uint16 lport,
+                                         ci_addr_t raddr, ci_uint16 rport);
 
 extern int
 ci_netif_get_active_wild_list(ci_netif* ni, int aw_pool,
-                              unsigned laddr, ci_ni_dllist_t** list_out);
+                              ci_addr_t laddr, ci_ni_dllist_t** list_out);
 
 /* Bind RX of socket to given interface.  Used by implementation of
  * SO_BINDTODEVICE and EF_MCAST_JOIN_BINDTODEVICE.  Returns 0 on success,
@@ -1562,6 +1818,11 @@ extern unsigned int ci_tcp_wscl_by_buff(ci_netif *netif,
 extern ci_int32 ci_tcp_rcvbuf_established(ci_netif* ni, ci_sock_cmn* s) CI_HF;
 
 extern ci_int32 ci_tcp_max_rcvbuf(ci_netif* ni, ci_uint16 amss) CI_HF;
+
+#if CI_CFG_IPV6
+extern void ci_tcp_ipcache_convert(int af, ci_tcp_state* ts) CI_HF;
+extern void ci_udp_ipcache_convert(int af, ci_udp_state* ts) CI_HF;
+#endif
 
 /* timer handlers */
 #define ci_tcp_time_now(ni) ci_ip_time_now(ni)
@@ -1607,6 +1868,8 @@ extern int ci_tp_init(citp_init_thread_callback cb) CI_HF;
 extern int ci_tcp_bind(citp_socket* ep, const struct sockaddr* my_addr,
                        socklen_t addrlen, ci_fd_t fd) CI_HF;
 extern int ci_tcp_reuseport_bind(ci_sock_cmn* sock, ci_fd_t fd) CI_HF;
+extern void ci_tcp_get_peer_addr(ci_tcp_state* ts, struct sockaddr* name,
+                                 socklen_t* namelen) CI_HF;
 extern int ci_tcp_getpeername(citp_socket*, struct sockaddr*, socklen_t*) CI_HF;
 extern int ci_tcp_getsockname(citp_socket*, ci_fd_t, struct sockaddr*,
                               socklen_t*) CI_HF;
@@ -1644,7 +1907,7 @@ extern int ci_tcp_sync_sockopts_to_os_sock(ci_netif* ni, oo_sp sock_id,
 
 extern int ci_tcp_listen_init(ci_netif *ni, ci_tcp_socket_listen *tls) CI_HF;
 extern int __ci_tcp_bind(ci_netif*, ci_sock_cmn*, ci_fd_t,
-                         ci_uint32 ip_addr_be32, ci_uint16* port_be16,
+                         ci_addr_t addr, ci_uint16* port_be16,
                          int may_defer) CI_HF;
 
 /* Send/recv called from within kernel & user-library, so outside above #if */
@@ -1676,13 +1939,13 @@ extern int ci_tcp_shutdown(citp_socket*, int how, ci_fd_t fd) CI_HF;
 #endif
 
 extern oo_sp ci_tcp_connect_find_local_peer(ci_netif *ni, int locked,
-                                            ci_ip_addr_t dst_be32,
+                                            ci_addr_t dst_addr,
                                             int dport_be16) CI_HF;
 
 #ifdef __KERNEL__
 extern int ci_tcp_connect_lo_samestack(ci_netif *ni, ci_tcp_state *ts,
                                        oo_sp tls_id, int *stack_locked) CI_HF;
-extern int ci_tcp_connect_lo_toconn(ci_netif *c_ni, oo_sp c_id, ci_uint32 dst,
+extern int ci_tcp_connect_lo_toconn(ci_netif *c_ni, oo_sp c_id, ci_addr_t dst,
                                     ci_netif *l_ni, oo_sp l_id) CI_HF;
 #endif
 
@@ -1691,7 +1954,8 @@ extern ci_uint16 ci_tcp_limit_mss(ci_uint16 mss, ci_netif* ni,
                                   const char* caller) CI_HF;
 #endif
 extern unsigned ci_tcp_amss(ci_netif* ni, const ci_tcp_socket_cmn* c,
-                            unsigned mtu, const char* caller) CI_HF;
+                            ci_ip_cached_hdrs* ipcache,
+                            const char* caller) CI_HF;
 
 
 /**********************************************************************
@@ -1931,9 +2195,21 @@ extern int ci_setup_ipstack_params(void);
 ***************************** Misc macros *****************************
 **********************************************************************/
 
-#define OO_STACK_FOR_EACH_INTF_I(ni, _intf_i)                           \
-  for( (_intf_i) = 0; (_intf_i) < oo_stack_intf_max(ni); ++(_intf_i) )
+/* note bitno is undefined after loop */
+#define OO_FOR_EACH_BIT(init_mask, mask, bitno)                        \
+  for( (mask) = (init_mask), (bitno) = __builtin_ctz(mask);              \
+       (mask) ;                                                        \
+       (mask) = (mask) & ((mask) - 1), (bitno) = __builtin_ctz(mask) )
 
+CI_BUILD_ASSERT(sizeof(unsigned) * 8 >= CI_CFG_MAX_INTERFACES);
+
+#define OO_STACK_FOR_EACH_INTF_I(_ni, _intf_i)                          \
+  for( (_intf_i) = 0; (_intf_i) < oo_stack_intf_max(_ni); ++(_intf_i) )
+
+#define OO_STACK_FOR_EACH_FUTURE_INTF_I(_ni, _mask, _intf_i) \
+  ci_assert_lt((_ni)->future_intf_mask, 1u << oo_stack_intf_max(_ni));    \
+  { CI_BUILD_ASSERT(sizeof(_mask) >= sizeof((_ni)->future_intf_mask)); } \
+  OO_FOR_EACH_BIT((_ni)->future_intf_mask, (_mask), (_intf_i))
 
 /*
 **
@@ -1978,6 +2254,16 @@ ci_inline ef_vi* ci_netif_rx_vi(ci_netif* ni, int nic_i) {
 ci_inline ef_vi* ci_udp_rxq_netif_rx_vi(ci_netif* ni, int nic_i) {
   return &ni->nic_hw[nic_i].udp_rxq_vi;
 }
+#endif
+
+#if CI_CFG_IPV6
+extern ci_uint32 ci_make_flowlabel(ci_netif* ni, ci_addr_t saddr,
+    ci_uint16 sport, ci_addr_t daddr, ci_uint16 dport, ci_uint8 proto) CI_HF;
+extern ci_uint32 ci_ipcache_make_flowlabel(ci_netif* ni,
+    ci_ip_cached_hdrs* ipcache) CI_HF;
+extern void ci_ipcache_update_flowlabel(ci_netif* ni, ci_sock_cmn* s) CI_HF;
+#else
+#define ci_ipcache_update_flowlabel(ni, s)
 #endif
 
 /* How many more descriptors can be posted into this VI?  Answer may be
@@ -2217,43 +2503,14 @@ ci_inline ci_uint32 ci_ip_time_ticks2ms(ci_netif* ni, ci_iptime_t t) {
 }
 
 
-#if CI_CFG_TCP_METRICS
-ci_inline oo_metrics_tstamp oo_metrics_frc2tstamp(const ci_netif* ni,
-                                                  ci_uint64 frc)
+/* Convert Herz (per-second value) to per tick. */
+ci_inline ci_uint32 ci_ip_time_freq_hz2tick(ci_netif* ni, ci_uint32 hz)
 {
-  ci_uint64 now;
-  ci_frc64(&now);
-  return frc >> IPTIMER_STATE(ni)->ci_ip_time_frc2us;
+  ci_ip_timer_state *its = IPTIMER_STATE(ni);
+  /* We assume that 1024==1000, and khz = hz >> 10.
+   * Then we use the expression from ci_ip_time_ms2ticks(). */
+  return ((ci_uint64)hz << 22) / its->ci_ip_time_ms2tick_fxp;
 }
-
-
-ci_inline oo_metrics_tstamp oo_metrics_now(const ci_netif* ni)
-{
-  return oo_metrics_frc2tstamp(ni, ci_frc64_get());
-}
-
-
-ci_inline oo_metrics_tstamp oo_metrics_stack_now(const ci_netif* ni)
-{
-  return oo_metrics_frc2tstamp(ni, IPTIMER_STATE(ni)->frc);
-}
-
-
-ci_inline ci_uint64 oo_metrics_intvl2frc(const ci_netif* ni,
-                                         oo_metrics_intvl intvl)
-{
-  return (ci_uint64) intvl << IPTIMER_STATE(ni)->ci_ip_time_frc2us;
-}
-
-
-# ifndef __KERNEL__
-ci_inline unsigned oo_metrics_intvl2us(const ci_netif* ni, oo_metrics_intvl i)
-{
-  ci_uint64 approx_frc = (ci_uint64) i << IPTIMER_STATE(ni)->ci_ip_time_frc2us;
-  return approx_frc * 1000 / IPTIMER_STATE(ni)->khz;
-}
-# endif
-#endif
 
 
 ci_inline const cicp_hwport_mask_t ci_netif_get_hwport_mask(ci_netif* ni)
@@ -2352,6 +2609,25 @@ ci_inline int ci_netif_has_event(ci_netif* ni) {
 }
 
 
+/* Returns true if there are any hardware events outstanding on any
+ * interface, where we can act on those events efficiently.
+ */
+ci_inline int ci_netif_has_actionable_event(ci_netif* ni) {
+  int intf_i;
+  OO_STACK_FOR_EACH_INTF_I(ni, intf_i) {
+    if( ci_netif_intf_has_event(ni, intf_i) ) {
+#ifndef __KERNEL__
+      if( ! ni->nic_hw[intf_i].poll_in_kernel )
+#endif
+      {
+        return 1;
+      }
+    }
+  }
+  return OO_PP_NOT_NULL(ni->state->looppkts);
+}
+
+
 /* Returns true if there are many hardware events outstanding. */
 ci_inline int ci_netif_has_many_events(ci_netif* ni, int lookahead) {
   int intf_i, rc = 0;
@@ -2383,18 +2659,17 @@ ci_inline void ci_netif_poison_rx_pkt(ci_ip_pkt_fmt* pkt)
 {
   *ci_netif_poison_location(pkt) = CI_PKT_RX_POISON;
 }
+
+#ifndef __KERNEL__
 ci_inline int ci_netif_rx_pkt_is_poisoned(ci_ip_pkt_fmt* pkt)
 {
   return *ci_netif_poison_location(pkt) == CI_PKT_RX_POISON;
 }
 
-
 ci_inline int ci_netif_intf_may_poll_future(ci_netif* ni, int intf_i)
 {
-  return intf_i >= 0 && intf_i < oo_stack_intf_max(ni) &&
-    (~ef_vi_flags(&ni->nic_hw[intf_i].vi) & EF_VI_RX_EVENT_MERGE);
+  return (ni->future_intf_mask & (1u << intf_i)) != 0;
 }
-
 
 ci_inline ci_ip_pkt_fmt* ci_netif_intf_next_rx_pkt(ci_netif* ni, int intf_i)
 {
@@ -2443,19 +2718,17 @@ ci_netif_intf_rx_future(ci_netif* ni, int intf_i, const uint32_t* poison)
   return pkt ? ci_netif_poison_location(pkt) : poison;
 }
 
-
-ci_inline int ci_netif_has_rx_future(ci_netif* ni)
-{
-  int intf_i;
-  OO_STACK_FOR_EACH_INTF_I(ni, intf_i)
-    if( ci_netif_intf_has_rx_future(ni, intf_i) )
-      return 1;
-  return 0;
-}
-
+#endif
 
 ci_inline int ci_netif_need_timer_prime(ci_netif* ni, ci_uint64 frc_now) {
   return frc_now - ni->state->evq_last_prime > ni->state->timer_prime_cycles;
+}
+
+
+ci_inline int ci_netif_need_poll_spinning(ci_netif* ni, ci_uint64 frc_now)
+{
+  return ci_netif_has_actionable_event(ni) ||
+         ci_netif_need_timer_prime(ni, frc_now);
 }
 
 
@@ -2463,9 +2736,8 @@ ci_inline int ci_netif_need_timer_prime(ci_netif* ni, ci_uint64 frc_now) {
 ** know a recent frc.
 */
 ci_inline int ci_netif_need_poll_frc(ci_netif* ni, ci_uint64 frc_now) {
-  return ( ci_netif_not_primed(ni) &&
-           ( ci_netif_has_event(ni) ||
-             ci_netif_need_timer_prime(ni, frc_now) ) );
+  return ci_netif_not_primed(ni) &&
+         ci_netif_need_poll_spinning(ni, frc_now);
 }
 
 
@@ -2478,10 +2750,6 @@ ci_inline int ci_netif_need_poll_frc(ci_netif* ni, ci_uint64 frc_now) {
 */
 ci_inline int ci_netif_need_poll(ci_netif* ni)
 { return ci_netif_need_poll_frc(ni, ci_frc64_get()); }
-
-
-ci_inline int ci_netif_need_poll_spinning(ci_netif* ni, ci_uint64 frc_now)
-{ return ci_netif_has_event(ni) || ci_netif_need_timer_prime(ni, frc_now); }
 
 
 ci_inline int ci_netif_need_poll_maybe_spinning(ci_netif* ni, ci_uint64 frc_now,
@@ -2514,7 +2782,7 @@ ci_inline void __ci_netif_pkt_clean(ci_ip_pkt_fmt* pkt)
   CI_DEBUG(pkt->pkt_start_off = 0xff;
            pkt->pkt_eth_payload_off = 0xff);
 #if CI_CFG_TIMESTAMPING
-  memset(&pkt->tx_hw_stamp, 0, sizeof(pkt->tx_hw_stamp));
+  memset(&pkt->hw_stamp, 0, sizeof(pkt->hw_stamp));
 #endif
 }
 
@@ -3109,12 +3377,28 @@ citp_waitable_lock_clear_flag(citp_waitable* w, ci_uint32 flag)
 **********************************************************************/
 
 #define ci_icmp_send_error(ni, rx_pkt, type, code)              \
-  __ci_icmp_send_error((ni), oo_ip_hdr(rx_pkt),                 \
+  __ci_icmp_send_error((ni), oo_pkt_af(rx_pkt),                 \
+                       oo_ipx_hdr(rx_pkt),                      \
                        oo_ether_hdr(rx_pkt), (type), (code))
 
-#define ci_icmp_send_port_unreach(ni, rx_pkt)                   \
-  ci_icmp_send_error((ni), (rx_pkt), CI_ICMP_DEST_UNREACH,      \
-                                     CI_ICMP_DU_PORT_UNREACH)
+ci_inline int
+ci_icmp_send_port_unreach(ci_netif *ni, ci_ip_pkt_fmt* rx_pkt)
+{
+  ci_uint8 type, code;
+
+#if CI_CFG_IPV6
+  if( IS_AF_INET6(oo_pkt_af(rx_pkt)) ) {
+    type = CI_ICMPV6_DEST_UNREACH;
+    code = CI_ICMPV6_DU_PORT_UNREACH;
+  }
+  else
+#endif
+  {
+    type = CI_ICMP_DEST_UNREACH;
+    code = CI_ICMP_DU_PORT_UNREACH;
+  }
+  return ci_icmp_send_error(ni, rx_pkt, type, code);
+}
 
 
 /**********************************************************************
@@ -3595,13 +3879,13 @@ ci_iptime_t ci_tcp_isn2tick(ci_netif* ni, ci_uint32 isn)
  * acceptable.
  */
 ci_inline unsigned
-ci_tcp_future_isn(ci_netif* ni, ci_uint32 laddr_be, ci_uint16 lport_be,
-                  ci_uint32 raddr_be, ci_uint16 rport_be,
+ci_tcp_future_isn(ci_netif* ni, ci_addr_t laddr, ci_uint16 lport_be,
+                  ci_addr_t raddr, ci_uint16 rport_be,
                   ci_uint64 future_delta_ticks)
 {
   ci_uint64 frc;
-  ci_uint32 hash = onload_hash3(AF_INET, &laddr_be, lport_be, &raddr_be,
-                                rport_be, IPPROTO_TCP);
+  ci_uint32 hash = onload_hash3(laddr, lport_be,
+                                raddr, rport_be, IPPROTO_TCP);
   ci_frc64(&frc);
   frc += future_delta_ticks << IPTIMER_STATE(ni)->ci_ip_time_frc2tick;
 
@@ -3612,10 +3896,10 @@ ci_tcp_future_isn(ci_netif* ni, ci_uint32 laddr_be, ci_uint16 lport_be,
 }
 
 ci_inline unsigned
-ci_tcp_initial_seqno(ci_netif* ni, ci_uint32 laddr_be, ci_uint16 lport_be,
-                     ci_uint32 raddr_be, ci_uint16 rport_be)
+ci_tcp_initial_seqno(ci_netif* ni, ci_addr_t laddr, ci_uint16 lport_be,
+                     ci_addr_t raddr, ci_uint16 rport_be)
 {
-  return ci_tcp_future_isn(ni, laddr_be, lport_be, raddr_be, rport_be, 0);
+  return ci_tcp_future_isn(ni, laddr, lport_be, raddr, rport_be, 0);
 }
 
 /* Returns non-scaled value of the receive window. */
@@ -3651,19 +3935,20 @@ ci_inline void ci_tcp_set_rcvbuf(ci_netif* ni, ci_tcp_state* ts)
 }
 
 ci_inline void ci_tcp_set_flags(ci_tcp_state* ts, unsigned flags) {
-  ci_tcp_hdr* tcp = TS_TCP(ts);
+  ci_tcp_hdr* tcp = TS_IPX_TCP(ts);
   tcp->tcp_flags = (ci_uint8)flags;
 }
 
 ci_inline void ci_tcp_set_hdr_len(ci_tcp_state* ts, unsigned len) {
-  ci_tcp_hdr* tcp = TS_TCP(ts);
+  ci_tcp_hdr* tcp = TS_IPX_TCP(ts);
   CI_TCP_HDR_SET_LEN(tcp, len);
 }
 
-ci_inline void ci_tcp_set_peer(ci_tcp_state* ts, unsigned addr, unsigned port){
-  ts->s.pkt.ip.ip_daddr_be32 = addr;
-  TS_TCP(ts)->tcp_dest_be16 = (ci_uint16)port;
+ci_inline void ci_tcp_set_peer(ci_tcp_state* ts, ci_addr_t addr, unsigned port){
+  ci_ipcache_set_daddr(&ts->s.pkt ,addr);
+  TS_IPX_TCP(ts)->tcp_dest_be16 = (ci_uint16)port;
   ts->s.pkt.dport_be16 = port;
+  ts->s.s_flags |= CI_SOCK_FLAG_CONNECTED;
 }
 
 
@@ -3780,26 +4065,6 @@ ci_inline unsigned ci_tcp_losswnd(ci_tcp_state* ts) {
 }
 
 
-/* find effective MSS value based on smss, PMTU and MTU and optional user
- * value */
-ci_inline void ci_tcp_set_eff_mss(ci_netif* netif, ci_tcp_state* ts) {
-  unsigned x;
-
-  ci_assert(ts->s.b.state != CI_TCP_LISTEN);
-
-  x = ts->pmtus.pmtu - sizeof(ci_tcp_hdr) - sizeof(ci_ip4_hdr);
-  x = CI_MIN(x, ts->smss);
-  ts->eff_mss = CI_MAX(x, CI_CFG_TCP_MINIMUM_MSS) - tcp_outgoing_opts_len(ts);
-
-  /* Increase ssthresh & cwndif eff_mss has increased */
-  ts->ssthresh = CI_MAX(ts->ssthresh, (ci_uint32) ts->eff_mss << 1u);
-  if( ts->cwnd < ts->eff_mss )
-    ci_tcp_set_initialcwnd(netif, ts);
-
-  ci_tcp_set_sndbuf(netif, ts);
-}
-
-
 #if CI_CFG_BURST_CONTROL
 ci_inline unsigned ci_tcp_burst_exhausted(ci_netif* ni, ci_tcp_state* ts) {
   int extra, retrans_data;
@@ -3898,6 +4163,40 @@ ci_inline int /*bool*/ ci_tcp_listen_has_timer(ci_tcp_socket_listen* tls)
 {
   return ~tls->s.s_flags & CI_SOCK_FLAG_BOUND_ALIEN ||
          tls->s.s_flags & CI_SOCK_FLAG_SCALPASSIVE;
+}
+
+ci_inline unsigned ci_ipx_tcp_checksum(int af, const ci_ipx_hdr_t* ipx,
+                                       const ci_tcp_hdr* tcp, void* payload)
+{
+#if CI_CFG_IPV6
+  if( af == AF_INET6 )
+  {
+    return ci_ip6_tcp_checksum(&ipx->ip6, tcp, payload);
+  }
+  else
+#endif
+  {
+    return ci_tcp_checksum(&ipx->ip4, tcp, payload);
+  }
+}
+
+ci_inline unsigned ci_ipx_udp_checksum(int af, const ci_ipx_hdr_t* ipx,
+                                       const ci_udp_hdr* udp, void* payload)
+{
+  ci_iovec iov = {.iov_base = payload};
+#if CI_CFG_IPV6
+  if( af == AF_INET6 )
+  {
+    iov.iov_len = CI_BSWAP_BE16(ipx->ip6.payload_len) - sizeof(ci_udp_hdr);
+    return ci_ip6_udp_checksum(&ipx->ip6, udp, &iov, 1);
+  }
+  else
+#endif
+  {
+    iov.iov_len = CI_BSWAP_BE16(ipx->ip4.ip_tot_len_be16) -
+        CI_IP4_IHL(&ipx->ip4) - sizeof(ci_udp_hdr);
+    return ci_udp_checksum(&ipx->ip4, udp, &iov, 1);
+  }
 }
 
 /**********************************************************************
@@ -4086,12 +4385,20 @@ ci_inline ci_sb_epoll_state* ci_ni_aux_p2epoll(ci_netif* ni, oo_p oop)
   ci_assert_equal(aux->type, CI_TCP_AUX_TYPE_EPOLL);
   return &aux->u.epoll;
 }
+ci_inline ci_pmtu_state_t* ci_ni_aux_p2pmtus(ci_netif* ni, oo_p oop)
+{
+  ci_ni_aux_mem* aux = ci_ni_aux_p2aux(ni, oop);
+  ci_assert_equal(aux->type, CI_TCP_AUX_TYPE_PMTUS);
+  return &aux->u.pmtus;
+}
 
 ci_inline oo_p ci_ni_aux2p(ci_netif* ni, ci_ni_aux_mem* aux)
 {
-  citp_waitable* w = (void *)((ci_uintptr_t)aux - aux->no * CI_AUX_MEM_SIZE);
+  CI_BUILD_ASSERT(CI_IS_POW2(CI_CFG_EP_BUF_SIZE));
+  ci_uintptr_t ep_buf_mask = CI_CFG_EP_BUF_SIZE - 1;
+  citp_waitable* w = (void *)((ci_uintptr_t)aux &~ ep_buf_mask);
   oo_p sp = oo_sockp_to_statep(ni, W_SP(w));
-  OO_P_ADD(sp, CI_AUX_MEM_SIZE * aux->no);
+  OO_P_ADD(sp, (ci_uintptr_t)aux & ep_buf_mask);
   return sp;
 }
 
@@ -4110,6 +4417,9 @@ ci_inline void ci_tcp_synrecv_free(ci_netif* ni, ci_tcp_state_synrecv* tsr) {
 }
 ci_inline void ci_sb_epoll_free(ci_netif* ni, ci_sb_epoll_state* epoll) {
   ci_ni_aux_free(ni, CI_CONTAINER(ci_ni_aux_mem, u.epoll, epoll));
+}
+ci_inline void ci_pmtu_state_free(ci_netif* ni, ci_pmtu_state_t* pmtus) {
+  ci_ni_aux_free(ni, CI_CONTAINER(ci_ni_aux_mem, u.pmtus, pmtus));
 }
 
 extern void ci_ni_aux_more_bufs(ci_netif* ni);
@@ -4169,10 +4479,49 @@ ci_inline ci_tcp_state_synrecv* ci_tcp_link2synrecv(ci_ni_dllist_link* link) {
   return &CI_CONTAINER(ci_ni_aux_mem, link, link)->u.synrecv;
 }
 
+/* finc current Path MTU */
+ci_inline unsigned ci_tcp_get_pmtu(ci_netif* netif, ci_tcp_state* ts)
+{
+  unsigned x;
+
+  ci_assert(ts->s.b.state != CI_TCP_LISTEN);
+
+  x = ts->s.pkt.mtu;
+  if( OO_PP_NOT_NULL(ts->pmtus) ) {
+    ci_pmtu_state_t* pmtus = ci_ni_aux_p2pmtus(netif, ts->pmtus);
+    return CI_MIN(x, pmtus->pmtu);
+  }
+  return x;
+}
+
+/* find effective MSS value based on smss, PMTU and MTU and optional user
+ * value */
+ci_inline void ci_tcp_set_eff_mss(ci_netif* netif, ci_tcp_state* ts) {
+  unsigned x;
+#if CI_CFG_IPV6
+  int af = ipcache_af(&ts->s.pkt);
+#endif
+
+  ci_assert(ts->s.b.state != CI_TCP_LISTEN);
+
+  x = ci_tcp_get_pmtu(netif, ts) - sizeof(ci_tcp_hdr) - CI_IPX_HDR_SIZE(af);
+
+  x = CI_MIN(x, ts->smss);
+  ts->eff_mss = CI_MAX(x, CI_CFG_TCP_MINIMUM_MSS) -
+                tcp_ipx_outgoing_opts_len(af, ts);
+
+  /* Increase ssthresh & cwndif eff_mss has increased */
+  ts->ssthresh = CI_MAX(ts->ssthresh, (ci_uint32) ts->eff_mss << 1u);
+  if( ts->cwnd < ts->eff_mss )
+    ci_tcp_set_initialcwnd(netif, ts);
+
+  ci_tcp_set_sndbuf(netif, ts);
+}
+
+
 #define CI_READY_LIST_EACH(bitmask, tmp, i)            \
   ci_assert_lt((bitmask), 1u << CI_CFG_N_READY_LISTS); \
-  for( tmp = (bitmask), i = ffs(tmp) - 1;              \
-       tmp != 0; tmp &= (tmp - 1), i = ffs(tmp) - 1 )
+  OO_FOR_EACH_BIT(bitmask, tmp, i)
 
 ci_inline void
 ci_netif_put_on_post_poll_epoll(ci_netif* ni, citp_waitable* sb)
@@ -4311,6 +4660,14 @@ ci_inline int ci_tcp_ipv6_is_addr_any(const struct sockaddr* sa)
 {
   return CI_IP6_IS_ADDR_ANY(&CI_SIN6(sa)->sin6_addr) ? 1 : 0;
 }
+
+ci_inline int ci_sock_maybe_ipv6(ci_sock_cmn* s, const struct sockaddr* addr)
+{
+  if(s->domain == PF_INET6 && (!ci_tcp_ipv6_is_ipv4(addr) ||
+      ci_tcp_ipv6_is_addr_any(addr)))
+    return 1;
+  return 0;
+}
 #endif
 
 ci_inline ci_addr_t ci_get_addr(const struct sockaddr* sa)
@@ -4375,6 +4732,35 @@ ci_make_sockaddr_in6_from_ip6(struct sockaddr_in6 *sin, ci_uint16 port_be16,
 }
 #endif
 
+ci_inline struct sockaddr_storage
+ci_make_sockaddr_storage_from_addr(ci_uint16 port_be16, ci_addr_t addr)
+{
+  union {
+    struct sockaddr_in in;
+#if CI_CFG_IPV6
+    struct sockaddr_in6 in6;
+#endif
+    struct sockaddr_storage ss;
+  } u;
+
+  memset(&u, 0, sizeof(u));
+#if CI_CFG_IPV6
+  if( CI_IS_ADDR_IP6(addr) ) {
+    u.in6.sin6_family = AF_INET6;
+    u.in6.sin6_port = port_be16;
+    memcpy(&u.in6.sin6_addr.s6_addr, addr.ip6, sizeof(addr.ip6));
+  }
+  else
+#endif
+  {
+    u.in.sin_family = AF_INET;
+    u.in.sin_port = port_be16;
+    u.in.sin_addr.s_addr = addr.ip4;
+  }
+
+  return u.ss;
+}
+
 /* Minimum IPv6 address size. It may be included from <net/ipv6.h> */
 #define SIN6_LEN_RFC2133 24
 
@@ -4382,41 +4768,46 @@ ci_make_sockaddr_in6_from_ip6(struct sockaddr_in6 *sin, ci_uint16 port_be16,
  * - domain_in defines the kind of addr_be32_p address;
  * - domain_out defines the type for the resulting sockaddr structure;
  * - addr_be32_p is the pointer to IPv4 or IPv6 address, depending on
- *   domain_in parameter. */
+ *   domain_in parameter;
+ * - scope_id defines sin6_scope_id value for IPv6 link-local addresses. */
 ci_inline void
 ci_addr_to_user(struct sockaddr *sa, socklen_t *sa_len,
                 sa_family_t domain_in, sa_family_t domain_out,
-                ci_uint16 port_be16, const ci_uint32* addr_be32_p)
+                ci_uint16 port_be16, const ci_uint32* addr_be32_p,
+                ci_ifid_t scope_id)
 {
-  socklen_t len_min, len_max;
-  len_min = len_max = sizeof(struct sockaddr_in);
+  socklen_t len = sizeof(struct sockaddr_in);
 
 #if CI_CFG_FAKE_IPV6
   ci_assert(domain_in == AF_INET || domain_in == AF_INET6);
   ci_assert(domain_out == AF_INET || domain_out == AF_INET6);
 
-  if (domain_out == AF_INET6) {
-    len_min = SIN6_LEN_RFC2133;
-    len_max = sizeof(struct sockaddr_in6);
-  }
-  else {
+  if (domain_out == AF_INET6)
+    /* One might expect to see SIN6_LEN_RFC2133 here, but Linux uses
+     * sizeof() instead. */
+    len = sizeof(struct sockaddr_in6);
+  else
     ci_assert_equal(domain_in, AF_INET);
-  }
 #else 
   ci_assert_equal(domain_in, AF_INET);
   ci_assert_equal(domain_out, AF_INET);
 #endif
 
-  if (CI_LIKELY(*sa_len >= len_min)) {
-    *sa_len = CI_MIN(*sa_len, len_max);
+  if (CI_LIKELY(*sa_len >= len)) {
+    *sa_len = CI_MIN(*sa_len, len);
     memset(sa, 0, *sa_len);
 #if CI_CFG_FAKE_IPV6
-    if (domain_out == AF_INET)
+    if (domain_out == AF_INET) {
       ci_make_sockaddr_from_ip4(CI_SIN(sa), port_be16, *addr_be32_p);
-    else if( domain_in == AF_INET )
+    }
+    else if( domain_in == AF_INET ) {
       ci_make_sockaddr_in6_from_ip4(CI_SIN6(sa), port_be16, *addr_be32_p);
-    else
+    }
+    else {
       ci_make_sockaddr_in6_from_ip6(CI_SIN6(sa), port_be16, addr_be32_p);
+      if( CI_IP6_IS_LINKLOCAL(&CI_SIN6(sa)->sin6_addr) )
+        CI_SIN6(sa)->sin6_scope_id = scope_id;
+    }
 #else
     ci_make_sockaddr_from_ip4(CI_SIN(sa), port_be16, *addr_be32_p);
 #endif
@@ -4425,25 +4816,72 @@ ci_addr_to_user(struct sockaddr *sa, socklen_t *sa_len,
     union ci_sockaddr_u ss_u;
 
     if (*sa_len == 0) {
-      *sa_len = len_min;
+      *sa_len = len;
       return;
     }
 
-    memset(&ss_u, 0, len_min);
+    memset(&ss_u, 0, len);
 #if CI_CFG_FAKE_IPV6
     if (domain_out == AF_INET)
       ci_make_sockaddr_from_ip4(&ss_u.sin, port_be16, *addr_be32_p);
     else if( domain_in == AF_INET )
       ci_make_sockaddr_in6_from_ip4(&ss_u.sin6, port_be16, *addr_be32_p);
     else
-      ci_make_sockaddr_in6_from_ip6(CI_SIN6(sa), port_be16, addr_be32_p);
+      ci_make_sockaddr_in6_from_ip6(&ss_u.sin6, port_be16, addr_be32_p);
 #else
     ci_make_sockaddr_from_ip4(&ss_u.sin, port_be16, *addr_be32_p);
 #endif
 
     memcpy(sa, &ss_u.sa, *sa_len);
-    *sa_len = len_min;
+    *sa_len = len;
   }
+}
+
+#if CI_CFG_IPV6
+/* Sets socket interface index derived from sockaddr struct for link-local
+ * address bind()/connect(). Returns -1 if an interface is not acceleratable.
+ * - addr       [in] is an address obtained via bind()/connect() parameter;
+ * - addrlen    [in] specifies the size of addr;
+ * - at_connect [in] set to 1 means function call on connect(),
+ *                   0 means - on bind().
+ * Returns 0 on success or -1 on failure. */
+ci_inline int
+ci_sock_set_ip6_scope_id(ci_netif* ni, ci_sock_cmn* s,
+                         const struct sockaddr* addr, socklen_t addrlen,
+                         int/*bool*/ at_connect)
+{
+  const struct sockaddr_in6* sin6 = (const struct sockaddr_in6*)addr;
+  if( addrlen >= sizeof(struct sockaddr_in6) && sin6->sin6_scope_id ) {
+    ci_ifid_t ifindex = sin6->sin6_scope_id;
+    cicp_hwport_mask_t hwports = 0;
+    int rc;
+    /* If interface is set while binding, indices must coincide */
+    if( at_connect && s->cp.so_bindtodevice &&
+        s->cp.so_bindtodevice != ifindex )
+      return -1;
+    rc = oo_cp_find_llap(ni->cplane, ifindex, NULL, NULL, &hwports, NULL, NULL);
+    if( rc != 0 || hwports == 0 )
+      return -1;
+    s->cp.so_bindtodevice = ifindex;
+  }
+  /* Bind/connect to link-local address requires an interface */
+  if( ! s->cp.so_bindtodevice )
+    return -1;
+  return 0;
+}
+#endif
+
+ci_inline ci_ifid_t ci_rx_pkt_ifindex(ci_netif* ni, const ci_ip_pkt_fmt* pkt)
+{
+  ci_hwport_id_t hwport = ni->state->intf_i_to_hwport[pkt->intf_i];
+  const uint8_t* mac = oo_ether_hdr_const(pkt)->ether_dhost;
+  if( mac[0] == 1 && mac[1] == 0 && mac[2] == 0x5e )
+    mac = NULL;
+  /* oo_cp_hwport_vlan_to_ifindex() may provide wrong information for incoming
+   * multicast packets when there are multiple macvlan interfaces in the same
+   * net namespace, or basic and macvlan interface in the same net namespace.
+   * See bug 72886 for details. */
+  return oo_cp_hwport_vlan_to_ifindex(ni->cplane, hwport, pkt->vlan, mac);
 }
 
 

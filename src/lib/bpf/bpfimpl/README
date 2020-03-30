@@ -1,0 +1,33 @@
+.. SPDX-License-Identifier: Solarflare-Binary
+.. X-SPDX-Copyright-Text: (c) Solarflare Communications Inc
+The bpfimpl library contains code imported from the kernel to provide JIT and verifier functionality, as well as compatibility support to allow building this on kernel versions differing from the version is was imported from and for userspace.
+
+All files taken from the kernel are isolated in the kernel subdirectory, which contains only unmodified kernel files.  The current version of this code is taken from kernel version 4.20.3.  The .c files are present at the top level.  There is a bpf_include subdirectory containing header files to be used in preference to the real kernel headers.
+
+There is also a kernel_replace subdirectory.  This contains a stub_include folder containing empty header files to allow compilation on systems where the header file in question does not exist, which include certain kernel versions as well as the userspace build.  It also contains a replace_include directory containing non-empty header files that are always used in preference to the current kernel headers, but which do not contain kernel code.
+
+For each of the foo.c files imported from the kernel there is a file there is an equivalent file in this directory named onload_foo.c.  This file #includes the kernel.c file, after including appropriate user or kernel compatibility headers.
+
+The compatibility headers are:
+
+- bpfimpl_kernel_config.h
+This defines kernel config options that we need to enable in our imported kernel files.  We need to always enable the eBPF functionality for our build of these file, irrespective of the config of the current kernel.  This also disables some config options that we don't need support for, to reduce the compat dependencies.  For the userspace build these would obviously otherwise not exist at all.
+
+- bpf_disable_exports.h
+This replaces the kernel's export.h header, allowing us to avoid duplicating symobols that are exported by the kernel.
+
+- bpf_kernel_compat.h
+This provides declarations of version specific, or non-exported, kernel functions.  Version specific functions are protected by the standard linux_affinity/kernel_compat.sh mechanism.
+
+- ci/kcompat.h
+This provides declarations and definitions of exported kernel functionality that enable the userspace build, and is only used there.  It's partner is the userspace kernel compat lib in lib/bpf/kcompat/.  That library has very rough implementations to enable running kernel code in userspace under restricted conditions.
+
+The eBPF code that we import has some dependencies on kernel functionality that varies with version or is not exported.  For these cases we need to provide some implementations.
+
+The compat functions for things that should never be called are provided in bpf_kernel_compat.c.  These all ci_assert(0).  There are some kernel functions that we do need.  These are provided in files name oo<bar>.c, based on the nature of the functionality.
+
+- ookern.c contains generic kernel functionality
+
+- oomap.c contains functions necessary for integrating our map functionality into the verifier
+
+- ooxdp.c contains functions necessary for integrating our XDP support into the verifier

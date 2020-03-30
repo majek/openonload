@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
-######################################################################
-# (c) 2002 Cambridge Internetworking Ltd.
-# Author: David Riddoch
-#
+# SPDX-License-Identifier: GPL-2.0
+# X-SPDX-Copyright-Text: (c) Solarflare Communications Inc
+
 # A 'make' wrapper
-######################################################################
 
 . "$(dirname "$0")/sh/fns"
 . "$bin/sh/mmake-fns"

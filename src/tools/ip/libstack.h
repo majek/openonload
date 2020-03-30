@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_SOURCE>
@@ -54,6 +41,12 @@ extern "C" {
 #define MAX_TS		32
 
 
+const static int STACK_END_MARKER = -1;
+const static int SOCK_END_MARKER  = -1;
+const static int SOCK_ALL_MARKER  = -2;
+
+#define STACK_LOG_DUMP(x)
+
 /**********************************************************************
 ********************** config *****************************************
 **********************************************************************/
@@ -70,6 +63,7 @@ extern int		cfg_notable;
 extern int		cfg_zombie;
 extern int              cfg_nopids;
 extern int		ci_cfg_verbose;
+const char*		cfg_filter;
 
 /**********************************************************************
 ********************** stacks *****************************************
@@ -109,7 +103,6 @@ extern void for_each_stack_op(stackop_fn_t *fn, void * arg);
 extern const stack_op_t* get_stack_op(const char *name);
 extern void for_each_stack(stack_ni_fn_t *fn, int only_once);
 extern void for_each_stack_id(stackid_fn_t *fn, void *arg);
-extern void list_all_stacks(int attach);
 extern void list_all_stacks2(stackfilter_t *filter,
                              stack_ni_fn_t *post_attach,
                              stack_ni_fn_t *pre_detach,

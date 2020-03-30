@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-2.0
+# X-SPDX-Copyright-Text: (c) Solarflare Communications Inc
 
 TARGET		:= $(EFHW_LIB)
 MMAKE_TYPE	:= LIB

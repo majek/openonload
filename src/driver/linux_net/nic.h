@@ -1,18 +1,3 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
 /****************************************************************************
  * Driver for Solarflare network controllers and boards
  * Copyright 2005-2006 Fen Systems Ltd.
@@ -364,6 +349,7 @@ enum {
  * @must_restore_piobufs: Flag: PIO buffers have yet to be restored after MC
  *	reboot
  * @rx_rss_context_exclusive: Whether our RSS context is exclusive or shared
+ * @mc_stats: Scratch buffer for converting statistics to the kernel's format
  * @stats: Hardware statistics
  * @vf_stats_work: Work item to poll hardware statistics (VF driver only)
 #if defined(EFX_USE_KCOMPAT) && !defined(EFX_USE_CANCEL_DELAYED_WORK_SYNC)
@@ -413,6 +399,7 @@ struct efx_ef10_nic_data {
 	u16 piobuf_size;
 	bool must_restore_piobufs;
 	bool rx_rss_context_exclusive;
+	__le64 *mc_stats;
 	u64 stats[EF10_STAT_COUNT];
 	struct delayed_work vf_stats_work;
 #if defined(EFX_USE_KCOMPAT) && !defined(EFX_USE_CANCEL_DELAYED_WORK_SYNC)

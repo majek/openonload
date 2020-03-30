@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: BSD-2-Clause
+# X-SPDX-Copyright-Text: (c) Solarflare Communications Inc
 ifeq ($(GNU),1)
 SUBDIRS		:= ciul \
                    ip \
@@ -9,7 +11,11 @@ SUBDIRS		:= ciul \
 		   rtt \
                    syscalls \
                    tap \
-		   trade_sim
+		   trade_sim \
+
+ifeq ($(PLATFORM),gnu_x86_64)
+SUBDIRS		+= bpf
+endif
 
 OTHER_SUBDIRS	:=
 

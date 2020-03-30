@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /****************************************************************************
  * Driver for Solarflare network controllers -
  *          resource management for Xen backend, OpenOnload, etc
@@ -224,9 +211,6 @@ static int efrm_vi_rm_alloc_instance(struct efrm_pd *pd,
 				     int print_resource_warnings)
 {
 	struct efrm_nic *efrm_nic;
-#ifdef CONFIG_SFC_RESOURCE_VF
-	struct efrm_vf *vf;
-#endif
 	unsigned vi_props;
 	int channel;
 
@@ -250,12 +234,6 @@ static int efrm_vi_rm_alloc_instance(struct efrm_pd *pd,
 	if (vi_attr->vi_set != NULL)
 		return efrm_vi_set_alloc_instance(virs, vi_attr->vi_set,
 						  vi_attr->vi_set_instance);
-
-#ifdef CONFIG_SFC_RESOURCE_VF
-	vf = efrm_pd_get_vf(pd);
-	if (vf != NULL)
-		return efrm_vf_vi_alloc(vf, &virs->allocation);
-#endif
 
 	if (vi_attr->with_interrupt)
 		vi_props = vi_with_interrupt;
@@ -283,10 +261,6 @@ static void efrm_vi_rm_free_instance(struct efrm_vi *virs)
 		if (need_complete)
 			complete(&vi_set->allocation_completion);
 	}
-#ifdef CONFIG_SFC_RESOURCE_VF
-	else if (virs->allocation.vf != NULL)
-		efrm_vf_vi_drop(&virs->allocation);
-#endif
 	else {
 		efrm_vi_allocator_free_set(efrm_nic(virs->rs.rs_client->nic),
 					   &virs->allocation);
@@ -962,13 +936,9 @@ efrm_vi_q_alloc(struct efrm_vi *virs, enum efhw_q_type q_type,
 		}
 	}
 
-#ifdef CONFIG_SFC_RESOURCE_VF
-	iova_base = vf ? efrm_vf_alloc_ioaddrs(vf,
-		1 << qsize.q_len_page_order, NULL) : 0;
-#endif
 	dev = efrm_vi_get_pci_dev(virs);
 	rc = efhw_iopages_alloc(dev, &q->pages, qsize.q_len_page_order,
-				iommu_domain, iova_base);
+				0, iommu_domain, iova_base);
 	pci_dev_put(dev);
 	if (rc < 0) {
 		EFRM_ERR("%s: Failed to allocate %s DMA buffer",
@@ -1270,13 +1240,6 @@ int  efrm_vi_alloc(struct efrm_client *client,
 			EFRM_ERR("%s: ERROR: no PD or CLIENT\n", __func__);
 			return -EINVAL;
 		}
-#ifdef CONFIG_SFC_RESOURCE_VF
-		if (attr->vf != NULL &&
-		    efrm_vf_to_resource(attr->vf)->rs_client != client) {
-			EFRM_ERR("%s: ERROR: VF client mismatch\n", __func__);
-			return -EINVAL;
-		}
-#endif
 		rc = efrm_pd_alloc(&pd, client, attr->vf,
 				   (attr->vf != NULL) ?
 				   EFRM_PD_ALLOC_FLAG_PHYS_ADDR_MODE : 0);
@@ -1378,24 +1341,6 @@ int  efrm_vi_alloc(struct efrm_client *client,
 	}
 #endif
 
-#ifdef CONFIG_SFC_RESOURCE_VF
-	if (virs->allocation.vf != NULL) {
-		char name[80];
-
-		if (vi_name == NULL) {
-			snprintf(name, sizeof(name),
-				 "SolarFlare NIC %d VF %d VI %d pid %d",
-				 client->nic->index,
-				 efrm_vf_to_resource(virs->allocation.vf)->
-					rs_instance,
-				 virs->allocation.instance,
-				 current ? current->tgid : -1);
-			name[sizeof(name)-1] = '\0';
-			vi_name = name;
-		}
-		efrm_vf_vi_start(virs, vi_name);
-	}
-#endif
 	if (client->nic->devtype.arch == EFHW_ARCH_FALCON)
 		efrm_bt_manager_ctor(&virs->bt_manager,
 				     0/*owner*/, 0/*order*/);

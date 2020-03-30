@@ -1,10 +1,8 @@
 # -*- Mode: shell-script; -*-
-######################################################################
-# Copyright 2005  Level 5 Networks.
-# Description: Onload application handler: mpiexec
-#      Author: David Riddoch
-#     Started: 2008/08/14
-######################################################################
+# SPDX-License-Identifier: BSD-2-Clause
+# X-SPDX-Copyright-Text: (c) Solarflare Communications Inc
+
+# Onload application handler: mpiexec
 
 sfc_1arg() {
   cmd="$cmd $1"

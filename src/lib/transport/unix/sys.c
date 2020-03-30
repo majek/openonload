@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_SOURCE>
@@ -93,6 +80,36 @@ citp_find_all_sys_calls(void)
     Log_E(log("%s: ERROR: dlclose != 0", __FUNCTION__));
 #endif
 
+  return 0;
+}
+
+
+extern int __open(const char*, int, ...);
+extern ssize_t __read(int, void*, size_t);
+extern ssize_t __write(int, const void*, size_t);
+extern int __close(int);
+
+int
+citp_basic_syscall_init(void)
+{
+  /* This is a small set of basic syscalls separated from the rest in order
+   * to resolve order-of-initialization problems with other preload libraries.
+   * The specific target here was jemalloc, notably os_overcommits_proc()
+   * therein. jemalloc initializes itself on first malloc, which happens
+   * during dlsym() in our initialization and hence causes infinite recursion
+   * (or actually deadlock because there's a non-recursive mutex in the call
+   * stack). libc exports many of its functions under alternate names, like
+   * the double underscore ones here, so we can use them as a simplistic
+   * dlsym.
+   * Note that these symbols are re-resolved in citp_syscall_init so that if
+   * there are stacked preload libraries, both of which try to intercept these
+   * functions, then they have a chance of working once Onload is fully
+   * initialized because RTLD_NEXT will find them where direct double-
+   * underscore references didn't. */
+  ci_sys_open = __open;
+  ci_sys_read = __read;
+  ci_sys_write = __write;
+  ci_sys_close = __close;
   return 0;
 }
 

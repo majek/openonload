@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 
 #ifndef __ONLOAD_CPLANE_DRIVER_HANDLE_H__
 #define __ONLOAD_CPLANE_DRIVER_HANDLE_H__
@@ -22,8 +9,15 @@
 
 struct cp_fwd_req;
 
+/* Important distinction between kernel and UL oo_cplane_handles: in the
+ * kernel, there's precisely one handle per cplane instance, but at UL there
+ * may be aribtrarily many handles per instance. */
 struct oo_cplane_handle {
+  unsigned cplane_id;
+
   struct cp_mibs mib[2];
+
+  struct cp_fwd_table fwd_tables[CP_MAX_INSTANCES];
 
   /* MIB memory allocation parameters. */
   void* mem;

@@ -1,8 +1,8 @@
 #!/bin/sh
-######################################################################
+# SPDX-License-Identifier: GPL-2.0
+# X-SPDX-Copyright-Text: (c) Solarflare Communications Inc
+
 # Create onload device node.
-# Author: David Riddoch
-######################################################################
 
 me=$(basename "$0")
 
@@ -97,6 +97,13 @@ domknod () {
   [ -x /sbin/restorecon ] && /sbin/restorecon "$path"
 }
 
+get_dev_perms() {
+  local DEV=$(echo "$1" | tr '[a-z]' '[A-Z]')
+  eval user=\"\${${DEV}_USER:-root}\"
+  eval group=\"\${${DEV}_GROUP:-root}\"
+  eval perm=\"\${${DEV}_MODE:-666}\"
+}
+
 mknod_for_dev() {
   local name="$1"
   local dev="$1"
@@ -106,10 +113,7 @@ mknod_for_dev() {
     rc=1
     return
   fi
-  local DEV=$(echo "$dev" | tr '[a-z]' '[A-Z]')
-  eval user=\"\${${DEV}_USER:-root}\"
-  eval group=\"\${${DEV}_GROUP:-root}\"
-  eval perm=\"\${${DEV}_MODE:-666}\"
+  get_dev_perms $dev
   domknod "/dev/$dev" "$major" 0 "$perm"
   chown "$user:$group" "/dev/$dev" 2> /dev/null
 }
@@ -137,11 +141,10 @@ cmd_mknod() {
 cmd_mod_params() {
   case "$1" in
     onload)
+      ONLOAD_CPLANE_USER=root
       . /etc/sysconfig/openonload
-      if [ ! -z $ONLOAD_CPLANE_USER ]; then
-        echo cplane_server_uid=$(id -u $ONLOAD_CPLANE_USER) \
-             cplane_server_gid=$(id -g $ONLOAD_CPLANE_USER)
-      fi
+      echo cplane_server_uid=$(id -u $ONLOAD_CPLANE_USER) \
+           cplane_server_gid=$(id -g $ONLOAD_CPLANE_USER)
       ;;
   esac
   exit 0
@@ -262,6 +265,23 @@ cmd_unload() {
   exit
 }
 
+######################################################################
+
+set_dev_perms() {
+  get_dev_perms $1
+  for dev in $@; do
+    chmod "$perm" "/dev/$dev"
+    chown "$user:$group" "/dev/$dev"
+  done
+}
+
+cmd_post_install() {
+  set_dev_perms onload onload_epoll
+  set_dev_perms sfc_char
+  set_dev_perms sfc_affinity
+}
+
+######################################################################
 
 cmd_reload() {
   [ $# = 0 ] || usage
@@ -306,6 +326,9 @@ case "$cmd" in
     ;;
   configure_container)
     cmd_configure_container "$@"
+    ;;
+  post_install)
+    cmd_post_install "$@"
     ;;
   *)
     usage

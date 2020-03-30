@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 ** <L5_PRIVATE L5_SOURCE>
 **   Copyright: (c) Level 5 Networks Limited.
@@ -181,12 +168,6 @@ extern int efab_thr_user_can_access_stack(uid_t uid, uid_t euid,
 extern int efab_thr_table_lookup(const char* name, struct net* netns,
                                  unsigned id, int flags,
                                  tcp_helper_resource_t** stack_out);
-
-
-/*! Dump a stack's netif state to a buffer or (if NULL) to syslog */
-extern int tcp_helper_dump_stack(unsigned id, unsigned orphan_only,
-                                 void* user_buf, int user_buf_len,
-                                 int op);
 
 /*! Try to kill an orphan/zombie stack */
 extern int tcp_helper_kill_stack_by_id(unsigned id);
@@ -527,6 +508,11 @@ efab_get_os_settings(tcp_helper_resource_t* trs)
   opts->tcp_sndbuf_max = trs->nsproxy->net_ns->ipv4.sysctl_tcp_wmem[2];
   opts->tcp_rcvbuf_def = trs->nsproxy->net_ns->ipv4.sysctl_tcp_rmem[1];
   opts->tcp_rcvbuf_max = trs->nsproxy->net_ns->ipv4.sysctl_tcp_rmem[2];
+#elif defined(EFRM_HAVE_NS_SYSCTL_TCP_MEM)
+  opts->tcp_sndbuf_def = init_net.ipv4.sysctl_tcp_wmem[1];
+  opts->tcp_sndbuf_max = init_net.ipv4.sysctl_tcp_wmem[2];
+  opts->tcp_rcvbuf_def = init_net.ipv4.sysctl_tcp_rmem[1];
+  opts->tcp_rcvbuf_max = init_net.ipv4.sysctl_tcp_rmem[2];
 #else
   opts->tcp_sndbuf_def = sysctl_tcp_wmem[1];
   opts->tcp_sndbuf_max = sysctl_tcp_wmem[2];
@@ -625,7 +611,7 @@ tcp_helper_install_tproxy(int install,
  *---------------------------------------------------------------------------*/
 
 extern int
-efab_alloc_ephemeral_port(ci_uint32 laddr_be32, ci_uint16 lport_be16,
+efab_alloc_ephemeral_port(ci_addr_t laddr, ci_uint16 lport_be16,
                           struct efab_ephemeral_port_keeper** keeper_out);
 extern void
 efab_free_ephemeral_port(struct efab_ephemeral_port_keeper* keeper);
@@ -635,8 +621,7 @@ tcp_helper_alloc_ephem_table(ci_uint32 min_entries, ci_uint32* entries_out);
 
 extern int
 tcp_helper_get_ephemeral_port_list(struct efab_ephemeral_port_head* table,
-                                   uint32_t laddr_be32,
-                                   ci_uint32 table_entries,
+                                   ci_addr_t laddr, ci_uint32 table_entries,
                                    struct efab_ephemeral_port_head** list_out);
 
 /*! Tries to allocate up to size active wilds to the active wild pool.
@@ -645,21 +630,20 @@ tcp_helper_get_ephemeral_port_list(struct efab_ephemeral_port_head* table,
  *        -1 otherwise
  */
 extern int tcp_helper_alloc_to_active_wild_pool(tcp_helper_resource_t* rs,
-                                                ci_uint32 laddr_be32,
+                                                ci_addr_t laddr_be32,
                                                 ci_dllist* ephemeral_ports);
 
 extern int tcp_helper_increase_active_wild_pool(tcp_helper_resource_t* rs,
-                                                ci_uint32 laddr_be);
+                                                ci_addr_t laddr_be);
 
 extern int
 tcp_helper_alloc_ephemeral_ports(struct efab_ephemeral_port_head* list_head,
                                  struct efab_ephemeral_port_head* global_head,
-                                 ci_uint32 laddr_be32, int count);
+                                 ci_addr_t laddr_be32, int count);
 
 extern void
 tcp_helper_free_ephemeral_ports(struct efab_ephemeral_port_head* table,
                                 ci_uint32 entries);
-
 
 #endif /* __CI_DRIVER_EFAB_TCP_HELPER_FNS_H__ */
 /*! \cidoxg_end */

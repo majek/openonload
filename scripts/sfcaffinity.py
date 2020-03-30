@@ -1,8 +1,7 @@
-######################################################################
-# Description: Library of routines related to cpu affinity for
-#              processes and interrupts.
-#      Author: David Riddoch <driddoch@solarflare.com>
-######################################################################
+# SPDX-License-Identifier: GPL-2.0
+# X-SPDX-Copyright-Text: (c) Solarflare Communications Inc
+
+# Library of routines related to cpu affinity for processes and interrupts.
 
 import os, re
 import sfcmask as mask
@@ -421,6 +420,19 @@ def get_close_cores(topology, core):
     addcores(core.core_siblings_list)
     addcores(unused_cores)
     return cc
+
+######################################################################
+sys_ethname_local_cpus_f = "/sys/class/net/%s/device/local_cpus"
+
+def get_local_cores(ethname):
+    """Return a list of cores which are NUMA-local to the specified NIC"""
+    try:
+        cpumask = file_get_strip(sys_ethname_local_cpus_f % ethname)
+    except:
+        cpumask = '0' # in case kernel doesn't support local_cpus return no cores
+    cpumask = mask.comma_sep_hex_to_int(cpumask)
+    cpulist = mask.to_int_list(cpumask)
+    return cpulist
 
 ######################################################################
 

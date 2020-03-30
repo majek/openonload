@@ -1,18 +1,3 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
 /****************************************************************************
  * Driver for Solarflare network controllers and boards
  * Copyright 2005-2006 Fen Systems Ltd.
@@ -412,7 +397,7 @@ static void efx_skb_copy_bits_to_pio(struct efx_nic *efx, struct sk_buff *skb,
 		vaddr = kmap_atomic(skb_frag_page(f));
 #endif
 
-		efx_memcpy_toio_aligned_cb(efx, piobuf, vaddr + f->page_offset,
+		efx_memcpy_toio_aligned_cb(efx, piobuf, vaddr + skb_frag_off(f),
 					   skb_frag_size(f), copy_buf);
 #if defined(EFX_USE_KCOMPAT) && defined(EFX_HAVE_OLD_KMAP_ATOMIC)
 		kunmap_atomic(vaddr, KM_SKB_DATA_SOFTIRQ);

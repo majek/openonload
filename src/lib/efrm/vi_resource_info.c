@@ -1,23 +1,9 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 #include <ci/efrm/nic_table.h>
 #include <ci/driver/efab/hardware.h>
 #include <ci/efrm/private.h>
 #include <ci/efrm/vi_resource_private.h>
-#include <ci/efrm/vf_resource_private.h>
 #include <ci/efhw/nic.h>
 #include <etherfabric/ef_vi.h>
 #include "efrm_internal.h"
@@ -101,13 +87,6 @@ struct pci_dev *efrm_vi_get_pci_dev(struct efrm_vi *virs)
 {
 	struct pci_dev* dev;
 
-#ifdef CONFIG_SFC_RESOURCE_VF
-	if (virs->allocation.vf) {
-		dev = virs->allocation.vf->pci_dev;
-		pci_dev_get(dev);
-	}
-	else
-#endif
 		dev = efhw_nic_get_pci_dev(virs->rs.rs_client->nic);
 
 	return dev;

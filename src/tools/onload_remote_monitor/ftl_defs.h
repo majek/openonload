@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 #ifndef __FTL_DEFS_H__
 #define __FTL_DEFS_H__
 
@@ -206,6 +193,12 @@
 #define ON_CI_CFG_USERSPACE_PIPE IGNORE
 #endif
 
+#if CI_CFG_IPV6
+#define ON_CI_CFG_IPV6 DO
+#else
+#define ON_CI_CFG_IPV6 IGNORE
+#endif
+
 
 #define oo_timespec \
   struct oo_timespec
@@ -233,7 +226,6 @@
 
 #define STRUCT_CI_NI_DLLINK(ctx) \
     FTL_TSTRUCT_BEGIN(ctx, ci_ni_dllist_link, )                               \
-    FTL_TFIELD_INT(ctx, oo_p, addr, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))                   \
     FTL_TFIELD_INT(ctx, oo_p, prev, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))                   \
     FTL_TFIELD_INT(ctx, oo_p, next, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))                   \
     FTL_TSTRUCT_END(ctx)                                                 
@@ -350,6 +342,8 @@
                  ci_iptime_t, tconst_pmtu_discover_fast, ORM_OUTPUT_STACK)                \
   FTL_TFIELD_INT(ctx, \
                  ci_iptime_t, tconst_pmtu_discover_recover, ORM_OUTPUT_STACK)             \
+  FTL_TFIELD_INT(ctx, \
+                 ci_uint32, tconst_challenge_ack_limit, ORM_OUTPUT_STACK) \
   FTL_TFIELD_INT(ctx, ci_iptime_t, tconst_stats, ORM_OUTPUT_STACK)       \
   FTL_TSTRUCT_END(ctx)                                                 
 
@@ -428,81 +422,18 @@
 #if CI_CFG_SUPPORT_STATS_COLLECTION
 
 #define STRUCT_IPV4_STATS(ctx) \
-    FTL_TSTRUCT_BEGIN(ctx, ci_ipv4_stats_count, )                             \
+    FTL_TSTRUCT_BEGIN(ctx, ci_ip_stats_count, )                             \
     FTL_TFIELD_INT(ctx, CI_IP_STATS_TYPE, in_recvs, ORM_OUTPUT_STACK)      \
     FTL_TFIELD_INT(ctx, CI_IP_STATS_TYPE, in_hdr_errs, ORM_OUTPUT_STACK)   \
-    FTL_TFIELD_INT(ctx, CI_IP_STATS_TYPE, in_addr_errs, ORM_OUTPUT_STACK)  \
-    FTL_TFIELD_INT(ctx, CI_IP_STATS_TYPE, forw_dgrams, ORM_OUTPUT_STACK)   \
-    FTL_TFIELD_INT(ctx, \
-		   CI_IP_STATS_TYPE, in_unknown_protos, ORM_OUTPUT_STACK)                       \
     FTL_TFIELD_INT(ctx, CI_IP_STATS_TYPE, in_discards, ORM_OUTPUT_STACK)   \
     FTL_TFIELD_INT(ctx, CI_IP_STATS_TYPE, in_delivers, ORM_OUTPUT_STACK)   \
-    FTL_TFIELD_INT(ctx, CI_IP_STATS_TYPE, out_requests, ORM_OUTPUT_STACK)  \
-    FTL_TFIELD_INT(ctx, CI_IP_STATS_TYPE, out_discards, ORM_OUTPUT_STACK)  \
-    FTL_TFIELD_INT(ctx, CI_IP_STATS_TYPE, out_no_routes, ORM_OUTPUT_STACK) \
-    FTL_TFIELD_INT(ctx, CI_IP_STATS_TYPE, reasm_timeout, ORM_OUTPUT_STACK) \
-    FTL_TFIELD_INT(ctx, CI_IP_STATS_TYPE, reasm_reqds, ORM_OUTPUT_STACK)   \
-    FTL_TFIELD_INT(ctx, CI_IP_STATS_TYPE, reasm_oks, ORM_OUTPUT_STACK)     \
-    FTL_TFIELD_INT(ctx, CI_IP_STATS_TYPE, reasm_fails, ORM_OUTPUT_STACK)   \
-    FTL_TFIELD_INT(ctx, CI_IP_STATS_TYPE, frag_oks, ORM_OUTPUT_STACK)      \
-    FTL_TFIELD_INT(ctx, CI_IP_STATS_TYPE, frag_fails, ORM_OUTPUT_STACK)    \
-    FTL_TFIELD_INT(ctx, CI_IP_STATS_TYPE, frag_creates, ORM_OUTPUT_STACK)  \
+    ON_CI_CFG_IPV6(                                                        \
+      FTL_TFIELD_INT(ctx, CI_IP_STATS_TYPE, in6_recvs, ORM_OUTPUT_STACK)   \
+      FTL_TFIELD_INT(ctx, CI_IP_STATS_TYPE, in6_hdr_errs, ORM_OUTPUT_STACK)\
+      FTL_TFIELD_INT(ctx, CI_IP_STATS_TYPE, in6_discards, ORM_OUTPUT_STACK)\
+      FTL_TFIELD_INT(ctx, CI_IP_STATS_TYPE, in6_delivers, ORM_OUTPUT_STACK)\
+    )                                                                      \
     FTL_TSTRUCT_END(ctx)
-
-#define STRUCT_ICMP_STATS(ctx) \
-    FTL_TSTRUCT_BEGIN(ctx, ci_icmp_stats_count, )                             \
-    FTL_TFIELD_INT(ctx, CI_IP_STATS_TYPE, icmp_in_msgs, ORM_OUTPUT_STACK)  \
-    FTL_TFIELD_INT(ctx, CI_IP_STATS_TYPE, icmp_in_errs, ORM_OUTPUT_STACK)  \
-    FTL_TFIELD_INT(ctx, CI_IP_STATS_TYPE,                \
-                  icmp_in_dest_unreachs, ORM_OUTPUT_STACK)				      \
-    FTL_TFIELD_INT(ctx, CI_IP_STATS_TYPE,                \
-                  icmp_in_time_excds, ORM_OUTPUT_STACK)					      \
-    FTL_TFIELD_INT(ctx, CI_IP_STATS_TYPE,                \
-                  icmp_in_parm_probs, ORM_OUTPUT_STACK)				              \
-    FTL_TFIELD_INT(ctx, CI_IP_STATS_TYPE,                \
-                  icmp_in_src_quenchs, ORM_OUTPUT_STACK)				              \
-    FTL_TFIELD_INT(ctx, CI_IP_STATS_TYPE,                \
-                  icmp_in_redirects, ORM_OUTPUT_STACK)				              \
-    FTL_TFIELD_INT(ctx, CI_IP_STATS_TYPE,                \
-                  icmp_in_echos, ORM_OUTPUT_STACK)				              \
-    FTL_TFIELD_INT(ctx, CI_IP_STATS_TYPE,                \
-                  icmp_in_echo_reps, ORM_OUTPUT_STACK)				              \
-    FTL_TFIELD_INT(ctx, CI_IP_STATS_TYPE,                \
-                  icmp_in_timestamps, ORM_OUTPUT_STACK)				              \
-    FTL_TFIELD_INT(ctx, CI_IP_STATS_TYPE,                \
-                  icmp_in_timestamp_reps, ORM_OUTPUT_STACK)				      \
-    FTL_TFIELD_INT(ctx, CI_IP_STATS_TYPE,                \
-                  icmp_in_addr_masks, ORM_OUTPUT_STACK)				              \
-    FTL_TFIELD_INT(ctx, CI_IP_STATS_TYPE,                \
-                  icmp_in_addr_mask_reps, ORM_OUTPUT_STACK)				      \
-    FTL_TFIELD_INT(ctx, CI_IP_STATS_TYPE,                \
-                  icmp_out_msgs, ORM_OUTPUT_STACK)				              \
-    FTL_TFIELD_INT(ctx, CI_IP_STATS_TYPE,                \
-                  icmp_out_errs, ORM_OUTPUT_STACK)				              \
-    FTL_TFIELD_INT(ctx, CI_IP_STATS_TYPE,                \
-                  icmp_out_dest_unreachs, ORM_OUTPUT_STACK)				      \
-    FTL_TFIELD_INT(ctx, CI_IP_STATS_TYPE,                \
-                  icmp_out_time_excds, ORM_OUTPUT_STACK)				              \
-    FTL_TFIELD_INT(ctx, CI_IP_STATS_TYPE,                \
-                  icmp_out_parm_probs, ORM_OUTPUT_STACK)				              \
-    FTL_TFIELD_INT(ctx, CI_IP_STATS_TYPE,                \
-                  icmp_out_src_quenchs, ORM_OUTPUT_STACK)				              \
-    FTL_TFIELD_INT(ctx, CI_IP_STATS_TYPE,                \
-                  icmp_out_redirects, ORM_OUTPUT_STACK)				              \
-    FTL_TFIELD_INT(ctx, CI_IP_STATS_TYPE,                \
-                  icmp_out_echos, ORM_OUTPUT_STACK)				              \
-    FTL_TFIELD_INT(ctx, CI_IP_STATS_TYPE,                \
-                  icmp_out_echo_reps, ORM_OUTPUT_STACK)				              \
-    FTL_TFIELD_INT(ctx, CI_IP_STATS_TYPE,                \
-                  icmp_out_timestamps, ORM_OUTPUT_STACK)				              \
-    FTL_TFIELD_INT(ctx, CI_IP_STATS_TYPE,                \
-                  icmp_out_timestamp_reps, ORM_OUTPUT_STACK)				      \
-    FTL_TFIELD_INT(ctx, CI_IP_STATS_TYPE,                \
-                  icmp_out_addr_masks, ORM_OUTPUT_STACK)				              \
-    FTL_TFIELD_INT(ctx, CI_IP_STATS_TYPE,                \
-                  icmp_out_addr_mask_reps, ORM_OUTPUT_STACK)				      \
-    FTL_TSTRUCT_END(ctx)
-
 
 #define STRUCT_UDP_STATS(ctx) \
     FTL_TSTRUCT_BEGIN(ctx, ci_udp_stats_count, )                              \
@@ -520,8 +451,7 @@
 #define STRUCT_IP_STATS(ctx) \
     FTL_TSTRUCT_BEGIN(ctx, ci_ip_stats, )                                     \
     FTL_TFIELD_INT(ctx, __TIME_TYPE__, now, ORM_OUTPUT_STACK)                      \
-    FTL_TFIELD_STRUCT(ctx, ci_ipv4_stats_count,    ipv4, ORM_OUTPUT_STACK)         \
-    FTL_TFIELD_STRUCT(ctx, ci_icmp_stats_count,    icmp, ORM_OUTPUT_STACK)         \
+    FTL_TFIELD_STRUCT(ctx, ci_ip_stats_count,      ip, ORM_OUTPUT_STACK)         \
     FTL_TFIELD_STRUCT(ctx, ci_tcp_stats_count,     tcp, ORM_OUTPUT_STACK)          \
     FTL_TFIELD_STRUCT(ctx, ci_udp_stats_count,     udp, ORM_OUTPUT_STACK)          \
     FTL_TFIELD_STRUCT(ctx, ci_tcp_ext_stats_count, tcp_ext, ORM_OUTPUT_STACK)      \
@@ -610,6 +540,8 @@
   FTL_TFIELD_INT(ctx, ci_int32, mem_pressure_pkt_pool_n, ORM_OUTPUT_STACK) \
   FTL_TFIELD_INT(ctx, ci_int32, n_async_pkts, ORM_OUTPUT_STACK)           \
   FTL_TFIELD_INT(ctx, ci_int32, reserved_pktbufs, ORM_OUTPUT_STACK)       \
+  FTL_TFIELD_STRUCT(ctx, ci_ni_dllist_t, deferred_list, ORM_OUTPUT_EXTRA) \
+  FTL_TFIELD_STRUCT(ctx, ci_ni_dllist_t, deferred_list_free, ORM_OUTPUT_EXTRA) \
   FTL_TFIELD_INT(ctx, ci_uint64, nonb_pkt_pool, ORM_OUTPUT_STACK)         \
   FTL_TFIELD_STRUCT(ctx, ci_netif_ipid_cb_t, ipid, ORM_OUTPUT_EXTRA) \
   FTL_TFIELD_INT(ctx, ci_uint32, vi_ofs, ORM_OUTPUT_STACK)                \
@@ -622,6 +554,8 @@
   FTL_TFIELD_ARRAYOFSTRUCT(ctx, ci_ni_dllist_t, timeout_q, \
                            OO_TIMEOUT_Q_MAX, ORM_OUTPUT_STACK, 1)         \
   FTL_TFIELD_STRUCT(ctx, ci_ni_dllist_t, reap_list, ORM_OUTPUT_EXTRA)     \
+  FTL_TFIELD_INT(ctx, ci_uint32, challenge_ack_num, ORM_OUTPUT_STACK)     \
+  FTL_TFIELD_INT(ctx, ci_iptime_t, challenge_ack_time, ORM_OUTPUT_STACK)  \
   ON_CI_CFG_SUPPORT_STATS_COLLECTION(                                   \
     FTL_TFIELD_INT(ctx, ci_int32, stats_fmt, ORM_OUTPUT_STACK)            \
     FTL_TFIELD_STRUCT(ctx, ci_ip_timer, stats_tid, ORM_OUTPUT_STACK)      \
@@ -786,6 +720,12 @@
     FTL_TFIELD_IPADDR(ctx, ip_daddr_be32, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS)) \
     FTL_TSTRUCT_END(ctx)
 
+#define UNION_IPX_HDR(ctx)                                  \
+  FTL_TUNION_BEGIN(ctx, ci_ipx_hdr_t,)                      \
+  FTL_TFIELD_STRUCT(ctx, ci_ip4_hdr, ip4, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS)) \
+  FTL_TUNION_END(ctx)
+  
+
 #define STRUCT_UDP_HDR(ctx) \
     FTL_TSTRUCT_BEGIN(ctx, ci_udp_hdr, )                                      \
     FTL_TFIELD_PORT(ctx, udp_source_be16, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))               \
@@ -825,8 +765,7 @@
 #define STRUCT_IP_HDRS(ctx)                                                   \
     FTL_TSTRUCT_BEGIN(ctx, ci_ip_cached_hdrs, )                               \
     FTL_TFIELD_STRUCT(ctx, cicp_verinfo_t,             \
-		      mac_integrity, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))					      \
-    FTL_TFIELD_IPXADDR(ctx, ip_saddr, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS)) \
+		      fwd_ver, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))					      \
     FTL_TFIELD_PORT(ctx, dport_be16, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS)) \
     FTL_TFIELD_INT(ctx, ci_int8, status, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))       \
     FTL_TFIELD_INT(ctx, ci_uint8, flags, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))       \
@@ -834,7 +773,8 @@
     FTL_TFIELD_INT(ctx, ci_mtu_t, mtu, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))                     \
     FTL_TFIELD_INT(ctx, ci_ifid_t, ifindex, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))                \
     FTL_TFIELD_INT(ctx, cicp_encap_t, encap, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))                \
-    FTL_TFIELD_INT(ctx, ci_int32, intf_i, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))            \
+    FTL_TFIELD_INT(ctx, ci_int16, intf_i, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))            \
+    FTL_TFIELD_INT(ctx, ci_ifid_t, iif_ifindex, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))            \
     ON_CI_CFG_L3XUDP( \
       FTL_TFIELD_INTBE32(ctx, encap_vni_be32, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))            \
       FTL_TFIELD_IPADDR(ctx, encap_daddr_be32, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS)) \
@@ -846,7 +786,7 @@
     FTL_TFIELD_ARRAYOFINT(ctx, ci_uint8, ether_header,     \
 			  2 * ETH_ALEN + 4, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))				      \
     FTL_TFIELD_INTBE16(ctx, ether_type, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))             \
-    FTL_TFIELD_STRUCT(ctx, ci_ip4_hdr, ip, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))                 \
+    FTL_TFIELD_STRUCT(ctx, ci_ipx_hdr_t, ipx, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))                 \
     FTL_TSTRUCT_END(ctx)
 
 
@@ -875,7 +815,7 @@ typedef struct oo_sock_cplane oo_sock_cplane_t;
 
 #define STRUCT_SOCK_CPLANE(ctx)                                         \
   FTL_TSTRUCT_BEGIN(ctx, oo_sock_cplane_t, )                            \
-  FTL_TFIELD_IPADDR(ctx, ip_laddr_be32, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS)) \
+  FTL_TFIELD_IPXADDR(ctx, laddr, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS)) \
   FTL_TFIELD_PORT(ctx, lport_be16, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS)) \
   FTL_TFIELD_INT(ctx, ci_ifid_t, so_bindtodevice, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))     \
   FTL_TFIELD_INT(ctx, ci_ifid_t, ip_multicast_if, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))     \
@@ -891,6 +831,7 @@ typedef struct oo_sock_cplane oo_sock_cplane_t;
   FTL_TFIELD_STRUCT(ctx, citp_waitable, b, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))                 \
   FTL_TFIELD_INT(ctx, ci_uint32, s_flags, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))                  \
   FTL_TFIELD_INT(ctx, ci_uint32, s_aflags, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))                 \
+  FTL_TFIELD_IPXADDR(ctx, laddr, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS)) \
   FTL_TFIELD_STRUCT(ctx, oo_sock_cplane_t, cp, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))             \
   FTL_TFIELD_STRUCT(ctx, ci_ip_cached_hdrs, pkt, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))           \
   FTL_TFIELD_ANON_UNION_BEGIN(ctx, space_for_hdrs, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))         \
@@ -914,7 +855,7 @@ typedef struct oo_sock_cplane oo_sock_cplane_t;
   FTL_TFIELD_INT(ctx, ci_ifid_t, rx_bind2dev_ifindex, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))       \
   FTL_TFIELD_INT(ctx, cicp_hwport_mask_t, rx_bind2dev_hwports, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))  \
   FTL_TFIELD_INT(ctx, ci_int16, rx_bind2dev_vlan, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))          \
-  FTL_TFIELD_INT(ctx, ci_uint8, cmsg_flags, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))                \
+  FTL_TFIELD_INT(ctx, ci_uint16, cmsg_flags, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))               \
   ON_CI_CFG_TIMESTAMPING( \
     FTL_TFIELD_INT(ctx, ci_uint32, timestamping_flags, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))     \
     FTL_TFIELD_INT(ctx, ci_uint32, ts_key, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))                 \
@@ -1116,7 +1057,7 @@ typedef struct oo_tcp_socket_stats oo_tcp_socket_stats;
     FTL_TFIELD_INT(ctx, ci_int32, local_peer, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))                   \
     FTL_TFIELD_INT(ctx, ci_int32, tmpl_head, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))                    \
     FTL_TFIELD_INT(ctx, ci_uint32, tcpflags, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))                    \
-    FTL_TFIELD_STRUCT(ctx, ci_pmtu_state_t, pmtus, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))              \
+    FTL_TFIELD_INT(ctx, oo_p, pmtus, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))              \
     FTL_TFIELD_INT(ctx, ci_int32, so_sndbuf_pkts, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))         \
     FTL_TFIELD_INT(ctx, ci_uint32, rcv_window_max, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))        \
     FTL_TFIELD_INT(ctx, ci_uint32, send_in, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))               \

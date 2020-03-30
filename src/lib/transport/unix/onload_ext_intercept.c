@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_SOURCE>
@@ -36,6 +23,7 @@
 #include <onload/extensions.h>
 #include <onload/ul/stackname.h>
 #include <ci/internal/tls.h>
+#include <ci/internal/ip_timestamp.h>
 
 #if CI_CFG_USERSPACE_PIPE
 #include "ul_pipe.h"
@@ -286,6 +274,44 @@ int onload_ordered_epoll_wait(int epfd, struct epoll_event *events,
   rc = -EOPNOTSUPP;
 #endif
   return rc;
+}
+
+
+int onload_timestamping_request(int fd, unsigned flags)
+{
+#if CI_CFG_TIMESTAMPING
+  if( flags & ~ONLOAD_TIMESTAMPING_FLAG_MASK )
+    return -EINVAL;
+
+  citp_fdinfo* fdi;
+  int rc;
+  citp_lib_context_t lib_context;
+
+  citp_enter_lib(&lib_context);
+
+  if( (fdi = citp_fdtable_lookup(fd)) != NULL && citp_fdinfo_is_socket(fdi) ) {
+    ci_sock_cmn* sock = fdi_to_socket(fdi)->s;
+    if( flags & ONLOAD_TIMESTAMPING_FLAG_RX_MASK )
+      sock->cmsg_flags |= CI_IP_CMSG_TIMESTAMPING;
+    else
+      sock->cmsg_flags &= ~CI_IP_CMSG_TIMESTAMPING;
+
+    sock->timestamping_flags = ONLOAD_SOF_TIMESTAMPING_ONLOAD | flags;
+    if( flags & ONLOAD_TIMESTAMPING_FLAG_TX_MASK )
+      /* HACK: this tricks the TCP receive path into providing timestamps */
+      sock->timestamping_flags |= ONLOAD_SOF_TIMESTAMPING_STREAM;
+
+    rc = 0;
+  }
+  else {
+    rc = -ENOTTY;
+  }
+
+  citp_exit_lib(&lib_context, 0);
+  return rc;
+#else
+  return -EOPNOTSUPP;
+#endif
 }
 
 

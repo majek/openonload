@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_HEADER >
@@ -98,8 +85,12 @@ static int pkt_chain_copy(ci_netif* ni, ci_ip_pkt_fmt* src_head,
   char* dst_ptr = (void*) (dst + 1);
   const char* src_ptr;
 
-  ci_assert_equal(CI_IP4_IHL((ci_ip4_hdr*)oo_tx_outer_l3_hdr(src_head)),
-                  sizeof(ci_ip4_hdr));
+#ifndef NDEBUG
+  if( oo_tx_ether_type_get(src_pkt) == CI_ETHERTYPE_IP )
+    ci_assert_equal(CI_IP4_IHL((ci_ip4_hdr*)oo_tx_outer_l3_hdr(src_head)),
+                    sizeof(ci_ip4_hdr));
+#endif
+
   n_seg = CI_MIN(src_head->n_buffers, CI_IP_PKT_SEGMENTS_MAX);
 
   bytes_copied = 0;
@@ -177,7 +168,7 @@ int cicppl_ip_pkt_flatten_copy(ci_netif* ni, oo_pkt_p src_pktid,
 extern int /* bool */
 cicp_user_defer_send(ci_netif *netif, cicpos_retrieve_rc_t retrieve_rc,
 		     ci_uerr_t *ref_os_rc, oo_pkt_p pkt_id,
-                     ci_ifid_t ifindex, ci_uint32 next_hop)
+                     ci_ifid_t ifindex, ci_addr_t next_hop)
 {
   /* TODO: Perform any service request implied by retrieve_rc:
    *    

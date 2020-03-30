@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_SOURCE>
@@ -43,6 +30,8 @@
  *       Hence we have little choice but to duplicate the definition here.
  */
 #define IP_MTU  14
+/* Duplicate IPV6_AUTOFLOWLABEL definition from linux/in6.h */
+#define IPV6_AUTOFLOWLABEL 70
 
 #define VERB(x)
 
@@ -264,7 +253,7 @@ int ci_get_sol_ip( ci_netif* ni, ci_sock_cmn* s, ci_fd_t fd,
       if( sock_raddr_be32(s) != 0 ) {
         ci_ip_cache_invalidate(&s->pkt);
         cicp_user_retrieve(ni, &s->pkt, &s->cp);
-        if( oo_cp_verinfo_is_valid(ni->cplane, &s->pkt.mac_integrity) ) {
+        if( oo_cp_ipcache_is_valid(ni, &s->pkt) ) {
           u = s->pkt.mtu;
           break;
         }
@@ -285,7 +274,7 @@ int ci_get_sol_ip( ci_netif* ni, ci_sock_cmn* s, ci_fd_t fd,
       /* The socket is not connected */
       RET_WITH_ERRNO(ENOTCONN);
     }
-    u = SOCK_TO_TCP(s)->pmtus.pmtu;
+    u = ci_tcp_get_pmtu(ni, SOCK_TO_TCP(s));
     break;
 
   case IP_MTU_DISCOVER:
@@ -405,22 +394,49 @@ int ci_get_sol_ip( ci_netif* ni, ci_sock_cmn* s, ci_fd_t fd,
 
 #if CI_CFG_FAKE_IPV6
 /* Handler for common getsockopt:SOL_IPV6 options. */
-int ci_get_sol_ip6(ci_sock_cmn* s, ci_fd_t fd, int optname, void *optval,
+int ci_get_sol_ip6(ci_netif* ni, ci_sock_cmn* s, ci_fd_t fd, int optname, void *optval,
                    socklen_t *optlen )
 {
-  int rc;
-  ci_fd_t os_sock = ci_get_os_sock_fd(fd);
+#if CI_CFG_IPV6
+  unsigned u;
 
-  if (CI_IS_VALID_SOCKET(os_sock) ) { 
-    rc = ci_sys_getsockopt( os_sock, IPPROTO_IPV6, optname, optval, optlen);
-    ci_rel_os_sock_fd( os_sock );
-    if (rc != 0)
-      RET_WITH_ERRNO(errno);
-    return 0;
-  } else {
-    /* Do not really support IPv6 options */
-    RET_WITH_ERRNO(ENOPROTOOPT); 
+  /* NOTE: "break" from this switch block will exit through code
+   * that passes the value in [u] back to the caller.  */
+
+  switch(optname) {
+  case IPV6_V6ONLY:
+    u = !!(s->s_flags & CI_SOCK_FLAG_V6ONLY);
+    break;
+
+  case IPV6_RECVPKTINFO:
+    u = !!(s->cmsg_flags & CI_IPV6_CMSG_PKTINFO);
+    break;
+
+  case IPV6_TCLASS:
+    u = s->tclass;
+    break;
+
+  case IPV6_RECVERR:
+    u = !!(s->so.so_debug & CI_SOCKOPT_FLAG_IPV6_RECVERR);
+    break;
+
+  case IPV6_AUTOFLOWLABEL:
+    u = !!(s->s_flags & CI_SOCK_FLAG_AUTOFLOWLABEL_OPT);
+    break;
+
+  default:
+    LOG_U(log("%s: "NS_FMT" unimplemented/bad SOL_IPV6 option: %i",
+              __FUNCTION__, NS_PRI_ARGS(ni, s), optname));
+    if( s->b.sb_aflags & CI_SB_AFLAG_OS_BACKED )
+      return ci_get_os_sockopt(fd, IPPROTO_IPV6, optname, optval, optlen);
+    else
+      RET_WITH_ERRNO(ENOPROTOOPT);
   }
+
+  return ci_getsockopt_final(optval, optlen, SOL_IPV6, &u, sizeof(u));
+#endif
+
+  return ci_get_os_sockopt(fd, IPPROTO_IPV6, optname, optval, optlen);
 }
 #endif
 #endif
@@ -635,6 +651,12 @@ int ci_get_sol_socket( ci_netif* netif, ci_sock_cmn* s,
 #if CI_CFG_TIMESTAMPING
   case ONLOAD_SO_TIMESTAMPING:
     u = s->timestamping_flags;
+    /* Only report the flags if they were set with `setsockopt`. If the
+     * behaviour was overridden with `onload_timestamping_request` then the
+     * flags have different meanings which might cause confusion.
+     */
+    if( u & ONLOAD_SOF_TIMESTAMPING_ONLOAD )
+      u = 0;
     goto u_out;
 #endif
 
@@ -689,6 +711,27 @@ int ci_get_sol_socket( ci_netif* netif, ci_sock_cmn* s,
 }
 
 #ifndef __KERNEL__
+static int ci_set_recverr(ci_netif* ni, ci_sock_cmn* s, ci_int32 flag,
+                          const void *optval, socklen_t optlen)
+{
+  int rc;
+  ci_assert(flag == CI_SOCKOPT_FLAG_IP_RECVERR ||
+            flag == CI_SOCKOPT_FLAG_IPV6_RECVERR);
+  if( (rc = opt_not_ok(optval, optlen, char)) )
+    return rc;
+  if( ci_get_optval(optval, optlen) )
+    s->so.so_debug |= flag;
+  else {
+    s->so.so_debug &= ~flag;
+    if( s->os_sock_status & OO_OS_STATUS_ERR ) {
+      oo_sp sock_id = SC_SP(s);
+      oo_resource_op(ci_netif_get_driver_handle(ni),
+                     OO_IOC_OS_POLLERR_CLEAR, &sock_id);
+    }
+  }
+  return 0;
+}
+
 /* Handler for common setsockopt:SOL_IP handlers */
 int ci_set_sol_ip( ci_netif* netif, ci_sock_cmn* s,
                    int optname, const void *optval, socklen_t optlen)
@@ -728,12 +771,14 @@ int ci_set_sol_ip( ci_netif* netif, ci_sock_cmn* s,
     }
     val = CI_MIN(val, CI_IP_MAX_TOS);
     s->cp.ip_tos = (ci_uint8)val;
-    s->pkt.ip.ip_tos = (ci_uint8)val;
-    if( s->b.state == CI_TCP_STATE_UDP )
-      SOCK_TO_UDP(s)->ephemeral_pkt.ip.ip_tos = (ci_uint8)val;
+    if( ! ipcache_is_ipv6(&s->pkt) ) {
+      s->pkt.ipx.ip4.ip_tos = (ci_uint8)val;
+      if( s->b.state == CI_TCP_STATE_UDP )
+        SOCK_TO_UDP(s)->ephemeral_pkt.ipx.ip4.ip_tos = (ci_uint8)val;
+    }
 
     LOG_TV(log("%s: "NS_FMT" TCP IP_TOS = %u", __FUNCTION__,
-               NS_PRI_ARGS(netif, s), s->pkt.ip.ip_tos));
+               NS_PRI_ARGS(netif, s), s->pkt.ipx.ip4.ip_tos));
 
     /* Set SO_PRIORITY */
     s->so_priority = ci_tos2priority[(((val)>>1) & 0xf)];
@@ -756,12 +801,12 @@ int ci_set_sol_ip( ci_netif* netif, ci_sock_cmn* s,
 
     s->cp.ip_ttl = (ci_uint8) v;
     s->s_flags |= CI_SOCK_FLAG_SET_IP_TTL;
-    if( ! CI_IP_IS_MULTICAST(s->pkt.ip.ip_daddr_be32) )
-      s->pkt.ip.ip_ttl = s->cp.ip_ttl;
+    if( ! CI_IP_IS_MULTICAST(s->pkt.ipx.ip4.ip_daddr_be32) )
+      s->pkt.ipx.ip4.ip_ttl = s->cp.ip_ttl;
     if( s->b.state == CI_TCP_STATE_UDP) {
       ci_udp_state* us = SOCK_TO_UDP(s);
-      if (! CI_IP_IS_MULTICAST(us->ephemeral_pkt.ip.ip_daddr_be32) )
-        us->ephemeral_pkt.ip.ip_ttl = s->cp.ip_ttl;
+      if (! CI_IP_IS_MULTICAST(us->ephemeral_pkt.ipx.ip4.ip_daddr_be32) )
+        us->ephemeral_pkt.ipx.ip4.ip_ttl = s->cp.ip_ttl;
     }
     LOG_TV(log("%s: "NS_FMT" IP_TTL = %u", __FUNCTION__,
                NS_PRI_ARGS(netif, s), s->cp.ip_ttl));
@@ -833,18 +878,9 @@ int ci_set_sol_ip( ci_netif* netif, ci_sock_cmn* s,
     break;
 
   case IP_RECVERR:
-    if( (rc = opt_not_ok(optval, optlen, char)) )
+    if( (rc = ci_set_recverr(netif, s, CI_SOCKOPT_FLAG_IP_RECVERR, optval,
+                             optlen)) )
       goto fail_fault;
-    if (ci_get_optval(optval, optlen))
-      s->so.so_debug |= CI_SOCKOPT_FLAG_IP_RECVERR;
-    else {
-      s->so.so_debug &= ~CI_SOCKOPT_FLAG_IP_RECVERR;
-      if( s->os_sock_status & OO_OS_STATUS_ERR ) {
-        oo_sp sock_id = SC_SP(s);
-        oo_resource_op(ci_netif_get_driver_handle(netif),
-                       OO_IOC_OS_POLLERR_CLEAR, &sock_id);
-      }
-    }
     break;
 
 #ifdef IP_TRANSPARENT
@@ -964,20 +1000,123 @@ int ci_set_sol_ip( ci_netif* netif, ci_sock_cmn* s,
 #endif
 }
 
+#if CI_CFG_IPV6
+ci_inline void
+ci_set_autoflowlabel_flags(ci_netif* ni, ci_sock_cmn* s, const void *optval,
+                           socklen_t optlen)
+{
+  if( ci_get_optval(optval, optlen) )
+    s->s_flags |= CI_SOCK_FLAG_AUTOFLOWLABEL_OPT;
+  else
+    s->s_flags &= ~CI_SOCK_FLAG_AUTOFLOWLABEL_OPT;
+
+  switch(NI_OPTS(ni).auto_flowlabels) {
+    case CITP_IP6_AUTO_FLOW_LABEL_FORCED:
+      s->s_flags |= CI_SOCK_FLAG_AUTOFLOWLABEL_REQ;
+      break;
+    case CITP_IP6_AUTO_FLOW_LABEL_OPTOUT:
+    case CITP_IP6_AUTO_FLOW_LABEL_OPTIN:
+      if( s->s_flags & CI_SOCK_FLAG_AUTOFLOWLABEL_OPT )
+        s->s_flags |= CI_SOCK_FLAG_AUTOFLOWLABEL_REQ;
+      else
+        s->s_flags &= ~CI_SOCK_FLAG_AUTOFLOWLABEL_REQ;
+      break;
+    case CITP_IP6_AUTO_FLOW_LABEL_OFF:
+    default:
+      s->s_flags &= ~CI_SOCK_FLAG_AUTOFLOWLABEL_REQ;
+      break;
+  }
+}
+#endif
+
 #if CI_CFG_FAKE_IPV6
 /* Handler for common getsockopt:SOL_IPV6 options. */
 int ci_set_sol_ip6( ci_netif* netif, ci_sock_cmn* s,
                     int optname, const void *optval, socklen_t optlen )
 {
-#ifdef  IPV6_V6ONLY
-  if (optname == IPV6_V6ONLY && 
-      (opt_not_ok(optval, optlen, unsigned) || *(unsigned *)optval)) {
-    return CI_SOCKET_HANDOVER;
-  }
+  int rc = 0; /* Shut up compiler warning */
+
+  switch( optname ) {
+  case IPV6_V6ONLY:
+  {
+    int val = ci_get_optval(optval, optlen);
+#if CI_CFG_IPV6
+    if( val && ! CI_IS_ADDR_IP6(s->laddr) )
+      RET_WITH_ERRNO(EINVAL);
+    if( val )
+      s->s_flags |= CI_SOCK_FLAG_V6ONLY;
+    else
+      s->s_flags &=~ CI_SOCK_FLAG_V6ONLY;
+#else
+    if( val )
+      return CI_SOCKET_HANDOVER;
 #endif
+    break;
+  }
+
+#if CI_CFG_IPV6
+  case IPV6_RECVPKTINFO:
+    if( (rc = opt_not_ok(optval, optlen, char)) )
+      goto fail_inval;
+
+    if ( ci_get_optval(optval, optlen) )
+      s->cmsg_flags |= CI_IPV6_CMSG_PKTINFO;
+    else
+      s->cmsg_flags &= ~CI_IPV6_CMSG_PKTINFO;
+    break;
+
+  case IPV6_TCLASS:
+  {
+    int val;
+
+    if( (rc = opt_not_ok( optval, optlen, char)) )
+      goto fail_inval;
+
+    val = ci_get_optval(optval, optlen);
+    /* Value checks according to RFC 3542 par. 6.5 and are similar to Linux */
+    if( val < -1 || val > 0xff )
+      goto fail_inval;
+    if( val == -1 )
+      val = CI_IPV6_DFLT_TCLASS;
+
+    s->tclass = (ci_uint8)val;
+    if( ipcache_is_ipv6(&s->pkt) ) {
+      ci_ip6_set_tclass(&s->pkt.ipx.ip6, (ci_uint8)val);
+      if( s->b.state == CI_TCP_STATE_UDP )
+        ci_ip6_set_tclass(&SOCK_TO_UDP(s)->ephemeral_pkt.ipx.ip6,
+                          (ci_uint8)val);
+    }
+    break;
+  }
+
+  case IPV6_RECVERR:
+    if( (rc = ci_set_recverr(netif, s, CI_SOCKOPT_FLAG_IPV6_RECVERR, optval,
+                             optlen)) )
+      goto fail_inval;
+    break;
+
+  case IPV6_AUTOFLOWLABEL:
+    if( (rc = opt_not_ok(optval, optlen, char)) )
+      goto fail_inval;
+    ci_set_autoflowlabel_flags(netif, s, optval, optlen);
+    break;
+
+  default:
+    /* Don't fail with error but print the message about unimplemented IPv6
+     * options. Options are set for system socket.*/
+    LOG_U(log("%s: "NS_FMT" unimplemented/bad SOL_IPV6 option %i",
+              __FUNCTION__, NS_PRI_ARGS(netif, s), optname));
+#endif
+  }
   /* All socket options are already set for system socket, and we do not
    * handle IPv6 option natively. */
-  return 0;
+  return rc;
+#if CI_CFG_IPV6
+ fail_inval:
+  LOG_SC(log("%s: "NS_FMT" option %i ptr/len error (EINVAL or EFAULT)",
+             __FUNCTION__, NS_PRI_ARGS(netif, s), optname));
+  RET_WITH_ERRNO( -rc );
+#endif
 }
 #endif
 

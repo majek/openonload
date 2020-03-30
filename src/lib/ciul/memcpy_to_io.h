@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This library is free software; you can redistribute it and/or
-** modify it under the terms of version 2.1 of the GNU Lesser General Public
-** License as published by the Free Software Foundation.
-**
-** This library is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-** Lesser General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: LGPL-2.1 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_HEADER >
@@ -240,10 +227,22 @@ static inline volatile uint64_t*
        __memcpy_to_pio((dst), (src), (len), 1)
 
 
-/* Emit a word, and do optional actions between each write buffer. */
-#define CTPIO_EMIT_WORD(dst, data)              \
+#define CTPIO_COPY_FLUSH()                      \
   do {                                          \
+    if( copy ) {                                \
+      int len = copy_dst - copy_local;          \
+      __builtin_memcpy(fallback, copy_local, len);\
+      fallback += len;                          \
+      copy_dst = copy_local;                    \
+    }                                           \
+  } while(0)                                    \
+
+/* Emit a word, and do optional actions between each write buffer. */
+#define CTPIO_EMIT_WORD(data)                   \
+  do {                                          \
+    uint64_t word = (data);                     \
     if( WB_ALIGNED(dst) )  {                    \
+      CTPIO_COPY_FLUSH();                       \
       if( wb_flush )                            \
         wmb_wc();                               \
       if( wb_ticks ) {                          \
@@ -253,16 +252,39 @@ static inline volatile uint64_t*
         start = now;                            \
       }                                         \
     }                                           \
-    *(dst)++ = (data);                          \
+    *dst++ = word;                              \
+    if( copy ) {                                \
+      *(uint64_t*)copy_dst = word;              \
+      copy_dst += sizeof(word);                 \
+    }                                           \
   } while(0)
 
+/* Emit the word in the "in_hand" buffer. This might be the first word,
+ * which needs handling differently. */
+#define CTPIO_EMIT_IN_HAND()                    \
+  do {                                          \
+    if( first ) {                               \
+      *dst++ = in_hand.qword;                   \
+      if( copy ) {                              \
+        *(uint32_t*)copy_dst = in_hand.dwords[1];\
+        copy_dst += sizeof(in_hand.dwords[1]);  \
+      }                                         \
+      first = 0;                                \
+    }                                           \
+    else {                                      \
+      CTPIO_EMIT_WORD(in_hand.qword);           \
+    }                                           \
+  } while(0)
 
-static inline void memcpy_iov_to_ctpio(volatile uint64_t*__restrict__ dst,
-                                       uint32_t ctpio_control,
-                                       const struct iovec* iov,
-                                       unsigned iovcnt,
-                                       int wb_flush,
-                                       uint32_t wb_ticks)
+static inline __attribute__((always_inline)) void
+  memcpy_iov_to_ctpio(volatile uint64_t*__restrict__ dst,
+                      uint32_t ctpio_control,
+                      const struct iovec* iov,
+                      unsigned iovcnt,
+                      int wb_flush,
+                      uint32_t wb_ticks,
+                      int copy,
+                      char*__restrict__ fallback)
 {
   union {
     uint8_t  bytes[MEMCPY_TO_PIO_ALIGN];
@@ -272,6 +294,13 @@ static inline void memcpy_iov_to_ctpio(volatile uint64_t*__restrict__ dst,
   size_t in_hand_len, src_iov_len = iov[0].iov_len;
   const uint64_t*__restrict__ src_iov_p = iov[0].iov_base;
   unsigned iov_next_i = 1;
+  int first = 1;
+
+  /* It seems measurably faster to write the fallback data to a local buffer
+   * in the main loop, and then copy this to the fallback buffer when we wait
+   * between write buffers. I'm not sure why. */
+  char copy_local[EF_VI_WRITE_BUFFER_SIZE];
+  char* copy_dst = copy_local;
 
   uint32_t now, start = 0;
   if( wb_ticks )
@@ -289,7 +318,7 @@ static inline void memcpy_iov_to_ctpio(volatile uint64_t*__restrict__ dst,
     size_t in_hand_space = MEMCPY_TO_PIO_ALIGN - in_hand_len;
     size_t n = CI_MIN(in_hand_space, src_iov_len);
     EF_VI_ASSERT( in_hand_len > 0 );
-    memcpy(in_hand.bytes + in_hand_len, src_iov_p, n);
+    __builtin_memcpy(in_hand.bytes + in_hand_len, src_iov_p, n);
     in_hand_len += n;
     src_iov_len -= n;
     src_iov_p = (void*) ((char*) src_iov_p + n);
@@ -298,18 +327,18 @@ static inline void memcpy_iov_to_ctpio(volatile uint64_t*__restrict__ dst,
       goto next_iov;
 
     /* Emit in_hand.  (We reset in_hand_len below). */
-    CTPIO_EMIT_WORD(dst, in_hand.qword);
+    CTPIO_EMIT_IN_HAND();
 
   nothing_in_hand:
     /* Copy whole qwords. */
     n = src_iov_len >> 3;
     src_iov_len -= n << 3;
     while( n-- )
-      CTPIO_EMIT_WORD(dst, *src_iov_p++);
+      CTPIO_EMIT_WORD(*src_iov_p++);
 
     if( src_iov_len ) {
       EF_VI_ASSERT( src_iov_len < MEMCPY_TO_PIO_ALIGN );
-      memcpy(in_hand.bytes, src_iov_p, src_iov_len);
+      __builtin_memcpy(in_hand.bytes, src_iov_p, src_iov_len);
       in_hand_len = src_iov_len;
     }
     else {
@@ -327,7 +356,7 @@ static inline void memcpy_iov_to_ctpio(volatile uint64_t*__restrict__ dst,
   }
 
   if( in_hand_len )
-    CTPIO_EMIT_WORD(dst, in_hand.qword);
+    CTPIO_EMIT_IN_HAND();
 
   /* Pad to end of write buffer.  It isn't obvious this is desirable, but I
    * (djr) have observed cases where more writes are out-of-order when this
@@ -336,14 +365,7 @@ static inline void memcpy_iov_to_ctpio(volatile uint64_t*__restrict__ dst,
   while( ! WB_ALIGNED(dst) )
     *dst++ = 0;
 
-  /* Is this final flush desirable?  It may push the final write buffer out
-   * more quickly than would be the case otherwise.  The only downside is
-   * that it likely increases CPU overhead a little.
-   *
-   * TODO: Test whether this improves latency in the case that the doorbell
-   * does not follow immediately after this call.
-   */
-  wmb_wc();
+  CTPIO_COPY_FLUSH();
 }
 
 

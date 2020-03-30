@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_SOURCE>
@@ -36,22 +23,15 @@ static const ci_uint16 mtu_plateau[] = CI_PMTU_PLATEAU_ENTRIES;
 
 
 extern void
-ci_pmtu_state_init(ci_netif* ni, ci_sock_cmn *s, ci_pmtu_state_t* pmtus,
+ci_pmtu_state_init(ci_netif* ni, ci_sock_cmn *s, 
+                   oo_p pmtu_sp, ci_pmtu_state_t* pmtus,
                    int func_code)
 {
   pmtus->tid.param1 = SC_SP(s);
   pmtus->tid.fn = (ci_iptime_callback_fn_t)func_code;
 
-  ci_pmtu_state_reinit(ni, s, pmtus);
-}
-
-extern void
-ci_pmtu_state_reinit(ci_netif* ni, ci_sock_cmn *s, ci_pmtu_state_t* pmtus)
-{
-  oo_p sp;
-  sp = oo_sockp_to_statep(ni, SC_SP(s));
-  OO_P_ADD(sp, (char*) &pmtus->tid - (char*) s);
-  ci_ip_timer_init(ni, &pmtus->tid, sp, "pmtu");
+  OO_P_ADD(pmtu_sp, CI_MEMBER_OFFSET(ci_ni_aux_mem, u.pmtus));
+  ci_ip_timer_init(ni, &pmtus->tid, pmtu_sp, "pmtu");
 }
 
 /*! Update the PMTU value for an endpoint, range limited to valid values.
@@ -105,11 +85,12 @@ ci_inline void __ci_pmtu_timeout_handler(ci_netif* ni, ci_pmtu_state_t *pmtus,
 }
 
 
-/* Called at timeout on a Path MTU (re-)discovery timeout. Can be called both
- * both TCP and UDP sockets */
+/* Called at timeout on a Path MTU (re-)discovery timeout.
+ * TCP sockets only. */
 void ci_pmtu_timeout_pmtu(ci_netif* ni, ci_tcp_state *ts)
 {
-  __ci_pmtu_timeout_handler(ni, &ts->pmtus, &ts->s.pkt);
+  __ci_pmtu_timeout_handler(ni, ci_ni_aux_p2pmtus(ni, ts->pmtus),
+                            &ts->s.pkt);
   ci_tcp_tx_change_mss(ni, ts);
 }
 

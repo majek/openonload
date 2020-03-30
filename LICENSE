@@ -20,6 +20,4 @@ This package includes software derived from lwIP.  Please see
 lwIP-LICENSE.
 
 The TCP Direct API and library and other binary objects are licensed as
-described in BIN-LICENSE.
-
-
+described in ../scripts/onload_misc/appflex_activation_file.

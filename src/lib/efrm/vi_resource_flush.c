@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /****************************************************************************
  * Driver for Solarflare network controllers -
  *          resource management for Xen backend, OpenOnload, etc
@@ -61,6 +48,8 @@
 #include "efrm_vi_set.h"
 
 #define JIFFIES_NO_TIMEOUT 0
+
+#define FLUSH_TIMEOUT  (2*HZ)
 
 /* Workqueue item to postpone processing of "flush complete" event. */
 struct efrm_flushed_req {
@@ -190,7 +179,7 @@ __efrm_vi_resource_issue_flush(struct efrm_vi *virs, int queue, bool *completed)
 	list_del(&q->flush_link);
 	list_add_tail(&q->flush_link, flush_outstanding_list);
 	queue_delayed_work(efrm_vi_manager->workqueue,
-			   &nvi->flush_work_item, HZ);
+			   &nvi->flush_work_item, FLUSH_TIMEOUT);
 }
 
 
@@ -306,7 +295,7 @@ void efrm_vi_check_flushes(struct work_struct *data)
 	if (!efrm_vi_rm_flushes_pending(efrm_nic))
 		goto out;
 
-	j = jiffies - HZ;
+	j = jiffies - FLUSH_TIMEOUT;
 
 	list_for_each_safe(pos, temp, &nvi->rx_flush_outstanding_list) {
 		virs = container_of(pos, struct efrm_vi,
@@ -322,8 +311,9 @@ void efrm_vi_check_flushes(struct work_struct *data)
 			 */
                         if (!efrm_nic->efhw_nic.resetting)
 				EFRM_WARN_LIMITED("%s: rx flush outstanding "
-				  "after 1 second on ifindex %d",
-				  __FUNCTION__, efrm_nic->efhw_nic.ifindex);
+				  "after %d second(s) on ifindex %d",
+				  __FUNCTION__, FLUSH_TIMEOUT / HZ,
+				  efrm_nic->efhw_nic.ifindex);
 			efrm_vi_resource_rx_flush_done(virs, &completed);
 			found = true;
 		}
@@ -343,8 +333,9 @@ void efrm_vi_check_flushes(struct work_struct *data)
 			 */
                         if (!efrm_nic->efhw_nic.resetting)
 				EFRM_WARN_LIMITED("%s: tx flush outstanding "
-				  "after 1 second on ifindex %d",
-				  __FUNCTION__, efrm_nic->efhw_nic.ifindex);
+				  "after %d second(s) on ifindex %d",
+				  __FUNCTION__, FLUSH_TIMEOUT / HZ,
+				  efrm_nic->efhw_nic.ifindex);
 			efrm_vi_resource_tx_flush_done(virs, &completed);
 			found = true;
 		}
@@ -361,7 +352,7 @@ void efrm_vi_check_flushes(struct work_struct *data)
 	spin_unlock_bh(&efrm_vi_manager->rm.rm_lock);
 	if (efrm_vi_rm_flushes_pending(efrm_nic)) {
 		queue_delayed_work(efrm_vi_manager->workqueue,
-				   &nvi->flush_work_item, HZ);
+				   &nvi->flush_work_item, FLUSH_TIMEOUT);
 	}
 }
 
@@ -561,13 +552,9 @@ efrm_handle_dmaq_flushed_schedule(struct efhw_nic *flush_nic,
 	if (req == NULL)
 		return 0;
 
-#ifdef CONFIG_SFC_RESOURCE_VF
-	efrm_vf_nic_params(flush_nic, &vi_base, &vi_scale, &vf_count);
-#else
 	vi_base = 0;
 	vi_scale = 0;
 	vf_count = 0;
-#endif
 
 	/* PF vi range [flush_nic->vi_min, flush_nic->vi_lim)
 	 * VF vi range [vi_base, vi_base + (1 << vi_scale) * vf_count)

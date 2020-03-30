@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 #ifndef __ONLOAD_MMAP_BASE_H__
 #define __ONLOAD_MMAP_BASE_H__
 
@@ -42,7 +29,25 @@
 #define OO_MMAP_ID_SHIFT         (OO_MMAP_TYPE_WIDTH + OO_MMAP_TYPE_SHIFT)
 #define OO_MMAP_TYPE(offset) \
     (((offset) >> OO_MMAP_TYPE_SHIFT) & OO_MMAP_TYPE_MASK)
-#define OO_MMAP_ID(offset)       ((offset) >> OO_MMAP_ID_SHIFT)
 
+typedef uint64_t oo_mmap_id_t;
+typedef uint8_t oo_mmap_type_t;
+
+/* Note that, in order to pass 64-bit offsets around, both UL and kernel have
+ * to be 64-bit.  This means in practice that Onload proper is limited to using
+ * 32-bit offsets, but that the control plane can use the full width. */
+static inline oo_mmap_id_t
+OO_MMAP_OFFSET_TO_MAP_ID(off_t offset)
+{
+  return (uint64_t) offset >> OO_MMAP_ID_SHIFT;
+}
+
+static inline off_t
+OO_MMAP_MAKE_OFFSET(oo_mmap_type_t map_type, oo_mmap_id_t map_id)
+{
+  off_t offset = map_id << OO_MMAP_ID_SHIFT;
+  offset |= ((off_t) map_type) << OO_MMAP_TYPE_SHIFT;
+  return offset;
+}
 
 #endif /* __ONLOAD_MMAP_BASE_H__ */

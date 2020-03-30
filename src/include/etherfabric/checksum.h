@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This library is free software; you can redistribute it and/or
-** modify it under the terms of version 2.1 of the GNU Lesser General Public
-** License as published by the Free Software Foundation.
-**
-** This library is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-** Lesser General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: LGPL-2.1 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /****************************************************************************
  * Copyright 2017-2018: Solarflare Communications Inc,
  *                      7505 Irvine Center Drive, Suite 100
@@ -53,9 +40,18 @@
 
 #include <etherfabric/base.h>
 
+#ifdef __KERNEL__
+#include <linux/ip.h>
+#include <linux/tcp.h>
+#include <linux/udp.h>
+#else
 #include <netinet/ip.h>
 #include <netinet/tcp.h>
 #include <netinet/udp.h>
+#endif
+
+#include <ci/compat.h>
+#include <ci/net/ipv6.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -73,9 +69,44 @@ extern "C" {
 */
 extern uint32_t ef_ip_checksum(const struct iphdr* ip);
 
-/*! \brief Calculate the checksum for a UDP packet
+/*! \brief Calculate the checksum for a non-IPv6 UDP packet
 **
 ** \param ip     The IP header for the packet.
+** \param udp    The UDP header for the packet.
+** \param iov    Start of the iovec array describing the UDP payload.
+** \param iovlen Length of the iovec array.
+**
+** \return The checksum of the UDP packet.
+**
+** Calculate the checksum for a non-IPv6 UDP packet.  The UDP header must be
+** populated (with the exception of the checksum field itself, which is
+** ignored) before calling this function.
+*/
+extern uint32_t
+ef_udp_checksum(const struct iphdr* ip, const struct udphdr* udp,
+                const struct iovec* iov, int iovlen);
+
+/*! \brief Calculate the checksum for an IPv6 UDP packet
+**
+** \param ip6    The IPv6 header for the packet.
+** \param udp    The UDP header for the packet.
+** \param iov    Start of the iovec array describing the UDP payload.
+** \param iovlen Length of the iovec array.
+**
+** \return The checksum of the UDP packet.
+**
+** Calculate the checksum for an IPv6 UDP packet.  The UDP header must be
+** populated (with the exception of the checksum field itself, which is
+** ignored) before calling this function.
+*/
+extern uint32_t
+ef_udp_checksum_ip6(const ci_ip6_hdr* ip6, const struct udphdr* udp,
+                    const struct iovec* iov, int iovlen);
+
+/*! \brief Calculate the checksum for a UDP packet
+**
+** \param af     The address family of the IP header for the packet.
+** \param ipx    The IP header for the packet.
 ** \param udp    The UDP header for the packet.
 ** \param iov    Start of the iovec array describing the UDP payload.
 ** \param iovlen Length of the iovec array.
@@ -87,12 +118,47 @@ extern uint32_t ef_ip_checksum(const struct iphdr* ip);
 ** calling this function.
 */
 extern uint32_t
-ef_udp_checksum(const struct iphdr* ip, const struct udphdr* udp,
-                const struct iovec* iov, int iovlen);
-                
-/*! \brief Calculate the checksum for a TCP packet
+ef_udp_checksum_ipx(int af, const void* ipx, const struct udphdr* udp,
+                    const struct iovec* iov, int iovlen);
+
+/*! \brief Calculate the checksum for a non-IPv6 TCP packet
 **
 ** \param ip     The IP header for the packet.
+** \param tcp    The TCP header for the packet.
+** \param iov    Start of the iovec array describing the TCP payload.
+** \param iovlen Length of the iovec array.
+**
+** \return The checksum of the TCP packet.
+**
+** Calculate the checksum for a non-IPv6 TCP packet.  The TCP header must be
+** populated (with the exception of the checksum field itself, which is
+** ignored) before calling this function.
+*/
+extern uint32_t
+ef_tcp_checksum(const struct iphdr* ip, const struct tcphdr* tcp,
+                const struct iovec* iov, int iovlen);
+
+/*! \brief Calculate the checksum for an IPv6 TCP packet
+**
+** \param ip6    The IPv6 header for the packet.
+** \param tcp    The TCP header for the packet.
+** \param iov    Start of the iovec array describing the TCP payload.
+** \param iovlen Length of the iovec array.
+**
+** \return The checksum of the TCP packet.
+**
+** Calculate the checksum for an IPv6 TCP packet.  The TCP header must be
+** populated (with the exception of the checksum field itself, which is
+** ignored) before calling this function.
+*/
+extern uint32_t
+ef_tcp_checksum_ip6(const ci_ip6_hdr* ip6, const struct tcphdr* tcp,
+                    const struct iovec* iov, int iovlen);
+
+/*! \brief Calculate the checksum for a TCP packet
+**
+** \param af     The address family of the IP header for the packet.
+** \param ipx    The IP header for the packet.
 ** \param tcp    The TCP header for the packet.
 ** \param iov    Start of the iovec array describing the TCP payload.
 ** \param iovlen Length of the iovec array.
@@ -104,8 +170,25 @@ ef_udp_checksum(const struct iphdr* ip, const struct udphdr* udp,
 ** calling this function.
 */
 extern uint32_t
-ef_tcp_checksum(const struct iphdr* ip, const struct tcphdr* tcp,
-                const struct iovec* iov, int iovlen);
+ef_tcp_checksum_ipx(int af, const void* ipx, const struct tcphdr* tcp,
+                    const struct iovec* iov, int iovlen);
+
+/*! \brief Calculate the checksum for an IPv6 ICMP packet
+**
+** \param ip6    The IPv6 header for the packet.
+** \param icmp   The ICMP header for the packet.
+** \param iov    Start of the iovec array describing the TCP payload.
+** \param iovlen Length of the iovec array.
+**
+** \return The checksum of the ICMP packet.
+**
+** Calculate the checksum for an IPv6 ICMP packet.  The ICMP header must be
+** populated (with the exception of the checksum field itself, which is
+** ignored) before calling this function.
+*/
+extern uint32_t
+ef_icmpv6_checksum(const ci_ip6_hdr* ip6, const void* icmp,
+                   const struct iovec* iov, int iovlen);
 
 #ifdef __cplusplus
 }

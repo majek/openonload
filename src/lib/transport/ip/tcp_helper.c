@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 ** <L5_PRIVATE L5_SOURCE>
 **   Copyright: (c) Level 5 Networks Limited.
@@ -36,6 +23,9 @@
 #include <ci/internal/ip.h>
 # include <ci/internal/trampoline.h>
 # include <asm/unistd.h>
+#if CI_CFG_BPF
+# include <onload/bpf_ioctl.h>
+#endif
 
 #define VERB(x)
 
@@ -110,7 +100,7 @@ int ci_tcp_helper_ep_reuseport_bind(ci_fd_t           fd,
                                     ci_int32          cluster_size,
                                     ci_uint32         cluster_restart_opt,
                                     ci_uint32         cluster_hot_restart_opt,
-                                    ci_uint32         addr_be32,
+                                    ci_addr_t         addr,
                                     ci_uint16         port_be16)
 {
   oo_tcp_reuseport_bind_t op;
@@ -121,7 +111,7 @@ int ci_tcp_helper_ep_reuseport_bind(ci_fd_t           fd,
   op.cluster_size = cluster_size;
   op.cluster_restart_opt = cluster_restart_opt;
   op.cluster_hot_restart_opt = cluster_hot_restart_opt,
-  op.addr_be32 = addr_be32;
+  op.addr = addr;
   op.port_be16 = port_be16;
   VERB(ci_log("%s: id=%d", __FUNCTION__, fd));
   rc = oo_resource_op(fd, OO_IOC_EP_REUSEPORT_BIND, &op);
@@ -525,7 +515,7 @@ int ci_tcp_helper_os_sock_create_and_set(ci_netif *ni, ci_fd_t fd,
    * we need to have created the OS socket (if needed) before installing a
    * filter.
    */
-  ci_assert_nflags(s->s_flags, CI_SOCK_FLAG_FILTER | CI_SOCK_FLAG_MAC_FILTER);
+  ci_assert_nflags(s->s_flags, CI_SOCK_FLAG_FILTER | CI_SOCK_FLAG_STACK_FILTER);
   /* This must be called before we turn into a listening socket.  If F_SETFL
    * is used after a socket enters the listening state onload filters the
    * request to ensure that the OS socket remains non-blocking.
@@ -546,13 +536,33 @@ int ci_tcp_helper_os_sock_create_and_set(ci_netif *ni, ci_fd_t fd,
 }
 
 
-int ci_tcp_helper_alloc_active_wild(ci_netif *ni, ci_uint32 laddr_be32)
+int ci_tcp_helper_alloc_active_wild(ci_netif *ni, ci_addr_t laddr)
 {
   oo_alloc_active_wild_t aaw = {
-    .laddr_be32 = laddr_be32,
+    .laddr = laddr,
   };
   return oo_resource_op(ci_netif_get_driver_handle(ni),
                         OO_IOC_ALLOC_ACTIVE_WILD, &aaw);
 }
 
 
+
+int ci_netif_evq_poll_k(ci_netif* ni, int _n)
+{
+  ci_uint32 intf_i = _n;
+
+  CITP_STATS_NETIF_INC(ni, ioctl_evq_polls);
+  return oo_resource_op(ci_netif_get_driver_handle(ni), OO_IOC_EVQ_POLL,
+                        &intf_i);
+}
+
+#if CI_CFG_BPF
+int ci_tcp_helper_bpf_bind(ci_netif* ni, int intf_i, int attach_point)
+{
+  oo_bpf_bind_t arg = {
+    .attach_point = attach_point,
+    .intf_i = intf_i,
+  };
+  return oo_resource_op(ci_netif_get_driver_handle(ni), OO_IOC_BPF_BIND, &arg);
+}
+#endif

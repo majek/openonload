@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 #include <ci/internal/ip.h>
 #include <onload/oof_interface.h>
 #include <onload/oof_onload.h>
@@ -89,8 +76,9 @@ oof_cb_callback_set_filter(struct oof_socket* skf)
 struct oof_cb_sw_filter_op {
   struct oof_cb_sw_filter_op *next;
   oo_sp sock_id;
-  unsigned laddr;
-  unsigned raddr;
+  int af_space;
+  ci_addr_t laddr;
+  ci_addr_t raddr;
   int lport;
   int rport;
   int protocol;
@@ -110,23 +98,18 @@ oof_cb_sw_filter_apply(ci_netif* ni)
 
   spin_lock_bh(&ni->swf_update_lock);
   for( op = ni->swf_update_first; op != NULL; op = ni->swf_update_first) {
-    ci_addr_t laddr, raddr;
-
     ni->swf_update_first = op->next;
     if( op->next == NULL )
       ni->swf_update_last = NULL;
     spin_unlock_bh(&ni->swf_update_lock);
 
-    laddr = CI_ADDR_FROM_IP4(op->laddr);
-    raddr = CI_ADDR_FROM_IP4(op->raddr);
-
     if( op->op == OOF_CB_SW_FILTER_OP_ADD ) {
-      ci_netif_filter_insert(ni, op->sock_id, AF_SPACE_FLAG_IP4, laddr, op->lport,
-                             raddr, op->rport, op->protocol);
+      ci_netif_filter_insert(ni, op->sock_id, op->af_space, op->laddr,
+                             op->lport, op->raddr, op->rport, op->protocol);
     }
     else {
-      ci_netif_filter_remove(ni, op->sock_id, AF_SPACE_FLAG_IP4, laddr, op->lport,
-                             raddr, op->rport, op->protocol);
+      ci_netif_filter_remove(ni, op->sock_id, op->af_space, op->laddr,
+                             op->lport, op->raddr, op->rport, op->protocol);
     }
 
     ci_free(op);
@@ -136,8 +119,9 @@ oof_cb_sw_filter_apply(ci_netif* ni)
 }
 
 static void
-oof_cb_sw_filter_postpone(struct oof_socket* skf, unsigned laddr, int lport,
-                          unsigned raddr, int rport, int protocol, int op_op)
+oof_cb_sw_filter_postpone(struct oof_socket* skf, int af_space,
+                          ci_addr_t laddr, int lport,
+                          ci_addr_t raddr, int rport, int protocol, int op_op)
 {
   ci_netif* ni = skf_to_ni(skf);
   struct tcp_helper_resource_s *trs = netif2tcp_helper_resource(ni);
@@ -149,6 +133,7 @@ oof_cb_sw_filter_postpone(struct oof_socket* skf, unsigned laddr, int lport,
   }
 
   op->sock_id = OO_SP_FROM_INT(ni, skf_to_ep(skf)->id);
+  op->af_space = af_space;
   op->laddr = laddr;
   op->raddr = raddr;
   op->lport = lport;
@@ -200,10 +185,9 @@ oof_cb_sw_filter_update(struct oof_socket* skf, int af_space,
     if( ! stack_locked )
       efab_tcp_helper_netif_unlock(trs, 1);
   } else {
-    if( !IS_AF_SPACE_IP6(af_space) )
-      oof_cb_sw_filter_postpone(skf, laddr.ip4, lport, raddr.ip4, rport,
-                                protocol, insert ? OOF_CB_SW_FILTER_OP_ADD :
-                                OOF_CB_SW_FILTER_OP_REMOVE);
+    oof_cb_sw_filter_postpone(skf, af_space, laddr, lport, raddr, rport,
+                              protocol, insert ? OOF_CB_SW_FILTER_OP_ADD :
+                              OOF_CB_SW_FILTER_OP_REMOVE);
   }
   return rc;
 }
@@ -252,34 +236,11 @@ oof_cb_sw_filter_remove(struct oof_socket* skf, int af_space,
 }
 
 
-struct oof_socket*
-oof_cb_sw_filter_lookup(struct tcp_helper_resource_s* stack,
-                        unsigned laddr, int lport,
-                        unsigned raddr, int rport, int protocol)
-{
-  ci_netif* ni = &stack->netif;
-  int sock_id, tbl_idx;
-  tbl_idx = ci_netif_filter_lookup(ni, laddr, lport, raddr, rport, protocol);
-  if( tbl_idx < 0 )
-    return NULL;
-  sock_id = ni->filter_table->table[tbl_idx].id;
-  if( ! IS_VALID_SOCK_ID(ni, sock_id) ) {
-    OO_DEBUG_ERR(ci_log("%s: ERROR: %d %s "IPPORT_FMT" "IPPORT_FMT,
-                        __FUNCTION__, NI_ID(ni), FMT_PROTOCOL(protocol),
-                        IPPORT_ARG(laddr, lport), IPPORT_ARG(raddr, rport));
-                 ci_log("--> idx=%d sock_id=%d sock_id_max=%d", tbl_idx,
-                        sock_id, ni->ep_tbl_n));
-    return NULL;
-  }
-  return &ni->ep_tbl[sock_id]->oofilter;
-}
-
-
 /* dlfilter callbacks are called from oof code to keep hw and dl filters
  * synchronized. */
 void
 oof_dl_filter_set(struct oo_hw_filter* filter, int stack_id, int protocol,
-                  unsigned saddr, int sport, unsigned daddr, int dport)
+                  ci_addr_t saddr, int sport, ci_addr_t daddr, int dport)
 {
   if( filter->dlfilter_handle != EFX_DLFILTER_HANDLE_BAD )
     efx_dlfilter_remove(efab_tcp_driver.dlfilter, filter->dlfilter_handle);

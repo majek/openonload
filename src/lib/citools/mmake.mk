@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-2.0
+# X-SPDX-Copyright-Text: (c) Solarflare Communications Inc
 
 TARGET		:= $(CITOOLS_LIB)
 MMAKE_TYPE	:= LIB
@@ -46,11 +48,6 @@ LIB_SRCS	+= drv_log_fn.c memleak_debug.c
 LIB_SRCS	+= drv_thread.c
 else
 LIB_SRCS	+= cithread.c get_cpu_khz.c log_fn.c log_file.c
-ifneq ($(ONLOAD_ONLY),1)
-LIB_SRCS	+= rbmw_parse.c \
-		rbmw_simulator.c \
-		rbmw_dumper.c
-endif
 
 ifneq ($(WINDOWS),1)
 LIB_SRCS	+= glibc_version.c

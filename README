@@ -18,7 +18,7 @@ Introduction
 Supported platforms
 ===================
 
- Linux kernels from 3.0.
+ Linux kernels from 3.10.
 
  The following processor architectures are supported:
  - amd64/em64t (support for AMD processors prior to Zen is deprecated)
@@ -52,7 +52,7 @@ Documentation
  The Onload User Guide is available to customers with supported cards.  You
  can register and download a copy from: https://support.solarflare.com/.
 
- You may also find the Solarstorm User Guide useful -- it is available from
+ You may also find the Server Adapter User Guide useful -- it is available from
  the same place.
 
 
@@ -119,6 +119,6 @@ Any questions?
 
 
 ==========
- version: openonload-201811-u1
-revision: eb2217a75e6a (ool1811) openonload-201811-u1/openonload-201811-u1-rc9
-    date: Thu Jun 27 13:05:40 BST 2019
+ version: onload-7.0.0.176
+revision: 6b275fd19944 (onload-7.0)
+    date: Mon Sep 16 10:59:51 BST 2019

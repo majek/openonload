@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-2.0 OR Solarflare-Binary
+# X-SPDX-Copyright-Text: (c) Solarflare Communications Inc
 ifndef KPATH
 $(shell echo >&2 "KPATH is not set.")
 $(error KPATH is not set.)
@@ -50,13 +52,4 @@ MMAKE_KBUILD_POST_COMMAND = \
 		$(if $(CONFIG_MODVERSIONS),-m) \
 		$(if $(CONFIG_MODULE_SRCVERSION_ALL),-a) \
 		-i Module.symvers -o Module.symvers $(addprefix ./,$(TARGETS))
-
-# Remove this when RHEL5 is not supported!
-#
-# RHEL5 does not understand KBUILD_EXTRA_SYMBOLS environment variable.
-# Here we find out if a workaround is necessary.
-#
-# USE_EXTRA_SYM=ok if KBUILD_EXTRA_SYMBOLS is handled by the kernel build
-USE_EXTRA_SYM := $(shell $(KPATH)/scripts/mod/modpost -e help 2>/dev/null \
-			 && echo ok)
 

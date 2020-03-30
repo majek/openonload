@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \Fileque
 ** <L5_PRIVATE L5_HEADER >
@@ -1051,25 +1038,6 @@ static inline void ci_clflush(volatile void* addr)
     temp=(((ci_uint64)sum)+v);            \
     sum=(unsigned int)(temp+(temp>>32));  \
   } while(0)
-
-
-/* Like x86, PPC does have a special byteswapping instruction.
- * However, it is empirically proven that using it yields slower
- * code than using generic shift-or implementation, unlike in x86.
- * The reason for this is most likely that gcc optimizes the shift-or
- * implementation into a series of register-based rotates, but
- * the dedicated byteswapper operates on memory
- */
-
-ci_inline ci_uint16 ci_bswap16(ci_uint16 v)
-{ return CI_BSWAPC_16(v); }
-
-ci_inline ci_uint32 ci_bswap32(ci_uint32 v)
-{ return CI_BSWAPC_32(v); }
-
-ci_inline ci_uint64 ci_bswap64(ci_uint64 v)
-{ return CI_BSWAPC_64(v); }
-
 
 
 #endif  /* __CI_TOOLS_GCC_PPC_H__ */

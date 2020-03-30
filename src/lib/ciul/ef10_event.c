@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This library is free software; you can redistribute it and/or
-** modify it under the terms of version 2.1 of the GNU Lesser General Public
-** License as published by the Free Software Foundation.
-**
-** This library is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-** Lesser General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: LGPL-2.1 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /****************************************************************************
  * Copyright 2002-2005: Level 5 Networks Inc.
  * Copyright 2005-2008: Solarflare Communications Inc,
@@ -693,8 +680,10 @@ ef10_ef_vi_receive_get_timestamp_with_sync_flags_from_tsync_qns
    */
   else if(likely( pkt_minor != NO_TIMESTAMP + vi->rx_ts_correction ))
     pkt_minor += ONE_SEC;
-  else
+  else {
+    *ts_out = (struct timespec) { 0 };
     return -ENODATA;
+  }
   EF_VI_ASSERT( pkt_minor < ONE_SEC );
 
   /* Take the difference mod ONE_SEC.  The upper end of the ONE_SEC range

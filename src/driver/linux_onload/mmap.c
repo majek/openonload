@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file driver.c mmap file operation--for onload and sfc_char driver
 ** <L5_PRIVATE L5_SOURCE>
@@ -291,7 +278,8 @@ __vm_op_nopage(tcp_helper_resource_t* trs, struct vm_area_struct* vma,
   pg = pfn_to_page(pfn);
   get_page(pg);
 
-  OO_DEBUG_TRAMP(ci_log("%s: %u vma=%p sz=%lx pageoff=%lx id=%d pfn=%lx",
+  OO_DEBUG_TRAMP(ci_log("%s: %u vma=%p sz=%lx pageoff=%lx id=%"CI_PRIx64
+                        " pfn=%lx",
                  __FUNCTION__, trs->id, vma, vma->vm_end - vma->vm_start,
                  (address - vma->vm_start) >> CI_PAGE_SHIFT,
                  OO_MMAP_OFFSET_TO_MAP_ID(VMA_OFFSET(vma)), pfn));
@@ -321,7 +309,8 @@ static struct page* vm_op_nopage(struct vm_area_struct* vma,
      * that would back not yet allocated resources.  Because of this we only
      * log failure as a debug message.
      */
-    OO_DEBUG_TRAMP(ci_log("%s: %u vma=%p sz=%lx pageoff=%lx id=%d FAILED",
+    OO_DEBUG_TRAMP(ci_log("%s: %u vma=%p sz=%lx pageoff=%lx id=%"CI_PRIx64
+                          " FAILED",
                           __FUNCTION__, trs->id,
                           vma, vma->vm_end - vma->vm_start,
                           (address - vma->vm_start) >> CI_PAGE_SHIFT,

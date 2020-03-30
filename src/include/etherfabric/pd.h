@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This library is free software; you can redistribute it and/or
-** modify it under the terms of version 2.1 of the GNU Lesser General Public
-** License as published by the Free Software Foundation.
-**
-** This library is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-** Lesser General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: LGPL-2.1 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /****************************************************************************
  * Copyright 2012-2018: Solarflare Communications Inc,
  *                      7505 Irvine Center Drive, Suite 100
@@ -175,6 +162,16 @@ extern int ef_pd_alloc_by_name(ef_pd* pd, ef_driver_handle pd_dh,
 ** \return 0 on success, or a negative error code.
 **
 ** Allocate a protection domain with vport support.
+**
+** Solarflare adapters have an internal switch to connect virtual ports
+** (vports) to functions. This call is used to add an extra vport to a
+** function, typically so that the function can then pass traffic to itself
+** between an existing vport and the extra vport.
+**
+** The @p vlan_id can be either EF_PD_VLAN_NONE, or the id of a vlan to
+** associate a vlan with the vport.
+**
+** This call requires full-featured firmware.
 */
 extern int ef_pd_alloc_with_vport(ef_pd* pd, ef_driver_handle pd_dh,
                                   const char* intf_name,

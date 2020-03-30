@@ -1,8 +1,8 @@
 #!/usr/bin/env python2
-######################################################################
+# SPDX-License-Identifier: GPL-2.0
+# X-SPDX-Copyright-Text: (c) Solarflare Communications Inc
+
 # Script to configure the sfc_affinity driver.
-# Author: David Riddoch <driddoch@solarflare.com>
-######################################################################
 
 # TODO:
 # - I'm concerned that the top-level-shared-cache might be the L1 when
@@ -668,21 +668,43 @@ def choose_core_ids(n_irqs, topology, interrupt_topology):
     return (list(core_ids), strategy)
 
 
-def interface_auto(ethx, topology, interrupt_topology):
-    ret = Bucket()
-
+def interface_auto_core_ids(ethx, topology, interrupt_topology):
     n_irqs = interface_n_rxqs(str(ethx))
     if n_irqs == 0:
         warn("interface %s has no rxqs" % ethx)
         return
 
-    core_ids, ret.strategy = \
+    core_ids, strategy = \
               choose_core_ids(n_irqs, topology, interrupt_topology)
     n = min(len(core_ids), n_irqs)
     if n_irqs == len(core_ids):
         # If we're going to use all of the eligible cores, then it makes it
         # easier to understand if we assign in natural order.
         core_ids.sort()
+
+    return (core_ids, strategy)
+
+
+def localise_core_ids(ethx, core_ids):
+    # List the cores on which are NUMA-local with the NIC first
+    # This helps performance for kernel traffic. When the default sfc module
+    # option rss_numa_local=Y, the sfc driver will configure RSS to share
+    # traffic over the first X irqs, assuming these are mapped to NUMA-local
+    # cores.
+
+    local_cores = affinity.get_local_cores(ethx)
+    local_ids = [c for c in core_ids if c in local_cores]
+    remote_ids = [c for c in core_ids if c not in local_cores]
+    core_ids = local_ids + remote_ids
+
+    return core_ids
+
+
+def interface_mappings(ethx, topology, interrupt_topology, core_ids, strategy):
+    ret = Bucket()
+
+    n_irqs = interface_n_rxqs(str(ethx))
+    core_ids = localise_core_ids(ethx, core_ids)
 
     q_to_core_id = [core_ids[i % len(core_ids)] for i in range(n_irqs)]
     for core in [topology.id2core[id] for id in q_to_core_id]:
@@ -698,7 +720,13 @@ def interface_auto(ethx, topology, interrupt_topology):
 
     ret.core_to_q = core_to_q
     ret.q_to_core_id = q_to_core_id
+    ret.strategy = strategy
     return ret
+
+
+def interface_auto(ethx, topology, interrupt_topology):
+    core_ids, strategy = interface_auto_core_ids(ethx, topology, interrupt_topology)
+    return interface_mappings(ethx, topology, interrupt_topology, core_ids, strategy)
 
 
 def interface_check(ethx):
@@ -707,8 +735,8 @@ def interface_check(ethx):
         err("%s has no rxqs" % ethx)
         ok = False
     elif ethx.n_rxqs() == 1:
-        err("%s has only one rxq" % ethx)
-        ok = False
+        warn("%s has only one rxq" % ethx)
+        ok = True
     else:
         info("%s has %d rxqs" % (ethx, ethx.n_rxqs()))
         if ethx.n_rxqs() != sfc_interface_n_rxqs(str(ethx)):
@@ -831,18 +859,19 @@ def cmd_auto(args):
             interface_bind_rxqs(ethx, b.q_to_core_id)
             sfc_affinity_new_interface(ethx, b.core_to_q)
     else:
-        nrxq2b = {}
-        info("Try to use the same mapping for all interfaces")
+        nrxq2c = {}
+        info("Try to use the same cores for all interfaces")
         for ethx in interfaces:
             n_rxqs = ethx.n_rxqs()
-            if n_rxqs not in nrxq2b:
-                b = interface_auto(ethx, topology, interrupt_topology)
-                nrxq2b[n_rxqs] = b
-            b = nrxq2b[n_rxqs]
+            if n_rxqs not in nrxq2c:
+                nrxq2c[n_rxqs] = interface_auto_core_ids(ethx, topology, interrupt_topology)
+            core_ids , strategy = nrxq2c[n_rxqs]
+            # need to remap for each interface as NUMA locality may vary
+            b = interface_mappings(ethx, topology, interrupt_topology, core_ids, strategy)
             info("%s: %s" % (ethx, b.strategy))
             interface_bind_rxqs(ethx, b.q_to_core_id)
             sfc_affinity_new_interface(ethx, b.core_to_q)
-        if len(nrxq2b) > 1:
+        if len(nrxq2c) > 1:
             warn("Not all interfaces have the same number of receive channels")
 
 

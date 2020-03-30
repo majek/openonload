@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file epoll_device.c
 ** <L5_PRIVATE L5_HEADER >
@@ -33,6 +20,7 @@
 #include <onload/linux_onload.h>
 #include <onload/tcp_helper_fns.h>
 #include <onload/epoll.h>
+#include <ci/driver/chrdev.h>
 #include <linux/eventpoll.h>
 #include <linux/poll.h>
 #include <linux/unistd.h> /* for __NR_epoll_pwait */
@@ -1355,29 +1343,19 @@ struct file_operations oo_epoll_fops =
   CI_STRUCT_MBR(mmap,  oo_epoll_fop_mmap),
 };
 
-static int oo_epoll_major;
+static struct ci_chrdev_registration* oo_epoll_chrdev;
+
 
 /* the only external symbol here: init /dev/onload_epoll */
 int __init oo_epoll_chrdev_ctor(void)
 {
-  int rc, major = 0; /* specify default major number here */
-
-  rc = register_chrdev(major, OO_EPOLL_DEV_NAME, &oo_epoll_fops);
-  if( rc < 0 ) {
-    ci_log("%s: can't register char device %d", OO_EPOLL_DEV_NAME, rc);
-    return rc;
-  }
-  if( major == 0 )
-    major = rc;
-  oo_epoll_major = major;
-
-  return 0;
+  return create_one_chrdev_and_mknod(0, OO_EPOLL_DEV_NAME, &oo_epoll_fops,
+                                     &oo_epoll_chrdev);
 }
 
 void oo_epoll_chrdev_dtor(void)
 {
-  if( oo_epoll_major )
-    unregister_chrdev(oo_epoll_major, OO_EPOLL_DEV_NAME);
+  destroy_chrdev_and_mknod(oo_epoll_chrdev);
 }
 
 #endif

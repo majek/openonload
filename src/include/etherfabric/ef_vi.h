@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This library is free software; you can redistribute it and/or
-** modify it under the terms of version 2.1 of the GNU Lesser General Public
-** License as published by the Free Software Foundation.
-**
-** This library is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-** Lesser General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: LGPL-2.1 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /****************************************************************************
  * Copyright 2002-2005: Level 5 Networks Inc.
  * Copyright 2005-2018: Solarflare Communications Inc,
@@ -81,6 +68,14 @@
 # define EF_VI_ALIGN(x) __attribute__ ((aligned (x)))
 # define ef_vi_inline static inline
 # define ef_vi_pure __attribute__ ((pure))
+# define ef_vi_cold __attribute__ ((cold))
+
+/* Expect noinline to be defined in kernel */
+# if defined(__linux__) && defined(__KERNEL__) && defined (noinline)
+#  define ef_vi_noinline noinline
+# else
+#  define ef_vi_noinline __attribute__ ((noinline))
+# endif
 
 #elif defined(_MSC_VER)
 
@@ -859,6 +854,11 @@ typedef struct ef_vi {
     void (*transmitv_ctpio)(struct ef_vi*, size_t frame_len,
                             const struct iovec* iov,
                             int iov_len, unsigned threshold);
+    /** Transmit a vector of packet buffers using CTPIO and copy to fallback */
+    void (*transmitv_ctpio_copy)(struct ef_vi*, size_t frame_len,
+                                 const struct iovec* iov,
+                                 int iov_len, unsigned threshold,
+                                 void* fallback);
     /** Select a TX alternative as the destination for future sends */
     int (*transmit_alt_select)(struct ef_vi*, unsigned alt_id);
     /** Select the "normal" data path as the destination for future sends */
@@ -1055,7 +1055,7 @@ ef_vi_inline int ef_vi_receive_space(const ef_vi* vi)
 **         descriptor entries.
 **
 ** Returns the fill level of the RX descriptor ring. This is the number of
-** slots that hold a descriptor (and an associated unfilled packet buffer).
+** slots that hold a descriptor (and an associated packet buffer).
 ** The fill level should be kept as high as possible, so there are enough
 ** slots available to handle a burst of incoming packets.
 */
@@ -1798,13 +1798,13 @@ extern unsigned ef_vi_transmit_alt_num_ids(ef_vi* vi);
 ** This function returns parameters which are needed by the
 ** ef_vi_transmit_alt_usage() function below.
 */
-extern int ef_vi_transmit_alt_query_overhead(ef_vi* vi, 
+extern int ef_vi_transmit_alt_query_overhead(ef_vi* vi,
                                              struct ef_vi_transmit_alt_overhead* params);
 
 
 /*! \brief Calculate a packet's buffer usage
 **
-** \param params      Parameters returned by 
+** \param params      Parameters returned by
 **                    ef_vi_transmit_alt_query_overhead
 **
 ** \param pkt_len     Packet length in bytes
@@ -1903,10 +1903,33 @@ extern void ef_vi_set_tx_push_threshold(ef_vi* vi, unsigned threshold);
 ** call returns.
 */
 #define ef_vi_transmitv_ctpio(vi, frame_len, frame_iov,         \
-                              frame_iov_len, ct_threshold)         \
+                              frame_iov_len, ct_threshold)      \
   (vi)->ops.transmitv_ctpio((vi), (frame_len), (frame_iov),     \
                             (frame_iov_len), (ct_threshold))
 
+
+/*! \brief Transmit a packet using CTPIO from an array of buffers,
+**         simultaneously copying the data into a fallback buffer
+**
+** \param vi            The virtual interface on which to transmit.
+** \param frame_len     Frame length in bytes.
+** \param frame_iov     Buffers containing the frame to transmit.
+** \param frame_iov_len Length of frame_iov.
+** \param ct_threshold  Number of bytes of the packet to buffer before
+**                      starting to cut-through to the wire.
+** \param fallback      Fallback buffer to copy the data into
+**
+** This function is identical to ef_vi_transmitv_cptio, but additionally
+** copies the data into a fallback buffer ready to provide to
+** ef_vi_transmit_ctpio_fallback. This is an optimisation to avoid the need
+** to copy the data in a separate step.
+*/
+#define ef_vi_transmitv_ctpio_copy(vi, frame_len, frame_iov,         \
+                                   frame_iov_len, ct_threshold,      \
+                                   fallback)                         \
+  (vi)->ops.transmitv_ctpio_copy((vi), (frame_len), (frame_iov),     \
+                                 (frame_iov_len), (ct_threshold),    \
+                                 (fallback))
 
 /*! \brief Transmit a packet using CTPIO
 **

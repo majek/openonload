@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_SOURCE>
@@ -40,18 +27,18 @@
 
 static void ci_mcast_opts_updated(ci_netif* ni, ci_udp_state* us)
 {
-  if( CI_IP_IS_MULTICAST(us->ephemeral_pkt.ip.ip_daddr_be32) )
+  if( CI_IP_IS_MULTICAST(us->ephemeral_pkt.ipx.ip4.ip_daddr_be32) )
     ci_ip_cache_invalidate(&us->ephemeral_pkt);
-  if( CI_IP_IS_MULTICAST(us->s.pkt.ip.ip_daddr_be32) )
+  if( CI_IP_IS_MULTICAST(us->s.pkt.ipx.ip4.ip_daddr_be32) )
     ci_ip_cache_invalidate(&us->s.pkt);
 }
 
 
 static int/*bool*/
 ip_to_ifindex_check(struct oo_cplane_handle* cp,
-                    cicp_ipif_row_t* ipif, void* data)
+                    ci_ifid_t ifindex, void* data)
 {
-  *(ci_ifid_t*)data = ipif->ifindex;
+  *(ci_ifid_t*)data = ifindex;
   /* as in Linux, we accept any interface */
   return 1;
 }
@@ -90,8 +77,7 @@ struct llap_param_data {
 };
 static int/*bool*/
 llap_param_from_ip(struct oo_cplane_handle* cp,
-                   cicp_llap_row_t* llap, cicp_ipif_row_t* ipif,
-                   void* data)
+                   cicp_llap_row_t* llap, void* data)
 {
   struct llap_param_data* d = data;
   *d->encap = llap->encap;
@@ -132,8 +118,8 @@ static int ci_mcast_join_leave(ci_netif* ni, ci_udp_state* us,
       ci_ip_cached_hdrs ipcache;
       struct oo_sock_cplane sock_cp = us->s.cp;
 
-      ci_ip_cache_init(&ipcache);
-      ipcache.ip.ip_daddr_be32 = maddr;
+      ci_ip_cache_init(&ipcache, AF_INET);
+      ipcache.ipx.ip4.ip_daddr_be32 = maddr;
       ipcache.dport_be16 = 0;
 
       /* OO_SCP_NO_MULTICAST may forbid multicast send through this socket.
@@ -312,7 +298,7 @@ int ci_udp_getsockopt(citp_socket* ep, ci_fd_t fd, int level,
 #if CI_CFG_FAKE_IPV6
   } else if (level ==  IPPROTO_IPV6 && us->s.domain == AF_INET6) {
     /* IP6 level options valid for TCP */
-    return ci_get_sol_ip6(&us->s, fd, optname, optval, optlen);
+    return ci_get_sol_ip6(netif, &us->s, fd, optname, optval, optlen);
 #endif
 
   } else if (level == IPPROTO_UDP) {

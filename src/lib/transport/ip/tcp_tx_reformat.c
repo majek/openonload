@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_SOURCE>
@@ -101,6 +88,7 @@ static ci_ip_pkt_fmt* ci_tcp_tx_allocate_pkt(ci_netif* ni, ci_tcp_state* ts,
   next = ci_netif_pkt_tx_tcp_alloc(ni, ts);
   if( ! next )  return NULL;
   oo_tx_pkt_layout_init(next);
+  ci_ipcache_update_flowlabel(ni, &ts->s);
   ci_pkt_init_from_ipcache_len(next, &ts->s.pkt, hdrlen);
 
   /* Initially make a buffer large enough to fit all the data in, since we
@@ -159,8 +147,9 @@ extern int ci_tcp_tx_split(ci_netif* ni, ci_tcp_state* ts, ci_ip_pkt_queue* qu,
                            ci_ip_pkt_fmt* pkt, int new_paylen, 
                            ci_boolean_t is_sendq)
 {
+  int af = ipcache_af(&ts->s.pkt);
   int old_len = PKT_TCP_TX_SEQ_SPACE(pkt)
-     - ((TX_PKT_TCP(pkt)->tcp_flags & CI_TCP_FLAG_FIN) >> CI_TCP_FLAG_FIN_BIT);
+     - ((TX_PKT_IPX_TCP(af, pkt)->tcp_flags & CI_TCP_FLAG_FIN) >> CI_TCP_FLAG_FIN_BIT);
   int n, old_last_seg_size;
   int hdrlen = ts->outgoing_hdrs_len;
   ci_ip_pkt_fmt *next;
@@ -210,9 +199,9 @@ extern int ci_tcp_tx_split(ci_netif* ni, ci_tcp_state* ts, ci_ip_pkt_queue* qu,
     ++ts->send_in;
 
   /* Move the FIN if necessary */
-  if( TX_PKT_TCP(pkt)->tcp_flags & CI_TCP_FLAG_FIN ) {
-    TX_PKT_TCP(pkt)->tcp_flags &=~ CI_TCP_FLAG_FIN;
-    TX_PKT_TCP(next)->tcp_flags |= CI_TCP_FLAG_FIN;
+  if( TX_PKT_IPX_TCP(af, pkt)->tcp_flags & CI_TCP_FLAG_FIN ) {
+    TX_PKT_IPX_TCP(af, pkt)->tcp_flags &=~ CI_TCP_FLAG_FIN;
+    TX_PKT_IPX_TCP(af, next)->tcp_flags |= CI_TCP_FLAG_FIN;
     next->pf.tcp_tx.end_seq++;
   }
 
@@ -239,8 +228,8 @@ static void ci_tcp_tx_chomp(ci_netif* ni, ci_tcp_state* ts,
 
   ci_assert_gt(bytes, 0);
   ci_assert_equal(pkt->n_buffers, 1);
-  ci_assert_equal(TX_PKT_TCP(pkt)->tcp_flags & (CI_TCP_FLAG_SYN |
-                                                CI_TCP_FLAG_FIN), 0);
+  ci_assert_equal(TX_PKT_IPX_TCP(ipcache_af(&ts->s.pkt), pkt)->tcp_flags &
+                  (CI_TCP_FLAG_SYN | CI_TCP_FLAG_FIN), 0);
 
   pkt->intf_i = 0;
   ci_netif_pkt_to_iovec(ni, pkt, &one_segment, 1);
@@ -290,7 +279,7 @@ int ci_tcp_tx_coalesce(ci_netif* ni, ci_tcp_state* ts,
   ef_iovec_ptr next_iov;
   ci_ip_pkt_fmt* next;
   ef_iovec one_segment; /* save stack space: only one seg is pre-alloced */
-
+  int af = ipcache_af(&ts->s.pkt);
 
   ci_tcp_tx_pkt_set_end(ts, pkt);
 
@@ -305,7 +294,7 @@ int ci_tcp_tx_coalesce(ci_netif* ni, ci_tcp_state* ts,
     return -1;
 
   /* Don't attempt to coalesce SYNs or FINs.  May confuse other stacks. */
-  if( (TX_PKT_TCP(pkt)->tcp_flags | TX_PKT_TCP(next)->tcp_flags)
+  if( (TX_PKT_IPX_TCP(af, pkt)->tcp_flags | TX_PKT_IPX_TCP(af, next)->tcp_flags)
       & (CI_TCP_FLAG_SYN | CI_TCP_FLAG_FIN) )
     return -1;
 
@@ -346,7 +335,7 @@ int ci_tcp_tx_coalesce(ci_netif* ni, ci_tcp_state* ts,
 
   if( SEQ_EQ(next->pf.tcp_tx.start_seq, next->pf.tcp_tx.end_seq) ) {
     /* Preserve the PSH bit. */
-    TX_PKT_TCP(pkt)->tcp_flags |= TX_PKT_TCP(next)->tcp_flags;
+    TX_PKT_IPX_TCP(af, pkt)->tcp_flags |= TX_PKT_IPX_TCP(af, next)->tcp_flags;
     pkt->next = next->next;
     if( OO_PP_EQ(q->tail, OO_PKT_P(next)) )  q->tail = OO_PKT_P(pkt);
     ci_netif_pkt_release(ni, next);

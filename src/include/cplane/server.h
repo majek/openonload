@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 OR Solarflare-Binary */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /* This header describes the interface between the open source parts
  * of Onload and the binary-only control plane server.
  *
@@ -40,23 +27,39 @@
 #define CPLANE_SERVER_FORCE_BONDING_NETLINK "force-bonding-netlink"
 #define CPLANE_SERVER_BOOTSTRAP "bootstrap"
 #define CPLANE_SERVER_NO_IPV6 "no-ipv6"
+#define CPLANE_SERVER_IPV6_NO_SOURCE "ipv6-no-source"
 #define CPLANE_SERVER_UID "uid"
 #define CPLANE_SERVER_GID "gid"
-
-/* To make a string from a macro number (such as CI_CFG_MAX_HWPORTS), use
- * STRINGIFY(CI_CFG_MAX_HWPORTS). */
-#define OO_STRINGIFY1(x) #x
-#define OO_STRINGIFY(x) OO_STRINGIFY1(x)
+#ifndef NDEBUG
+#define CPLANE_SERVER_CORE_SIZE "core_size"
+#endif
 
 /* Mask for forward request id, as used between server and module. */
-#define CP_FWD_FLAG_REQ_MASK 0x03ffffff
+#define CP_FWD_FLAG_REQ_MASK 0x01ffffff
 
 
+#include <cplane/cplane.h> /* for cp_fwd_table_id */
 #include <cplane/mib.h> /* for cp_fwd_key */
+
+enum cp_helper_msg_type {
+  CP_HMSG_FWD_REQUEST,
+  CP_HMSG_VETH_SET_FWD_TABLE_ID,
+};
+
 /* message from in-kernel cplane helper to the cplane server */
 struct cp_helper_msg {
-  struct cp_fwd_key key;
-  ci_uint32 id;
+  enum cp_helper_msg_type hmsg_type;
+  union {
+    struct {
+      struct cp_fwd_key key;
+      ci_uint32 id;
+      cp_fwd_table_id fwd_table_id;
+    } fwd_request;
+    struct {
+      ci_ifid_t veth_ifindex;
+      cp_fwd_table_id fwd_table_id;
+    } veth_set_fwd_table_id;
+  } u;
 };
 
 #endif /* defined(__ONLOAD_CPLANE_SERVER_H__) */

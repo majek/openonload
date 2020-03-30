@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_SOURCE>
@@ -31,6 +18,7 @@
 
 #include <ci/internal/ip.h>
 #include <ci/internal/ip_log.h>
+#include <ci/internal/ip_timestamp.h>
 #include <ci/net/ethernet.h>
 #include <onload/ul/tcp_helper.h>
 #ifdef __KERNEL__
@@ -110,7 +98,14 @@ ci_inline void ci_tcp_update_rtt(ci_netif* netif, ci_tcp_state* ts, int m)
 {
   /* ?? Jacobson's algorithm assumes a signed number which might not
   ** be the same as ci_iptime_t, hmmm... what to do? */
-  ci_assert_ge(m, 0);
+  if( m < 0 ) {
+    /* It's possible to get here if the timestamp has been corrupted.  If so
+     * it's probably best not to use it to update the rtt.
+     */
+    LOG_TL(ci_log("TCP RX %d:%d ditching bad timestamp echo",
+                  LNT_PRI_ARGS(netif, ts)));
+    return;
+  }
   m = CI_MAX(1, m);
 
   if( CI_LIKELY(ts->sa) ) {
@@ -146,9 +141,8 @@ void ip_cmsg_recv_timestamp(ci_netif *ni, ci_uint64 timestamp,
                                       struct cmsg_state *cmsg_state);
 void ip_cmsg_recv_timestampns(ci_netif *ni, ci_uint64 timestamp, 
                                         struct cmsg_state *cmsg_state);
-void ip_cmsg_recv_timestamping(ci_netif *ni,
-      ci_uint64 sys_timestamp, struct timespec* hw_timestamp,
-      int flags, struct cmsg_state *cmsg_state);
+void ip_cmsg_recv_timestamping(ci_netif *ni, const ci_ip_pkt_fmt *pkt,
+                               int flags, struct cmsg_state *cmsg_state);
 
 
 /**********************************************************************
@@ -222,7 +216,7 @@ ci_tcp_ep_set_filters(ci_netif *        ni,
 
 #else
   if( ci_tcp_can_set_filter_in_ul(ni, SP_TO_SOCK(ni, sock_id)) )
-    rc = ci_tcp_sock_set_scalable_filter(ni, SP_TO_SOCK(ni, sock_id));
+    rc = ci_tcp_sock_set_stack_filter(ni, SP_TO_SOCK(ni, sock_id));
   else
     rc = ci_tcp_helper_ep_set_filters(ci_netif_get_driver_handle(ni), sock_id,
                                       bindto_ifindex, from_tcp_id);
@@ -238,16 +232,16 @@ ci_inline int
 ci_tcp_ep_reuseport_bind(ci_fd_t fd, const char* cluster_name,
                          ci_int32 cluster_size, ci_uint32 cluster_restart_opt,
                          ci_uint32 cluster_hot_restart_opt,
-                         ci_uint32 addr_be32, ci_uint16 port_be16)
+                         ci_addr_t addr, ci_uint16 port_be16)
 {
   int rc;
 
-  LOG_TC(ci_log("%s: %d addr_be32: %d port: %d", __FUNCTION__, fd, addr_be32,
-                port_be16));
+  LOG_TC(ci_log("%s: %d addr: " IPX_FMT " port: %d", __FUNCTION__, fd,
+                IPX_ARG(AF_IP_L3(addr)), port_be16));
   rc = ci_tcp_helper_ep_reuseport_bind(fd, cluster_name, cluster_size,
                                        cluster_restart_opt,
                                        cluster_hot_restart_opt,
-                                       addr_be32, port_be16);
+                                       addr, port_be16);
   LOG_TC( if(rc < 0)
             ci_log(" ---> %s (rc=%d)", __FUNCTION__, rc) );
   return rc;
@@ -286,9 +280,9 @@ ci_tcp_ep_clear_filters(ci_netif*         ni,
   rc = tcp_helper_endpoint_clear_filters(ci_netif_get_valid_ep(ni, sock_id),
                                          supress_hw_ops, need_update);
 #else
-  if( (SP_TO_SOCK(ni, sock_id)->s_flags & CI_SOCK_FLAG_MAC_FILTER) &&
+  if( (SP_TO_SOCK(ni, sock_id)->s_flags & CI_SOCK_FLAG_STACK_FILTER) &&
       ci_tcp_can_set_filter_in_ul(ni, SP_TO_SOCK(ni, sock_id)) ) {
-    ci_tcp_sock_clear_scalable_filter(ni, SP_TO_TCP(ni, sock_id));
+    ci_tcp_sock_clear_stack_filter(ni, SP_TO_TCP(ni, sock_id));
     rc = 0;
   }
   else
@@ -393,28 +387,6 @@ ci_tcp_ep_mcast_add_del(ci_netif*         ni,
  */
 #define ONLOAD_SO_TIMESTAMPING 37
 #define ONLOAD_SCM_TIMESTAMPING ONLOAD_SO_TIMESTAMPING
-
-/* The following values need to match their counterparts in
- * linux kernel header linux/net_tstamp.h
- */
-enum {
-	ONLOAD_SOF_TIMESTAMPING_TX_HARDWARE = (1<<0),
-	ONLOAD_SOF_TIMESTAMPING_TX_SOFTWARE = (1<<1),
-	ONLOAD_SOF_TIMESTAMPING_RX_HARDWARE = (1<<2),
-	ONLOAD_SOF_TIMESTAMPING_RX_SOFTWARE = (1<<3),
-	ONLOAD_SOF_TIMESTAMPING_SOFTWARE = (1<<4),
-	ONLOAD_SOF_TIMESTAMPING_SYS_HARDWARE = (1<<5),
-	ONLOAD_SOF_TIMESTAMPING_RAW_HARDWARE = (1<<6),
-	ONLOAD_SOF_TIMESTAMPING_OPT_ID = (1<<7),
-	ONLOAD_SOF_TIMESTAMPING_TX_SCHED = (1<<8),
-	ONLOAD_SOF_TIMESTAMPING_TX_ACK = (1<<9),
-	ONLOAD_SOF_TIMESTAMPING_OPT_CMSG = (1<<10),
-	ONLOAD_SOF_TIMESTAMPING_OPT_TSONLY = (1<<11),
-
-	ONLOAD_SOF_TIMESTAMPING_LAST = ONLOAD_SOF_TIMESTAMPING_OPT_TSONLY,
-	ONLOAD_SOF_TIMESTAMPING_MASK =
-	( (ONLOAD_SOF_TIMESTAMPING_LAST << 1) - 1 )
-};
 #endif
 
 /* Replica of sock_extended_err - just in case we do not have ee_data in
@@ -472,7 +444,7 @@ ci_inline int
 ci_getsockopt_final(void *optval, socklen_t *optlen, int level,
                     void *val, size_t val_size)
 {
-  if( (level == SOL_SOCKET || level == SOL_IP) &&
+  if( (level == SOL_SOCKET || level == SOL_IP || level == SOL_IPV6) &&
       val_size == sizeof(int) && 
       *optlen >= sizeof(char) && *optlen < sizeof(int) ) {
     int ival = *((int *)val);
@@ -526,7 +498,7 @@ extern int ci_get_sol_ip( ci_netif* netif, ci_sock_cmn* s, ci_fd_t fd,
  * \param optlen  [in/out] Length of buffer ref'd by [optval]
  * \return        As for getsockopt()
  */
-extern int ci_get_sol_ip6( ci_sock_cmn* s, ci_fd_t fd,
+extern int ci_get_sol_ip6( ci_netif* netif, ci_sock_cmn* s, ci_fd_t fd,
                            int optname, void *optval, 
                            socklen_t *optlen ) CI_HF;
 #endif
@@ -683,11 +655,11 @@ extern ci_ip_pkt_fmt* ci_pkt_alloc_n_nnl(ci_netif* ni, int n) CI_HF;
  * boundary requirements (multiple of 64 bits) */
 
 /* How much payload space in a first fragment packet */
-#define UDP_PAYLOAD1_SPACE_PMTU(pmtu)			\
-  (((pmtu)-sizeof(ci_ip4_hdr)- sizeof(ci_udp_hdr))&0xfff8)
+#define UDP_PAYLOAD1_SPACE_PMTU(af, pmtu)			\
+  (((pmtu)-CI_IPX_HDR_SIZE(af)- sizeof(ci_udp_hdr))&0xfff8)
 
 /* How much space in a second fragment packet */
-#define UDP_PAYLOAD2_SPACE_PMTU(pmtu) (((pmtu)-sizeof(ci_ip4_hdr))&0xfff8)
+#define UDP_PAYLOAD2_SPACE_PMTU(af, pmtu) (((pmtu)-CI_IPX_HDR_SIZE(af))&0xfff8)
 
 #define UDP_HAS_SENDQ_SPACE(us,l) \
   ((us)->s.so.sndbuf >= (int)((us)->tx_count + (l)))
@@ -833,26 +805,6 @@ extern void ci_netif_set_merge_atomic_flag(ci_netif* ni);
 
 void oo_pkt_calc_checksums(ci_netif* ni, ci_ip_pkt_fmt* pkt,
                            struct iovec* host_iov);
-
-
-#if CI_CFG_TCP_METRICS
-extern void ci_tcp_metrics_init(ci_tcp_state* ts);
-extern void ci_tcp_metrics_on_state(ci_netif* ni, ci_tcp_state* ts,
-                                    int new_state);
-extern void ci_tcp_metrics_on_promote(ci_netif* ni, ci_tcp_state* ts,
-                                      const ci_tcp_state_synrecv* tsr);
-extern void ci_tcp_metrics_on_rx(ci_netif* ni, ci_tcp_state* ts);
-extern void ci_tcp_metrics_on_tx(ci_netif* ni, ci_tcp_state* ts);
-#else
-static inline void ci_tcp_metrics_init(ci_tcp_state* ts) {}
-static inline void ci_tcp_metrics_on_state(ci_netif* ni, ci_tcp_state* ts,
-                               int new_state) {}
-static inline void ci_tcp_metrics_on_promote(ci_netif* ni, ci_tcp_state* ts,
-                                             const ci_tcp_state_synrecv* tsr)
-{}
-static inline void ci_tcp_metrics_on_rx(ci_netif* ni, ci_tcp_state* ts) {}
-static inline void ci_tcp_metrics_on_tx(ci_netif* ni, ci_tcp_state* ts) {}
-#endif
 
 
 #endif /* __CI_LIB_IP_INTERNAL_H__ */

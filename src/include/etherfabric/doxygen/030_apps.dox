@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /****************************************************************************
  * Copyright 2004-2005: Level 5 Networks Inc.
  * Copyright 2005-2018: Solarflare Communications Inc,
@@ -44,9 +46,6 @@ source code and make files. This is a quick guide to using them, both for
 testing %ef_vi's effectiveness in an environment, and as starting points
 for developing applications.
 
-Not all of these applications are available in the current Onload
-release; but source code is available on request.
-
 Most of these applications have additional options to test physical
 addressing mode, or hardware timestamping. Run with "--help" to check this.
 
@@ -62,16 +61,18 @@ addressing mode, or hardware timestamping. Run with "--help" to check this.
 | \ref efsink_packed          | Receive streams of packets on a single interface using packed streams.
 | \ref efforward_packed       | Forward packets between two interfaces without modification using packed stream mode for receive.
 | \ref efrss                  | Forward packets between two interfaces without modification, spreading the load over multiple virtual interfaces and threads.
-| \ref efjumborx              | Receive jumbo packets
+| \ref efjumborx              | Receive jumbo packets.
 | \ref exchange               | Simplified electronic trading exchange.
 | \ref trader_onload_ds_efvi  | Simplified electronic trader.
+| \ref efrink_controller      | Receive packets on a single interface into a shared memory ring.
+| \ref efrink_consumer        | Consume packets from a shared memory ring.
 
 \section eflatency eflatency
 
-The eflatency application echoes a single packet back and forth 
+The eflatency application echoes a single packet back and forth
 repeatedly, measuring the round-trip time.
 
-This is the most useful example application for testing lowest possible 
+This is the most useful example application for testing lowest possible
 latency. It is not a very good sample for building an application, because:
 - it uses only one filter
 - it operates knowing that there is only ever a single packet on the wire,
@@ -103,11 +104,11 @@ time to wait between sends can be controlled.
 
 \section efsink efsink
 
-The efsink application is a demonstration of capturing packets, and the 
+The efsink application is a demonstration of capturing packets, and the
 flexibility of filters.
 
-It supports all filter types that %ef_vi supports. By default it just 
-reports the amount of data captured, but it also demonstrates simple 
+It supports all filter types that %ef_vi supports. By default it just
+reports the amount of data captured, but it also demonstrates simple
 actions upon the packet data, with the option to hexdump incoming packets.
 
 It is a very useful jumping off point as it shows:
@@ -133,16 +134,16 @@ The efsink application does not send packets.
 
 \section efforward efforward
 
-The efforward application listens for traffic on one interface and echoes 
-it out of a second; and vice versa. It demonstrates a very simple 
+The efforward application listens for traffic on one interface and echoes
+it out of a second; and vice versa. It demonstrates a very simple
 high-performance bridge.
 
-Some route configuration on the clients might be necessary to get this 
-working, but it is a very simple example, and is very easy to start adding 
+Some route configuration on the clients might be necessary to get this
+working, but it is a very simple example, and is very easy to start adding
 packet re-writing rules etc.
 
-Although this is a viable starting point for a bridging application, a 
-better option might be the SolarCapture API, which includes a more 
+Although this is a viable starting point for a bridging application, a
+better option might be the SolarCapture API, which includes a more
 complete pre-made bridging application.
 
 \section efsend_timestamping efsend_timestamping
@@ -177,32 +178,31 @@ time to wait between sends can be controlled.
 
 The efsend_pio_warm application demonstrates PIO transmit warming.
 
-The application sends a UDP packet using PIO each time a trigger fires.  
-While waiting for a trigger, the application can warm the PIO transmit path 
+The application sends a UDP packet using PIO each time a trigger fires.
+While waiting for a trigger, the application can warm the PIO transmit path
 to reduce latency of the subsequent send.
 
-The effect of warming can be assessed by measuring the time from when the 
+The effect of warming can be assessed by measuring the time from when the
 trigger fires to when the corresponding packet leaves the adapter.
 
-Several parameters can be controlled including the delay between triggers, 
-the enablement of warming and the frequency of warming while waiting for a 
+Several parameters can be controlled including the delay between triggers,
+the enablement of warming and the frequency of warming while waiting for a
 trigger.
-
 
 \section efsink_packed efsink_packed
 
-The efsink_packed application is a variant of \ref efsink that 
+The efsink_packed application is a variant of \ref efsink that
 demonstrates usage of the packed-stream firmware.
 
 \section efforward_packed efforward_packed
 
-The efforward_packed application is a variant of \ref efforward that 
+The efforward_packed application is a variant of \ref efforward that
 demonstrates usage of the packed-stream firmware.
 
 \section efrss efrss
 
-The efrss application is a variant of \ref efforward. It demonstrates 
-automatically spreading the load over multiple threads, using a vi_set and 
+The efrss application is a variant of \ref efforward. It demonstrates
+automatically spreading the load over multiple threads, using a vi_set and
 RSS.
 
 \section efdelegated_client efdelegated_client
@@ -230,19 +230,19 @@ receive.
 
 The efjumborx application demonstrates receiving jumbo packets.
 
-Various parameters can be set, including the interface, IP address and port 
-to use. Verbose output can be enabled to view progress. The received packet 
+Various parameters can be set, including the interface, IP address and port
+to use. Verbose output can be enabled to view progress. The received packet
 can be printed as text or in hexadecimal.
- 
+
 \section exchange exchange
 
 The exchange application plays the role of a simplified electronic trading exchange. It is to be used in conjunction with the \ref trader_onload_ds_efvi application.
 
 \section trader_onload_ds_efvi trader_onload_ds_efvi
 
-The trader_onload_ds_efvi application demonstrates various techniques to 
-reduce latency. These techniques are often useful in electronic trading 
-applications, and so this example takes the form of an extremely simplified 
+The trader_onload_ds_efvi application demonstrates various techniques to
+reduce latency. These techniques are often useful in electronic trading
+applications, and so this example takes the form of an extremely simplified
 electronic trading system.
 
 The \ref exchange application provides a simplified electronic trading exchange, and this application provides a simplified electronic trader.
@@ -272,24 +272,50 @@ where:
 
 There are various additional options. See the help text for details.
 
+\section efrink_controller efrink_controller
+
+The efrink_controller application receives streams of packets on a single
+interface into a shared memory ring. This can be read by multiple consumers,
+such as \ref efrink_consumer.
+
+This is an advanced technique which has the potential to provide a more
+efficient way to receive data when multiple consumer processes want to
+receive the same data stream(s) from the network.
+
+A single controller sets up a region of shared memory, and posts chunks of
+this to the RX ring of the NIC. As the NIC writes packet data, it returns
+completion events. The controller receives these events and marks each packet
+buffer as complete.
+
+One or more readers such as \ref efrink_consumer can access the shared memory
+to read the packets. The data is protected via a generation counter.
+
+\section efrink_consumer efrink_consumer
+
+The efrink_consumer application consumes packets from a shared memory ring,
+that is being managed by \ref efrink_controller.
+
+Multiple copies of efrink_consumer can run at the same time. For best
+performance, all processes should share the same NUMA node/cache.
+
 \section building Building the Example Applications
 
-The %ef_vi example applications are built along with the Onload 
-installation and will be present in the 
-`/Onload-&lt;version>/build/gnu_x86_64/tests/ef_vi` subdirectory.  In the 
-  build directory there will be `gnu`, `gnu_x86_64`, 
+The %ef_vi example applications are built along with the Onload
+installation and will be present in the
+`/Onload-&lt;version>/build/gnu_x86_64/tests/ef_vi` subdirectory.  In the
+  build directory there will be `gnu`, `gnu_x86_64`,
   `x86_64_linux-&lt;kernel version>` directories:
 - files under the `gnu` directory are 32-bit (if these are built)
 - files under the `gnu_x86_64` directory are 64-bit.
 
-Source code files for the example applications exist in the 
+Source code files for the example applications exist in the
 `/Onload-&lt;version>/src/tests/ef_vi` subdirectory.
 
 After running the onload_install command, example applications exist in the
 `/Onload-&lt;version>/build/gnu_x86_64/tests/ef_vi` subdirectory.
 
-To rebuild the example applications you must have the 
-`Onload-&lt;version>/scripts` subdirectory in your path and use the 
+To rebuild the example applications you must have the
+`Onload-&lt;version>/scripts` subdirectory in your path and use the
 following procedure:
 
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~{.sh}

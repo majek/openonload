@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_HEADER >
@@ -135,14 +122,8 @@
 
 
 /* A linked list for things in the netif state. */
-#define CI_MK_ID(x)             ci_ni_dllist##x
-#define CI_ILL_ADDR_T           oo_p
-#define CI_ILL_CTX_T            ci_netif*
-#if CI_CFG_OOP_IS_PTR
-# define CI_ILL_ADDR(ctx,lnk)	((oo_p) (lnk))
-#endif
 #define CI_ILL_NO_CODE
-#include <ci/tools/idllist.h.tmpl>
+#include <ci/internal/ni_dllist_tmpl_instantiate.h>
 
 
 
@@ -221,9 +202,6 @@ typedef union {
     ci_uint32         end_seq;  /* end sequence #, includes SYN/FIN flags */
     ci_uint32         window;   /* window advertised in the packet */
     ci_uint32         pay_len;  /* length of TCP payload */
-#if CI_CFG_TIMESTAMPING
-    struct oo_timespec rx_hw_stamp; /*!< UTC time we arrived according to hw */
-#endif
     union {
       struct {
        /* These fields are valid for the first packet in each block only */
@@ -243,6 +221,8 @@ typedef union {
     ci_uint32         end_seq;
     ci_uint32         start_seq;
     oo_pkt_p          block_end;     /* end of the current (un)sacked block */
+    oo_sp             sock_id;       /* The socket this pkt is tx'd on:
+                                      * used in oo_deferred_arp_failed() */
 #if CI_CFG_TIMESTAMPING
     struct oo_timespec first_tx_hw_stamp; /* Timestamp of the first transmit */
 #endif
@@ -250,13 +230,9 @@ typedef union {
   } tcp_tx CI_ALIGN(8);
   struct {
     ci_uint32         pay_len;              /*!< length of UDP payload */
-#if CI_CFG_TIMESTAMPING
-    struct oo_timespec rx_hw_stamp; /*!< UTC time we arrived according to hw */
-#endif
-
     ci_int32          tx_length;
     oo_sp             tx_sock_id; /* The socket this pkt is tx'd on:  
-                                   * used for tx completion action */
+                                   * used in oo_deferred_arp_failed() */
   } udp;
 #ifdef CI_CFG_USERSPACE_PIPE
   struct {
@@ -333,8 +309,8 @@ struct ci_ip_pkt_fmt_s {
   ci_int16              vlan;
 
 #if CI_CFG_TIMESTAMPING
-  /*! UTC time we were sent according to hw */
-  struct oo_timespec    tx_hw_stamp;
+  /*! UTC time we were sent or received according to hw */
+  struct oo_timespec    hw_stamp;
 
   /*! Key for SOF_TIMESTAMPING_OPT_ID */
   ci_uint32             ts_key;
@@ -372,10 +348,14 @@ struct ci_ip_pkt_fmt_s {
 #define CI_PKT_FLAG_MSG_WARM       0x0800  /* pkt with a TX timestamp    */
 #define CI_PKT_FLAG_TX_CTPIO       0x1000  /* attempted CTPIO send       */
 #define CI_PKT_FLAG_TX_PSH_ON_ACK  0x2000  /* set PSH and emit on ack    */
+/* In the essence, it is derived from oo_pkt_ether_type(), but cached here
+ * for speed.  Used for both RX and TX paths. */
+#define CI_PKT_FLAG_IS_IP6         0x4000
+#define CI_PKT_FLAG_XDP_DROP       0x8000
 
 #define CI_PKT_FLAG_TX_MASK_ALLOWED                                     \
     (CI_PKT_FLAG_TX_MORE | CI_PKT_FLAG_TX_PSH | CI_PKT_FLAG_NONB_POOL | \
-     CI_PKT_FLAG_TX_PSH_ON_ACK)
+     CI_PKT_FLAG_TX_PSH_ON_ACK | CI_PKT_FLAG_IS_IP6)
 
   ci_uint16             flags;
 
@@ -404,7 +384,7 @@ struct ci_ip_pkt_fmt_s {
    */
   ci_int8               pkt_start_off;
 
-  /*! Offset from [dma_start] of the layer-3 header (usually the IP
+  /*! Offset from [dma_start] of the layer-3 header (usually the IPv4/IPv6
    * header).  If the frame is encapsulated this is the inner header.  It
    * should not be assumed that there is an Ethernet header immediately in
    * front of this header.
@@ -539,8 +519,8 @@ typedef struct {
 
 
 typedef struct {
-  ci_uint32 laddr;
-  ci_uint32 raddr;
+  ci_addr_t laddr;
+  ci_addr_t raddr;
   ci_uint16 lport;
   ci_uint16 rport;
   ci_uint32 seq_no; /* ISN of next connection */
@@ -548,7 +528,7 @@ typedef struct {
   ci_uint32 route_count; /* for handling tombstones */
 } ci_tcp_prev_seq_t;
 
-#define CI_TCP_PREV_SEQ_IS_FREE(prev_seq)     ((prev_seq).laddr == 0)
+#define CI_TCP_PREV_SEQ_IS_FREE(prev_seq)     (CI_IPX_ADDR_IS_ANY((prev_seq).laddr))
 #define CI_TCP_PREV_SEQ_IS_TERMINAL(prev_seq) ((prev_seq).route_count == 0)
 
 #if CI_CFG_IPV6
@@ -636,6 +616,17 @@ typedef struct {
    * rather than every time. This could at least help avoid a DoS attack.  */
   ci_iptime_t tconst_pmtu_discover_recover;
 #define CI_PMTU_TCONST_DISCOVER_RECOVER (30*1000)
+
+  /* RFC 5961: limit for challenge ack packets per tick,
+   * derived from NI_OPTS(netif).challenge_ack_limit. */
+  ci_uint32 tconst_challenge_ack_limit;
+
+  /* Rate limit for ACKs sent in response to invalid TCP packets,
+   * time period in ticks. */
+  ci_iptime_t tconst_invalid_ack_ratelimit;
+
+  /* Maximum time to defer a packet with unresolved MAC. */
+  ci_iptime_t tconst_defer_arp;
 
   /* Stack statistics timer */
   ci_iptime_t tconst_stats;
@@ -773,64 +764,41 @@ typedef struct {
 } oo_pktbuf_manager;
 
 
-enum oo_metrics_record_type {
-  MRT_TCP_OPEN,
-  MRT_TCP_REQ,
-};
-
-
-/*
-** Metrics export ring.
-*/
-struct oo_metrics_record {
-  ci_uint8                    type;
-  union {
-    struct {
-      ci_uint64               open_frc CI_ALIGN(8);
-      ci_uint32               conn_id;
-      ci_uint32               ep_id;
-      ci_uint32               lcl_ip, rmt_ip;
-      ci_uint16               lcl_port, rmt_port;
-      oo_metrics_intvl        open_time;
-      ci_uint8                active_open;
-      ci_uint8                open_retries;
-    } tcp_open;
-    struct {
-      ci_uint32               conn_id;
-      ci_uint32               rx_bytes;
-      ci_uint32               tx_bytes;
-      oo_metrics_intvl        app_time;
-      oo_metrics_intvl        tx_time;
-      oo_metrics_intvl        idle_time;
-      oo_metrics_intvl        rx_time;
-      ci_uint16               retransmits;
-      ci_uint8                flags;
-    } tcp_req;
-  };
-};
-
-
-struct oo_metrics_ring {
-  ci_uint32                   export_enabled;
-  ci_uint32                   drops;
-  volatile ci_uint16          metrics_write_i;
-  volatile ci_uint16          metrics_read_i;
-  struct oo_metrics_record    entries[CI_CFG_METRICS_RING_SIZE];
-};
-
-
-struct oo_stack_metrics {
-  ci_uint32                   conn_id_gen;
-};
-
-
-
 /**********************************************************************
 ************************* Asynchronous IO *****************************
 **********************************************************************/
 
 typedef ci_uint32 ci_async_op_flags_t;
 
+
+/**********************************************************************
+************************* Deferred packets ****************************
+**********************************************************************/
+
+struct oo_deferred_pkt {
+  oo_pkt_p pkt_id;   /* ID of the packet we want to send */
+
+  /* Forward info */
+  ci_ifid_t ifindex;
+  ci_ifid_t iif_ifindex;
+  ci_addr_t src;
+  ci_addr_t nexthop;
+  cicp_verinfo_t ver;
+  int flag;
+/* The packet is IPv6 one: */
+#define OO_DEFERRED_FLAG_IS_IPV6      1
+/* This flag is used when the packet have just been deferred, and
+ * oo_deferred_send_one() is called for the first time with it. */
+#define OO_DEFERRED_FLAG_FIRST        2
+
+  ci_iptime_t ts;    /* Timestamp when added to the queue */
+  ci_ni_dllist_link link; /* Link */
+};
+
+
+/**********************************************************************
+***************** Shared stack lock and its flags *********************
+**********************************************************************/
 
 
 /*! Comment? */
@@ -880,8 +848,12 @@ typedef struct {
 # define CI_EPLOCK_NETIF_KERNEL_PACKETS    0x0020000000000000ULL
   /* need to finish clearing ready lists */
 # define CI_EPLOCK_NETIF_FREE_READY_LIST   0x0008000000000000ULL
+  /* need to handle postponed XDP prog update */
+# define CI_EPLOCK_NETIF_XDP_CHANGE        0x0004000000000000ULL
+  /* have some deferred packets to send */
+#define CI_EPLOCK_NETIF_HAS_DEFERRED_PKTS  0x0002000000000000ULL
   /* mask for the above flags that must be handled before dropping lock */
-# define CI_EPLOCK_NETIF_UNLOCK_FLAGS      0xff38000000000000ULL
+# define CI_EPLOCK_NETIF_UNLOCK_FLAGS      0xff3c000000000000ULL
 } ci_eplock_t;
 
 
@@ -948,6 +920,9 @@ typedef struct {
   oo_pkt_p              rx_frags;
   /* Owner of EFRM PD */
   ci_uint32             pd_owner;
+  /* Sequence number of the desired XDP eBPF program config. c.f.
+   * ci_netif_nic_s::xdp_active_gen */
+  ci_uint32             xdp_current_gen;
 #if CI_CFG_TIMESTAMPING
   /* Timestamp of the last packet received with a hardware timestamp. */
   struct oo_timespec    last_rx_timestamp;
@@ -997,6 +972,7 @@ struct ci_netif_state_s {
 #ifndef NDEBUG
 #define CI_NETIF_FLAG_PKT_ACCOUNT_PENDING  0x40 /* pending packet account */
 #endif
+# define CI_NETIF_FLAG_NO_INIT_NET_CPLANE  0x80 /* failed to map main cplane */
 
 
   /* To give insight into runtime errors detected.  See also copy in
@@ -1109,6 +1085,7 @@ struct ci_netif_state_s {
   CI_ULCONST ci_uint32  ip6_table_ofs;   /**< offset of IPv6 s/w filter table */
 #endif
   CI_ULCONST ci_uint32  seq_table_ofs;   /**< offset of seq no table */
+  CI_ULCONST ci_uint32  deferred_pkts_ofs; /**< offset of deferred pkts array */
   CI_ULCONST ci_uint32  buf_ofs;         /**< offset of packet metadata */
 
   ci_ip_timer_state     iptimer_state CI_ALIGN(8);
@@ -1121,6 +1098,10 @@ struct ci_netif_state_s {
 
   /* List of sockets that may have reapable buffers. */
   ci_ni_dllist_t        reap_list;
+
+  /* RFC 5961: limit the number of challenge ACKs */
+  ci_uint32     challenge_ack_num;
+  ci_iptime_t   challenge_ack_time;
 
 #if CI_CFG_SUPPORT_STATS_COLLECTION
   ci_int32              stats_fmt; /**< Output format */
@@ -1156,7 +1137,8 @@ struct ci_netif_state_s {
 #define CI_TCP_AUX_TYPE_SYNRECV 0
 #define CI_TCP_AUX_TYPE_BUCKET  1
 #define CI_TCP_AUX_TYPE_EPOLL   2
-#define CI_TCP_AUX_TYPE_NUM     3
+#define CI_TCP_AUX_TYPE_PMTUS   3
+#define CI_TCP_AUX_TYPE_NUM     4
   oo_p                  free_aux_mem;    /**< Free list of synrecv bufs. */
   ci_uint32             n_free_aux_bufs; /**< Number of free aux bufs */
   ci_uint32             n_aux_bufs[CI_TCP_AUX_TYPE_NUM];
@@ -1238,11 +1220,6 @@ struct ci_netif_state_s {
   volatile ci_uint16    dump_write_i;
 #endif
 
-#ifdef CI_CFG_TCP_METRICS
-  struct oo_stack_metrics metrics;
-  struct oo_metrics_ring  metrics_ring;
-#endif
-
   ef_vi_stats           vi_stats CI_ALIGN(8);
 #if CI_CFG_SEPARATE_UDP_RXQ
   ef_vi_stats           udp_rxq_vi_stats CI_ALIGN(8);
@@ -1314,6 +1291,15 @@ struct ci_netif_state_s {
    */
   ci_int32              reserved_pktbufs;
 
+  /* Deferred packets, because of nomac. */
+  ci_ni_dllist_t deferred_list;
+  ci_ni_dllist_t deferred_list_free;
+
+
+  /* events are in shared state for poll_in_kernel mode,
+   * in which events are acquired in kernel, stored here,
+   * and processed in UL */
+  ef_event      events[256];
 
   /* Followed by:
   **
@@ -1363,11 +1349,7 @@ typedef union {
 /* !!! You MUST keep oo_ep_header in sync with the beginning of
  * citp_waitable !!! */
 struct oo_ep_header {
-#if CI_CFG_SOCKP_IS_PTR
-  ci_int32              bufid;
-#else
   oo_sp                 bufid;
-#endif
   ci_uint32             state;
 };
 
@@ -1384,11 +1366,7 @@ struct oo_ep_header {
 */
 typedef struct {
   /* !!! This is a copy of struct oo_ep_header.  Keep it in sync !!! */
-#if CI_CFG_SOCKP_IS_PTR
-  ci_int32              bufid;
-#else
   oo_sp                 bufid;
-#endif
   ci_uint32             state;
   /* --- end of oo_ep_header --- */
 
@@ -1572,15 +1550,11 @@ typedef enum
 
 
 typedef struct {
-  cicp_verinfo_t  mac_integrity; /*!< Control plane info version number handle   */
+  ci_addr_t       nexthop;
 
-  /* This field receives the source address that should be used.
-   *
-   * Why not just use [ip.ip_saddr_be32] ?  Because that field is
-   * overloaded (when used in [ci_sock_cmn::pkt]) to be the bound local IP
-   * of the socket, so we can't write it.  TODO: Change that!!
-   */
-  ci_addr_t       ip_saddr;
+  /* fwd verinfos for which this cache was last updated, must renew if stale. */
+  cicp_verinfo_t  fwd_ver; /* Current namespace */
+  cicp_verinfo_t  fwd_ver_init_net; /* Main namespace if across veth */
 
   ci_uint16       dport_be16;  /* Dest port: This is an input. */
 
@@ -1594,11 +1568,11 @@ typedef struct {
   /* retrrc_localroute, and we really CAN handle it */
 #define CI_IP_CACHE_IS_LOCALROUTE       1
 
-  ci_addr_t       nexthop;
   ci_mtu_t        mtu;
   ci_ifid_t       ifindex;
   cicp_encap_t    encap;
-  ci_int32        intf_i;
+  ci_int16        intf_i;
+  ci_ifid_t       iif_ifindex;
   ci_hwport_id_t  hwport CI_ALIGN(4); /* ip hdr to start at 4-byte boundary */
   ci_uint8        ether_offset;
   /* Here we are aligned+2 and have 2 cases:
@@ -1612,19 +1586,34 @@ typedef struct {
    */
   ci_uint8        ether_header[2 * ETH_ALEN + ETH_VLAN_HLEN];
   ci_uint16       ether_type;
-  union {
-    ci_ip4_hdr      ip;
-#if CI_CFG_IPV6
-    ci_ip6_hdr      ip6;
-#endif
-  };
+  ci_ipx_hdr_t    ipx;
 } ci_ip_cached_hdrs;
 
+/*
+ * For ipcache_laddr() see the comment about laddr in struct ci_sock_cmn_s.
+ */
 #if CI_CFG_IPV6
-#define ipcache_is_ipv6(ipcache) ((ipcache).ether_type == CI_ETHERTYPE_IP6)
+#define ci_ethertype2af(ether_type) \
+  ((ether_type) == CI_ETHERTYPE_IP6 ? AF_INET6 : AF_INET)
+#define ci_af2ethertype(af) \
+  ((af) == AF_INET6 ? CI_ETHERTYPE_IP6 : CI_ETHERTYPE_IP)
+#define ipcache_is_ipv6(ipcache) ((ipcache)->ether_type == CI_ETHERTYPE_IP6)
+#define ipcache_laddr(ipcache)              \
+  (ipcache_is_ipv6(ipcache) ?               \
+   CI_ADDR_FROM_IP6((ipcache)->ipx.ip6.saddr) :   \
+   CI_ADDR_FROM_IP4((ipcache)->ipx.ip4.ip_saddr_be32))
+#define ipcache_raddr(ipcache)              \
+  (ipcache_is_ipv6(ipcache) ?               \
+   CI_ADDR_FROM_IP6((ipcache)->ipx.ip6.daddr) :   \
+   CI_ADDR_FROM_IP4((ipcache)->ipx.ip4.ip_daddr_be32))
 #else
+#define ci_ethertype2af(ether_type) AF_INET
+#define ci_af2ethertype(af) CI_ETHERTYPE_IP
 #define ipcache_is_ipv6(ipcache) 0
+#define ipcache_laddr(ipcache) CI_ADDR_FROM_IP4((ipcache)->ipx.ip4.ip_saddr_be32)
+#define ipcache_raddr(ipcache) CI_ADDR_FROM_IP4((ipcache)->ipx.ip4.ip_daddr_be32)
 #endif
+#define ipcache_af(ipcache) ci_ethertype2af((ipcache)->ether_type)
 
 typedef ci_int32 ci_pkt_priority_t;
 
@@ -1638,8 +1627,10 @@ struct oo_sock_cplane {
    * selected by the control plane lookup.  Usually set when a socket is
    * bound to a local IP.  Must not be set to a multicast IP -- should be
    * left at zero if socket is bound to a multicast IP.
+   *
+   * See also a comment about laddr in struct ci_sock_cmn_s.
    */
-  ci_uint32  ip_laddr_be32;
+  ci_addr_t  laddr;
   ci_uint16  lport_be16;
   ci_ifid_t  so_bindtodevice;
   ci_ifid_t  ip_multicast_if;
@@ -1650,8 +1641,15 @@ struct oo_sock_cplane {
   ci_uint8   sock_cp_flags;
 # define OO_SCP_NO_MULTICAST 0x1 /* do not accelerate multicast */
 # define OO_SCP_UDP_WILD     0x2 /* UDP socket bound to wildcard or mcast */
+# define OO_SCP_BOUND_ADDR   0x4 /* Local address is set by user */
 # define OO_SCP_TPROXY       0x8 /* IP_TRANSPARENT proxying */
 };
+#define OO_SCP_FLAGS_FMT "%s%s%s%s"
+#define OO_SCP_FLAGS_ARG(cp_flags) \
+  ((cp_flags) & OO_SCP_NO_MULTICAST ? "NO_MULTICAST ":""),  \
+  ((cp_flags) & OO_SCP_UDP_WILD     ? "UDP_WILD ":""),      \
+  ((cp_flags) & OO_SCP_BOUND_ADDR   ? "BOUND_ADDR ":""),    \
+  ((cp_flags) & OO_SCP_TPROXY       ? "TPROXY ":"")
 
 
 struct ci_sock_cmn_s {
@@ -1667,13 +1665,6 @@ struct ci_sock_cmn_s {
 #define CI_SOCK_FLAG_FILTER       0x00000040   /* socket has h/w filter      */
 /* bind() has been successfully called on this socket. */
 #define CI_SOCK_FLAG_BOUND        0x00000080 
-/* The address portion of the local address has been bound (i.e. not
- * INADDR_ANY). This flag is only valid when CI_SOCK_FLAG_BOUND has been
- * set and is used by Windows LSP to determine whether to reset the local
- * address when/if a socket is disconnected (at successful completion of
- * disconnectex).
- */
-#define CI_SOCK_FLAG_ADDR_BOUND   0x00000100
 /* Socket was bound to explicit port number. It is used by Linux stack to
  * determaine if the socket should be re-bound by connect()/listen() after 
  * shutdown().
@@ -1688,7 +1679,10 @@ struct ci_sock_cmn_s {
 #define CI_SOCK_FLAG_ALWAYS_DF    0x00010000   /* always set DF bit in IP */
 #define CI_SOCK_FLAG_REUSEPORT    0x00020000   /* socket SO_REUSEPORT option */
 #define CI_SOCK_FLAG_TPROXY       0x00040000   /* IP_TRANSPARENT proxying */
-#define CI_SOCK_FLAG_MAC_FILTER   0x00080000   /* sharing stack MAC filter */
+/* HW filter is associated with the stack. This flag is used for sockets
+ * with HW filter which is handled by stack.
+ */
+#define CI_SOCK_FLAG_STACK_FILTER 0x00080000
 #define CI_SOCK_FLAG_SET_IP_TTL   0x00100000   /* app has set IP_TTL */
 /* In order to allow active wild filters to be shared with sockets that are
  * bound to an IP but not a port we need to defer the bind until we know the
@@ -1713,6 +1707,15 @@ struct ci_sock_cmn_s {
 #define CI_SOCK_FLAGS_SCALABLE    (CI_SOCK_FLAG_TPROXY | \
                                    CI_SOCK_FLAG_SCALACTIVE | \
                                    CI_SOCK_FLAG_SCALPASSIVE)
+#define CI_SOCK_FLAG_V6ONLY        0x01000000   /* IPV6_V6ONLY */
+#define CI_SOCK_FLAG_CONNECTED     0x02000000   /* remote address is non-any */
+
+/* IPv6 flowlabel generation required or not */
+#define CI_SOCK_FLAG_AUTOFLOWLABEL_REQ 0x04000000
+/* Socket IPV6_AUTOFLOWLABEL option */
+#define CI_SOCK_FLAG_AUTOFLOWLABEL_OPT 0x08000000
+/* Destination address has been NAT-ed. */
+#define CI_SOCK_FLAG_DNAT              0x10000000
 
   ci_uint32             s_aflags;
 #define CI_SOCK_AFLAG_CORK              0x01          /* TCP_CORK     */
@@ -1732,12 +1735,31 @@ struct ci_sock_cmn_s {
   /*! Which socket flags should be inherited by accepted connections? */
 #define CI_SOCK_FLAG_TCP_INHERITED                                          \
   (CI_SOCK_FLAG_KALIVE | CI_SOCK_FLAG_OOBINLINE | CI_SOCK_FLAG_LINGER |     \
-   CI_SOCK_FLAG_PMTU_DO | CI_SOCK_FLAG_ALWAYS_DF |                          \
-   CI_SOCK_FLAG_BROADCAST | CI_SOCK_FLAG_SET_SNDBUF | CI_SOCK_FLAG_SET_RCVBUF)
+   CI_SOCK_FLAG_PMTU_DO | CI_SOCK_FLAG_ALWAYS_DF | CI_SOCK_FLAG_BROADCAST | \
+   CI_SOCK_FLAG_SET_SNDBUF | CI_SOCK_FLAG_SET_RCVBUF |                      \
+   CI_SOCK_FLAG_AUTOFLOWLABEL_REQ | CI_SOCK_FLAG_AUTOFLOWLABEL_OPT)
 #define CI_SOCK_AFLAG_TCP_INHERITED \
     (CI_SOCK_AFLAG_CORK | CI_SOCK_AFLAG_NODELAY)
 
+  /* Bound-to local address.
+   * - s.laddr is the bound-to address, unmodified.  Used by the filters.
+   * - s.cp.laddr is the "preferred source" address when resolving
+   *   a route, as provided from Onload to cplane.  Differs from the first
+   *   in case of multicast.
+   * - ipcache_laddr(ipcache = s.pkt) is the "preferred source" address
+   *   after a route has been resolved by cplane.  Same as the previous one
+   *   if it is non-any.
+   */
+  ci_addr_t laddr;
+
   struct oo_sock_cplane cp;
+
+#if CI_CFG_IPV6
+  /* IPv6 Traffic Class. Corresponding IPv4 TOS field is situated in
+   * oo_sock_cplane struct, but there is no reason adding tclass there
+   * because Traffic Class does not affect control plane lookup. */
+  ci_uint8 tclass;
+#endif
 
   ci_ip_cached_hdrs     pkt;
   union {
@@ -1782,6 +1804,7 @@ struct ci_sock_cmn_s {
     ci_int32            so_debug; /* Flags for dummy options */
 # define CI_SOCKOPT_FLAG_SO_DEBUG    0x1
 # define CI_SOCKOPT_FLAG_IP_RECVERR  0x2
+# define CI_SOCKOPT_FLAG_IPV6_RECVERR 0x4
   } so;
 
   /* Socket options that are not inherited on accept from listening socket.
@@ -1800,7 +1823,7 @@ struct ci_sock_cmn_s {
   cicp_hwport_mask_t    rx_bind2dev_hwports;
   ci_int16              rx_bind2dev_vlan;
 
-  ci_uint8              cmsg_flags;
+  ci_uint16             cmsg_flags;
 
 # define CI_IP_CMSG_PKTINFO      0x01
 # define CI_IP_CMSG_TTL          0x02
@@ -1812,8 +1835,7 @@ struct ci_sock_cmn_s {
 # define CI_IP_CMSG_TIMESTAMPING 0x80
 # define CI_IP_CMSG_TIMESTAMP_ANY \
   (CI_IP_CMSG_TIMESTAMP | CI_IP_CMSG_TIMESTAMPNS | CI_IP_CMSG_TIMESTAMPING )
-
-  ci_uint8              domain;           /*!<  PF_INET or PF_INET6 */
+# define CI_IPV6_CMSG_PKTINFO    0x0100
 
 #if CI_CFG_TIMESTAMPING
   /* timestamping_flags relate to flags provided with socket option
@@ -1834,6 +1856,12 @@ struct ci_sock_cmn_s {
 
 
   ci_ni_dllist_link     reap_link;
+
+  /* Size of 'ci_sock_cmn_s' structure may be improved by making 'domain'
+   * as a flag. Also 'so_debug' field of 'so' structure has 2 flags and size
+   * of 4 bytes.
+   */
+  ci_uint8              domain;           /*!<  PF_INET or PF_INET6 */
 
 #ifdef ONLOAD_OFE
   /* Start point for OFE engine */
@@ -1891,7 +1919,7 @@ typedef struct {
   ci_uint32 n_rx_eagain;      /* recv returned EAGAIN                  */
   ci_uint32 n_rx_overflow;    /* datagrams dropped due to overflow     */
   ci_uint32 n_rx_mem_drop;    /* datagrams dropped due to out-of-mem   */
-  ci_uint32 n_rx_pktinfo;     /* n times IP_PKTINFO retrieved          */
+  ci_uint32 n_rx_pktinfo;     /* n times IP/IPV6_PKTINFO retrieved     */
   ci_uint32 max_recvq_pkts;   /* maximum packets queued for recv       */
 
   ci_uint32 n_tx_os;          /* datagrams send via OS socket          */
@@ -1918,7 +1946,6 @@ typedef struct {
   ci_uint32 n_tx_unconnect_late; /* concurrent send and unconnect      */
 } ci_udp_socket_stats;
 
-
 struct  ci_udp_state_s {
   ci_sock_cmn           s;
 
@@ -1941,6 +1968,9 @@ struct  ci_udp_state_s {
 #define CI_UDPF_MCAST_JOIN      0x00008000  /*!< done IP_ADD_MEMBERSHIP */
 #define CI_UDPF_MCAST_FILTER    0x00010000  /*!< mcast filter added */
 #define CI_UDPF_NO_UCAST_FILTER 0x00020000  /*!< don't add unicast filters */
+#define CI_UDPF_LAST_SEND_NOMAC 0x00040000  /*!< last send was via nomac path */
+
+  ci_uint32 future_intf_i; /* Interface to check for incoming future packets */
 
 #if CI_CFG_ZC_RECV_FILTER
   /* Only safe to use these at user-level in context of caller who set them */
@@ -1979,16 +2009,21 @@ struct  ci_udp_state_s {
    */
   ci_uint32 tx_count;
 
-  /* Cache for IP_PKTINFO  */
+  /* Cache for IP_PKTINFO and IPV6_PKTINFO */
   struct {
     /* PKT info: */
     ci_int16 intf_i;
     ci_int16 vlan;
-    ci_uint32 daddr;
+    ci_addr_t daddr;
     ci_uint8  dmac[ETH_ALEN];
 
     /* User info: */
-    struct in_pktinfo ipi;
+    union {
+      struct in_pktinfo ipi;
+#if CI_CFG_IPV6
+      struct ci_in6_pktinfo ipi6;
+#endif
+    } ipx_pktinfo;
   } ip_pktinfo_cache;
 
   ci_udp_socket_stats stats;
@@ -2078,10 +2113,10 @@ struct oo_pipe {
 
 struct ci_active_wild_s {
   ci_sock_cmn           s;
+  ci_addr_t             last_laddr;
+  ci_addr_t             last_raddr;
   ci_ni_dllist_link     pool_link;
   ci_iptime_t           expiry;
-  ci_uint32             last_laddr;
-  ci_uint32             last_raddr;
   ci_uint32             last_rport;
 };
 
@@ -2105,13 +2140,14 @@ typedef struct {
 ** accept queue.
 */
 typedef struct {
-  ci_uint16            r_port;    /* remote port                         */
-  ci_uint32            l_addr;    /* local address                       */
-  ci_uint32            r_addr;    /* remote address                      */
+  ci_addr_t            l_addr;    /* local address                       */
+  ci_addr_t            r_addr;    /* remote address                      */
 
   ci_uint32            rcv_nxt;   /* sequence number one beyond SYN      */
-
   ci_uint32            snd_isn;   /* initial sequence number for SYN-ACK */
+
+  ci_uint16            r_port;    /* remote port                         */
+
   ci_uint8             rcv_wscl;  /* advertised window scale in SYN-ACK  */
   ci_int8              retries;   /* number of times SYN-ACK sent        */
 #define CI_FLAG_TSR_RETRIES_ACKED 0x80 /* ACK have been received */
@@ -2129,9 +2165,6 @@ typedef struct {
   ci_uint32            hash;        /* hash value for lookup table       */
   oo_p                 bucket_link; /* link used in hash buckets         */
 
-#if CI_CFG_TCP_METRICS
-  oo_metrics_tstamp    tstamp;
-#endif
 } ci_tcp_state_synrecv;
 
 /* State for maintaining ci_netif_state::ready_eps_list[ready_list_id]
@@ -2165,22 +2198,24 @@ typedef struct {
   oo_p bucket[CI_TCP_LISTEN_BUCKET_SIZE];
 } ci_tcp_listen_bucket;
 
-/* This chunk of memory should be exactly cacheline in size. */
+/* This memory is cacheline-aligned for performance reasons. */
 #define CI_AUX_MEM_SIZE 128
+#define CI_AUX_HEADER_SIZE CI_CACHE_LINE_SIZE
 typedef struct {
   ci_ni_dllist_link    link; /* Link into free_aux_mem or into other lists */
-  ci_uint16            type; /* Type of the union */
-  ci_uint16            no;   /* 1-7 Number in the socket buffer */
+  ci_uint8            type; /* Type of the union */
 
   union {
     ci_tcp_state_synrecv synrecv;
     ci_tcp_listen_bucket bucket;
     ci_sb_epoll_state    epoll;
+    ci_pmtu_state_t      pmtus;
   } u;
 
   /* This is not a real member.  It just brings the sizeof(ci_ni_aux_mem)
-   * to the cacheline size. */
-  ci_uint8             align[0] CI_ALIGN(CI_AUX_MEM_SIZE);
+   * to the correct size. Note that __attribute__((align)) doesn't work with
+   * non-power-of-2 sizes */
+  ci_uint8             align[0] CI_ALIGN(CI_CACHE_LINE_SIZE);
 } ci_ni_aux_mem;
 
 
@@ -2199,39 +2234,6 @@ typedef struct {
 #define OO_TCP_DEFER_ACCEPT_OFF 0xff
 
 } ci_tcp_socket_cmn;
-
-
-enum {
-  TSM_S_INITED,
-  TSM_S_RX,
-  TSM_S_TX,
-  TSM_S_DONE,
-};
-
-
-enum {
-  TSM_F_CLIENT      = 0x1,    /* did transmit before receive */
-  TSM_F_PIPELINED   = 0x2,    /* did send with data in recv q */
-  TSM_F_ABORTED     = 0x4,    /* non-clean transition to CLOSED */
-  TSM_F_EXPORT      = 0x8,    /* export has no missing records */
-};
-
-
-struct oo_tcp_socket_metrics {
-  /* State */
-  oo_metrics_tstamp ts_last;
-  oo_metrics_tstamp ts_enter;
-  ci_uint32         tx_isn;
-  ci_uint8          state;
-  ci_uint8          flags;
-  /* Metrics */
-  ci_uint8          retrans_adjust;
-  oo_metrics_intvl  tx_time;
-  oo_metrics_intvl  rx_time;
-  oo_metrics_intvl  idle_time;
-  oo_metrics_intvl  app_time;
-  ci_uint32         conn_id;
-};
 
 
 struct oo_tcp_socket_stats {
@@ -2335,7 +2337,7 @@ struct ci_tcp_state_s {
         (CI_TCPT_FLAG_TSO | CI_TCPT_FLAG_WSCL | CI_TCPT_FLAG_SACK | \
          CI_TCPT_FLAG_ECN)
   /* Path MTU data: timer, value, etc */
-  ci_pmtu_state_t pmtus;
+  oo_p pmtus;
 
   /* SO_SNDBUF measured in packet buffers. */
   ci_int32            so_sndbuf_pkts;
@@ -2479,6 +2481,9 @@ struct ci_tcp_state_s {
    */
 #endif
 
+  ci_iptime_t          t_last_invalid_ack; /* timestamp of last ACK for
+                                              an invalid incoming packet */
+
   /* sa and sv are scaled by 8 and 4 respectively to minimize roundoff
   ** error when time has a large granularity See the appendix of
   ** Jacobson's SIGCOMM 88  */
@@ -2574,10 +2579,14 @@ struct ci_tcp_state_s {
     ci_iptime_t        time;
   } rcvbuf_drs;
 
+
+  /* Destination address before NAT.  Required for getpeername(). */
+  struct {
+    ci_addr_t          daddr_be32;
+    ci_uint16          dport_be16;
+  } pre_nat;
+
   struct oo_tcp_socket_stats    stats;
-#if CI_CFG_TCP_METRICS
-  struct oo_tcp_socket_metrics  metrics;
-#endif
 };
 
 
@@ -2686,6 +2695,9 @@ struct oo_eth_hdr {
   ci_uint16 ether_type;
 };
 
+
+/* Default value for sysctl net/ipv6/auto_flowlabels parameter */
+#define CI_AUTO_FLOWLABELS_DEFAULT 1
 
 #endif  /* __CI_INTERNAL_IP_SHARED_TYPES_H__ */
 /*! \cidoxg_end */

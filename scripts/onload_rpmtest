@@ -1,9 +1,8 @@
 #!/bin/bash
-######################################################################
+# SPDX-License-Identifier: GPL-2.0
+# X-SPDX-Copyright-Text: (c) Solarflare Communications Inc
+
 # Description: Simple quick OpenOnload test, for use with rpm-test.
-#   Copyright: 2010 Solarflare Communications Inc.
-#      Author: David Riddoch <driddoch@solarflare.com>
-######################################################################
 
 bin=$(cd $(dirname "$0") && /bin/pwd)
 me=$(basename "$0")

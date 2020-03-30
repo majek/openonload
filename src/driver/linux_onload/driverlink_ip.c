@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file driverlink_ip.c  Inter-driver communications for the IP driver
 ** <L5_PRIVATE L5_SOURCE>
@@ -217,6 +204,26 @@ static struct nf_hook_ops oo_netfilter_ip_hook = {
 #endif
   .priority = NF_IP_PRI_FIRST,
 };
+
+#if CI_CFG_IPV6
+static struct nf_hook_ops oo_netfilter_ip6_hook = {
+  .hook = oo_netfilter_ip,
+#ifdef EFRM_HAVE_NETFILTER_OPS_HAVE_OWNER
+  .owner = THIS_MODULE,
+#endif
+#ifdef EFX_HAVE_NFPROTO_CONSTANTS
+  .pf = NFPROTO_IPV6,
+#else
+  .pf = PF_INET6,
+#endif
+#ifdef NF_IP_PRE_ROUTING
+  .hooknum = NF_IP_PRE_ROUTING,
+#else
+  .hooknum = NF_INET_PRE_ROUTING,
+#endif
+  .priority = NF_IP_PRI_FIRST,
+};
+#endif
 
 
 /* This function will create an oo_nic if one hasn't already been created.
@@ -502,14 +509,21 @@ int oo_driverlink_register(void)
     goto fail2;
 
 #ifndef EFRM_HAVE_NF_NET_HOOK
-  rc = nf_register_hook(&oo_netfilter_ip_hook);
-  if( rc < 0 )
+  if( (rc = nf_register_hook(&oo_netfilter_ip_hook)) < 0 )
     goto fail4;
+#if CI_CFG_IPV6
+  if( (rc = nf_register_hook(&oo_netfilter_ip6_hook)) < 0 )
+    goto fail5;
+#endif
 #endif
 
   return 0;
 
 #ifndef EFRM_HAVE_NF_NET_HOOK
+#if CI_CFG_IPV6
+  fail5:
+   nf_unregister_hook(&oo_netfilter_ip_hook);
+#endif
   fail4:
    efx_dl_unregister_driver(&oo_dl_driver);
 #endif
@@ -525,6 +539,9 @@ void oo_driverlink_unregister(void)
 {
 #ifndef EFRM_HAVE_NF_NET_HOOK
   nf_unregister_hook(&oo_netfilter_ip_hook);
+#if CI_CFG_IPV6
+  nf_unregister_hook(&oo_netfilter_ip6_hook);
+#endif
 #endif
   unregister_netdevice_notifier(&oo_netdev_notifier);
   efx_dl_unregister_driver(&oo_dl_driver);
@@ -533,11 +550,21 @@ void oo_driverlink_unregister(void)
 #ifdef EFRM_HAVE_NF_NET_HOOK
 int oo_register_nfhook(struct net *net)
 {
-  return nf_register_net_hook(net, &oo_netfilter_ip_hook);
+  int rc;
+  if( (rc = nf_register_net_hook(net, &oo_netfilter_ip_hook)) != 0 )
+    return rc;
+#if CI_CFG_IPV6
+  if( (rc = nf_register_net_hook(net, &oo_netfilter_ip6_hook)) != 0 )
+    nf_unregister_net_hook(net, &oo_netfilter_ip_hook);
+#endif
+  return rc;
 }
 void oo_unregister_nfhook(struct net *net)
 {
   nf_unregister_net_hook(net, &oo_netfilter_ip_hook);
+#if CI_CFG_IPV6
+  nf_unregister_net_hook(net, &oo_netfilter_ip6_hook);
+#endif
 }
 #endif
 

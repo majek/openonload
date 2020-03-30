@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: LGPL-2.1
+# X-SPDX-Copyright-Text: (c) Solarflare Communications Inc
 ifeq ($(UNIX),1)
 # Order important for GNU make 3.82 unless MMAKE_NO_DEPS=1. SFC bug 27495.
 TARGETS		:= $(EFVI_LIB) $(CIUL_LIB)
@@ -21,7 +23,8 @@ LIB_SRCS	:=		\
 		$(EFVI_SRCS)	\
 		falcon_evtimer.c	\
 		ef10_evtimer.c	\
-		logging.c
+		logging.c \
+		checksum.c
 
 ifneq ($(DRIVER),1)
 LIB_SRCS	+=		\
@@ -41,7 +44,6 @@ LIB_SRCS	+=		\
 		vi_stats.c	\
 		vi_prime.c	\
 		vi_discard.c	\
-		checksum.c	\
 		capabilities.c	\
 		ctpio.c
 

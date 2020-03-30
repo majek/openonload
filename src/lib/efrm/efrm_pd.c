@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /****************************************************************************
  * Driver for Solarflare network controllers -
  *          resource management for Xen backend, OpenOnload, etc
@@ -51,7 +38,6 @@
 #include <ci/efrm/pd.h>
 #include <ci/efrm/buffer_table.h>
 #include <ci/efrm/vf_resource.h>
-#include <ci/efrm/vf_resource_private.h>
 #include <ci/efrm/efrm_filter.h>
 #include <ci/efhw/ef10.h>
 #include <ci/efhw/nic.h>
@@ -82,10 +68,6 @@ struct efrm_pd {
 	 * physical addresses.
 	 */
 	int owner_id;
-#ifdef CONFIG_SFC_RESOURCE_VF
-	/* If the protection domain is a VF, then [vf] will be non-null. */
-	struct efrm_vf *vf;
-#endif
 
 	/* OS-specific data */
 	void *os_data;
@@ -270,7 +252,8 @@ int efrm_pd_alloc(struct efrm_pd **pd_out, struct efrm_client *client_opt,
 	int orders_num = 0;
 
 
-	EFRM_ASSERT((client_opt != NULL) || (vf_opt != NULL));
+	/* Support for SRIOV VF was removed (see bug 84927). */
+	EFRM_ASSERT((vf_opt == NULL) && (client_opt != NULL));
 	if ((flags &
 	    ~(EFRM_PD_ALLOC_FLAG_PHYS_ADDR_MODE |
 	    EFRM_PD_ALLOC_FLAG_HW_LOOPBACK)) != 0) {
@@ -299,11 +282,6 @@ int efrm_pd_alloc(struct efrm_pd **pd_out, struct efrm_client *client_opt,
 		pd->owner_id = OWNER_ID_PHYS_MODE;
 	}
 	else {
-#ifdef CONFIG_SFC_RESOURCE_VF
-		if (vf_opt != NULL)
-			owner_ids = vf_opt->owner_ids;
-		else
-#endif
 		owner_ids = efrm_nic_from_client(client_opt)->owner_ids;
 		EFRM_ASSERT(owner_ids != NULL);
 		pd->owner_id = efrm_pd_owner_id_alloc(owner_ids);
@@ -313,14 +291,7 @@ int efrm_pd_alloc(struct efrm_pd **pd_out, struct efrm_client *client_opt,
 		rc = -EBUSY;
 		goto fail2;
 	}
-#ifdef CONFIG_SFC_RESOURCE_VF
-	pd->vf = vf_opt;
-	if (pd->vf != NULL) {
-		struct efrm_resource *vfrs = efrm_vf_to_resource(pd->vf);
-		efrm_resource_ref(vfrs);
-		client_opt = vfrs->rs_client;
-	}
-#endif
+
 	if (!(flags & EFRM_PD_ALLOC_FLAG_PHYS_ADDR_MODE)) {
 		int ord;
 		for (ord = 0; ord < orders_num; ord++) {
@@ -389,20 +360,12 @@ void efrm_pd_free(struct efrm_pd *pd)
 
 	spin_lock_bh(&pd_manager->rm.rm_lock);
 	if (pd->owner_id != OWNER_ID_PHYS_MODE) {
-#ifdef CONFIG_SFC_RESOURCE_VF
-		if (pd->vf)
-			owner_ids = pd->vf->owner_ids;
-		else
-#endif
 		owner_ids = efrm_nic_from_rs(&pd->rs)->owner_ids;
 		EFRM_ASSERT(owner_ids != NULL);
 		efrm_pd_owner_id_free(owner_ids, pd->owner_id);
 	}
 	spin_unlock_bh(&pd_manager->rm.rm_lock);
-#ifdef CONFIG_SFC_RESOURCE_VF
-	if (pd->vf != NULL)
-		efrm_vf_resource_release(pd->vf);
-#endif
+
 	if (pd->owner_id != OWNER_ID_PHYS_MODE) {
 		int ord;
 		for (ord = 0;
@@ -453,36 +416,13 @@ EXPORT_SYMBOL(efrm_pd_get_min_align);
 
 struct efrm_vf *efrm_pd_get_vf(struct efrm_pd *pd)
 {
-#ifdef CONFIG_SFC_RESOURCE_VF
-	return pd->vf;
-#else
 	return NULL;
-#endif
 }
 
 
 int efrm_pd_share_dma_mapping(struct efrm_pd *pd, struct efrm_pd *pd1)
 {
-#ifndef CONFIG_SFC_RESOURCE_VF_IOMMU
 	return false;
-#else
-	efhw_iommu_domain *dom, *dom1;
-
-	if (pd->owner_id != OWNER_ID_PHYS_MODE ||
-	    pd1->owner_id != OWNER_ID_PHYS_MODE)
-		return false;
-
-	if (pd->vf == NULL || pd1->vf == NULL)
-		return false;
-
-	dom = efrm_vf_get_iommu_domain(pd->vf);
-	dom1 = efrm_vf_get_iommu_domain(pd1->vf);
-	if (dom == NULL || dom1 == NULL)
-		return false;
-	if (dom != dom1)
-		return false;
-	return true;
-#endif
 }
 EXPORT_SYMBOL(efrm_pd_share_dma_mapping);
 
@@ -603,107 +543,6 @@ fail:
 			      pci_addrs, pci_addrs_stride);
 	return -ENOMEM;
 }
-
-
-#ifdef CONFIG_SFC_RESOURCE_VF
-#ifdef CONFIG_SFC_RESOURCE_VF_IOMMU
-static void efrm_pd_dma_unmap_iommu(efhw_iommu_domain *iommu_domain,
-				    int n_pages, int nic_order,
-				    dma_addr_t *pci_addrs,
-				    int pci_addrs_stride)
-{
-	while (--n_pages >= 0) {
-		mutex_lock(&efrm_iommu_mutex);
-		iommu_unmap(iommu_domain, *pci_addrs,
-			    NIC_ORDER_TO_BYTES(nic_order));
-		mutex_unlock(&efrm_iommu_mutex);
-		pci_addrs = (void *)((char *)pci_addrs + pci_addrs_stride);
-	}
-}
-
-
-static int efrm_pd_dma_map_iommu(efhw_iommu_domain *iommu_domain,
-				 unsigned long iovaddr,
-				 int n_pages, int nic_order,
-				 void **addrs, int addrs_stride,
-				 dma_addr_t *pci_addrs, int pci_addrs_stride)
-{
-	/* TODO: Is there any benefit to mapping larger chunks? */
-
-	int i, rc;
-
-	for (i = 0; i < n_pages; ++i) {
-		rc = iommu_map(iommu_domain, iovaddr,
-			       __pa(*addrs),
-			       NIC_ORDER_TO_BYTES(nic_order),
-			       IOMMU_READ | IOMMU_WRITE | IOMMU_CACHE);
-		if (rc < 0) {
-			EFRM_ERR("%s: ERROR: iommu_map failed (%d)",
-				 __FUNCTION__, rc);
-			goto fail;
-		}
-		*pci_addrs = iovaddr;
-		iovaddr += NIC_ORDER_TO_BYTES(nic_order),
-		addrs = (void *)((char *)addrs + addrs_stride);
-		pci_addrs = (void *)((char *)pci_addrs + pci_addrs_stride);
-	}
-	return 0;
-
-fail:
-	pci_addrs = (void *)((char *)pci_addrs - i * pci_addrs_stride);
-	addrs = (void *)((char *)addrs - i * addrs_stride);
-	efrm_pd_dma_unmap_iommu(iommu_domain, i, nic_order,
-				pci_addrs, pci_addrs_stride);
-	return rc;
-}
-#endif
-
-static void efrm_pd_dma_unmap_vf(struct efrm_pd *pd,
-				 int n_pages, int nic_order,
-				 dma_addr_t *pci_addrs, int pci_addrs_stride)
-{
-	efhw_iommu_domain *iommu_domain;
-	efrm_vf_alloc_ioaddrs(pd->vf, 0, &iommu_domain);
-
-#ifdef CONFIG_SFC_RESOURCE_VF_IOMMU
-	if (iommu_domain != NULL)
-		efrm_pd_dma_unmap_iommu(iommu_domain, n_pages, nic_order,
-				        pci_addrs, pci_addrs_stride);
-	else
-#endif
-		efrm_pd_dma_unmap_pci(pd->vf->pci_dev, n_pages, nic_order,
-				      pci_addrs, pci_addrs_stride);
-}
-
-
-static int efrm_pd_dma_map_vf(struct efrm_pd *pd, int n_pages, int nic_order,
-			      void **addrs, int addrs_stride,
-			      dma_addr_t *pci_addrs, int pci_addrs_stride)
-{
-	efhw_iommu_domain *iommu_domain;
-	unsigned long iovaddr;
-	int n_sys_pages;
-
-	n_sys_pages = ((n_pages * NIC_ORDER_TO_BYTES(nic_order) +
-				PAGE_SIZE - 1) & PAGE_MASK) >> PAGE_SHIFT;
-
-	iovaddr = efrm_vf_alloc_ioaddrs(pd->vf, n_sys_pages,
-					&iommu_domain);
-
-#ifdef CONFIG_SFC_RESOURCE_VF_IOMMU
-	if (iommu_domain != NULL)
-		return efrm_pd_dma_map_iommu(iommu_domain, iovaddr,
-					     n_pages, nic_order,
-					     addrs, addrs_stride,
-					     pci_addrs, pci_addrs_stride);
-	else
-#endif
-		return efrm_pd_dma_map_pci(pd->vf->pci_dev,
-					   n_pages, nic_order,
-					   addrs, addrs_stride,
-					   pci_addrs, pci_addrs_stride);
-}
-#endif
 
 
 static void efrm_pd_dma_unmap_nic(struct efrm_pd *pd,
@@ -1200,13 +1039,6 @@ int efrm_pd_dma_map(struct efrm_pd *pd, int n_pages, int nic_order,
 		return -EPROTO;
 	}
 
-#ifdef CONFIG_SFC_RESOURCE_VF
-	if (pd->vf != NULL)
-		rc = efrm_pd_dma_map_vf(pd, n_pages, nic_order,
-					addrs, addrs_stride,
-					pci_addrs, pci_addrs_stride);
-	else
-#endif
 		rc = efrm_pd_dma_map_nic(pd, n_pages, nic_order,
 					 addrs, addrs_stride,
 					 pci_addrs, pci_addrs_stride);
@@ -1234,12 +1066,6 @@ int efrm_pd_dma_map(struct efrm_pd *pd, int n_pages, int nic_order,
 
 
 fail2:
-#ifdef CONFIG_SFC_RESOURCE_VF
-	if (pd->vf != NULL)
-		efrm_pd_dma_unmap_vf(pd, n_pages, nic_order,
-				     pci_addrs, pci_addrs_stride);
-	else
-#endif
 		efrm_pd_dma_unmap_nic(pd, n_pages, nic_order,
 				      pci_addrs, pci_addrs_stride);
 fail1:
@@ -1255,14 +1081,9 @@ void efrm_pd_dma_unmap(struct efrm_pd *pd, int n_pages, int nic_order,
 	dma_addr_t *pci_addrs = p_pci_addrs;
 	if (pd->owner_id != OWNER_ID_PHYS_MODE)
 		efrm_pd_dma_unmap_bt(pd, bt_alloc, reset_pending);
-#ifdef CONFIG_SFC_RESOURCE_VF
-	if (pd->vf != NULL)
-		efrm_pd_dma_unmap_vf(pd, n_pages, nic_order,
-				     pci_addrs, pci_addrs_stride);
-	else
-#endif
-		efrm_pd_dma_unmap_nic(pd, n_pages, nic_order,
-				      pci_addrs, pci_addrs_stride);
+
+	efrm_pd_dma_unmap_nic(pd, n_pages, nic_order,
+			      pci_addrs, pci_addrs_stride);
 }
 EXPORT_SYMBOL(efrm_pd_dma_unmap);
 

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-2.0 OR Solarflare-Binary
+# X-SPDX-Copyright-Text: (c) Solarflare Communications Inc
 GNU	    := 1
 ifndef MMAKE_CTUNE
 # Not all gcc's support -mtune=native, so we do a dummy invocation with that

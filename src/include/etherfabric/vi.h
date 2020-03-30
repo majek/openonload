@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This library is free software; you can redistribute it and/or
-** modify it under the terms of version 2.1 of the GNU Lesser General Public
-** License as published by the Free Software Foundation.
-**
-** This library is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-** Lesser General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: LGPL-2.1 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /****************************************************************************
  * Copyright 2004-2005: Level 5 Networks Inc.
  * Copyright 2005-2018: Solarflare Communications Inc,
@@ -399,7 +386,7 @@ extern int ef_vi_set_free(ef_vi_set* vi_set, ef_driver_handle vi_set_dh);
 ** \param index_in_vi_set Index of the virtual interface within the set to
 **                        allocate, or -1 for any.
 ** \param evq_capacity    The number of events in the event queue (maximum
-**                        4096), or:\n
+**                        32768), or:\n
 **                        - 0 for no event queue\n
 **                        - -1 for the default size.
 ** \param rxq_capacity    The number of slots in the RX descriptor ring,

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-2.0
+# X-SPDX-Copyright-Text: (c) Solarflare Communications Inc
 obj-$(CONFIG_SFC_RESOURCE) := sfc_resource.o
 
 sfc_resource-objs := iopage.o \

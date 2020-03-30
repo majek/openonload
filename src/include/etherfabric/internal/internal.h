@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This library is free software; you can redistribute it and/or
-** modify it under the terms of version 2.1 of the GNU Lesser General Public
-** License as published by the Free Software Foundation.
-**
-** This library is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-** Lesser General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: LGPL-2.1 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /****************************************************************************
  * Copyright 2013-2015: Solarflare Communications Inc,
  *                      7505 Irvine Center Drive, Suite 100
@@ -107,41 +94,17 @@ extern int ef_vi_evq_reinit(ef_vi* vi);
  * TX Warming *********************************************************
  **********************************************************************/
 
-typedef unsigned ef_vi_tx_warm_state;
+typedef struct {
+  unsigned removed;
+  char* vi_ctpio_mmap_ptr;
+} ef_vi_tx_warm_state;
 
-/* This prevents ef_vi transmit functions from sending by modifying
- * TXQ removed account to make the queue appear full.  This is
- * used to warm the transmit path without sending data. */
-ef_vi_inline void
-ef_vi_start_transmit_warm(ef_vi* vi, ef_vi_tx_warm_state* saved_state)
-{
-  ef_vi_txq_state* qs = &vi->ep_state->txq;
-  ef_vi_txq* q = &vi->vi_txq;
-  *saved_state = qs->removed;
-/* qs->removed is modified so ( qs->added - qs->removed < q->mask )
- * is false and packet is not sent.  Descriptor will be written to
- * qs->added & q->mask.  */
-  qs->removed = qs->added - q->mask;
-}
+extern ef_vi_noinline ef_vi_cold void
+  ef_vi_start_transmit_warm(ef_vi* vi, ef_vi_tx_warm_state* saved_state,
+                            char* warm_ctpio_mmap_ptr);
 
-
-/* This resets the state of the transmit queue so sending can continue
- * after warming.  saved_state should be the return value of the
- * last call to ef_vi_start_transmit_warm for the same VI. */
-#ifndef __KERNEL__
-#include <assert.h>
-#endif
-ef_vi_inline void ef_vi_stop_transmit_warm(ef_vi* vi, ef_vi_tx_warm_state state)
-{
-  ef_vi_txq_state* qs = &vi->ep_state->txq;
-#if ! defined(__KERNEL__) && ! defined(NDEBUG)
-  /* We assert that the queue id was not modified by any transmit
-   * since warming was started. */
-  ef_vi_txq* q = &vi->vi_txq;
-  assert(q->ids[qs->added & q->mask] == EF_REQUEST_ID_MASK);
-#endif
-  qs->removed = state;
-}
+extern ef_vi_noinline ef_vi_cold void
+  ef_vi_stop_transmit_warm(ef_vi* vi, const ef_vi_tx_warm_state* state);
 
 
 /**********************************************************************

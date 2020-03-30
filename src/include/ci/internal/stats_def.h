@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_HEADER >
@@ -23,6 +10,8 @@
 ** </L5_PRIVATE>
 *//*
 \**************************************************************************/
+
+#include <ci/internal/transport_config_opt.h>
 
 /*
  * OO_STAT(description, datatype, name, kind)
@@ -60,6 +49,8 @@ OO_STAT("Number of times event queue was polled from kernel.  Expected to "
         ci_uint32, k_polls, count)
 OO_STAT("Number of times event queue was polled from user-level.",
         ci_uint32, u_polls, count)
+OO_STAT("Number of times event queue was polled from user-level with ioctl.",
+        ci_uint32, ioctl_evq_polls, count)
 OO_STAT("Number of RX events handled.  Not always 1:1 with number of "
         "packets received, an event can cover a batch of packets in "
         "high-throughput mode.",
@@ -228,6 +219,8 @@ OO_STAT("Number of times TCP sendmsg() found the non-blocking pool empty.",
         ci_uint32, tcp_send_nonb_pool_empty, count)
 OO_STAT("Number of times TCP sendmsg() contended the stack lock.",
         ci_uint32, tcp_send_ni_lock_contends, count)
+OO_STAT("Number of times TCP sendmsg() failed to find an acceleratable route.",
+        ci_uint32, tcp_send_fail_noroute, count)
 OO_STAT("Number of times UDP sendmsg() contended the stack lock.",
         ci_uint32, udp_send_ni_lock_contends, count)
 OO_STAT("Number of times getsockopt() contended the stack lock.",
@@ -272,6 +265,11 @@ OO_STAT("Onload was short of socket buffers, and reclaimed sockets that were "
         "closing, but not yet fully closed.  This can cause resets to be "
         "sent; if the remote side later finalises the close sequence.",
         ci_uint32, timewait_reap, count)
+#if CI_CFG_IPV6
+OO_STAT("Connect() on TCP socket detected source and destination address"
+        "family mismatch and handed socket to the kernel.",
+        ci_uint32, tcp_connect_af_mismatch, count)
+#endif
 OO_STAT("Onload was short of filters, and reclaimed sockets that were "
         "closing, but not yet fully closed.  This can cause resets to be "
         "sent; if the remote side later finalises the close sequence.",
@@ -285,6 +283,17 @@ OO_STAT("Number of entries in software-filter hash table.",
         ci_uint32, table_n_entries, val)
 OO_STAT("Number of slots occupied in software-filter hash table.",
         ci_uint32, table_n_slots, val)
+#if CI_CFG_IPV6
+OO_STAT("Max hops in the IPv6 software-filter hash table lookup.",
+        ci_uint32, ipv6_table_max_hops, val)
+OO_STAT("Rolling mean of number of hops in recent inserts to the "
+        "IPv6 software filter-table.",
+        ci_uint32, ipv6_table_mean_hops, val)
+OO_STAT("Number of entries in IPv6 software-filter hash table.",
+        ci_uint32, ipv6_table_n_entries, val)
+OO_STAT("Number of slots occupied in IPv6 software-filter hash table.",
+        ci_uint32, ipv6_table_n_slots, val)
+#endif
 OO_STAT("Number of retransmit timeouts, across all TCP sockets that stack "
         "has had.",
         ci_uint32, tcp_rtos, count)
@@ -362,6 +371,11 @@ OO_STAT("We got a UDP packet, but we didn't have a socket to match, so we "
 OO_STAT("We got a non-TCP-non-UDP IP packet, so we decided to forward it to "
         "the kernel.",
         ci_uint32, no_match_pass_to_kernel_ip_other, count)
+#if CI_CFG_IPV6
+OO_STAT("We got a non-TCP-non-UDP IPv6 packet, so we decided to forward it to "
+        "the kernel.",
+        ci_uint32, no_match_pass_to_kernel_ip6_other, count)
+#endif
 OO_STAT("We got a non-IP packet, so we decided to forward it to the kernel.",
         ci_uint32, no_match_pass_to_kernel_non_ip, count)
 OO_STAT("We got a packet, but we didn't have a socket to match, and we didn't "
@@ -455,6 +469,33 @@ OO_STAT("Number of TCP segments received in-order when ROB is non-empty.  "
         ci_uint32, rx_rob_non_empty, count)
 OO_STAT("Number of TCP segments retransmited.",
         ci_uint32, retransmits, count)
+OO_STAT("Number of ACK packets not sent in response of invalid incoming TCP "
+        "packets because of rate limiting.",
+        ci_uint32, invalid_ack_limited, count)
+OO_STAT("Number of challenge ACKs sent (RFC 5961).",
+        ci_uint32, challenge_ack_sent, count)
+OO_STAT("Number of challenge ACKs not sent because of packet allocation "
+        "failure.",
+        ci_uint32, challenge_ack_out_of_pkts, count)
+OO_STAT("Number of challenge ACKs not sent because of rate-limiting.",
+        ci_uint32, challenge_ack_limited, count)
+OO_STAT("Number of deferred packets when next hop MAC address is not known.",
+        ci_uint32, tx_defer_pkt, count)
+OO_STAT("Number of deferred packets sent without any real delay.",
+        ci_uint32, tx_defer_pkt_fast, count)
+OO_STAT("Number of deferred packets sent.",
+        ci_uint32, tx_defer_pkt_sent, count)
+OO_STAT("Number of deferred packets which were dropped because Onload failed "
+        "to resolve the MAC address.",
+        ci_uint32, tx_defer_pkt_drop_failed, count)
+OO_STAT("Number of deferred packets which were dropped because the OS failed "
+        "to resolve the MAC address.",
+        ci_uint32, tx_defer_pkt_drop_arp_failed, count)
+OO_STAT("Number of deferred packets which were dropped because of "
+        "EF_DEFER_ARP_TIMEOUT timeout.",
+        ci_uint32, tx_defer_pkt_drop_timeout, count)
+OO_STAT("Number of dropped packets because of EF_DEFER_ARP_MAX limitation.",
+        ci_uint32, tx_defer_pkt_drop_limited, count)
 OO_STAT("Number of EF_EVENT_TYPE_TX_ERROR events.  A transmit failed.",
         ci_uint32, tx_error_events, count)
 OO_STAT("Number of RX discards (checksum bad).",
@@ -512,8 +553,6 @@ OO_STAT("Indicates that you're sending faster than we can push packets on to "
         ci_uint32, tx_dma_max, val)
 OO_STAT("Number of TX DMA doorbells.",
         ci_uint32, tx_dma_doorbells, count)
-OO_STAT("Number of sends that failed due to alien (i.e. Non-SFC) route.",
-        ci_uint32, tx_discard_alien_route, count)
 OO_STAT("Unable to allocate more packet buffers.  It's possible that this is "
         "transient; or due to needing memory in a context where allocating "
         "is forbidden.  It's also posisble we're about to enter "
@@ -635,8 +674,10 @@ OO_STAT("Number of passive sockets not cached owing to stack limit.  "
 OO_STAT("Number of active sockets not cached owing to stack limit  "
         "See EF_SOCKET_CACHE_MAX",
         ci_uint32, active_sockcache_stacklim, count)
+#if ! CI_CFG_IPV6
 OO_STAT("Number of active sockets not cached as being non-IPv4",
         ci_uint32, active_sockcache_non_ip4, count)
+#endif
 OO_STAT("Number of times active cached sockets had their fd attached to "
         "existing file",
         ci_uint32, active_attach_fd, count)
@@ -813,4 +854,18 @@ OO_STAT("Number of packets not captured by onload_tcpdump because the "
 
 OO_STAT("Lowest recorded number of free packets",
         ci_uint32, lowest_free_pkts, val)
+#if CI_CFG_BPF
+OO_STAT("Number of rx packets accepted by XDP program",
+        ci_uint32, rx_xdp_pass, count)
+OO_STAT("Number of rx packets rejected by XDP program with DROP code",
+        ci_uint32, rx_xdp_drop, count)
+OO_STAT("Number of rx packets rejected due to XDP program returning TX code",
+        ci_uint32, rx_xdp_tx, count)
+OO_STAT("Number of rx packets rejected due to XDP program returning REDIRECT code",
+        ci_uint32, rx_xdp_redirect, count)
+OO_STAT("Number of rx packets rejected due to XDP program returning ABORTED code",
+        ci_uint32, rx_xdp_aborted, count)
+OO_STAT("Number of rx packets rejected due to XDP program returning unknown code",
+        ci_uint32, rx_xdp_unknown, count)
+#endif
 

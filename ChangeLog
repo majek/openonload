@@ -1,3 +1,63 @@
+onload-7.0.0
+------------
+
+Update sfc net driver to v4.15.4.1003
+
+Add support for IPv6 acceleration
+Add support for Equal Cost Multipath routing
+Add support for external timestamps received in packet trailers
+Add support for some eXpress Data Path filtering features
+Add support for IPVLANs
+Install the Onload control plane as a non-root user by default
+
+Support recent Linux kernel versions (up to 5.2)
+Support recent Linux distributions (RHEL 7.7, RHEL8.1, Ubuntu 19.04, Debian 10)
+
+Remove support for Debian 8
+
+SF-122792-KI/bug62297: avoid hang at app startup with jemalloc
+SF-122793-KI/bug87598: fix possible Tx timestamp corruption if completion occurs after ACK
+
+task37255: enable generation of debuginfo RPMS with --define "debuginfo true"
+task61330: add CTPIO to sample trader apps and a cut-through receive example
+task69709: enable onload_stackdump lots, dump commands for orphan stacks
+task70031: add onload_stackdump vi_info command to display low level VI information
+task79510: use endpoint packet reserve feature in WAN profiles
+task82743: remove initscript; provide moduled-load.d file
+task82876: add onload_stackdump config command to dump CI_CFG_* build options
+task83747: add EF_INVALID_ACK_RATELIMIT option
+task84118: allocate contiguous memory for descriptors in queues
+task84260: speed up onload_stackdump and orm_json
+task84389: add address and port filtering to onload_stackdump and orm_json
+task84860: allow socket caching with shared local ports
+task85385: TCPDirect: improve warming with CTPIO
+task86032: add EF_POLL_IN_KERNEL option only to poll event queue in kernel
+task86984: create non-root cplane user on installation from package
+task87734: add efrink* examples of shared-memory receive (same traffic to multiple consumers)
+task87780: let sfcaffinity_config configure NUMA-local cores first for IRQs
+SLB-53/SLB-54/SLB-66/SLB-67/SLB-68: add profiles for HAProxy, NGINX, nettyio and redis
+
+bug44995: avoid complaining about unaccessible stacks not requested of onload_stackdump
+bug56276: fix bind following a bind on UDP socket resulting in filter removal
+bug59700: avoid updating ARP for multicast routes
+bug76743: fix list corruption in scalable passive mode with stack sharing/multi-threading
+bug80452: update onload_stackdump netstat to show sockets in SYN_RECV state
+bug82882: fix sfcaffinity_config check not to treat rss_cpus=1 as an error
+bug83463: Detect administrative link up/down for bonding
+bug83474: fix onload_install --listfiles
+bug83869: fix onload_stackdump crash on rmmod onload
+bug84214: fix counting of sock_orphans statistic
+bug84221: fix address resolution when no gateway required, avoiding send via OS
+bug85138: fix building on Linux >= 4.15 when namespaces disabled
+bug86762: fix SO_LINGER=0 in unusual TCP states
+bug87474: lookup IP_TRANSPARENT routes in input rather than output context
+bug87633: avoid segfault when zf_stackdump run with unknown command or option
+bug87958: fix possible Tx of UDP packets on wrong intf after Rx on same socket
+bug88147: fix possible memory leaks on forking
+bug88174: avoid reporting non-zero Rx timestamps on X2 adapters when timestamp absent
+bug88596: don't hand over UDP sockets without filters if EF_UDP_CONNECT_HANDOVER=0
+
+
 openonload-201811-u1
 --------------------
 

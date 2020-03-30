@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /****************************************************************************
  * Copyright 2004-2005: Level 5 Networks Inc.
  * Copyright 2005-2018: Solarflare Communications Inc,
@@ -43,9 +45,9 @@ This chapter tells you what's new in this release of ef_vi.
 
 If you are not a previous user of ef_vi, go to \ref overview.
 
-\section whatsnew_features New features
+\section whatsnew_ipv6_checksums IPv6 checksum functions
 
-There are no new features in this release.
+New functions have been added for calculating IPv6 checksums.
 
 \section whatsnew_bugfixes Bug fixes
 

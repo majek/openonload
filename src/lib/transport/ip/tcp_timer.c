@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_SOURCE>
@@ -33,46 +20,6 @@
 
 
 static void ci_tcp_timeout_taildrop(ci_netif* netif, ci_tcp_state* ts);
-
-
-#ifndef __KERNEL__
-#ifndef NDEBUG
-static void ci_tcp_timer_dump_consts(ci_netif* netif)
-{
-  log(LPF "time constants for this CPU\n"
-      "  rto_initial: %uticks (%ums)\n" 
-      "  rto_min: %uticks (%ums)\n" 
-      "  rto_max: %uticks (%ums)\n"
-      "  delack: %uticks (%ums)\n"
-      "  idle: %uticks (%ums)",
-      NI_CONF(netif).tconst_rto_initial, NI_OPTS(netif).rto_initial,
-      NI_CONF(netif).tconst_rto_min, NI_OPTS(netif).rto_min,
-      NI_CONF(netif).tconst_rto_max, NI_OPTS(netif).rto_max,
-      NI_CONF(netif).tconst_delack, CI_TCP_TCONST_DELACK,
-      NI_CONF(netif).tconst_idle, CI_TCP_TCONST_IDLE);
-  log("  keepalive_time: %uticks (%ums)\n" 
-      "  keepalive_intvl: %uticks (%ums)\n" 
-      "  keepalive_probes: %u\n"
-      "  zwin_max: %uticks (%ums)",
-      NI_CONF(netif).tconst_keepalive_time, NI_OPTS(netif).keepalive_time,
-      NI_CONF(netif).tconst_keepalive_intvl, NI_OPTS(netif).keepalive_intvl,
-      NI_OPTS(netif).keepalive_probes,
-      NI_CONF(netif).tconst_zwin_max, CI_TCP_TCONST_ZWIN_MAX);
-  log("  paws_idle: %uticks (%ums)",
-      NI_CONF(netif).tconst_paws_idle, CI_TCP_TCONST_PAWS_IDLE);
-  log("  PMTU slow discover: %uticks (%ums)\n"
-      "  PMTU fast discover: %uticks (%ums)\n"
-      "  PMTU recover: %uticks (%ums)",
-      NI_CONF(netif).tconst_pmtu_discover_slow, CI_PMTU_TCONST_DISCOVER_SLOW,
-      NI_CONF(netif).tconst_pmtu_discover_fast, CI_PMTU_TCONST_DISCOVER_FAST,
-      NI_CONF(netif).tconst_pmtu_discover_recover, 
-      CI_PMTU_TCONST_DISCOVER_RECOVER);
-  log("  Intrumentation: %uticks (%ums)",
-      NI_CONF(netif).tconst_stats, CI_TCONST_STATS);
-}
-#endif /* NDEBUG */
-
-#endif
 
 
 /* Called to setup the TCP time constants in terms of ticks for this
@@ -126,12 +73,22 @@ void ci_tcp_timer_init(ci_netif* netif)
   NI_CONF(netif).tconst_pmtu_discover_recover = 
     ci_tcp_time_ms2ticks(netif, CI_PMTU_TCONST_DISCOVER_RECOVER);
 
+  /* Convert per-second challenge ACK limit to a per-tick.
+   * +1 to ensure that the result is non-zero. */
+  NI_CONF(netif).tconst_challenge_ack_limit =
+      ci_ip_time_freq_hz2tick(netif, NI_OPTS(netif).challenge_ack_limit) + 1;
+
+  if( NI_OPTS(netif).oow_ack_ratelimit == 0 )
+    NI_CONF(netif).tconst_invalid_ack_ratelimit = 0;
+  else
+    NI_CONF(netif).tconst_invalid_ack_ratelimit =
+      ci_tcp_time_ms2ticks(netif, NI_OPTS(netif).oow_ack_ratelimit) + 1;
+
+  NI_CONF(netif).tconst_defer_arp =
+    ci_tcp_time_ms2ticks(netif, NI_OPTS(netif).defer_arp_timeout * 1000);
+
   NI_CONF(netif).tconst_stats = 
     ci_tcp_time_ms2ticks(netif, CI_TCONST_STATS);
-
-#ifndef __KERNEL__
-  LOG_S(ci_tcp_timer_dump_consts(netif));
-#endif
 }
 
 
@@ -218,8 +175,8 @@ void ci_tcp_timeout_listen(ci_netif* netif, ci_tcp_socket_listen* tls)
                      tsr->timeout));
         }
         else {
-          LOG_U(ci_log("%s: no return route exists "CI_IP_PRINTF_FORMAT,
-                       __FUNCTION__, CI_IP_PRINTF_ARGS(&tsr->r_addr)));
+          LOG_U(ci_log("%s: no return route exists "IPX_FMT,
+                       __FUNCTION__, IPX_ARG(AF_IP_L3(tsr->r_addr))));
         }
       }
 
@@ -555,8 +512,8 @@ void ci_tcp_timeout_rto(ci_netif* netif, ci_tcp_state* ts)
 	 log("  "TCP_CONG_FMT, TCP_CONG_PRI_ARG(ts));
 	 log("  head=%08x-%08x tsval=%x pkt_flag=%u",
 	     pkt->pf.tcp_tx.start_seq, pkt->pf.tcp_tx.end_seq,
-	     (ts->tcpflags&CI_TCPT_FLAG_TSO) ? PKT_TCP_TSO_TSVAL(pkt):0x0,
-	     pkt->flags));
+	     (ts->tcpflags&CI_TCPT_FLAG_TSO) ?
+       PKT_IPX_TCP_TSO_TSVAL(ipcache_af(&ts->s.pkt), pkt):0x0, pkt->flags));
   CI_IP_SOCK_STATS_INC_RTTO( ts );
 
 #if CI_CFG_BURST_CONTROL

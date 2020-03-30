@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /****************************************************************************
  * Copyright 2004-2005: Level 5 Networks Inc.
  * Copyright 2005-2018: Solarflare Communications Inc,
@@ -39,16 +41,16 @@
  *************************************************************************/
 /*! \mainpage %ef_vi
 
-Solarflare's %ef_vi API is a flexible interface for passing Ethernet 
-frames between applications and the network. It is the internal API used 
+Solarflare's %ef_vi API is a flexible interface for passing Ethernet
+frames between applications and the network. It is the internal API used
 by Onload for sending and receiving packets.
 
 \section introduction Introduction
 
-%ef_vi grants an application direct access to the Solarflare network 
-adapter datapath to deliver lower latency and reduced per message 
-processing overheads. It can be used directly by applications that want 
-the very lowest latency send and receive API, and that do not require a 
+%ef_vi grants an application direct access to the Solarflare network
+adapter datapath to deliver lower latency and reduced per message
+processing overheads. It can be used directly by applications that want
+the very lowest latency send and receive API, and that do not require a
 POSIX socket interface.
 
 The key features of %ef_vi are:
@@ -65,8 +67,8 @@ The key features of %ef_vi are:
 
 Each %ef_vi instance provides a \ref vi for an application to use:
 
-- Each virtual interface provides a TX channel for passing packets to the 
-  adapter. Packets may be transmitted onto the wire, or looped-back in the 
+- Each virtual interface provides a TX channel for passing packets to the
+  adapter. Packets may be transmitted onto the wire, or looped-back in the
   adapter for delivery back into the host, or both.
 
 - Each virtual interface also provides an RX channel for receiving packets

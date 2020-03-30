@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_HEADER >
@@ -113,25 +100,28 @@ int ci_ipp_icmp_csum_ok( ci_icmp_hdr* icmp, int icmp_total_len)
  * on success both addr->ip and addr->icmp will be valid pointers.
  */
 extern int
-efab_ipp_icmp_parse(const ci_ip4_hdr *ip, int ip_len, efab_ipp_addr* addr,
+efab_ipp_icmp_parse(const ci_ipx_hdr_t* ipx, int ip_len, efab_ipp_addr* addr,
 		    int data_only )
 {
-  const ci_ip4_hdr* data_ip;
+  const ci_ipx_hdr_t* data_ipx;
   ci_icmp_hdr* icmp;
   ci_tcp_hdr* data_tcp;
   ci_udp_hdr* data_udp;
-  int ip_paylen;
+  int ip_paylen, af, data_ipx_af;
+  ci_uint8 data_ipx_proto;
 
   __ENTRY;
-  ci_assert( ip );
+  ci_assert( ipx );
   ci_assert( addr );
 
-  ip_paylen = (int)CI_BSWAP_BE16(ip->ip_tot_len_be16);
+  af = ipx_hdr_af(ipx);
+
+  ip_paylen = ipx_hdr_tot_len(af, ipx);
 
   if( !data_only ) {
     /* remotely generated (ICMP) errors */
-    addr->ip = ip;
-    addr->icmp = icmp = (ci_icmp_hdr*)((char*)ip + CI_IP4_IHL(ip));
+    addr->ipx = ipx;
+    addr->icmp = icmp = (ci_icmp_hdr*)((char*)ipx + CI_IPX_IHL(af, ipx));
 
     if( ip_paylen > ip_len ) {
       /* ?? how do I record this in the ICMP stats */
@@ -141,39 +131,40 @@ efab_ipp_icmp_parse(const ci_ip4_hdr *ip, int ip_len, efab_ipp_addr* addr,
     }
     /* uncount the ICMP message IP hdr & ICMP hdr */
     ci_assert( sizeof(ci_icmp_hdr) == 4 );
-    ip_paylen -= (int)CI_IP4_IHL(ip) + sizeof(ci_icmp_hdr) + 4;
-    data_ip = (ci_ip4_hdr*)((char*)icmp + sizeof(ci_icmp_hdr) + 4);
+    ip_paylen -= (int)CI_IPX_IHL(af, ipx) + sizeof(ci_icmp_hdr) + 4;
+    data_ipx = (ci_ipx_hdr_t*)((char*)icmp + sizeof(ci_icmp_hdr) + 4);
   } else { 
     /* Locally generated errors */
-    addr->ip = 0;
+    addr->ipx = 0;
     addr->icmp = icmp = 0;
-    data_ip = ip;
+    data_ipx = ipx;
   }
 
+  data_ipx_af = ipx_hdr_af(data_ipx);
+  data_ipx_proto = ipx_hdr_protocol(data_ipx_af, data_ipx);
 
   /* note that we swap the source/dest addr:port info - this means
    * that the sense of the addresses is correct for the lookup */
-  if( data_ip->ip_protocol == IPPROTO_IP || 
-      data_ip->ip_protocol == IPPROTO_TCP ) {
-    data_tcp = (ci_tcp_hdr*)((char*)data_ip + CI_IP4_IHL(data_ip));
+  if( data_ipx_proto == IPPROTO_IP || data_ipx_proto == IPPROTO_TCP ) {
+    data_tcp = (ci_tcp_hdr*)((char*)data_ipx + CI_IPX_IHL(data_ipx_af, data_ipx));
     addr->protocol = IPPROTO_TCP;
     addr->sport_be16 = data_tcp->tcp_dest_be16;
     addr->dport_be16 = data_tcp->tcp_source_be16;
-  } else if ( data_ip->ip_protocol == IPPROTO_UDP ) {
-    data_udp = (ci_udp_hdr*)((char*)data_ip + CI_IP4_IHL(data_ip));
+  } else if ( data_ipx_proto == IPPROTO_UDP ) {
+    data_udp = (ci_udp_hdr*)((char*)data_ipx + CI_IPX_IHL(data_ipx_af, data_ipx));
     addr->protocol = IPPROTO_UDP;
     addr->sport_be16 = data_udp->udp_dest_be16;
     addr->dport_be16 = data_udp->udp_source_be16;
   } else {
     OO_DEBUG_IPP(ci_log("%s: Unknown protocol %d", __FUNCTION__, 
-		    data_ip->ip_protocol));
+                        data_ipx_proto));
     return 0;
   }
 
-  addr->data = (ci_uint8*)data_ip;
+  addr->data = (ci_uint8*)data_ipx;
   addr->data_len =  ip_paylen;
-  addr->saddr_be32 = data_ip->ip_daddr_be32;
-  addr->daddr_be32 = data_ip->ip_saddr_be32;
+  addr->saddr = ipx_hdr_daddr(data_ipx_af, data_ipx);
+  addr->daddr = ipx_hdr_saddr(data_ipx_af, data_ipx);
   __EXIT(0);
   return 1;
 }
@@ -205,19 +196,15 @@ efab_ipp_icmp_validate( tcp_helper_resource_t* thr, ci_ip4_hdr *ip)
   OO_DEBUG_IPP( ci_log("%s: ip: tot len:%u, pay_len:%u", 
 		   __FUNCTION__, ip_tot_len, ip_paylen ));
 
-  CI_ICMP_IN_STATS_COLLECT( &(thr->netif), icmp );
-
   /* Done in net driver */
 
   /* as we may be making more than one copy of this ICMP message we
    * may be saving time by doing the sum just once. Or maybe not. */
   if( CI_UNLIKELY( !ci_ipp_icmp_csum_ok( icmp, ip_paylen))) {
-    CI_ICMP_STATS_INC_IN_ERRS( &(thr->netif));
     __EXIT("bad ICMP sum");
     return 0;
   }
 
-  CI_ICMP_STATS_INC_IN_MSGS( &(thr->netif) );
   __EXIT(0);
   return 1;
 }
@@ -246,6 +233,18 @@ static struct icmp_error {
   { EHOSTUNREACH, 0 }    /* ICMP_HOST_UNR_TOS  */
 };
 
+#if CI_CFG_IPV6
+static struct icmp_error icmpv6_du_code2errno[CI_ICMPV6_DU_CODE_MAX] = {
+  { ENETUNREACH,  0 },   /* NOROUTE            */
+  { EACCES,       1 },   /* ADM_PROHIBITED     */
+  { EHOSTUNREACH, 0 },   /* NOT_NEIGHBOUR      */
+  { EHOSTUNREACH, 0 },   /* ADDR_UNREACH       */
+  { ECONNREFUSED, 1 },   /* PORT_UNREACH       */
+  { EACCES,       1 },   /* POLICY_FAIL        */
+  { EACCES,       1 }    /* REJECT_ROUTE       */
+};
+#endif
+
 /*!
  * Maps received ICMP message type and code fields to host errno value
  * according to STEVENS, section 25.7
@@ -255,39 +254,57 @@ static struct icmp_error {
  * \param err   errno that corresponds to ICMP type/code
  * \param hard  whether the error is hard
  */
-static void get_errno(ci_uint8 type, ci_uint8 code,
+static void get_errno(int af, ci_uint8 type, ci_uint8 code,
                       int *err, ci_uint8 *hard)
 {
-  switch (type) {
-  case CI_ICMP_DEST_UNREACH:
-    if (code < CI_ICMP_DU_CODE_MAX) {
-      *err = icmp_du_code2errno[code].errno;
-      *hard = icmp_du_code2errno[code].hard;
-    }
-    else {  
-      *err = EHOSTUNREACH;
-      *hard = 1;
-    }
-    break;
-
-  case CI_ICMP_SOURCE_QUENCH:
-    *err = 0;
-    *hard  = 0;
-    break;
-    
-  case CI_ICMP_TIME_EXCEEDED:
-    *err = EHOSTUNREACH;
-    *hard = 0;
-    break;
-
-  case CI_ICMP_PARAMETERPROB:
+#if CI_CFG_IPV6
+  if( af == AF_INET6 ) {
     *err = EPROTO;
-    *hard = 1;
-    break;
-
-  default:
-    *err = EHOSTUNREACH;
     *hard = 0;
+    if( type == CI_ICMPV6_DEST_UNREACH ) {
+      if (code < CI_ICMPV6_DU_CODE_MAX) {
+        *err = icmpv6_du_code2errno[code].errno;
+        *hard = icmpv6_du_code2errno[code].hard;
+      }
+      else {
+        *hard = 1;
+      }
+    }
+  }
+  else
+#endif
+  {
+    switch (type) {
+    case CI_ICMP_DEST_UNREACH:
+      if (code < CI_ICMP_DU_CODE_MAX) {
+        *err = icmp_du_code2errno[code].errno;
+        *hard = icmp_du_code2errno[code].hard;
+      }
+      else {
+        *err = EHOSTUNREACH;
+        *hard = 1;
+      }
+      break;
+
+    case CI_ICMP_SOURCE_QUENCH:
+      *err = 0;
+      *hard  = 0;
+      break;
+
+    case CI_ICMP_TIME_EXCEEDED:
+      *err = EHOSTUNREACH;
+      *hard = 0;
+      break;
+
+    case CI_ICMP_PARAMETERPROB:
+      *err = EPROTO;
+      *hard = 1;
+      break;
+
+    default:
+      *err = EHOSTUNREACH;
+      *hard = 0;
+    }
   }
 }
 
@@ -298,15 +315,14 @@ typedef struct {
 } ci_icmp_too_big_t;
 
 
-#define CI_PMTU_PRINTF_SOCKET_FORMAT \
-  CI_IP_PRINTF_FORMAT ":%d->" CI_IP_PRINTF_FORMAT ":%d"
+#define CI_PMTU_PRINTF_SOCKET_FORMAT IPX_PORT_FMT "->" IPX_PORT_FMT
 
 #define CI_PMTU_PRINTF_SOCKET_ARGS(ipp_addr) \
-  CI_IP_PRINTF_ARGS(&ipp_addr->saddr_be32),  \
-  CI_BSWAP_BE16(addr->sport_be16),           \
-  CI_IP_PRINTF_ARGS(&addr->daddr_be32),      \
-  CI_BSWAP_BE16(addr->dport_be16)
-                                                                                  
+  IPX_ARG(AF_IP(ipp_addr->saddr)),           \
+  CI_BSWAP_BE16(ipp_addr->sport_be16),       \
+  IPX_ARG(AF_IP(ipp_addr->daddr)),           \
+  CI_BSWAP_BE16(ipp_addr->dport_be16)
+
 
 static void 
 ci_ipp_pmtu_rx(ci_netif *netif, ci_pmtu_state_t *pmtus,
@@ -314,12 +330,12 @@ ci_ipp_pmtu_rx(ci_netif *netif, ci_pmtu_state_t *pmtus,
                efab_ipp_addr* addr)
 {
   const ci_uint16 plateau[] = CI_PMTU_PLATEAU_ENTRIES;
-  ci_ip4_hdr* ip;        /* hdr of failing packet */
+  ci_ipx_hdr_t* ipx;        /* hdr of failing packet */
   ci_uint16 len;         /* length of failing packet */
   ci_icmp_too_big_t *tb = (ci_icmp_too_big_t*)addr->icmp;
   int ctr;
 
-  if( ipcache->ip.ip_daddr_be32 != addr->saddr_be32 ) {
+  if( !CI_IPX_ADDR_EQ(ipcache_raddr(ipcache), addr->saddr) ) {
     DEBUGPMTU(ci_log("%s: "CI_PMTU_PRINTF_SOCKET_FORMAT
                      " addresses don't match",
                      __FUNCTION__, CI_PMTU_PRINTF_SOCKET_ARGS(addr)));
@@ -331,8 +347,8 @@ ci_ipp_pmtu_rx(ci_netif *netif, ci_pmtu_state_t *pmtus,
   len = CI_BSWAP_BE16(tb->next_hop_mtu_be16);
   if( len == 0 ) {
     ci_assert( sizeof(*tb) == (sizeof(ci_icmp_hdr) + 4) );
-    ip = (ci_ip4_hdr*)(&tb[1]);	
-    len = CI_BSWAP_BE16( ip->ip_tot_len_be16 );
+    ipx = (ci_ipx_hdr_t*)(&tb[1]);
+    len = ipx_hdr_tot_len(ipx_hdr_af(ipx), ipx);
     ctr = CI_PMTU_PLATEAU_ENTRY_MAX;
     while( ctr >= 0 && len <= plateau[ctr] )
       --ctr;
@@ -410,6 +426,7 @@ static void
 ci_ipp_pmtu_rx_tcp(tcp_helper_resource_t* thr, 
                    ci_tcp_state* ts, efab_ipp_addr* addr)
 {
+  ci_pmtu_state_t* pmtus;
   ci_assert( thr );
   ci_assert( ts );
   ci_assert( addr );
@@ -417,17 +434,39 @@ ci_ipp_pmtu_rx_tcp(tcp_helper_resource_t* thr,
   ci_assert( sizeof(ci_icmp_hdr) == 4 );
 
   if (ts->s.b.state == CI_TCP_LISTEN) {
-    DEBUGPMTU(ci_log("%s: "CI_IP_PRINTF_FORMAT":%d->"
-                     CI_IP_PRINTF_FORMAT":%d listening socket - aborting", 
-                     __FUNCTION__,
-                     CI_IP_PRINTF_ARGS(&addr->saddr_be32), 
+    DEBUGPMTU(ci_log("%s: " IPX_PORT_FMT "->" IPX_PORT_FMT
+                     " listening socket - aborting", __FUNCTION__,
+                     IPX_ARG(AF_IP(addr->saddr)),
                      CI_BSWAP_BE16(addr->sport_be16),
-                     CI_IP_PRINTF_ARGS(&addr->daddr_be32), 
+                     IPX_ARG(AF_IP(addr->daddr)),
                      CI_BSWAP_BE16(addr->dport_be16)));
     return;
   }
 
-  ci_ipp_pmtu_rx(&thr->netif, &ts->pmtus, &ts->s.pkt, addr);
+  if( OO_PP_IS_NULL(ts->pmtus) ) {
+    ts->pmtus = ci_ni_aux_alloc(&thr->netif, CI_TCP_AUX_TYPE_PMTUS);
+    if( OO_PP_IS_NULL(ts->pmtus) ) {
+      ci_log("%s: " IPX_PORT_FMT "->" IPX_PORT_FMT
+             " out of PMTU buffers", __FUNCTION__,
+             IPX_ARG(AF_IP(addr->saddr)),
+             CI_BSWAP_BE16(addr->sport_be16),
+             IPX_ARG(AF_IP(addr->daddr)),
+             CI_BSWAP_BE16(addr->dport_be16));
+    }
+
+    pmtus = ci_ni_aux_p2pmtus(&thr->netif, ts->pmtus);
+    ci_pmtu_state_init(&thr->netif, &ts->s, ts->pmtus, pmtus,
+                       CI_IP_TIMER_PMTU_DISCOVER);
+    ci_pmtu_set(&thr->netif, pmtus,
+                CI_MIN(ts->s.pkt.mtu,
+                       ts->smss + sizeof(ci_tcp_hdr) +
+                       CI_IPX_HDR_SIZE(ipcache_af(&ts->s.pkt))));
+  }
+  else {
+    pmtus = ci_ni_aux_p2pmtus(&thr->netif, ts->pmtus);
+  }
+
+  ci_ipp_pmtu_rx(&thr->netif, pmtus, &ts->s.pkt, addr);
 
   DEBUGPMTU(ci_log("%s: set eff_mss & change tx q to match", __FUNCTION__));
   ci_tcp_tx_change_mss(&thr->netif, ts);
@@ -446,7 +485,9 @@ static void ci_ipp_pmtu_rx_udp_work(struct work_struct *data)
                                              struct ipp_pmtu_udp_work,
                                              w);
 
-  oo_op_route_resolve(w->cplane, &w->key);
+  /* This is always the stack-local cplane, so we can use its ID as the ID for
+   * the fwd table. */
+  oo_op_route_resolve(w->cplane, &w->key, w->cplane->cplane_id);
   kfree(w);
 }
 
@@ -468,15 +509,13 @@ ci_ipp_pmtu_rx_udp(tcp_helper_resource_t* thr,
   int mtu = CI_BSWAP_BE16(((ci_icmp_too_big_t*)(addr->icmp))->
                           next_hop_mtu_be16);
 
-  OO_DEBUG_IPP(ci_log("%s: ICMP route from "CI_IP_PRINTF_FORMAT
-                      " to "CI_IP_PRINTF_FORMAT" ifindex %d mtu=%d",
-                      __func__,
-                      CI_IP_PRINTF_ARGS(&addr->daddr_be32),
-                      CI_IP_PRINTF_ARGS(&addr->saddr_be32),
+  OO_DEBUG_IPP(ci_log("%s: ICMP route from " IPX_FMT
+                      " to " IPX_FMT " ifindex %d mtu=%d", __FUNCTION__,
+                      IPX_ARG(AF_IP(addr->daddr)), IPX_ARG(AF_IP(addr->saddr)),
                       addr->ifindex, mtu));
 
-  if( us->s.cp.ip_laddr_be32 != 0 &&
-      us->s.cp.ip_laddr_be32 != addr->daddr_be32 )
+  if( !CI_IPX_ADDR_IS_ANY(us->s.cp.laddr) &&
+      !CI_IPX_ADDR_EQ(us->s.cp.laddr, addr->daddr))
     return;
   if( us->s.cp.so_bindtodevice != 0 &&
       us->s.cp.so_bindtodevice != addr->ifindex )
@@ -490,17 +529,18 @@ ci_ipp_pmtu_rx_udp(tcp_helper_resource_t* thr,
    * Fixme: Do we need to support multicast here?  IP_TRANSPARENT? */
   memset(w, 0, sizeof(*w));
   INIT_WORK(&w->w, ci_ipp_pmtu_rx_udp_work);
-  w->key.dst = addr->saddr_be32;
-  w->key.src = us->s.cp.ip_laddr_be32;
+  w->key.dst = CI_ADDR_SH_FROM_ADDR(addr->saddr);
+  w->key.src = CI_ADDR_SH_FROM_ADDR(us->s.cp.laddr);
   w->key.ifindex = us->s.cp.so_bindtodevice;
   w->key.flag = CP_FWD_KEY_UDP | CP_FWD_KEY_SOURCELESS | CP_FWD_KEY_REQ_REFRESH;
   if( us->s.cp.sock_cp_flags & OO_SCP_TPROXY )
     w->key.flag |= CP_FWD_KEY_TRANSPARENT;
   w->cplane = thr->netif.cplane;
 
-  if( __oo_cp_route_resolve(w->cplane, &verinfo, &w->key, 0, &data)
+  if( __oo_cp_route_resolve(w->cplane, &verinfo, &w->key, 0, &data,
+                            w->cplane->cplane_id)
       != 0 ||
-      data.mtu <= mtu ) {
+      data.base.mtu <= mtu ) {
     /* Our forward cache does not know about such a route.  Have we ever
      * sent a datagram via it, or is it an attack?
      * If we know about this route, and our MTU is small enough, then there
@@ -511,6 +551,11 @@ ci_ipp_pmtu_rx_udp(tcp_helper_resource_t* thr,
     kfree(w);
     return;
   }
+
+  /* We're going to defer to a workqueue, which relies on the property that we
+   * now assert, but which can't assert it itself because it doesn't have a
+   * reference to the stack. */
+  ci_assert_equal(w->cplane, thr->netif.cplane);
 
   /* Nothing prevents us from calling oo_op_route_resolve() right now,
    * but we have a good chance to get a Linux route information before
@@ -530,13 +575,18 @@ ci_ipp_pmtu_rx_udp(tcp_helper_resource_t* thr,
 ci_sock_cmn* efab_ipp_icmp_for_thr( tcp_helper_resource_t* thr, 
 				    efab_ipp_addr* addr )
 {
+  int af_space;
+
   ci_assert( thr );
   ci_assert( addr );
   ci_assert( addr->data );
 
-  return  __ci_netif_filter_lookup(&thr->netif, addr->daddr_be32, 
-				   addr->dport_be16, addr->saddr_be32, 
-				   addr->sport_be16, addr->protocol);
+  af_space = (CI_IS_ADDR_IP6(addr->saddr)) ? AF_SPACE_FLAG_IP6 : AF_SPACE_FLAG_IP4;
+
+  return  __ci_netif_filter_lookup(&thr->netif, af_space,
+                                   addr->daddr, addr->dport_be16,
+                                   addr->saddr, addr->sport_be16,
+                                   addr->protocol);
 }
 
 /* efab_ipp_icmp_qpkt -
@@ -559,7 +609,7 @@ efab_ipp_icmp_qpkt(tcp_helper_resource_t* thr,
   ci_assert(addr->data);
   /* If the address was created without an
    * IP/ICMP hdr then these will be 0 */
-  ci_assert(addr->ip);
+  ci_assert(addr->ipx);
   ci_assert(addr->icmp);
 
   ci_assert( ci_netif_is_locked(ni) );
@@ -589,7 +639,7 @@ efab_ipp_icmp_qpkt(tcp_helper_resource_t* thr,
     ci_tcp_state* ts = SOCK_TO_TCP(s);
 
     CITP_STATS_NETIF(++ni->state->stats.tcp_connect_icmp);
-    get_errno(icmp_type, icmp_code, &err, &hard);
+    get_errno(ipcache_af(&ts->s.pkt), icmp_type, icmp_code, &err, &hard);
     OO_DEBUG_IPP(ci_log("%s: TCP", __FUNCTION__));
 
     ci_tcp_drop(ni, ts, err);

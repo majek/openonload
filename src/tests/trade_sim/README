@@ -1,3 +1,5 @@
+.. SPDX-License-Identifier: GPL-2.0
+.. X-SPDX-Copyright-Text: (c) Solarflare Communications Inc
 Introduction
 ------------
 
@@ -64,3 +66,9 @@ Applications
    This implementation uses TCPDirect for the UDP receive path, and to
    manage the TCP socket.  The delegated send API is used together with
    ef_vi for the low-latency send path.
+
+ trader_tcpdirect_ds_efvi_ct_rx
+
+   This implementation uses EF_VI with cut-through receive for the UDP receive
+   path, and TCPDirect to manage the TCP socket. The delegated send API is used
+   together with ef_vi for the low-latency send path.

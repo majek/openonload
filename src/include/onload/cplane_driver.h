@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /* Driver-specific cplane interface. */
 #ifndef __ONLOAD_CPLANE_DRIVER_H__
 #define __ONLOAD_CPLANE_DRIVER_H__
@@ -40,8 +27,9 @@ extern int oo_cp_get_active_hwport_mask(struct oo_cplane_handle* cp,
 extern int oo_cp_driver_ctor(void);
 extern int oo_cp_driver_dtor(void);
 
+enum cp_sync_mode;
 extern struct oo_cplane_handle*
-cp_acquire_from_netns(struct net* netns);
+cp_acquire_and_sync(struct net* netns, enum cp_sync_mode mode);
 extern struct oo_cplane_handle*
 cp_acquire_from_netns_if_exists(const struct net* netns);
 extern void cp_release(struct oo_cplane_handle* cp);
@@ -56,6 +44,9 @@ cicpplos_ctor(struct cicppl_instance* cppl);
 extern void
 cicpplos_dtor(struct cicppl_instance *cppl);
 
+enum cp_sync_mode;
+extern int oo_cp_wait_for_server(struct oo_cplane_handle* cp,
+                                 enum cp_sync_mode mode);
 extern int oo_cp_wait_for_server_rsop(struct ci_private_s*, void* arg);
 extern int oo_cp_link_rsop(struct ci_private_s*, void* arg);
 extern int oo_cp_ready(struct ci_private_s*, void* version);
@@ -65,5 +56,18 @@ extern int oo_cp_check_version(struct ci_private_s*, void* arg);
 extern int oo_cp_get_server_pid(struct oo_cplane_handle* cp);
 extern int oo_cp_llap_change_notify_all(struct oo_cplane_handle* main_cp);
 extern int oo_cp_oof_sync(struct oo_cplane_handle* cp);
+extern int
+oo_cp_check_veth_acceleration(struct oo_cplane_handle* cp, ci_ifid_t ifindex);
+extern int
+oo_cp_select_instance(struct ci_private_s* priv,
+                      enum oo_op_cp_select_instance inst);
+extern int oo_cp_init_kernel_mibs(struct oo_cplane_handle* cp,
+                                  cp_fwd_table_id* fwd_table_id_out);
+
+struct ci_netif_s;
+extern void
+cicp_kernel_resolve(struct ci_netif_s* ni, struct oo_cplane_handle* cp,
+                    struct cp_fwd_key* key,
+                    struct cp_fwd_data* data);
 
 #endif /* __ONLOAD_CPLANE_DRIVER_H__ */

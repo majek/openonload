@@ -1,3 +1,5 @@
+% SPDX-License-Identifier: GPL-2.0
+% X-SPDX-Copyright-Text: (c) Solarflare Communications Inc
 % SF: Based on the default Latex header for doxygen 1.8.13.
 % SF: Solarflare changes have comments starting "SF:"
 
@@ -38,7 +40,10 @@
   \fontseries{b}\selectfont%
   \color{darkgray}%
 }
-\newcommand{\+}{\discretionary{\mbox{\scriptsize$\hookleftarrow$}}{}{}}
+
+% SF: Disable additional line-breaking added by Doxygen
+% \newcommand{\+}{\discretionary{\mbox{\scriptsize$\hookleftarrow$}}{}{}}
+\newcommand{\+}{}
 
 % SF: Define corporate color
 \definecolor{pms300c}{cmyk}{1.0,0.42,0.0,0.0}
@@ -73,6 +78,10 @@
 }
 \makeatother
 
+% SF: Disable hyphenation, and use ragged right to avoid large word spacing
+\usepackage[none]{hyphenat}
+\raggedright
+
 % SF: Doxygen <1.8.9: force graphics to fit on page even if no size given
 \makeatletter
 \def\CappedWidth{%
@@ -97,7 +106,7 @@
 
 % SF: Add default headheight back to textheight...
 \addtolength{\textheight}{\headheight}
-% SF: ...then define and remove new headheight 
+% SF: ...then define and remove new headheight
 \setlength{\headheight}{1.35cm}
 \addtolength{\textheight}{-\headheight}
 
@@ -108,7 +117,7 @@
 \fancyhead[RE,LO]{$projectname\vspace{0.2\baselineskip}\linebreak\nouppercase\leftmark}
 \renewcommand{\headrulewidth}{0.25pt}
 \fancyfoot[LE,RO]{\thepage}
-\fancyfoot[CE,CO]{Copyright © Solarflare Communications \the\year{}}
+\fancyfoot[CE,CO]{© Copyright \the\year{} Xilinx, Inc}
 \fancyfoot[RE,LO]{$projectbrief}
 \renewcommand{\footrulewidth}{0.25pt}
 
@@ -179,17 +188,16 @@
 \vspace*{0.25cm}\linebreak
 {\small \today\ \currenttime}
 \vspace*{1cm}\linebreak
-{\large Solarflare Communications Inc}\linebreak
+{\large Xilinx, Inc}\linebreak
 \end{center}
 \end{titlepage}
 \clearemptydoublepage
 
 % SF: Add standard corporate disclaimer
 {\large\bfseries $projectname}\par
-Copyright © \the\year{} SOLARFLARE Communications, Inc. All rights reserved.\par
 \input disclaimer.tex\par
 $projectnumber\par
-Last Revised: \the\month \the\year\par
+Last Revised: \monthname{} \the\year{}\par
 $projectbrief\par
 \cleardoublepage
 

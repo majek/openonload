@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_SOURCE>
@@ -302,6 +289,62 @@ OO_INTERCEPT(int, socket,
 }
 
 
+#ifndef NDEBUG
+static const char* sa_af2str(const struct sockaddr* sa, socklen_t sa_len)
+{
+  if( sa == NULL || sa_len < sizeof(sa->sa_family) )
+    return "NONE";
+  switch( sa->sa_family ) {
+#define AF2STR_CASE(a) case a: return #a;
+    AF2STR_CASE(AF_INET);
+    AF2STR_CASE(AF_INET6);
+    AF2STR_CASE(AF_UNSPEC);
+    AF2STR_CASE(AF_UNIX);
+#undef AF2STR_CASE
+  }
+  return "AF_UNKNOWN";
+}
+static const char* sa_addr2str(const struct sockaddr* sa, socklen_t sa_len,
+                               char* str)
+{
+  switch( sa->sa_family ) {
+    case AF_INET:
+      if( sa_len >= sizeof(struct sockaddr_in) )
+        return inet_ntop(AF_INET,
+                         &((const struct sockaddr_in*)sa)->sin_addr,
+                         str, INET6_ADDRSTRLEN);
+      else
+        return "";
+      break; /* unreachable, but let's appease compilers */
+
+    case AF_INET6:
+      if( sa_len >= sizeof(struct sockaddr_in6) )
+        return inet_ntop(AF_INET6,
+                         &((const struct sockaddr_in6*)sa)->sin6_addr,
+                         str, INET6_ADDRSTRLEN);
+      else
+        return "";
+      break; /* unreachable, but let's appease compilers */
+  }
+  return "";
+}
+static int sa2port(const struct sockaddr* sa, socklen_t sa_len)
+{
+  if( sa != NULL && sa_len >= sizeof(struct sockaddr_in) )
+    return CI_BSWAP_BE16(((struct sockaddr_in*)sa)->sin_port);
+  else
+    return 0;
+}
+
+#define OO_PRINT_SOCKADDR_DECL  char _sockaddr_str[INET6_ADDRSTRLEN]
+#define OO_PRINT_SOCKADDR_FMT "%p<%s %s:%u>, %d"
+#define OO_PRINT_SOCKADDR_ARG(sa, sa_len) \
+  sa, sa_af2str(sa, sa_len),                \
+  sa_addr2str(sa, sa_len, _sockaddr_str),   \
+  sa2port(sa, sa_len), sa_len
+#endif
+
+
 OO_INTERCEPT(int, bind,
              (int fd, const struct sockaddr* sa, socklen_t sa_len))
 {
@@ -315,7 +358,11 @@ OO_INTERCEPT(int, bind,
   }
 
   citp_enter_lib(&lib_context);
-  Log_CALL(ci_log("%s(%d, %p, %u)", __FUNCTION__, fd, sa, sa_len));
+  Log_CALL(
+    OO_PRINT_SOCKADDR_DECL;
+    ci_log("%s(%d,"OO_PRINT_SOCKADDR_FMT")", __FUNCTION__, fd,
+           OO_PRINT_SOCKADDR_ARG(sa, sa_len));
+    )
 
   if( (fdi = citp_fdtable_lookup(fd)) ) {
     /* NOTE
@@ -487,14 +534,10 @@ OO_INTERCEPT(int, connect,
 
   citp_enter_lib(&lib_context);
   Log_CALL(
-     if( sa && sa_len >= sizeof(struct sockaddr_in) &&
-         sa->sa_family == AF_INET )
-       ci_log("%s(%d,AF_INET %s:%u,%u)", __FUNCTION__, fd,
-              ip_addr_str(((struct sockaddr_in*)sa)->sin_addr.s_addr),
-              CI_BSWAP_BE16(((struct sockaddr_in*)sa)->sin_port), sa_len);
-     else
-       ci_log("%s(%d,%p,%u)", __FUNCTION__, fd, sa, sa_len)
-     );
+    OO_PRINT_SOCKADDR_DECL;
+    ci_log("%s(%d,"OO_PRINT_SOCKADDR_FMT")", __FUNCTION__, fd,
+           OO_PRINT_SOCKADDR_ARG(sa, sa_len));
+    )
 
   if( (fdi = citp_fdtable_lookup(fd)) ) {
     /* NOTE
@@ -963,6 +1006,12 @@ OO_INTERCEPT(ssize_t, sendto,
     return ci_sys_sendto(fd, msg, len, flags, to, tolen);
   }
 
+  Log_CALL(
+    OO_PRINT_SOCKADDR_DECL;
+    ci_log("%s(%d, %p, %u, %d, "OO_PRINT_SOCKADDR_FMT")", __FUNCTION__,
+           fd, msg,(unsigned)len,flags,
+           OO_PRINT_SOCKADDR_ARG(to, tolen));
+    )
   Log_CALL(ci_log("%s(%d, %p, %u, %d, %p, %u)", __FUNCTION__,
                   fd,msg,(unsigned)len,flags,to,tolen));
 
@@ -1561,7 +1610,7 @@ OO_INTERCEPT(ssize_t, read,
   citp_lib_context_t lib_context;
 
   if( CI_UNLIKELY(citp.init_level < CITP_INIT_ALL) ) {
-    citp_do_init(CITP_INIT_SYSCALLS);
+    citp_do_init(CITP_INIT_BASIC_SYSCALLS);
     return ci_sys_read(fd, buf, count);
   }
 
@@ -1617,7 +1666,7 @@ OO_INTERCEPT(ssize_t, write,
   citp_lib_context_t lib_context;
 
   if( CI_UNLIKELY(citp.init_level < CITP_INIT_ALL) ) {
-    citp_do_init(CITP_INIT_SYSCALLS);
+    citp_do_init(CITP_INIT_BASIC_SYSCALLS);
     return ci_sys_write(fd, buf, count);
   }
 
@@ -1829,7 +1878,7 @@ OO_INTERCEPT(int, close,
   citp_lib_context_t lib_context;
 
   if( CI_UNLIKELY(citp.init_level < CITP_INIT_ALL) ) {
-    citp_do_init(CITP_INIT_SYSCALLS);
+    citp_do_init(CITP_INIT_BASIC_SYSCALLS);
     return ci_sys_close(fd);
   }
 
@@ -2018,11 +2067,12 @@ OO_INTERCEPT(int, dup3,
 }
 #endif
 
-void *onload___vfork_rtaddr = NULL;
-#ifdef __i386__
-ci_uint32 onload___vfork_ebx = 0;
-#endif
+
+/* x86/x86-64/ARM are not here: they've been converted to use thread-safe
+ * stuff in oo_per_thread::vfork_scratch. The platforms listed below haven't
+ * yet been adapted. */
 #ifdef __powerpc__
+void *onload___vfork_rtaddr = NULL;
 #ifdef __powerpc64__
 ci_uint64 onload___vfork_r31 = 0;
 #else
@@ -2030,13 +2080,11 @@ ci_uint32 onload___vfork_r31 = 0;
 ci_uint32 onload___vfork_r3  = 0;
 #endif
 #endif
-#ifdef __aarch64__
-ci_uint64 onload__vfork_retval = 0;
-#endif
 
-OO_INTERCEPT(int, __vfork_is_vfork, (void))
+
+OO_INTERCEPT(void**, __vfork_is_vfork, (void))
 {
-  return CITP_OPTS.vfork_mode == 2;
+  return CITP_OPTS.vfork_mode == 2 ? oo_per_thread_get()->vfork_scratch : NULL;
 }
 
 OO_INTERCEPT(pid_t, __vfork_as_fork,
@@ -2123,7 +2171,7 @@ OO_INTERCEPT(int, open,
   va_end(va);
 
   if( CI_UNLIKELY(citp.init_level < CITP_INIT_ALL) ) {
-    citp_do_init(CITP_INIT_SYSCALLS);
+    citp_do_init(CITP_INIT_BASIC_SYSCALLS);
     return ci_sys_open(pathname, flags, mode);
   }
 
@@ -2489,27 +2537,27 @@ static int onload_exec(const char *path, char *const argv[],
                        const char *fname)
 {
   int rc;
-  char **new_env;
+  char* const* new_env;
+  size_t env_bytes;
 
   if( CI_UNLIKELY(citp.init_level < CITP_INIT_ALL) )
     citp_do_init(CITP_INIT_ENVIRON);
 
-  new_env = citp_environ_check_preload((char **)envp);
+  new_env = citp_environ_check_preload(envp, &env_bytes);
+  if( env_bytes ) {
+    void* e = alloca(env_bytes);
+    new_env = e;
+    citp_environ_make_preload(envp, e, env_bytes);
+  }
 
   /* No citp_enter_lib() / citp_exit_lib() needed here */
   Log_CALL(ci_log("%s(\"%s\", %p, %p)", fname, path,argv,envp));
-  if (new_env == NULL) {
-    Log_E(log("%s: no memory for modified environment", __FUNCTION__));
-    errno = ENOMEM;
-    rc =  -1;
-  } else if (!resolve_path) {
+  if (!resolve_path) {
     Log_V(log("execve: %s", path));
     rc = ci_sys_execve(path, argv, new_env);
   } else {
-    ci_assert_equal(envp, __environ);
-    __environ = new_env;
-    Log_V(log("execvp: %s", path));
-    rc = ci_sys_execvp(path, argv);
+    Log_V(log("execvpe: %s", path));
+    rc = ci_sys_execvpe(path, argv, new_env);
   }
   Log_CALL(ci_log("%s returning %d (errno %d)", fname, rc, errno))
   return rc;
@@ -2536,13 +2584,9 @@ OO_INTERCEPT(int, execl,
   char **argv;
 
   va_start(args, arg);
-  argv = citp_environ_handle_args(arg, args, NULL);
+  argv = alloca(citp_environ_count_args(arg, args) * sizeof(char*));
+  citp_environ_handle_args(argv, arg, args, NULL);
   va_end(args);
-  if (argv == NULL) {
-    Log_E(log("%s: no memory for aruments", __FUNCTION__));
-    errno = ENOMEM;
-    return -1;
-  }
   return onload_exec(path, argv, __environ, CI_FALSE, __FUNCTION__);
 }
 
@@ -2554,13 +2598,9 @@ OO_INTERCEPT(int, execlp,
   char **argv;
 
   va_start(args, arg);
-  argv = citp_environ_handle_args(arg, args, NULL);
+  argv = alloca(citp_environ_count_args(arg, args) * sizeof(char*));
+  citp_environ_handle_args(argv, arg, args, NULL);
   va_end(args);
-  if (argv == NULL) {
-    Log_E(log("%s: no memory for aruments", __FUNCTION__));
-    errno = ENOMEM;
-    return -1;
-  }
   return onload_exec(file, argv, __environ, CI_TRUE, __FUNCTION__);
 }
 
@@ -2572,13 +2612,9 @@ OO_INTERCEPT(int, execle,
   char **argv, **new_env;
 
   va_start(args, arg);
-  argv = citp_environ_handle_args(arg, args, &new_env);
+  argv = alloca(citp_environ_count_args(arg, args) * sizeof(char*));
+  citp_environ_handle_args(argv, arg, args, &new_env);
   va_end(args);
-  if (argv == NULL) {
-    Log_E(log("%s: no memory for aruments", __FUNCTION__));
-    errno = ENOMEM;
-    return -1;
-  }
   return onload_exec(path, argv, new_env, CI_FALSE, __FUNCTION__);
 }
 
@@ -2587,6 +2623,13 @@ OO_INTERCEPT(int, execvp,
              (const char *file, char *const argv[]))
 {
   return onload_exec(file, argv, __environ, CI_TRUE, __FUNCTION__);
+}
+
+
+OO_INTERCEPT(int, execvpe,
+             (const char *file, char *const argv[], char *const envp[]))
+{
+  return onload_exec(file, argv, envp, CI_TRUE, __FUNCTION__);
 }
 
 
@@ -2678,6 +2721,8 @@ OO_INTERCEPT(long, syscall,
   long f = va_arg(va, long);
   va_end(va);
 
+  Log_CALL(ci_log("%s(%ld)", __FUNCTION__, nr));
+
 #define NR(sc)               \
   case __NR_##sc: {          \
     void* p = onload_##sc;   \
@@ -2763,29 +2808,6 @@ OO_INTERCEPT(long, syscall,
 #endif
 
 
-
-#ifdef __GLIBC__
-/**********************************************************************
- * Aliases
- */
-
-/* We define these so we can intercept I/O calls from within GLIBC.
-**
-** For example: fprintf(fd, "Hello")
-** will call __write within glibc hence we need to catch this here
-** because fd might be a socket.
-**
-** Note: this doesn't work with more recent versions of glibc, because it is
-** compiled with "hidden plt" which makes it go slightly faster, at the cost
-** of not correctly handling the overriding of weak symbols :-(  To cope with
-** that we intercept fdopen and in such cases pass all handling down to the
-** kernel.
-**
-** ?? FIXME: I suspect these are no longer needed.
-*/
-strong_alias(onload_read, __read)
-strong_alias(onload_write, __write)
-#endif
 
 /*
  * vi: sw=2:ai:aw

@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_SOURCE>
@@ -31,6 +18,7 @@
 #include "internal.h"
 #include "ul_poll.h"
 #include "ul_select.h"
+#include <ci/internal/ip_timestamp.h>
 #include <onload/ul/tcp_helper.h>
 #include <onload/tcp_poll.h>
 
@@ -183,50 +171,61 @@ static int citp_udp_bind(citp_fdinfo* fdinfo, const struct sockaddr* sa,
 
   Log_V(log(LPF "bind(%d, sa, %d)", fdinfo->fd, sa_len));
 
+  if( sa != NULL )
+    Log_V(log("%s: Bind to port = %d", __FUNCTION__,
+      ntohs(((struct sockaddr_in*)sa)->sin_port)));
+
+  /* There should be address length check before address family validation to
+   * match Linux errno value set in inet6_bind(). */
+  if (s->domain == PF_INET6 && sa_len < SIN6_LEN_RFC2133) {
+    CI_SET_ERROR(rc, EINVAL);
+    goto done;
+  }
+
+  /* In theory, this check is performed by the OS bind().  But in practice,
+   * we do a lot of reuseport-related things before calling to the OS. */
+  if( sa == NULL || sa->sa_family != ep->s->domain ) {
+    if( sa == NULL )
+      CI_SET_ERROR(rc, EINVAL);
+    else
+      CI_SET_ERROR(rc, EAFNOSUPPORT);
+    goto done;
+  }
+
   ci_udp_handle_force_reuseport(fdinfo->fd, ep, sa, sa_len);
 
-
-#if CI_CFG_IPV6
-  /* FIXME: This is a hack for IPv6 to get it working for now.
-     This should be fixed in future to provide generic code for both
-     IPv4 and IPv6. */
-  if( ep->s->domain != PF_INET6 ||
-     (ci_tcp_ipv6_is_ipv4(sa) && !ci_tcp_ipv6_is_addr_any(sa)) )
-#endif
-  {
-    /* multicast sockets do not do clustering */
-    if( (s->s_flags & CI_SOCK_FLAG_REUSEPORT) != 0 &&
-        CI_SOCK_NOT_BOUND(s) &&
-        ! CI_IP_IS_MULTICAST(ci_get_ip4_addr(s->domain, sa)) ) {
-      if( (rc = ci_udp_reuseport_bind(ep, fdinfo->fd, sa, sa_len)) == 0 ) {
-        /* The socket has moved so need to reprobe the fd.  This will also
-         * map the the new stack into user space of the executing process.
-         */
-        fdinfo = citp_reprobe_moved(fdinfo,
-                                    CI_FALSE/* ! from_fast_lookup */,
-                                    CI_FALSE/* ! fdip_is_busy */);
-        /* We want to prefault the packets for the new clustered stack.  This
-         * is only needed if we successfully reprobed a valid fd.  This might
-         * not happen if the fd has been closed or re-used under our feet.
-         *
-         * This doesn't properly verify that what we've reprobed is really
-         * the same thing as we had before.  Fixing this properly is covered
-         * by bug77888.
-         */
-        if( fdinfo && fdinfo->protocol == &citp_udp_protocol_impl ) {
-          epi = fdi_to_sock_fdi(fdinfo);
-          ep = &epi->sock;
-          UDP_SET_FLAG(SOCK_TO_UDP(ep->s), CI_UDPF_FILTERED);
-          ci_netif_cluster_prefault(ep->netif);
-        }
-        else {
-          CI_SET_ERROR(rc, EBADF);
-          goto done;
-        }
+  /* multicast sockets do not do clustering */
+  if( (s->s_flags & CI_SOCK_FLAG_REUSEPORT) != 0 &&
+      CI_SOCK_NOT_BOUND(s) &&
+      ! CI_IPX_IS_MULTICAST(ci_get_addr(sa)) ) {
+    if( (rc = ci_udp_reuseport_bind(ep, fdinfo->fd, sa, sa_len)) == 0 ) {
+      /* The socket has moved so need to reprobe the fd.  This will also
+       * map the the new stack into user space of the executing process.
+       */
+      fdinfo = citp_reprobe_moved(fdinfo,
+                                  CI_FALSE/* ! from_fast_lookup */,
+                                  CI_FALSE/* ! fdip_is_busy */);
+      /* We want to prefault the packets for the new clustered stack.  This
+       * is only needed if we successfully reprobed a valid fd.  This might
+       * not happen if the fd has been closed or re-used under our feet.
+       *
+       * This doesn't properly verify that what we've reprobed is really
+       * the same thing as we had before.  Fixing this properly is covered
+       * by bug77888.
+       */
+      if( fdinfo && fdinfo->protocol == &citp_udp_protocol_impl ) {
+        epi = fdi_to_sock_fdi(fdinfo);
+        ep = &epi->sock;
+        UDP_SET_FLAG(SOCK_TO_UDP(ep->s), CI_UDPF_FILTERED);
+        ci_netif_cluster_prefault(ep->netif);
       }
       else {
+        CI_SET_ERROR(rc, EBADF);
         goto done;
       }
+    }
+    else {
+      goto done;
     }
   }
 
@@ -714,7 +713,11 @@ citp_udp_ordered_data(citp_fdinfo* fdi, struct timespec* limit,
   } 
 
   do {
-    if( citp_oo_timespec_compare(&pkt->pf.udp.rx_hw_stamp, limit) < 1 ) {
+    struct timespec stamp;
+    ci_rx_pkt_timespec(pkt, &stamp,
+                       NI_OPTS(epi->sock.netif).rx_timestamping_ordering);
+
+    if( citp_timespec_compare(&stamp, limit) < 1 ) {
       /* We have data before the limit, add on the number of readable bytes. */
       *bytes_out += pkt->pf.udp.pay_len;
     }
@@ -722,8 +725,7 @@ citp_udp_ordered_data(citp_fdinfo* fdi, struct timespec* limit,
       /* We have more data, but it's after the limit.  Set the next data
        * limit here, and stop.
        */
-      next_out->tv_sec = pkt->pf.udp.rx_hw_stamp.tv_sec;
-      next_out->tv_nsec = pkt->pf.udp.rx_hw_stamp.tv_nsec;
+      *next_out = stamp;
       break;
     }
   }

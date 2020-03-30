@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /****************************************************************************
  * Driver for Solarflare network controllers -
  *          resource management for Xen backend, OpenOnload, etc
@@ -46,19 +33,6 @@
 #ifndef __EFRM_VF_H__
 #define __EFRM_VF_H__
 
-
 struct efrm_vf;
-#ifdef CONFIG_SFC_RESOURCE_VF
-struct efrm_resource_manager;
-struct vi_resource_dimensions;
-
-
-extern int
-efrm_create_vf_resource_manager(struct efrm_resource_manager **);
-
-extern void
-efrm_vf_resource_free(struct efrm_vf *);
-#endif
-
 
 #endif  /* __EFRM_VF_H__ */

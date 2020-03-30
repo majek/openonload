@@ -1,23 +1,9 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /* Cplane related functions which are part of Onload */
 #ifndef __ONLOAD_CPLANE_OPS_H__
 #define __ONLOAD_CPLANE_OPS_H__
 
-#include <cplane/cplane.h>
 #include <ci/internal/ip.h>
 
 #ifndef __KERNEL__
@@ -33,78 +19,6 @@
 #define CICP_HANDLE(netif) ((netif)->cplane)
 
 #endif
-
-/*----------------------------------------------------------------------------
- * System call interface
- *---------------------------------------------------------------------------*/
-
-#ifdef __ci_driver__
-
-#define CICP_SYSCALL extern
-#define CICP_SYSBODY(_body) ;
-
-#else /* not part of the driver - generate system calls */
-
-#define CICP_SYSCALL ci_inline
-#define CICP_SYSBODY(_body) { _body }
-
-#endif /* __ci_driver__ */
-
-
-/*! Defer transmission of packet until forwarding information re-established
- *
- * \param netif           a the network interface representation
- * \param retrieve_rc     the fault identified by \c cicp_fwd_retrieve
- * \param ref_os_rc       a corresponding O/S error code - later updated
- * \param pkt_id          the ID of a packet buffer of data to be transmitted
- *
- * This function is normally called if the return code from
- * \c cicp_fwd_retrieve indicates that deferred transmission is necessary
- * (e.g. following the retrieval of forwarding information).
- *
- * Some values of \c retrieve_rc are allowed to refer to an O/S return
- * code. When they do the O/S error code involved is passed in \c os_rc.
- *
- * If there was a reason for entry into the kernel indicated in \c retrieve_rc
- * this call will, as a side-effect, service that request.
- *
- * The destination address for the packet is embedded in the packet itself.
- *
- * \return                TRUE iff the packet was accepted/used 
- *
- * The return value does not indicate that the packet buffer will or will not
- * be transmitted - it defines whose responsibility it is to free/transmit the
- * packet.  If it is non-zero the packet continues to be the caller's
- * responsibility.
- *
- * If it is transmitted its transmission is likely to precede visible
- * availability of valid forwarding information in \c cicp_fwd_retrieve, but
- * this is not guaranteed.
- *
- */
-CICP_SYSCALL int /* bool */
-cicp_user_defer_send(ci_netif *netif, cicpos_retrieve_rc_t retrieve_rc,
-		     ci_uerr_t *ref_os_rc, oo_pkt_p pkt_id,
-                     ci_ifid_t ifindex, ci_uint32 next_hop)
-CICP_SYSBODY(
-    cp_user_defer_send_t op;
-
-    op.retrieve_rc = retrieve_rc;
-    op.os_rc       = *ref_os_rc;
-    op.pkt         = pkt_id;
-    op.ifindex     = ifindex;
-    op.next_hop    = next_hop;
-
-    oo_resource_op(ci_netif_get_driver_handle(netif),
-                   OO_IOC_CP_USER_DEFER_SEND, &op);
-    
-    *ref_os_rc = op.os_rc;
-
-    return op.rc;
-)
-
-#undef CICP_SYSBODY
-#undef CICP_SYSCALL
 
 #ifdef CI_USE_GCC_VISIBILITY
 #pragma GCC visibility push(default)
@@ -145,7 +59,7 @@ cicp_user_retrieve(ci_netif*                    ni,
  * only takes the fields that are updated by control plane lookup.  These
  * include:
  *
- * - mac_integrity
+ * - fwd_ver
  * - freshness (invalidated)
  * - ip_saddr_be32
  * - status
@@ -178,28 +92,46 @@ cicp_ipcache_vlan_set(ci_ip_cached_hdrs*  ipcache)
 }
 
 extern int
-cicp_llap_ipif_check_onloaded(struct oo_cplane_handle* cp,
-                              cicp_llap_row_t* llap, cicp_ipif_row_t* ipif,
-                              void* data);
+cicp_llap_check_onloaded(struct oo_cplane_handle* cp,
+                         cicp_llap_row_t* llap, void* data);
 /*! Checks if the given ip address is both local and etherfabric.
  *  Returns 1 if it is, 0 if it isn't.
  *  If the address isn't found, it returns 0
  */
 ci_inline int
-cicp_user_addr_is_local_efab(ci_netif* ni, ci_ip_addr_t ip)
+cicp_user_addr_is_local_efab(ci_netif* ni, ci_addr_t ip)
 { 
-  return oo_cp_find_llap_by_ip(ni->cplane, ip,
-                               cicp_llap_ipif_check_onloaded, ni);
+#if CI_CFG_IPV6
+  if( CI_IS_ADDR_IP6(ip) ) {
+    return oo_cp_find_llap_by_ip6(ni->cplane, ip.ip6,
+                                  cicp_llap_check_onloaded, ni);
+  }
+  else
+#endif
+  return oo_cp_find_llap_by_ip(ni->cplane, ip.ip4,
+                               cicp_llap_check_onloaded, ni);
 }
+
+
+static inline int/*bool*/
+cicp_find_ifindex_by_ip(struct oo_cplane_handle* cp, ci_addr_t ip,
+                        oo_cp_ifindex_check check, void* data)
+{
+#if CI_CFG_IPV6
+  if( CI_IS_ADDR_IP6(ip) )
+    return oo_cp_find_ipif_by_ip6(cp, ip.ip6, check, data);
+#endif
+  return oo_cp_find_ipif_by_ip(cp, ip.ip4, check, data);
+}
+
 
 extern int
 cicp_ipif_check_ok(struct oo_cplane_handle* cp,
-                   cicp_ipif_row_t* ipif, void* data);
+                   ci_ifid_t ifindex, void* data);
 ci_inline int /* bool */
-cicp_user_is_local_addr(struct oo_cplane_handle *cplane,
-			ci_ip_addr_t ip)
+cicp_user_is_local_addr(struct oo_cplane_handle *cplane, ci_addr_t ip)
 {
-  return oo_cp_find_ipif_by_ip(cplane, ip, cicp_ipif_check_ok, NULL);
+  return cicp_find_ifindex_by_ip(cplane, ip, cicp_ipif_check_ok, NULL);
 }
 
 ci_inline int ci_hwport_check_onload(ci_hwport_id_t hwport,
@@ -209,6 +141,17 @@ ci_inline int ci_hwport_check_onload(ci_hwport_id_t hwport,
 }
 
 
+
+/* Try to send one deferred packet.  Returns TRUE if sent. */
+extern int oo_deferred_send_one(ci_netif *ni, struct oo_deferred_pkt* dpkt);
+/* Try to send all deferred packets.  Returns TRUE if all sent. */
+extern int oo_deferred_send(ci_netif *ni);
+#ifdef __KERNEL__
+/* Release all the deferred packets */
+void oo_deferred_free(ci_netif *ni);
+#endif
+
+
 /*----------------------------------------------------------------------------
  * Control Plane initialization/termination 
  *---------------------------------------------------------------------------*/
@@ -216,49 +159,10 @@ ci_inline int ci_hwport_check_onload(ci_hwport_id_t hwport,
 
 #ifdef __ci_driver__
 
-/*!
- * Very restricted copying of an IP packet in to a packet buffer. 
- *
- * \param netif             owner of the source packet
- * \param netif_ip_pktid    Netif packet ID of the source packet
- * \param dst               destination packet from ARP table pool
- *
- * \retval 0                Success
- * \retval -EFAULT          Failed to convert efab address to kernel
- *                          virtual address
- *
- * \attention It's assumed that the segments after the first contain
- *            data from the pinned pages.
- *
- * Only data and its length is copied. No metadata are copied.
- *
- * This operation assumes that \c dst is from contiguous vm_alloc()'ed memory
- */
-extern int
-cicppl_ip_pkt_flatten_copy(ci_netif *ni, oo_pkt_p src_pktid,
-                           struct cicp_bufpool_pkt* dst);
-
-/*! Request IP resolution and queue the ip packet that triggered it
- *
- *  \param netif           a the network interface representation
- *  \param out_os_rc       an O/S error code - non-zero iff send known failed
- *  \param ref_ip          (location of) IP address of destination
- *  \param pkt_id          the ID of a packet buffer of data to be transmitted
-
- *  \return                TRUE iff the packet was accepted
- *
- *  The ownership of the packet remains with the caller if this function
- *  returns FALSE.
- */
-extern int /*bool*/
-cicppl_mac_defer_send(ci_netif *netif, int *out_os_rc,
-		      ci_ip_addr_t ip, oo_pkt_p ip_pktid, ci_ifid_t ifindex);
-
-
 /*! Send IP packet via RAW socket.  Computes TCP/UDP checksum if possible */
-extern int cicp_raw_ip_send(struct oo_cplane_handle* cp,
-                            const ci_ip4_hdr* ip, int len, ci_ifid_t ifindex,
-                            ci_ip_addr_t next_hop);
+extern int cicp_raw_ip_send(struct oo_cplane_handle* cp, int af,
+                            ci_ipx_hdr_t* ipx, int len, ci_ifid_t ifindex,
+                            ci_addr_t next_hop);
 
 #ifdef CI_USE_GCC_VISIBILITY
 #pragma GCC visibility pop

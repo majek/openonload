@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /****************************************************************************
  * Copyright 2002-2005: Level 5 Networks Inc.
  * Copyright 2005-2008: Solarflare Communications Inc,
@@ -491,17 +478,6 @@ ci_inline void ci_atomic32_merge(volatile ci_uint32* p,
 					"adcl $0, %0 ;"			  \
 					: "=r" (sum)			  \
 					: "g" ((ci_uint32) v), "0" (sum))
-
-ci_inline ci_uint16 ci_bswap16(ci_uint16 v) {
-  __asm__("xchgb %h0, %b0" : "+Q" (v));
-  return v;
-}
-
-ci_inline ci_uint32 ci_bswap32(ci_uint32 v) {
-  __asm__("bswapl %0" : "+r" (v));
-  return v;
-}
-
 
 #define ci_prefetch            __builtin_prefetch
 #define ci_prefetch_ppc(addr)  do{}while(0)

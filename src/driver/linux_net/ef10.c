@@ -1,18 +1,3 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
 /***************************************************************************
  * Driver for Solarflare network controllers and boards
  * Copyright 2012-2017 Solarflare Communications Inc.
@@ -958,6 +943,32 @@ static void efx_ef10_cleanup_vlans(struct efx_nic *efx)
 	mutex_unlock(&nic_data->vlan_lock);
 }
 
+#ifdef CONFIG_SFC_SRIOV
+static int efx_vf_parent(struct efx_nic *efx, struct efx_nic **efx_pf)
+{
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_PHYSFN)
+	struct pci_dev *pci_dev_pf = pci_physfn(efx->pci_dev);
+#endif
+	int rc = 0;
+
+	/* By default succeed without a parent PF */
+	*efx_pf = NULL;
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_PHYSFN)
+	/* Suceed if this is a PF already, or if there is noparent PF.
+	 * Fail if the parent is not an sfc device.
+	 */
+	if (!pci_dev_pf || (efx->pci_dev == pci_dev_pf))
+		rc = 0;
+	else if (!pci_dev_pf->dev.driver ||
+		 (pci_dev_pf->dev.driver->owner != THIS_MODULE))
+		rc = -EBUSY;
+	else
+		*efx_pf = pci_get_drvdata(pci_dev_pf);
+#endif
+	return rc;
+}
+#endif
+
 #ifdef EFX_NOT_UPSTREAM
 static DEVICE_ATTR(forward_fcs, 0644, efx_ef10_show_forward_fcs,
 		   efx_ef10_store_forward_fcs);
@@ -1069,6 +1080,15 @@ static int efx_ef10_probe(struct efx_nic *efx)
 	rc = efx_ef10_init_datapath_caps(efx);
 	if (rc < 0)
 		goto fail5;
+
+	nic_data->mc_stats = kmalloc(efx->num_mac_stats * sizeof(__le64),
+				GFP_KERNEL);
+	if (!nic_data->mc_stats) {
+		netif_warn(efx, probe, efx->net_dev,
+			   "failed to allocate scratch MC stats buffer\n");
+		rc = -ENOMEM;
+		goto fail5;
+	}
 
 	efx->tx_queues_per_channel = 1;
 	efx->select_tx_queue = efx_ef10_select_tx_queue;
@@ -1243,6 +1263,8 @@ fail6:
 		device_remove_file(&efx->pci_dev->dev, &dev_attr_forward_fcs);
 #endif
 fail5:
+	kfree(nic_data->mc_stats);
+
 	device_remove_file(&efx->pci_dev->dev, &dev_attr_primary_flag);
 fail4:
 	device_remove_file(&efx->pci_dev->dev, &dev_attr_link_control_flag);
@@ -1521,7 +1543,10 @@ static void efx_ef10_free_piobufs(struct efx_nic *efx)
 			       nic_data->piobuf_handle[i]);
 		rc = efx_mcdi_rpc(efx, MC_CMD_FREE_PIOBUF, inbuf, sizeof(inbuf),
 				  NULL, 0, NULL);
-		WARN_ON(rc && rc != -ENETDOWN && !efx_ef10_hw_unavailable(efx));
+		if (unlikely(rc && rc != -ENETDOWN && !efx_ef10_hw_unavailable(efx)))
+			netif_warn(efx, probe, efx->net_dev,
+				   "Failed to free PIO buffers: %d\n",
+				   rc);
 	}
 
 	nic_data->n_piobufs = 0;
@@ -1793,6 +1818,7 @@ static void efx_ef10_remove(struct efx_nic *efx)
 
 	efx_mcdi_fini(efx);
 	efx_nic_free_buffer(efx, &nic_data->mcdi_buf);
+	kfree(nic_data->mc_stats);
 	kfree(nic_data);
 	efx->nic_data = NULL;
 }
@@ -1805,28 +1831,27 @@ static int efx_ef10_probe_vf(struct efx_nic *efx __attribute__ ((unused)))
 #else
 static int efx_ef10_probe_vf(struct efx_nic *efx)
 {
-	int rc;
 	struct efx_ef10_nic_data *nic_data;
-#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_PHYSFN)
-	struct pci_dev *pci_dev_pf;
+	struct efx_nic *efx_pf;
+	int rc = efx_vf_parent(efx, &efx_pf);
+
+	/* Fail if the parent is not a Solarflare PF */
+	if (rc)
+		return rc;
 
 	/* If the parent PF has no VF data structure, it doesn't know about this
 	 * VF so fail probe.  The VF needs to be re-created.  This can happen
 	 * if the PF driver is unloaded while the VF is assigned to a guest.
 	 */
-	pci_dev_pf = efx->pci_dev->physfn;
-	if (pci_dev_pf) {
-		struct efx_nic *efx_pf = pci_get_drvdata(pci_dev_pf);
-		struct efx_ef10_nic_data *nic_data_pf = efx_pf->nic_data;
-
-		if (!nic_data_pf->vf) {
+	if (efx_pf) {
+		nic_data = efx_pf->nic_data;
+		if (!nic_data->vf) {
 			netif_info(efx, drv, efx->net_dev,
 				   "The VF cannot link to its parent PF; "
 				   "please destroy and re-create the VF\n");
 			return -EBUSY;
 		}
 	}
-#endif
 
 	rc = efx_ef10_probe(efx);
 	if (rc)
@@ -2883,19 +2908,15 @@ static size_t efx_ef10_update_stats_pf(struct efx_nic *efx, u64 *full_stats,
 {
 	struct efx_ef10_nic_data *nic_data = efx->nic_data;
 	DECLARE_BITMAP(mask, EF10_STAT_COUNT);
-	__le64 *mc_stats = kmalloc(efx->num_mac_stats * sizeof(__le64),
-				   GFP_KERNEL);
 	u64 *stats = nic_data->stats;
 
 	spin_lock_bh(&efx->stats_lock);
 
 	efx_ef10_get_stat_mask(efx, mask);
 
-	efx_nic_copy_stats(efx, mc_stats);
+	efx_nic_copy_stats(efx, nic_data->mc_stats);
 	efx_nic_update_stats(efx_ef10_stat_desc, EF10_STAT_COUNT,
-			     mask, stats, efx->mc_initial_stats, mc_stats);
-
-	kfree(mc_stats);
+			     mask, stats, efx->mc_initial_stats, nic_data->mc_stats);
 
 	/* Update derived statistics */
 	efx_nic_fix_nodesc_drop_stat(efx,
@@ -7896,7 +7917,6 @@ reset_nic:
 static int efx_ef10_set_mac_address(struct efx_nic *efx)
 {
 	MCDI_DECLARE_BUF(inbuf, MC_CMD_VADAPTOR_SET_MAC_IN_LEN);
-	struct efx_ef10_nic_data *nic_data = efx->nic_data;
 	bool was_enabled = efx->port_enabled;
 	int rc;
 
@@ -7942,6 +7962,7 @@ static int efx_ef10_set_mac_address(struct efx_nic *efx)
 #ifdef CONFIG_SFC_SRIOV
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_PHYSFN)
 	if (efx->pci_dev->is_virtfn && efx->pci_dev->physfn) {
+		struct efx_ef10_nic_data *nic_data;
 		struct pci_dev *pci_dev_pf = efx->pci_dev->physfn;
 
 		if (rc == -EPERM) {
@@ -7949,15 +7970,16 @@ static int efx_ef10_set_mac_address(struct efx_nic *efx)
 
 			/* Switch to PF and change MAC address on vport */
 			efx_pf = pci_get_drvdata(pci_dev_pf);
+			nic_data = efx->nic_data;
 
 			rc = efx_ef10_sriov_set_vf_mac(efx_pf,
 						       nic_data->vf_index,
 						       efx->net_dev->dev_addr);
 		} else if (!rc) {
 			struct efx_nic *efx_pf = pci_get_drvdata(pci_dev_pf);
-			struct efx_ef10_nic_data *nic_data = efx_pf->nic_data;
 			unsigned int i;
 
+			nic_data = efx_pf->nic_data;
 			/* MAC address successfully changed by VF (with MAC
 			 * spoofing) so update the parent PF if possible.
 			 */
@@ -7965,6 +7987,19 @@ static int efx_ef10_set_mac_address(struct efx_nic *efx)
 				struct ef10_vf *vf = nic_data->vf + i;
 
 				if (vf->efx == efx) {
+					/* Add new MAC to list */
+					rc = efx_ef10_vport_add_mac(efx, vf->vport_id, efx->net_dev->dev_addr);
+					if (rc)
+						break;
+
+					/* Remove old MAC from list */
+					rc = efx_ef10_vport_del_mac(efx, vf->vport_id, vf->mac);
+					if (rc) {
+						/* If that failed, attempt to remove new MAC too */
+						efx_ef10_vport_del_mac(efx, vf->vport_id, efx->net_dev->dev_addr);
+						break;
+					}
+
 					ether_addr_copy(vf->mac,
 							efx->net_dev->dev_addr);
 					return 0;
@@ -8696,16 +8731,23 @@ again:
 	return rc;
 }
 
+static void efx_ef10_udp_tnl_push_ports_sync(struct efx_nic *efx)
+{
+	struct efx_ef10_nic_data *nic_data = efx->nic_data;
+
+	spin_lock_bh(&nic_data->udp_tunnels_lock);
+	efx_ef10_set_udp_tnl_ports(nic_data->efx, false);
+}
+
 static void efx_ef10__udp_tnl_push_ports(struct work_struct *data)
 {
 	struct efx_ef10_nic_data *nic_data = container_of(
 				data, struct efx_ef10_nic_data, udp_tunnel_work);
 
-	spin_lock_bh(&nic_data->udp_tunnels_lock);
-	efx_ef10_set_udp_tnl_ports(nic_data->efx, false); /* drops the lock */
+	efx_ef10_udp_tnl_push_ports_sync(nic_data->efx);
 }
 
-static void efx_ef10_udp_tnl_push_ports(struct efx_nic *efx)
+static void efx_ef10_udp_tnl_push_ports_async(struct efx_nic *efx)
 {
 	struct efx_ef10_nic_data *nic_data = efx->nic_data;
 
@@ -8793,7 +8835,7 @@ static void efx_ef10_udp_tnl_add_port(struct efx_nic *efx,
 			match->removing = false;
 			match->count = 1;
 			/* schedule an update */
-			efx_ef10_udp_tnl_push_ports(efx);
+			efx_ef10_udp_tnl_push_ports_async(efx);
 			goto out_unlock;
 		}
 	}
@@ -8866,7 +8908,7 @@ static void efx_ef10_udp_tnl_del_port(struct efx_nic *efx,
 				match->adding = false;
 			match->removing = true;
 			/* schedule an update */
-			efx_ef10_udp_tnl_push_ports(efx);
+			efx_ef10_udp_tnl_push_ports_async(efx);
 			goto out_unlock;
 		}
 		efx_get_udp_tunnel_type_name(match->type,
@@ -9169,7 +9211,7 @@ const struct efx_nic_type efx_hunt_a0_nic_type = {
 	.vlan_rx_add_vid = efx_ef10_vlan_rx_add_vid,
 	.vlan_rx_kill_vid = efx_ef10_vlan_rx_kill_vid,
 #endif
-	.udp_tnl_push_ports = efx_ef10_udp_tnl_push_ports,
+	.udp_tnl_push_ports = efx_ef10_udp_tnl_push_ports_sync,
 	.udp_tnl_add_port = efx_ef10_udp_tnl_add_port,
 	.udp_tnl_has_port = efx_ef10_udp_tnl_has_port,
 	.udp_tnl_del_port = efx_ef10_udp_tnl_del_port,

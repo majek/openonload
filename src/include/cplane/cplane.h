@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 OR Solarflare-Binary */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /* This header describes the interface between the open source parts
  * of Onload and the binary-only control plane server.
  *
@@ -92,8 +79,9 @@ struct oo_cplane_handle {
   uint32_t bytes;
 };
 
+#define CP_CREATE_FLAGS_INIT_NET  0x1u
 int oo_cp_create(int fd, struct oo_cplane_handle* cp,
-                 enum cp_sync_mode mode);
+                 enum cp_sync_mode mode, ci_uint32 flags);
 void oo_cp_destroy(struct oo_cplane_handle* cp);
 
 #else
@@ -101,9 +89,11 @@ void oo_cp_destroy(struct oo_cplane_handle* cp);
 #include <onload/cplane_driver_handle.h>
 
 extern int
-__oo_cp_arp_confirm(struct oo_cplane_handle* cp, cicp_verinfo_t* verinfo);
+__oo_cp_arp_confirm(struct oo_cplane_handle* cp, cicp_verinfo_t* verinfo,
+                    cp_fwd_table_id fwd_table_id);
 extern int
-__oo_cp_arp_resolve(struct oo_cplane_handle* cp, cicp_verinfo_t* verinfo);
+__oo_cp_arp_resolve(struct oo_cplane_handle* cp, cicp_verinfo_t* verinfo,
+                    cp_fwd_table_id fwd_table_id);
 extern cicp_hwport_mask_t
 oo_cp_get_licensed_hwports(struct oo_cplane_handle*);
 extern int oo_cp_get_acceleratable_llap_count(struct oo_cplane_handle*);
@@ -112,12 +102,20 @@ extern int oo_cp_get_acceleratable_ifindices(struct oo_cplane_handle*,
                                              int max_count);
 #endif
 
+
+#ifndef __KERNEL__
+extern int
+cp_svc_check_dnat(struct oo_cplane_handle* cp,
+                  ci_addr_sh_t* dst_addr, ci_uint16* dst_port);
+#endif
+
+
 extern ci_ifid_t
 oo_cp_get_hwport_ifindex(struct oo_cplane_handle* cp, ci_hwport_id_t hwport);
 
 extern int
 oo_cp_get_hwport_properties(struct oo_cplane_handle*, ci_hwport_id_t hwport,
-                            ci_uint8* out_mib_flags,
+                            cp_hwport_flags_t* out_mib_flags,
                             ci_uint32* out_oo_vi_flags_mask,
                             ci_uint32* out_efhw_flags_extra,
                             ci_uint8* out_pio_len_shift,
@@ -130,6 +128,24 @@ static inline void oo_cp_verinfo_init(cicp_verinfo_t* verinfo)
   verinfo->id = CICP_MAC_ROWID_BAD;
 }
 
+static inline struct cp_fwd_table*
+oo_cp_get_fwd_table(struct oo_cplane_handle* cp, cp_fwd_table_id fwd_table_id)
+{
+  /* At UL, each cplane handle maps the local fwd table.  This is not true in
+   * the kernel, where there is precisely one handle per cplane instance, but
+   * in the kernel we can get straight at each table by ID. */
+#ifdef __KERNEL__
+  struct cp_fwd_table* fwd_table = &cp->fwd_tables[fwd_table_id];
+  ci_assert_lt(fwd_table_id, CP_MAX_INSTANCES);
+  ci_assert(fwd_table->rows);
+  ci_assert(fwd_table->prefix);
+  ci_assert(fwd_table->rw_rows);
+  return fwd_table;
+#else
+  return &cp->mib[0].fwd_table;
+#endif
+}
+
 /* Confirm that the given ARP entry is valid (to be used with MSG_CONFIRM
  * or when TCP received a new ACK).
  * Fast exit of the inline function if the ARP entry is already fresh and
@@ -139,16 +155,17 @@ static inline void oo_cp_verinfo_init(cicp_verinfo_t* verinfo)
  */
 static inline void
 oo_cp_arp_confirm(struct oo_cplane_handle* cp,
-                  cicp_verinfo_t* verinfo)
+                  cicp_verinfo_t* verinfo,
+                  cp_fwd_table_id fwd_table_id)
 {
-  struct cp_mibs* mib = &cp->mib[0];
+  struct cp_fwd_table* fwd_table = oo_cp_get_fwd_table(cp, fwd_table_id);
   struct cp_fwd_rw_row* fwd_rw;
 
   if( ! CICP_MAC_ROWID_IS_VALID(verinfo->id) ||
-      ! cp_fwd_version_matches(mib, verinfo) )
+      ! cp_fwd_version_matches(fwd_table, verinfo) )
     return;
 
-  fwd_rw = cp_get_fwd_rw(mib, verinfo);
+  fwd_rw = cp_get_fwd_rw(fwd_table, verinfo);
   if( ! (fwd_rw->flags & CICP_FWD_RW_FLAG_ARP_NEED_REFRESH) )
     return;
   ci_atomic32_and(&fwd_rw->flags, ~CICP_FWD_RW_FLAG_ARP_NEED_REFRESH);
@@ -156,7 +173,7 @@ oo_cp_arp_confirm(struct oo_cplane_handle* cp,
 #ifndef __KERNEL__
   cp_ioctl(cp->fd, OO_IOC_CP_ARP_CONFIRM, verinfo);
 #else
-  __oo_cp_arp_confirm(cp, verinfo);
+  __oo_cp_arp_confirm(cp, verinfo, fwd_table_id);
 #endif
 }
 
@@ -164,28 +181,46 @@ oo_cp_arp_confirm(struct oo_cplane_handle* cp,
  * resolved when we send via OS.  However, it is always good to resolve ARP
  * at connect() time without waiting for send(). */
 static inline void
-oo_cp_arp_resolve(struct oo_cplane_handle* cp,
-                  cicp_verinfo_t* verinfo)
+oo_cp_arp_resolve(struct oo_cplane_handle* cp, cicp_verinfo_t* verinfo,
+                  cp_fwd_table_id fwd_table_id)
 {
-  struct cp_mibs* mib = &cp->mib[0];
+  struct cp_fwd_table* fwd_table = oo_cp_get_fwd_table(cp, fwd_table_id);
   struct cp_fwd_data* data;
 
   ci_assert(CICP_MAC_ROWID_IS_VALID(verinfo->id));
-  data = cp_get_fwd_data(mib, verinfo);
+  data = cp_get_fwd_data(fwd_table, verinfo);
+
+#ifndef NDEBUG
+  /* It was
+   * ci_assert_nequal(data->base.ifindex, CI_IFID_(LOOP|BAD))
+   * but it fired when the fwd entry is under change. */
+  if( data->base.ifindex == CI_IFID_BAD ||
+      data->base.ifindex == CI_IFID_LOOP ) {
+    ci_rmb();
+    ci_assert_nequal(verinfo->version,
+                     *cp_fwd_version(cp_get_fwd(fwd_table, verinfo)) );
+  }
+#endif
 
   /* The most probable reason for verinfo to be invalid is ARP resolution.
-   * If ARP is really resolved, then there is no need to go further.
-   * After all, we always can resolve the ARP by sending a packet via OS. */
-  if( data->arp_valid || ! cp_fwd_version_matches(mib, verinfo) )
+   * If ARP is really resolved, then there is no need to go further. */
+  if( (data->flags & CICP_FWD_DATA_FLAG_ARP_VALID) ||
+      ! cp_fwd_version_matches(fwd_table, verinfo) )
     return;
 
-  ci_assert_nequal(data->ifindex, CI_IFID_BAD);
-  ci_assert_nequal(data->ifindex, CI_IFID_LOOP);
-
 #ifndef __KERNEL__
-  cp_ioctl(cp->fd, OO_IOC_CP_ARP_RESOLVE, verinfo);
+  {
+    struct oo_op_cplane_arp_resolve op = {
+      .verinfo = *verinfo,
+      /* fwd_table_id in this structure is not respected when the ioctl comes
+       * from a cplane client.  The kernel will assert that it's set to
+       * CP_FWD_TABLE_ID_INVALID. */
+      .fwd_table_id = CP_FWD_TABLE_ID_INVALID,
+    };
+    cp_ioctl(cp->fd, OO_IOC_CP_ARP_RESOLVE, &op);
+  }
 #else
-  __oo_cp_arp_resolve(cp, verinfo);
+  __oo_cp_arp_resolve(cp, verinfo, fwd_table_id);
 #endif
 }
 
@@ -194,22 +229,25 @@ __oo_cp_route_resolve(struct oo_cplane_handle* cp,
                     cicp_verinfo_t* verinfo,
                     struct cp_fwd_key* req,
                     int/*bool*/ ask_server,
-                    struct cp_fwd_data* data);
+                    struct cp_fwd_data* data,
+                    cp_fwd_table_id fwd_table_id);
 
 static inline int
 oo_cp_verinfo_is_valid(struct oo_cplane_handle* cp,
-                       cicp_verinfo_t* verinfo)
+                       cicp_verinfo_t* verinfo,
+                       cp_fwd_table_id fwd_table_id)
 {
-  struct cp_mibs* mib = &cp->mib[0];
-  return verinfo->id != CICP_MAC_ROWID_BAD &&
-         cp_fwd_version_matches(mib, verinfo);
+  struct cp_fwd_table* fwd_table = oo_cp_get_fwd_table(cp, fwd_table_id);
+  return CICP_MAC_ROWID_IS_VALID(verinfo->id) &&
+         cp_fwd_version_matches(fwd_table, verinfo);
 }
 
 #if defined(__KERNEL__)
-int oo_op_route_resolve(struct oo_cplane_handle* cp,
-                        struct cp_fwd_key* key);
+int oo_op_route_resolve(struct oo_cplane_handle* cp, struct cp_fwd_key* key,
+                        cp_fwd_table_id fwd_table_id);
 #endif
 
+#ifndef __KERNEL__
 /* Resolve the route, update the version info.
  *
  * Returns:
@@ -223,20 +261,23 @@ oo_cp_route_resolve(struct oo_cplane_handle* cp,
                     struct cp_fwd_key* key,
                     struct cp_fwd_data* data)
 {
+  /* The fwd-table ID is meaningless at UL, but we have to pass something. */
+  const cp_fwd_table_id fwd_table_id = CP_FWD_TABLE_ID_INVALID;
+
   /* Are we lucky?  Is the verlock valid? */
-  if( oo_cp_verinfo_is_valid(cp, verinfo) ) {
+  if( oo_cp_verinfo_is_valid(cp, verinfo, fwd_table_id) ) {
     struct cp_mibs* mib = &cp->mib[0];
-    if( cp_get_fwd(mib, verinfo)->flags & CICP_FWD_FLAG_STALE )
-      cp_get_fwd_rw(mib, verinfo)->frc_used = ci_frc64_get();
-    memcpy(data, cp_get_fwd_data(mib, verinfo), sizeof(*data));
+    cp_get_fwd_rw(&mib->fwd_table, verinfo)->frc_used = ci_frc64_get();
+    memcpy(data, cp_get_fwd_data(&mib->fwd_table, verinfo), sizeof(*data));
     ci_rmb();
-    if( cp_fwd_version_matches(mib, verinfo) )
+    if( cp_fwd_version_matches(&mib->fwd_table, verinfo) )
       return 1;
   }
 
   /* We are unlucky. Let's go via slow path. */
-  return __oo_cp_route_resolve(cp, verinfo, key, 1, data);
+  return __oo_cp_route_resolve(cp, verinfo, key, 1, data, fwd_table_id);
 }
+#endif
 
 /* Find the network interface by the incoming packet:
  * hwport + vlan => ifindex. */
@@ -276,10 +317,9 @@ oo_cp_hwport_vlan_to_ifindex(struct oo_cplane_handle* cp,
 }
 
 
-typedef int/*bool*/ (*oo_cp_ipif_check)(
+typedef int/*bool*/ (*oo_cp_ifindex_check)(
         struct oo_cplane_handle* cp,
-        cicp_ipif_row_t* ipif,
-        void* data);
+        ci_ifid_t ifindex, void* data);
 
 /* Find the network interface by an IP address.  Returns 1 if found,
  * 0 otherwise.  The "check" parameter is the local function which checks if
@@ -292,7 +332,7 @@ typedef int/*bool*/ (*oo_cp_ipif_check)(
  */
 static inline int/*bool*/
 oo_cp_find_ipif_by_ip(struct oo_cplane_handle* cp, ci_ip_addr_t ip,
-                      oo_cp_ipif_check check, void* data)
+                      oo_cp_ifindex_check check, void* data)
 {
   struct cp_mibs* mib;
   cicp_rowid_t id;
@@ -306,7 +346,33 @@ oo_cp_find_ipif_by_ip(struct oo_cplane_handle* cp, ci_ip_addr_t ip,
       break;
 
     if( mib->ipif[id].net_ip == ip ) {
-      if( check(cp, &mib->ipif[id], data) ) {
+      if( check(cp, mib->ipif[id].ifindex, data) ) {
+        rc = 1;
+        break;
+      }
+    }
+  }
+  CP_VERLOCK_STOP(version, mib)
+  return rc;
+}
+
+static inline int/*bool*/
+oo_cp_find_ipif_by_ip6(struct oo_cplane_handle* cp, ci_ip6_addr_t ip,
+                      oo_cp_ifindex_check check, void* data)
+{
+  struct cp_mibs* mib;
+  cicp_rowid_t id;
+  cp_version_t version;
+  int rc = 0;
+
+  CP_VERLOCK_START(version, mib, cp)
+
+  for( id = 0; id < mib->dim->ip6if_max; id++ ) {
+    if( cicp_ip6if_row_is_free(&mib->ip6if[id]) )
+      break;
+
+    if( CI_IP6_ADDR_CMP(mib->ip6if[id].net_ip6, ip) == 0 ) {
+      if( check(cp, mib->ip6if[id].ifindex, data) ) {
         rc = 1;
         break;
       }
@@ -317,14 +383,14 @@ oo_cp_find_ipif_by_ip(struct oo_cplane_handle* cp, ci_ip_addr_t ip,
 }
 
 
-typedef int/*bool*/ (*oo_cp_ipif_llap_check)(
+typedef int/*bool*/ (*oo_cp_llap_check)(
         struct oo_cplane_handle* cp,
-        cicp_llap_row_t* llap, cicp_ipif_row_t* ipif,
+        cicp_llap_row_t* llap,
         void* data);
 /* Same as oo_cp_find_ipif_by_ip(), but also looks up a llap row. */
 static inline int
 oo_cp_find_llap_by_ip(struct oo_cplane_handle* cp, ci_ip_addr_t ip,
-                      oo_cp_ipif_llap_check check, void* data)
+                      oo_cp_llap_check check, void* data)
 {
   struct cp_mibs* mib;
   cicp_rowid_t id;
@@ -341,7 +407,37 @@ oo_cp_find_llap_by_ip(struct oo_cplane_handle* cp, ci_ip_addr_t ip,
       cicp_rowid_t llap_id = cp_llap_find_row(mib, mib->ipif[id].ifindex);
       if( llap_id == CICP_ROWID_BAD )
         continue;
-      if( check(cp, &mib->llap[llap_id], &mib->ipif[id], data) ) {
+      if( check(cp, &mib->llap[llap_id], data) ) {
+        rc = 1;
+        break;
+      }
+    }
+  }
+
+  CP_VERLOCK_STOP(version, mib)
+  return rc;
+}
+
+static inline int
+oo_cp_find_llap_by_ip6(struct oo_cplane_handle* cp, ci_ip6_addr_t ip6,
+                       oo_cp_llap_check check, void* data)
+{
+  struct cp_mibs* mib;
+  cicp_rowid_t id;
+  cp_version_t version;
+  int rc = 0;
+
+  CP_VERLOCK_START(version, mib, cp)
+
+  for( id = 0; id < mib->dim->ip6if_max; id++ ) {
+    if( cicp_ip6if_row_is_free(&mib->ip6if[id]) )
+      break;
+
+    if( !CI_IP6_ADDR_CMP(mib->ip6if[id].net_ip6, ip6) ) {
+      cicp_rowid_t llap_id = cp_llap_find_row(mib, mib->ip6if[id].ifindex);
+      if( llap_id == CICP_ROWID_BAD )
+        continue;
+      if( check(cp, &mib->llap[llap_id], data) ) {
         rc = 1;
         break;
       }
@@ -456,15 +552,22 @@ ci_inline int cicp_layer34_hash(struct cicp_hash_state *hs, int num_slaves)
 {
   /* TODO do we ever call this with non-IP traffic */
   if( hs->flags & CICP_HASH_STATE_FLAGS_IS_IP ) {
+    ci_uint32 addrs = CI_BSWAP_BE32(hs->src_addr_be32 ^ hs->dst_addr_be32);
     if( !(hs->flags & CICP_HASH_STATE_FLAGS_IS_FRAG) &&
         (hs->flags & CICP_HASH_STATE_FLAGS_IS_TCP_UDP) ) {
-      return
-        (CI_BSWAP_BE16(hs->src_port_be16 ^ hs->dst_port_be16) ^
-         (CI_BSWAP_BE32(hs->src_addr_be32 ^ hs->dst_addr_be32) & 0xffff))
-        % num_slaves;
+      /* The factors in the design of this hash function are mostly obvious
+       * (speed, distribution, etc.) with the added caveat that the kernel's
+       * port allocation algorithm prefers odd/even numbers (depending on the
+       * caller - see inet_csk_find_open_port()), so for the common case where
+       * num_slaves==2 we want to avoid predictable output.
+       * The hash here is a mutation of FNV-1.
+       * Cast to 16-bit is because 16-bit division is slightly lower-latency
+       * than 32-bit */
+      ci_uint16 ports = CI_BSWAP_BE16(hs->src_port_be16 ^ hs->dst_port_be16);
+      return (ci_uint16)(((ports * 16777619) >> 8) ^ addrs)
+               % (ci_uint16)num_slaves;
     } else {
-      return (CI_BSWAP_BE32(hs->src_addr_be32 ^ hs->dst_addr_be32) & 0xffff)
-        % num_slaves;
+      return (ci_uint16)addrs % (ci_uint16)num_slaves;
     }
   }
   else {

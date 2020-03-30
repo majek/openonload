@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 OR Solarflare-Binary */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /* This file contains description of the Onload ioctls used by the Control
  * Plane server.  Any change in this file is likely to result in
  * misfunctioning cplane server. */
@@ -37,6 +24,17 @@ struct oo_op_cplane_llapmod {
   ci_mac_addr_t mac;
 };
 
+/* Parameter to OO_OP_CP_SELECT_INSTANCE, specifying which instance of the
+ * cplane to select. */
+enum oo_op_cp_select_instance {
+  CP_SELECT_INSTANCE_LOCAL,
+  CP_SELECT_INSTANCE_INIT_NET,
+};
+
+struct oo_op_cplane_arp_resolve {
+  cicp_verinfo_t verinfo;
+  cp_fwd_table_id fwd_table_id;  /* Respected only for the cplane server. */
+};
 
 #include <onload/ioctl_base.h>
 
@@ -60,7 +58,8 @@ enum {
 #define OO_IOC_CP_FWD_RESOLVE_COMPLETE     OO_IOC_W(CP_FWD_RESOLVE_COMPLETE, \
                                                     ci_uint32)
   OO_OP_CP_ARP_RESOLVE,
-#define OO_IOC_CP_ARP_RESOLVE     OO_IOC_W(CP_ARP_RESOLVE, cicp_verinfo_t)
+#define OO_IOC_CP_ARP_RESOLVE     OO_IOC_W(CP_ARP_RESOLVE, \
+                                           struct oo_op_cplane_arp_resolve)
 
   OO_OP_CP_ARP_CONFIRM,
 #define OO_IOC_CP_ARP_CONFIRM     OO_IOC_W(CP_ARP_CONFIRM, cicp_verinfo_t)
@@ -89,6 +88,18 @@ enum {
 
   OO_OP_CP_NOTIFY_LLAP_MONITORS,
 #define OO_IOC_CP_NOTIFY_LLAP_MONITORS OO_IOC_NONE(CP_NOTIFY_LLAP_MONITORS)
+
+  OO_OP_CP_CHECK_VETH_ACCELERATION,
+#define OO_IOC_CP_CHECK_VETH_ACCELERATION OO_IOC_W(CP_CHECK_VETH_ACCELERATION, \
+                                                   ci_uint32)
+
+  /* Defined as taking a ci_uint32.  Admissible values are in the
+   * oo_op_cp_select_instance enum. */
+  OO_OP_CP_SELECT_INSTANCE,
+#define OO_IOC_CP_SELECT_INSTANCE OO_IOC_W(CP_SELECT_INSTANCE, ci_uint32)
+
+  OO_OP_CP_INIT_KERNEL_MIBS,
+#define OO_IOC_CP_INIT_KERNEL_MIBS OO_IOC_R(CP_INIT_KERNEL_MIBS, ci_uint32)
 
   OO_OP_CP_END  /* This had better be last! */
 };

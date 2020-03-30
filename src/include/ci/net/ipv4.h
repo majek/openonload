@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_HEADER >
@@ -63,6 +50,11 @@ typedef struct {
 #define CI_IP4_IHL_VERSION(ihl)  ((4u << 4u) | ((ihl) >> 2u))
 #define CI_IP4_IHL(ip)           (((ip)->ip_ihl_version & 0xf) << 2u)
 #define CI_IP4_VERSION(ip)       ((ip)->ip_ihl_version >> 4u)
+
+ci_inline void* ci_ip_data(ci_ip4_hdr* ip)
+{
+  return (uint8_t*) ip + CI_IP4_IHL(ip);
+}
 
 #define CI_IP4_OFFSET_MASK       CI_BSWAPC_BE16(0x1fff)
 #define CI_IP4_FRAG_MORE         CI_BSWAPC_BE16(0x2000)

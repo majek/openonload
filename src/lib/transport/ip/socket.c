@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /************************************************************************** \
 *//*! \file
 ** <L5_PRIVATE L5_SOURCE>
@@ -35,10 +22,9 @@ void ci_sock_cmn_reinit(ci_netif* ni, ci_sock_cmn* s)
   s->tx_errno = EPIPE;
 
   s->rx_errno = ENOTCONN;
-  s->pkt.ether_type = CI_ETHERTYPE_IP;
-  ci_ip_cache_init(&s->pkt);
+  ci_ip_cache_init(&s->pkt, AF_INET);
 
-  s->s_flags &= ~(CI_SOCK_FLAG_FILTER | CI_SOCK_FLAG_MAC_FILTER |
+  s->s_flags &= ~(CI_SOCK_FLAG_FILTER | CI_SOCK_FLAG_STACK_FILTER |
                   CI_SOCK_FLAG_SCALPASSIVE);
   ci_assert_nflags(s->s_flags, CI_SOCK_FLAG_SCALACTIVE);
 }
@@ -48,7 +34,7 @@ void ci_sock_cmn_reinit(ci_netif* ni, ci_sock_cmn* s)
 
 void oo_sock_cplane_init(struct oo_sock_cplane* cp)
 {
-  cp->ip_laddr_be32 = 0;
+  cp->laddr = ip4_addr_any;
   cp->lport_be16 = 0;
   cp->so_bindtodevice = CI_IFID_BAD;
   cp->ip_multicast_if = CI_IFID_BAD;
@@ -72,6 +58,10 @@ void ci_sock_cmn_init(ci_netif* ni, ci_sock_cmn* s, int can_poison)
 
   citp_waitable_reinit(ni, &s->b);
   oo_sock_cplane_init(&s->cp);
+
+#if CI_CFG_IPV6
+  s->tclass = CI_IPV6_DFLT_TCLASS;
+#endif
 
   s->s_flags = CI_SOCK_FLAG_CONNECT_MUST_BIND | CI_SOCK_FLAG_PMTU_DO;
   s->s_aflags = 0u;
@@ -101,6 +91,19 @@ void ci_sock_cmn_init(ci_netif* ni, ci_sock_cmn* s, int can_poison)
   s->os_sock_status = OO_OS_STATUS_TX;
 
 
+#if CI_CFG_IPV6
+  {
+    ci_uint32 auto_flowlabels = NI_OPTS(ni).auto_flowlabels;
+    if( auto_flowlabels == CITP_IP6_AUTO_FLOW_LABEL_OPTOUT ||
+        auto_flowlabels == CITP_IP6_AUTO_FLOW_LABEL_FORCED )
+      s->s_flags |= (CI_SOCK_FLAG_AUTOFLOWLABEL_REQ |
+                     CI_SOCK_FLAG_AUTOFLOWLABEL_OPT );
+    else
+      s->s_flags &= ~(CI_SOCK_FLAG_AUTOFLOWLABEL_REQ |
+                      CI_SOCK_FLAG_AUTOFLOWLABEL_OPT );
+  }
+#endif
+
   ci_sock_cmn_reinit(ni, s);
 
   sp = oo_sockp_to_statep(ni, SC_SP(s));
@@ -123,15 +126,16 @@ void ci_sock_cmn_dump(ci_netif* ni, ci_sock_cmn* s, const char* pf,
          " s_flags: "CI_SOCK_FLAGS_FMT, pf,
          (int) s->uuid CI_DEBUG_ARG((int)s->pid),
          CI_SOCK_FLAGS_PRI_ARG(s));
-  logger(log_arg, "%s  rcvbuf=%d sndbuf=%d bindtodev=%d(%d,0x%x:%d) ttl=%d", pf,
-         s->so.rcvbuf, s->so.sndbuf, s->cp.so_bindtodevice,
-         s->rx_bind2dev_ifindex, s->rx_bind2dev_hwports,
-         s->rx_bind2dev_vlan, s->cp.ip_ttl);
+  logger(log_arg, "%s  rcvbuf=%d sndbuf=%d", pf, s->so.rcvbuf, s->so.sndbuf);
   logger(log_arg, "%s  rcvtimeo_ms=%d sndtimeo_ms=%d sigown=%d "
-         "cmsg="OO_CMSG_FLAGS_FMT"%s",
+         "cmsg="OO_CMSG_FLAGS_FMT,
          pf, s->so.rcvtimeo_msec, s->so.sndtimeo_msec, s->b.sigown,
-         OO_CMSG_FLAGS_PRI_ARG(s->cmsg_flags),
-         (s->cp.sock_cp_flags & OO_SCP_NO_MULTICAST) ? " NO_MCAST_TX":"");
+         OO_CMSG_FLAGS_PRI_ARG(s->cmsg_flags));
+  logger(log_arg, "%s  bindtodev=%d(%d,0x%x:%d) ttl=%d "OO_SCP_FLAGS_FMT,
+         pf, s->cp.so_bindtodevice,
+         s->rx_bind2dev_ifindex, s->rx_bind2dev_hwports,
+         s->rx_bind2dev_vlan, s->cp.ip_ttl,
+         OO_SCP_FLAGS_ARG(s->cp.sock_cp_flags));
   logger(log_arg, "%s  rx_errno=%x tx_errno=%x so_error=%d os_sock=%u%s%s", pf,
          s->rx_errno, s->tx_errno, s->so_error,
          s->os_sock_status >> OO_OS_STATUS_SEQ_SHIFT,
@@ -146,54 +150,53 @@ void ci_sock_cmn_dump(ci_netif* ni, ci_sock_cmn* s, const char* pf,
 }
 
 
-void ci_sock_set_laddr(ci_sock_cmn* s, ci_addr_t addr, ci_uint16 port)
+void ci_ipcache_set_saddr(ci_ip_cached_hdrs* ipcache, ci_addr_t addr)
 {
 #if CI_CFG_IPV6
-  if( ipcache_is_ipv6(s->pkt) ) {
-    memcpy(sock_ip6_laddr(s), addr.ip6, sizeof(ci_ip6_addr_t));
+  if( ipcache_is_ipv6(ipcache) ) {
+    memcpy(ipcache->ipx.ip6.saddr, addr.ip6, sizeof(ci_ip6_addr_t));
   } else
 #endif
   {
-    sock_laddr_be32(s) = addr.ip4;
+    ipcache->ipx.ip4.ip_saddr_be32 = addr.ip4;
   }
+}
+
+void ci_ipcache_set_daddr(ci_ip_cached_hdrs* ipcache, ci_addr_t addr)
+{
+#if CI_CFG_IPV6
+  if( ipcache_is_ipv6(ipcache) ) {
+    memcpy(ipcache->ipx.ip6.daddr, addr.ip6, sizeof(ci_ip6_addr_t));
+  } else
+#endif
+  {
+    ipcache->ipx.ip4.ip_daddr_be32 = addr.ip4;
+  }
+}
+
+void ci_sock_set_laddr_port(ci_sock_cmn* s, ci_addr_t addr, ci_uint16 port)
+{
+  ci_sock_set_laddr(s, addr);
   sock_lport_be16(s) = port;
 }
 
-
-void ci_sock_set_raddr(ci_sock_cmn* s, ci_addr_t addr, ci_uint16 port)
+void ci_sock_set_raddr_port(ci_sock_cmn* s, ci_addr_t addr, ci_uint16 port)
 {
-#if CI_CFG_IPV6
-  if( ipcache_is_ipv6(s->pkt) ) {
-    memcpy(sock_ip6_raddr(s), addr.ip6, sizeof(ci_ip6_addr_t));
-  } else
-#endif
-  {
-    sock_raddr_be32(s) = addr.ip4;
-  }
-  sock_rport_be16(s) = s->pkt.dport_be16 = port;
+  ci_sock_set_raddr(s, addr);
+  sock_rport_be16(s) = port;
 }
 
 
 ci_addr_t sock_laddr(ci_sock_cmn* s)
 {
-#if CI_CFG_IPV6
-  if( ipcache_is_ipv6(s->pkt) ) {
-    ci_addr_t addr;
-    memcpy(addr.ip6, sock_ip6_laddr(s), sizeof(addr.ip6));
-    return addr;
-  }
-  else
-#endif
-  {
-    return CI_ADDR_FROM_IP4(sock_laddr_be32(s));
-  }
+  return s->laddr;
 }
 
 
 ci_addr_t sock_raddr(ci_sock_cmn* s)
 {
 #if CI_CFG_IPV6
-  if( ipcache_is_ipv6(s->pkt) ) {
+  if( ipcache_is_ipv6(&s->pkt) ) {
     ci_addr_t addr;
     memcpy(addr.ip6, sock_ip6_raddr(s), sizeof(addr.ip6));
     return addr;
@@ -207,23 +210,41 @@ ci_addr_t sock_raddr(ci_sock_cmn* s)
 
 
 #if CI_CFG_IPV6
-void ci_init_ipcache_ip6_hdr(ci_sock_cmn* s)
+ci_inline void ci_init_ipcache_ipx_hdr(ci_sock_cmn* s, int af_to)
 {
   ci_uint8 protocol, ttl;
+  int af_from = (af_to == AF_INET6) ? AF_INET : AF_INET6;
 
-  ci_assert_equal(ipcache_is_ipv6(s->pkt), 0);
+#ifndef NDEBUG
+  if (af_to == AF_INET6)
+    ci_assert_equal(ipcache_is_ipv6(&s->pkt), 0);
+  else
+    ci_assert_nequal(ipcache_is_ipv6(&s->pkt), 0);
+#endif
 
-  protocol = sock_protocol(s);
-  ttl = s->pkt.ip.ip_ttl;
+  protocol = ipx_hdr_protocol(af_from, &s->pkt.ipx);
+  ttl = ipx_hdr_ttl(af_from, &s->pkt.ipx);
 
-  s->pkt.ether_type = CI_ETHERTYPE_IP6;
+  if (af_to == AF_INET6) {
+    s->pkt.ether_type = CI_ETHERTYPE_IP6;
+    memset(&s->pkt.ipx.ip6, 0, sizeof(s->pkt.ipx.ip6));
+  }
+  else {
+    s->pkt.ether_type = CI_ETHERTYPE_IP;
+    memset(&s->pkt.ipx.ip4, 0, sizeof(s->pkt.ipx.ip4));
+  }
 
-  /* Move source and destination ports */
-  memmove(&s->pkt.ip6 + 1, &s->pkt.ip + 1, sizeof(ci_uint16) * 2);
+  ci_ipx_hdr_init_fixed(&s->pkt.ipx, af_to, protocol, ttl,
+                        sock_tos_tclass(af_to, s));
+}
 
-  memset(&s->pkt.ip6, 0, sizeof(s->pkt.ip6));
+void ci_init_ipcache_ip4_hdr(ci_sock_cmn* s)
+{
+  ci_init_ipcache_ipx_hdr(s, AF_INET);
+}
 
-  sock_protocol(s) = protocol;
-  s->pkt.ip6.hop_limit = ttl;
+void ci_init_ipcache_ip6_hdr(ci_sock_cmn* s)
+{
+  ci_init_ipcache_ipx_hdr(s, AF_INET6);
 }
 #endif

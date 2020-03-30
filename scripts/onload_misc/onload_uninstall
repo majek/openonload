@@ -1,8 +1,8 @@
 #!/bin/sh
-######################################################################
+# SPDX-License-Identifier: GPL-2.0
+# X-SPDX-Copyright-Text: (c) Solarflare Communications Inc
+
 # Uninstall onload files from system directories.
-# Author: David Riddoch
-######################################################################
 
 bin=$(cd $(dirname "$0") && /bin/pwd)
 me=$(basename "$0")
@@ -80,9 +80,9 @@ rmdir $i_include &> /dev/null || \
 
 uninstall_ldconfig $m
 
-if [ -f /etc/modprobe.conf ]; then
-  sed -i '/onload_start/,/onload_end/d' /etc/modprobe.conf
-fi
+# We deliberately do not deluser onload_cplane because we might be using it
+# again and it would be inconvenient for its ID to change (potentially). This
+# is also the normal behaviour for RPM and deb packages.
 
 log "Updating kernel module dependencies..."
 grep "^/lib/modules/" "$m" | sed 's+/lib/modules/\([^/]*\)/.*+\1+' |

@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 ** <L5_PRIVATE L5_SOURCE>
 **   Copyright: (c) Level 5 Networks Limited.
@@ -115,7 +102,7 @@ ci_tcp_helper_ep_reuseport_bind(ci_fd_t           fd,
                                 ci_int32          cluster_size,
                                 ci_uint32         cluster_restart_opt,
                                 ci_uint32         cluster_hot_restart_opt,
-                                ci_uint32         addr_be32,
+                                ci_addr_t         addr,
                                 ci_uint16         port_be16) CI_HF;
 
 
@@ -220,13 +207,15 @@ extern int ci_tcp_helper_set_tcp_close_os_sock(ci_netif *ni,
  *!
  * Try and expand the active wild pool
  *--------------------------------------------------------------------*/
-extern int ci_tcp_helper_alloc_active_wild(ci_netif *ni, ci_uint32 laddr_be32);
+extern int ci_tcp_helper_alloc_active_wild(ci_netif *ni, ci_addr_t laddr);
 
 extern int
 ci_tcp_inject_packets(ci_netif *ni, int ifindex, struct iovec* kernel_packets,
                       int num);
 
 
+
+int ci_tcp_helper_bpf_bind(ci_netif* ni, int intf_i, int attach_point);
 
 #endif /* __CI_UL_TCP_HELPER_H__ */
 

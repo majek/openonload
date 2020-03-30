@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_HEADER >
@@ -33,6 +20,7 @@ struct ci_ip4_hdr_s;
 struct ci_tcp_hdr_s;
 struct ci_udp_hdr_s;
 struct ci_icmp_hdr_s;
+struct ci_ip6_hdr_s;
 
 
   /*! Compute the checksum for an IP header. */
@@ -43,15 +31,27 @@ extern unsigned ci_tcp_checksum(const struct ci_ip4_hdr_s* ip,
 				const struct ci_tcp_hdr_s* tcp,
 				const void* payload) CI_HF;
 
+extern unsigned ci_ip6_tcp_checksum(const struct ci_ip6_hdr_s* ip6,
+                                    const struct ci_tcp_hdr_s* tcp,
+                                    const void* payload) CI_HF;
+
   /*! Compute the checksum for a UDP packet. */
 extern unsigned ci_udp_checksum(const struct ci_ip4_hdr_s* ip,
 				const struct ci_udp_hdr_s* udp,
 				const ci_iovec *iov, int iovlen) CI_HF;
 
+extern unsigned
+ci_ip6_udp_checksum(const struct ci_ip6_hdr_s* ip6,
+                    const struct ci_udp_hdr_s* udp,
+                    const ci_iovec *iov, int iovlen) CI_HF;
+
   /*! Compute the checksum for a ICMP packet. */
 extern unsigned ci_icmp_checksum(const struct ci_ip4_hdr_s* ip,
 				 const struct ci_icmp_hdr_s* icmp) CI_HF;
 
+extern unsigned
+ci_icmpv6_checksum(const struct ci_ip6_hdr_s* ip6,
+                   const struct ci_icmp_hdr_s* icmp) CI_HF;
 
   /*! Compute a partial checksum for those parts of the IP header that are
   ** unlikely to change when communicating with a particular host.  ie. All

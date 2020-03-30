@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /****************************************************************************
  * Copyright 2002-2005: Level 5 Networks Inc.
  * Copyright 2005-2008: Solarflare Communications Inc,
@@ -48,15 +35,13 @@
 #define CI_LOG_I(x)       x              /* information */
 #define CI_LOG_V(x)       x              /* verbose     */
 
-/* Build time asserts. We paste the line number into the type name
- * so that the macro can be used more than once per file even if the
- * compiler objects to multiple identical typedefs. Collisions
- * between use in different header files is still possible. */
+/* Build time asserts. We paste a counter into the type name so that
+ * the macro can be used more than once per file. */
 #ifndef CI_BUILD_ASSERT
 #define __CI_BUILD_ASSERT_NAME(_x) __CI_BUILD_ASSERT_ILOATHECPP(_x)
 #define __CI_BUILD_ASSERT_ILOATHECPP(_x)  __CI_BUILD_ASSERT__ ##_x
 #define CI_BUILD_ASSERT(e)\
- typedef char  __CI_BUILD_ASSERT_NAME(__LINE__)[(e)?1:-1] \
+ typedef char  __CI_BUILD_ASSERT_NAME(__COUNTER__)[(e)?1:-1] \
     __attribute__((unused))
 #endif
 
@@ -94,6 +79,8 @@
 # define _ci_assert_flags(x, y, f, l)         __analysis_assume((((x)&(y)) \
                                                                 == (y)))
 # define _ci_assert_nflags(x, y, f, l)        __analysis_assume((((x)&(y))==0))
+# define _ci_assert_addrs_equal(x, y, f, l)   \
+  __analysis_assume(CI_IPX_ADDR_EQ((x),(y)))
 # define _ci_assert_equal_msg(x, y, m, f, l)  __analysis_assume((x)==(y))
 
 # define _ci_verify(exp, file, line) \
@@ -137,6 +124,7 @@
 # define _ci_assert_impl(exp1, exp2, file, line)     do{}while(0)
 # define _ci_assert_flags(exp1, exp2, file, line)    do{}while(0)
 # define _ci_assert_nflags(exp1, exp2, file, line)   do{}while(0)
+# define _ci_assert_addrs_equal(exp1, exp2, file, line) do{}while(0)
 
 # define _ci_verify(exp, file, line) \
   do { \
@@ -201,6 +189,18 @@
     }                                               \
   } while (0)
 
+# define _ci_assert2_addr(e, x, y, file, line)  do {     \
+    if(CI_UNLIKELY( ! (e) )) {                      \
+      ci_log("ci_assert(%s)", #e);                  \
+      ci_log("where [%s="IPX_FMT"]",               \
+             #x, IPX_ARG(AF_IP_L3(x)));             \
+      ci_log("and [%s="IPX_FMT"]",                 \
+             #y, IPX_ARG(AF_IP_L3(y)));             \
+      ci_log("at %s:%d", __FILE__, __LINE__);       \
+      ci_fail(("from %s:%d", (file), (line)));      \
+    }                                               \
+  } while (0)
+
 # define _ci_verify(exp, file, line)                            \
   do {                                                          \
     if (CI_UNLIKELY(!(exp)))                                    \
@@ -221,6 +221,8 @@
                                                     (f), (l))
 # define _ci_assert_nflags(x, y, f, l) _ci_assert2(((x)&(y))== 0, x, y, \
                                                     (f), (l))
+# define _ci_assert_addrs_equal(x, y, f, l) \
+   _ci_assert2_addr(CI_IPX_ADDR_EQ((x),(y)), x, y, (f), (l))
 
 #define _ci_assert_equal_msg(exp1, exp2, msg, file, line)       \
   do {                                                          \
@@ -356,6 +358,9 @@
 
 #define ci_assert_nflags(val, flags) \
         _ci_assert_nflags(val, flags, __FILE__, __LINE__)
+
+#define ci_assert_addrs_equal(exp1, exp2) \
+        _ci_assert_addrs_equal(exp1, exp2, __FILE__, __LINE__)
 
 
 #define CI_TEST(exp)                            \

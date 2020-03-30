@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /****************************************************************************
  * Driver for Solarflare network controllers -
  *          resource management for Xen backend, OpenOnload, etc
@@ -56,61 +43,11 @@
 
 struct efrm_vf;
 
-
-#ifdef CONFIG_SFC_RESOURCE_VF
-#include <ci/efrm/resource.h>
-#include <ci/efrm/vi_allocation.h>
-
-
-struct efrm_vi;
-struct efrm_client;
-struct vi_resource_dimensions;
-
-/* Should we avoid atomic allocations when using VFs? */
-extern int efrm_vf_avoid_atomic_allocations;
-
-extern void
-efrm_vf_nic_params(struct efhw_nic*, unsigned *vi_base_out,
-		   unsigned *vi_scale_out, unsigned *vf_count_out);
-extern void
-efrm_vf_init_nic_params(struct efhw_nic*,
-			const struct vi_resource_dimensions *);
-
-extern struct efrm_resource *
-efrm_vf_to_resource(struct efrm_vf *) __attribute__ ((__pure__));
-extern struct efrm_vf *
-efrm_vf_from_resource(struct efrm_resource *) __attribute__ ((__pure__));
-
-extern int
-efrm_vf_resource_alloc(struct efrm_client *,
-		       struct efrm_vf *linked, int use_iommu,
-		       struct efrm_vf **vf_out);
-extern void
-efrm_vf_resource_release(struct efrm_vf *);
-
-extern int
-efrm_vf_get_nic_index(struct efrm_vf *) __attribute__ ((__pure__));
-extern efhw_iommu_domain *
-efrm_vf_get_iommu_domain(struct efrm_vf *) __attribute__ ((__pure__));
-
-
-extern int
-efrm_vf_vi_alloc(struct efrm_vf *vf, struct efrm_vi_allocation *allocation);
-extern void efrm_vf_vi_start(struct efrm_vi *, const char *name);
-extern void efrm_vf_vi_drop(struct efrm_vi_allocation *allocation);
-
-extern int efrm_vf_vi_qmoderate(struct efrm_vi *virs, int usec);
-extern int efrm_vf_vi_set_cpu_affinity(struct efrm_vi *virs, int cpu);
-
-extern unsigned long efrm_vf_alloc_ioaddrs(struct efrm_vf *, int n_pages,
-					   efhw_iommu_domain **);
-
-#else /* !CONFIG_SFC_RESOURCE_VF */
 static inline efhw_iommu_domain *
 efrm_vf_get_iommu_domain(struct efrm_vf *vf)
 {
 	return NULL;
 }
-#endif /* CONFIG_SFC_RESOURCE_VF */
+
 #endif /* __CI_EFRM_VF_RESOURCE_H__ */
 

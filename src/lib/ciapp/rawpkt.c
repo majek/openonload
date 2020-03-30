@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_SOURCE>
@@ -157,9 +144,9 @@ static int udp_ctor(ci_rawpkt_t* rp, char* arg)
     close(rp->rd);
     return -errno;
   }
-  if( ci_hostport_to_sockaddr(raddr_s, &sa) < 0 ) {
-    ci_log("ci_rawpkt_ctor: ci_hostport_to_sockaddr (%d)",
-	   ci_hostport_to_sockaddr(raddr_s, &sa));
+  if( ci_hostport_to_sockaddr_in(raddr_s, &sa) < 0 ) {
+    ci_log("ci_rawpkt_ctor: ci_hostport_to_sockaddr_in (%d)",
+	   ci_hostport_to_sockaddr_in(raddr_s, &sa));
     close(rp->rd);
     return -errno;
   }

@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /*
 ** Copyright 2012     Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA

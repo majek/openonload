@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file ip_driver.c OS interface to the IP module
 ** <L5_PRIVATE L5_SOURCE>
@@ -40,7 +27,8 @@
 #include <onload/version.h>
 #include <onload/oof_interface.h>
 #include <onload/cplane_driver.h>
-#include <onload/cplane_module_params.h>
+#include "onload_kernel_compat.h"
+#include <ci/driver/chrdev.h>
 #include <ci/tools.h>
 #ifdef ONLOAD_OFE
 #include "ofe/onload.h"
@@ -266,103 +254,15 @@ MODULE_PARM_DESC(scalable_filter_gid,
                  "See EF_SCALABLE_FILTERS environment variable.");
 
 
-module_param(cplane_init_timeout, int, S_IRUGO | S_IWUSR);
-MODULE_PARM_DESC(cplane_init_timeout,
-                 "Time in seconds to wait for the control plane to initialize "
-                 "when creating a stack.  This initialization requires that "
-                 "the user-level control plane process be spawned if one is "
-                 "not already running for the current network namespace.  "
-                 "If this parameter is zero, stack-creation will fail "
-                 "immediately if the control plane is not ready.  If it is "
-                 "negative, stack-creation will block indefinitely in wait "
-                 "for the control plane.");
-
-bool cplane_spawn_server = 1;
-module_param(cplane_spawn_server, bool, S_IRUGO | S_IWUSR);
-MODULE_PARM_DESC(cplane_spawn_server,
-                 "If true, control plane server processes are spawned "
-                 "on-demand.  Typically this occurs when a stack is created "
-                 "in a network namespace in which there are no other stacks.");
-
-char* cplane_server_path = NULL;
-
-#ifdef EFRM_HAVE_KERNEL_PARAM_OPS
-static const struct kernel_param_ops cplane_server_path_ops = {
-  .set = cplane_server_path_set,
-  .get = cplane_server_path_get,
-};
-module_param_cb(cplane_server_path, &cplane_server_path_ops, 
-                NULL, S_IRUGO | S_IWUSR);
-#else
-module_param_call(cplane_server_path, cplane_server_path_set,
-                  cplane_server_path_get, NULL, S_IRUGO | S_IWUSR);
-#endif
-MODULE_PARM_DESC(cplane_server_path,
-                 "Sets the path to the onload_cp_server binary.  Defaults to "
-                 DEFAULT_CPLANE_SERVER_PATH" if empty.");
-
-char* cplane_server_params = NULL;
-#ifdef EFRM_HAVE_KERNEL_PARAM_OPS
-static const struct kernel_param_ops cplane_server_params_ops = {
-  .set = cplane_server_params_set,
-  .get = cplane_server_params_get,
-};
-module_param_cb(cplane_server_params, &cplane_server_params_ops, 
-                NULL, S_IRUGO | S_IWUSR);
-#else
-module_param_call(cplane_server_params, cplane_server_params_set,
-                  cplane_server_params_get, NULL, S_IRUGO | S_IWUSR);
-#endif
-MODULE_PARM_DESC(cplane_server_params,
-                 "Set additional parameters for the onload_cp_server "
-                 "server when it is spawned on-demand.");
-
-#ifdef EFRM_HAVE_KERNEL_PARAM_OPS
-static const struct kernel_param_ops cplane_server_grace_timeout_ops = {
-  .set = cplane_server_grace_timeout_set,
-  .get = param_get_int,
-};
-module_param_cb(cplane_server_grace_timeout, &cplane_server_grace_timeout_ops, 
-                &cplane_server_grace_timeout, S_IRUGO | S_IWUSR);
-#else
-module_param_call(cplane_server_grace_timeout,
-                  cplane_server_grace_timeout_set, param_get_int,
-                  &cplane_server_grace_timeout, S_IRUGO | S_IWUSR);
-#endif
-MODULE_PARM_DESC(cplane_server_grace_timeout,
-                 "Time in seconds to wait before killing the control plane "
-                 "server after the last user has gone (i.e. the last Onload "
-                 "stack in this namespace have been destroyed).  It is used "
-                 "with cplane_spawn_server = Y only.");
-
-module_param(cplane_route_request_limit, int, S_IRUGO | S_IWUSR);
-MODULE_PARM_DESC(cplane_route_request_limit,
-                 "Queue depth limit for route resolution requests.");
-
-
-#ifdef EFRM_HAVE_KERNEL_PARAM_OPS
-static const struct kernel_param_ops cplane_route_request_timeout_ms_ops = {
-  .set = cplane_route_request_timeout_set,
-  .get = param_get_int,
-};
-module_param_cb(cplane_route_request_timeout_ms, 
-                &cplane_route_request_timeout_ms_ops, 
-                &cplane_route_request_timeout_ms, S_IRUGO | S_IWUSR);
-#else
-module_param_call(cplane_route_request_timeout_ms,
-                  cplane_route_request_timeout_set,
-                  param_get_int, &cplane_route_request_timeout_ms,
-                  S_IRUGO | S_IWUSR);
-#endif
-MODULE_PARM_DESC(cplane_route_request_timeout_ms,
-                 "Time out value for route resolution requests.");
-
-module_param(cplane_server_uid, int, S_IRUGO | S_IWUSR);
-MODULE_PARM_DESC(cplane_server_uid,
-                 "UID to drop privileges to for the cplane server.");
-module_param(cplane_server_gid, int, S_IRUGO | S_IWUSR);
-MODULE_PARM_DESC(cplane_server_gid,
-                 "GID to drop privileges to for the cplane server.");
+/* Module parameter controlling whether to accelerate traffic over veth
+ * interfaces. */
+bool oo_accelerate_veth = 0;
+module_param(oo_accelerate_veth, bool, S_IRUGO | S_IWUSR);
+MODULE_PARM_DESC(oo_accelerate_veth,
+                 "Controls whether Onload will accelerate traffic over veth "
+                 "interfaces.  For traffic over a given veth interface to be "
+                 "accelerated, its peer must be in the default network "
+                 "namespace.");
 
 
 /**************************************************************************** 
@@ -370,71 +270,6 @@ MODULE_PARM_DESC(cplane_server_gid,
  * ioctl: customised driver interface
  * 
  ****************************************************************************/ 
-
-int efab_fds_dump(unsigned pid)
-{
-  struct task_struct* t;
-  struct file* filp;
-  ci_private_t* priv;
-  int fd, rc = 0;
-
-  rcu_read_lock();
-  t = ci_get_task_by_pid(pid);
-
-  if( ! t ) {
-    ci_log("%s: bad pid %d", __FUNCTION__, pid);
-    rc = -ENOENT;
-  }
-  else {
-    if( ! t->files ) {
-      ci_log("%s: files pointer is null in pid %d", __FUNCTION__, pid);
-      rc = -EINVAL;
-    }
-    else {
-      for( fd = 0; fd < files_fdtable(t->files)->max_fds; ++fd ) {
-	rcu_read_lock();
-	filp = fcheck_files(t->files, fd);
-
-	if( ! filp )  continue;
-	priv = 0;
-
-	if( filp->f_op == &oo_fops ) {
-	  ci_log("pid=%d fd=%d => efab", pid, fd);
-	  priv = (ci_private_t*) filp->private_data;
-	}
-	else if( filp->f_op == &linux_tcp_helper_fops_tcp ) {
-	  ci_log("pid=%d fd=%d => TCP", pid, fd);
-	  priv = (ci_private_t*) filp->private_data;
-	}
-	else if( filp->f_op == &linux_tcp_helper_fops_udp ) {
-	  ci_log("pid=%d fd=%d => UDP", pid, fd);
-	  priv = (ci_private_t*) filp->private_data;
-	}
-#if CI_CFG_USERSPACE_PIPE
-	else if( filp->f_op == &linux_tcp_helper_fops_pipe_reader ) {
-	  ci_log("pid=%d fd=%d => PIPE READER", pid, fd);
-	  priv = (ci_private_t*) filp->private_data;
-	}
-	else if( filp->f_op == &linux_tcp_helper_fops_pipe_writer ) {
-	  ci_log("pid=%d fd=%d => PIPE WRITER", pid, fd);
-	  priv = (ci_private_t*) filp->private_data;
-	}
-#endif
-	else
-	  ci_log("pid=%d fd=%d => other", pid, fd);
-
-#ifndef NDEBUG
-        if( priv ) THR_PRIV_DUMP(priv, "      ");
-#endif
-      }
-    }
-  }
-  rcu_read_unlock();
-
-  return rc;
-}
-
-
 
 #if CI_MEMLEAK_DEBUG_ALLOC_TABLE
 #error "this code is broken, fix it if necessary"
@@ -664,34 +499,6 @@ struct file_operations oo_fops = {
  *
  ****************************************************************************/
 
-static int         oo_dev_major;
-static const char* oo_dev_name = EFAB_DEV_NAME;
-
-static int 
-ci_chrdev_ctor(struct file_operations *fops, const char *name)
-{
-  int rc, major = 0; /* specify default major number here */
-
-  if ((rc = register_chrdev(major, name, fops)) < 0) {
-    ci_log("%s: can't register char device %d", name, rc);
-    return rc;
-  }
-  if (major == 0)
-    major = rc;
-  oo_dev_major = major;
-
-  return rc;
-}
-
-
-static void
-ci_chrdev_dtor(const char* name)
-{
-  if( oo_dev_major )
-    unregister_chrdev(oo_dev_major, name);
-}
-
-
 static int onload_sanity_checks(void)
 {
   const int dma_start_off = CI_MEMBER_OFFSET(ci_ip_pkt_fmt, dma_start);
@@ -737,6 +544,9 @@ static int onload_sanity_checks(void)
  *
  **********************************************************************/
 
+static struct ci_chrdev_registration* oo_chrdev;
+
+
 static int __init onload_module_init(void)
 {
   int rc;
@@ -759,6 +569,14 @@ static int __init onload_module_init(void)
     goto fail_sanity;
 
   oo_mm_tbl_init();
+
+#if CI_CFG_BPF
+#ifndef NO_BPF
+  rc = oo_bpf_ctor();
+  if( rc < 0 )
+    goto fail_bpf;
+#endif
+#endif
 
   rc = efab_tcp_driver_ctor();
   if( rc != 0 )
@@ -791,7 +609,7 @@ static int __init onload_module_init(void)
     goto failed_onloadfs;
 
   /* Now register as a character device. */
-  rc = ci_chrdev_ctor(&oo_fops, oo_dev_name);
+  rc = create_one_chrdev_and_mknod(0, OO_DEV_NAME, &oo_fops, &oo_chrdev);
   if( rc < 0 )
     goto failed_chrdev;
 
@@ -812,7 +630,7 @@ static int __init onload_module_init(void)
  failed_cp_ctor:
   oo_epoll_chrdev_dtor();
  failed_epolldev_ctor:
-  ci_chrdev_dtor(EFAB_DEV_NAME);
+  destroy_chrdev_and_mknod(oo_chrdev);
  failed_chrdev:
   onloadfs_fini();
  failed_onloadfs:
@@ -832,6 +650,12 @@ static int __init onload_module_init(void)
   oo_nic_shutdown();
   efab_tcp_driver_dtor();
  fail_ip_ctor:
+#if CI_CFG_BPF
+#ifndef NO_BPF
+  oo_bpf_dtor();
+ fail_bpf:
+#endif
+#endif
  fail_sanity:
   return rc;
 }
@@ -845,10 +669,8 @@ static void onload_module_exit(void)
 
   /* Destroy User API: char devices. */
   oo_epoll_chrdev_dtor();
-  ci_chrdev_dtor(oo_dev_name);
+  destroy_chrdev_and_mknod(oo_chrdev);
   onloadfs_fini();
-
-  oo_cp_driver_dtor();
 
   /* There are no User API now - so we do not need trampoline any more.
    * Destroy trampoline early to alleviate the race condition with RT
@@ -859,6 +681,12 @@ static void onload_module_exit(void)
    * It should be done early, as soon as User API is not available. */
   efab_tcp_driver_stop();
 
+  /* By reverse order of creation, we should have destroyed the cplane driver
+   * earlier than this, but because stacks have references to cplanes, we need
+   * to have flushed the global workqueue in efab_tcp_driver_stop() before
+   * calling oo_cp_driver_ctor(). */
+  oo_cp_driver_dtor();
+
   /* Remove external interfaces to efab_tcp_driver. */
   ci_uninstall_proc_entries();
   oo_driverlink_unregister();
@@ -867,6 +695,12 @@ static void onload_module_exit(void)
   oo_nic_shutdown();
 
   efab_tcp_driver_dtor();
+
+#if CI_CFG_BPF
+#ifndef NO_BPF
+  oo_bpf_dtor();
+#endif
+#endif
 
   OO_DEBUG_LOAD(ci_log("Onload module unloaded"));
 }
