@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-2.0
+# X-SPDX-Copyright-Text: (c) Solarflare Communications Inc
 ############################
 # 
 # EtherFabric linux kernel drivers 
@@ -7,7 +9,7 @@
 ############################
 
 RESOURCE_SRCS	:= resource_driver.c \
-	iopage.c driverlink_new.c kernel_proc.c vf_driver.c filter.c \
+	iopage.c driverlink_new.c kernel_proc.c filter.c \
 	bt_stats.c compat_pat_wc.c port_sniff.c
 
 EFHW_SRCS	:= nic.c eventq.c falcon.c ef10.c
@@ -27,7 +29,6 @@ EFRM_SRCS	:=			\
 		vi_resource_manager.c	\
 		vi_resource_info.c	\
 		vi_allocator.c		\
-		vf_resource.c		\
 		buddy.c			\
 		kfifo.c			\
 		bt_manager.c		\

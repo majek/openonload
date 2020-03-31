@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_HEADER >
@@ -29,12 +16,28 @@
 
 
 #ifndef ONLOAD_VERSION
-# define ONLOAD_VERSION "201811-u1"
+# define ONLOAD_VERSION "7.0.0.176"
 #endif
 
-#define ONLOAD_PRODUCT "OpenOnload"
+#define ONLOAD_PRODUCT "Onload"
 
 #define ONLOAD_COPYRIGHT "Copyright 2006-2019 Solarflare Communications, 2002-2005 Level 5 Networks"
+
+/* Max length of version string used for version skew checking. */
+enum { OO_VER_STR_LEN = 40 };
+
+
+/* We use an md5sum over certain headers to ensure that userland and kernel
+ * drivers are built against a compatible interface.
+ */
+enum { CI_CHSUM_STR_LEN = 32 };
+
+
+typedef struct oo_version_check_s {
+  char                    in_version[OO_VER_STR_LEN + 1];
+  char                    in_uk_intf_ver[CI_CHSUM_STR_LEN + 1];
+  int32_t                 debug;
+} oo_version_check_t;
 
 
 #endif  /* __ONLOAD_VERSION_H__ */

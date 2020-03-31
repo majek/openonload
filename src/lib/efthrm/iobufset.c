@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /****************************************************************************
  * Driver for Solarflare network controllers -
  *          resource management for Xen backend, OpenOnload, etc
@@ -297,7 +284,8 @@ static int oo_bufpage_alloc(struct oo_buffer_pages **pages_out,
 
   if( low_order > 0 ) {
 #ifdef OO_HAVE_COMPOUND_PAGES
-    /* __GFP_COMP hint stolen from http://samirdas.blog.com/
+    /* __GFP_COMP hint suggests that the page allocator optimistically assume
+     * that these pages are going to be compound, for faster allocation
      * __GFP_NOWARN is necessary because we properly handle high-order page
      * allocation failure by allocating pages one-by-one. */
     gfp_flag |= __GFP_COMP | __GFP_NOWARN;

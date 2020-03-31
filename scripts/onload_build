@@ -1,8 +1,8 @@
 #!/bin/sh
-######################################################################
+# SPDX-License-Identifier: GPL-2.0
+# X-SPDX-Copyright-Text: (c) Solarflare Communications Inc
+
 # Make build trees and compile.
-# Author: David Riddoch
-######################################################################
 
 bin=$(cd $(dirname "$0") && /bin/pwd)
 me=$(basename "$0")
@@ -73,6 +73,7 @@ NDEBUG=1; export NDEBUG
 filter_engine_def="/opt/onload_filter_engine"
 withofe=true
 build_profile=
+parallel=-j$(nproc 2> /dev/null || echo 4)
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -156,7 +157,7 @@ if $all || $kernel; then
     echo "PREBUILD_CPLANE := 1" >>"$d/options_config.mk"
   fi
 
-  make -j4 -C "$d" ONLOAD_ONLY=1 $nodeps ||
+  make $parallel -C "$d" ONLOAD_ONLY=1 $nodeps ||
     fail "ERROR: Failed to build driver components."
 fi
 
@@ -177,7 +178,7 @@ if $all || $user || $user64; then
       echo "PREBUILD_CPLANE := 1" >>"$userplatform/options_config.mk"
     fi
 
-    make -j4 -C "$userplatform" ONLOAD_ONLY=1 $nodeps ||
+    make $parallel -C "$userplatform" ONLOAD_ONLY=1 $nodeps ||
       fail "ERROR: Failed to build 64-bit user-level components."
 
     if [ -n "$ppc_at" ]; then
@@ -189,7 +190,7 @@ if $all || $user || $user64; then
              >>"${userplatform}_at/options_config.mk"
         nodeps=MMAKE_NO_DEPS=1
       fi
-      make -j4 -C "${userplatform}_at" ONLOAD_ONLY=1 $nodeps ||
+      make $parallel -C "${userplatform}_at" ONLOAD_ONLY=1 $nodeps ||
         fail "ERROR: Failed to build with IBM Advanced Tools ($ppc_at)"
     fi
   fi
@@ -211,7 +212,7 @@ if $all || $user || $user32; then
     echo "PREBUILD_CPLANE := 1" >>"$userplatform/options_config.mk"
   fi
 
-  make -j4 -C "$userplatform" ONLOAD_ONLY=1 $nodeps || {
+  make $parallel -C "$userplatform" ONLOAD_ONLY=1 $nodeps || {
     if $is64; then
       err
       log "WARNING: Failed to build 32-bit user-level components."

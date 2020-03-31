@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file linux_stats.c OS Interface for reporting network statistics
 ** <L5_PRIVATE L5_SOURCE>
@@ -106,24 +93,6 @@ static ci_proc_efab_entry_t ci_proc_efab_table[] = {
 
 #define CI_PROC_EFAB_TABLE_SIZE \
     (sizeof(ci_proc_efab_table) / sizeof(ci_proc_efab_entry_t))
-
-
-/** Global statististics store */
-static ci_ip_stats ci_ip_stats_global;
-
-
-/****************************************************************************
- *
- * Update global statistics
- *
- ****************************************************************************/
-void
-ci_ip_stats_update_global(ci_ip_stats *stats) {
-  ci_assert(stats);
-  ci_ip_stats_update(&ci_ip_stats_global, stats);
-}
-EXPORT_SYMBOL(ci_ip_stats_update_global);
-
 
 
 /****************************************************************************
@@ -524,8 +493,6 @@ ci_install_proc_entries(void)
 
 void ci_uninstall_proc_entries(void)
 {
-  ci_ip_stats_clear(&ci_ip_stats_global);
-
   if( oo_proc_root == NULL )
     return;
 

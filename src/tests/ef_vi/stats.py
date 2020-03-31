@@ -1,4 +1,6 @@
 #!/usr/bin/env python
+# SPDX-License-Identifier: BSD-2-Clause
+# X-SPDX-Copyright-Text: (c) Solarflare Communications Inc
 ######################################################################
 # Report stats on dataset.
 ######################################################################

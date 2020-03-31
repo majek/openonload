@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: BSD-2-Clause
+# X-SPDX-Copyright-Text: (c) Solarflare Communications Inc
+
 ############################################################################
 #
 # Settings for the OpenOnload drivers.
@@ -45,5 +48,5 @@ SFC_AFFINITY_MODE=666
 #
 # If the setting is not defined, the server will run as root.
 
-#ONLOAD_CPLANE_USER=onload_cplane
+ONLOAD_CPLANE_USER=onload_cplane
 

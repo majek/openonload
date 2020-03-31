@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 #/**************************************************************************\
 ** <L5_PRIVATE L5_SOURCE>
 **   Copyright: (c) Level 5 Networks Limited.
@@ -29,6 +16,32 @@
 #include <onload/sleep.h>
 #include <etherfabric/vi.h>
 
+#ifdef NDEBUG
+# define IS_DEBUG  0
+#else
+# define IS_DEBUG  1
+#endif
+
+#ifdef NDEBUG
+# define IS_DEBUG  0
+#else
+# define IS_DEBUG  1
+#endif
+
+
+#ifdef __KERNEL__
+  #define LOG_PRINT(...) logger(log_arg, __VA_ARGS__ )
+#else
+  #include <ctype.h>
+  #define LOG_PRINT(...) ci_log(__VA_ARGS__ )
+#endif /* __KERNEL__ */
+
+#ifdef __KERNEL__
+  #define LOG_PRINT(...) logger(log_arg, __VA_ARGS__ )
+#else
+  #include <ctype.h>
+  #define LOG_PRINT(...) ci_log(__VA_ARGS__ )
+#endif /* __KERNEL__ */
 
 /**********************************************************************
  * Validation of state.
@@ -270,7 +283,7 @@ void ci_netif_netstat_sockets_to_logger(ci_netif* ni, oo_dump_log_fn_t logger,
     if( wo->waitable.state != CI_TCP_STATE_FREE &&
         wo->waitable.state != CI_TCP_CLOSED &&
         CI_TCP_STATE_IS_SOCKET(wo->waitable.state) ) {
-      citp_waitable_print_to_logger(&wo->waitable, logger, log_arg);
+      citp_waitable_print_to_logger(ni, &wo->waitable, logger, log_arg);
     }
   }
 }
@@ -542,6 +555,13 @@ void ci_netif_dump_reap_list(ci_netif* ni, int verbose)
 
 void ci_netif_dump_extra(ci_netif* ni)
 {
+  ci_netif_dump_extra_to_logger(ni, ci_log_dump_fn, NULL);
+}
+
+
+void ci_netif_dump_extra_to_logger(ci_netif* ni, oo_dump_log_fn_t logger,
+                                   void* log_arg)
+{
   ci_netif_state* ns = ni->state;
   char hp2i[CI_CFG_MAX_HWPORTS * 10];
   char i2hp[CI_CFG_MAX_INTERFACES * 10];
@@ -552,24 +572,137 @@ void ci_netif_dump_extra(ci_netif* ni)
   for( i = 0, off = 0; i < CI_CFG_MAX_INTERFACES; ++i )
     off += sprintf(i2hp+off, "%s%d", i?",":"", (int) ns->intf_i_to_hwport[i]);
 
-  log("%s: stack=%d", __FUNCTION__, NI_ID(ni));
-  log("  in_poll=%d post_poll_list_empty=%d poll_did_wake=%d",
-      ns->in_poll, ci_ni_dllist_is_empty(ni, &ns->post_poll_list),
-      ns->poll_did_wake);
-  log("  rx_defrag_head=%d rx_defrag_tail=%d",
-      OO_PP_FMT(ns->rx_defrag_head), OO_PP_FMT(ns->rx_defrag_tail));
-  log("  tx_may_alloc=%d can=%d nonb_pool=%d send_may_poll=%d is_spinner=%d,%d",
-      ci_netif_pkt_tx_may_alloc(ni), ci_netif_pkt_tx_can_alloc_now(ni),
-      ci_netif_pkt_nonb_pool_not_empty(ni), ns->send_may_poll,
-      (int) ns->is_spinner, ns->n_spinners);
-  log("  hwport_to_intf_i=%s intf_i_to_hwport=%s", hp2i, i2hp);
-  log("  uk_intf_ver=%s", OO_UK_INTF_VER);
-  log("  deferred count %d/%d", ns->defer_work_count, NI_OPTS(ni).defer_work_limit);
-  log("  numa nodes: creation=%d load=%d",
-      ns->creation_numa_node, ns->load_numa_node);
-  log("  numa node masks: packet alloc=%x sock alloc=%x interrupt=%x",
-      ns->packet_alloc_numa_nodes, ns->sock_alloc_numa_nodes,
-      ns->interrupt_numa_nodes);
+  logger(log_arg, "%s: stack=%d", __FUNCTION__, NI_ID(ni));
+  logger(log_arg, "  in_poll=%d post_poll_list_empty=%d poll_did_wake=%d",
+         ns->in_poll, ci_ni_dllist_is_empty(ni, &ns->post_poll_list),
+         ns->poll_did_wake);
+  logger(log_arg, "  rx_defrag_head=%d rx_defrag_tail=%d",
+         OO_PP_FMT(ns->rx_defrag_head), OO_PP_FMT(ns->rx_defrag_tail));
+  logger(log_arg, "  tx_may_alloc=%d can=%d nonb_pool=%d send_may_poll=%d is_spinner=%d,%d",
+         ci_netif_pkt_tx_may_alloc(ni), ci_netif_pkt_tx_can_alloc_now(ni),
+         ci_netif_pkt_nonb_pool_not_empty(ni), ns->send_may_poll,
+         (int) ns->is_spinner, ns->n_spinners);
+  logger(log_arg, "  hwport_to_intf_i=%s intf_i_to_hwport=%s", hp2i, i2hp);
+  logger(log_arg, "  uk_intf_ver=%s", OO_UK_INTF_VER);
+  logger(log_arg, "  deferred count %d/%d", ns->defer_work_count, NI_OPTS(ni).defer_work_limit);
+  logger(log_arg, "  numa nodes: creation=%d load=%d",
+         ns->creation_numa_node, ns->load_numa_node);
+  logger(log_arg, "  numa node masks: packet alloc=%x sock alloc=%x interrupt=%x",
+         ns->packet_alloc_numa_nodes, ns->sock_alloc_numa_nodes,
+         ns->interrupt_numa_nodes);
+}
+
+void ci_netif_config_opts_dump(ci_netif_config_opts* opts,
+                               oo_dump_log_fn_t logger, void* log_arg)
+{
+  static const ci_netif_config_opts defaults = {
+    #undef CI_CFG_OPTFILE_VERSION
+    #undef CI_CFG_OPT
+    #undef CI_CFG_STR_OPT
+    #undef CI_CFG_OPTGROUP
+
+    #define CI_CFG_OPTFILE_VERSION(version)
+    #define CI_CFG_OPTGROUP(group, category, expertise)
+    #define CI_CFG_OPT(env, name, type, doc, bits, group, default, min, max, presentation) \
+            default,
+    #define CI_CFG_STR_OPT CI_CFG_OPT
+    #include <ci/internal/opts_netif_def.h>
+  };
+
+  #undef CI_CFG_OPTFILE_VERSION
+  #undef CI_CFG_OPT
+  #undef CI_CFG_STR_OPT
+  #undef CI_CFG_OPTGROUP
+
+  #define ci_uint32_fmt   "%u"
+  #define ci_uint16_fmt   "%u"
+  #define ci_uint8_fmt    "%u"
+  #define ci_int32_fmt    "%d"
+  #define ci_int16_fmt    "%d"
+  #define ci_int8_fmt     "%d"
+  #define ci_iptime_t_fmt "%u"
+  #define ci_string256_fmt "\"%s\""
+
+  #define CI_CFG_OPTFILE_VERSION(version)
+  #define CI_CFG_OPTGROUP(group, category, expertise)
+  #define CI_CFG_OPT(env, name, type, doc, bits, group, default, min, max, presentation) \
+    if( strlen(env) != 0 ) {                                            \
+      if( opts->name == defaults.name )                                 \
+        LOG_PRINT("%30s: " type##_fmt, env, opts->name);                   \
+      else                                                              \
+        LOG_PRINT("%30s: " type##_fmt " (default: " type##_fmt")", env,    \
+               opts->name, defaults.name);                              \
+    }
+
+  #define CI_CFG_STR_OPT(env, name, type, doc, bits, group, default, min, max, presentation) \
+    if( strlen(env) != 0 ) {                                            \
+      if( strcmp(opts->name, defaults.name) == 0 )                                 \
+        LOG_PRINT("%30s: " type##_fmt, env, opts->name);                   \
+      else                                                              \
+        LOG_PRINT("%30s: " type##_fmt " (default: " type##_fmt")", env,    \
+               opts->name, defaults.name);                              \
+    }
+
+
+  LOG_PRINT("                        NDEBUG: %d", ! IS_DEBUG);
+  #include <ci/internal/opts_netif_def.h>
+}
+
+
+void ci_stack_time_dump(ci_netif* ni, oo_dump_log_fn_t logger, void* log_arg)
+{
+  ci_ip_timer_state* its = IPTIMER_STATE(ni);
+  LOG_PRINT("          sched_ticks: %x", its->sched_ticks);
+  LOG_PRINT("ci_ip_time_real_ticks: %x", its->ci_ip_time_real_ticks);
+  LOG_PRINT("                  frc: %"CI_PRIx64, its->frc);
+  LOG_PRINT("  ci_ip_time_frc2tick: %u", (unsigned) its->ci_ip_time_frc2tick);
+  LOG_PRINT("    ci_ip_time_frc2us: %u", (unsigned) its->ci_ip_time_frc2us);
+  LOG_PRINT("   ci_ip_time_frc2isn: %u", (unsigned) its->ci_ip_time_frc2isn);
+#ifndef __KERNEL__
+  LOG_PRINT("   ci_ip_time_tick2ms: %f", (1. * (1ull<<32)) /
+            its->ci_ip_time_ms2tick_fxp);
+  LOG_PRINT("   ci_ip_time_ms2tick: %f (%" PRIx64 ")",
+            its->ci_ip_time_ms2tick_fxp/(1. * (1ull<<32)),
+            its->ci_ip_time_ms2tick_fxp);
+#endif /* __KERNEL__ */
+  LOG_PRINT("                  khz: %u", (unsigned) its->khz);
+  LOG_PRINT("time constants for this CPU\n"
+            "  rto_initial: %uticks (%ums)\n" 
+            "  rto_min: %uticks (%ums)\n" 
+            "  rto_max: %uticks (%ums)\n"
+            "  delack: %uticks (%ums)\n"
+            "  idle: %uticks (%ums)",
+            NI_CONF(ni).tconst_rto_initial, NI_OPTS(ni).rto_initial,
+            NI_CONF(ni).tconst_rto_min, NI_OPTS(ni).rto_min,
+            NI_CONF(ni).tconst_rto_max, NI_OPTS(ni).rto_max,
+            NI_CONF(ni).tconst_delack, CI_TCP_TCONST_DELACK,
+            NI_CONF(ni).tconst_idle, CI_TCP_TCONST_IDLE);
+  LOG_PRINT("  keepalive_time: %uticks (%ums)\n" 
+            "  keepalive_intvl: %uticks (%ums)\n" 
+            "  keepalive_probes: %u\n"
+            "  zwin_max: %uticks (%ums)",
+            NI_CONF(ni).tconst_keepalive_time, NI_OPTS(ni).keepalive_time,
+            NI_CONF(ni).tconst_keepalive_intvl, NI_OPTS(ni).keepalive_intvl,
+            NI_OPTS(ni).keepalive_probes,
+            NI_CONF(ni).tconst_zwin_max, CI_TCP_TCONST_ZWIN_MAX);
+  LOG_PRINT("  paws_idle: %uticks (%ums)",
+            NI_CONF(ni).tconst_paws_idle, CI_TCP_TCONST_PAWS_IDLE);
+  LOG_PRINT("  PMTU slow discover: %uticks (%ums)\n"
+            "  PMTU fast discover: %uticks (%ums)\n"
+            "  PMTU recover: %uticks (%ums)",
+            NI_CONF(ni).tconst_pmtu_discover_slow, CI_PMTU_TCONST_DISCOVER_SLOW,
+            NI_CONF(ni).tconst_pmtu_discover_fast, CI_PMTU_TCONST_DISCOVER_FAST,
+            NI_CONF(ni).tconst_pmtu_discover_recover, 
+            CI_PMTU_TCONST_DISCOVER_RECOVER);
+  LOG_PRINT("  RFC 5961 challenge ack limit: %d per tick, %d per sec\n",
+            NI_CONF(ni).tconst_challenge_ack_limit,
+            NI_OPTS(ni).challenge_ack_limit);
+  LOG_PRINT("  Time between ACKs sent as a response to invalid "
+            "incoming TCP packets: %uticks (%ums)\n",
+            NI_CONF(ni).tconst_invalid_ack_ratelimit,
+            NI_OPTS(ni).oow_ack_ratelimit);
+  LOG_PRINT("  Intrumentation: %uticks (%ums)",
+            NI_CONF(ni).tconst_stats, CI_TCONST_STATS);
 }
 
 
@@ -758,7 +891,8 @@ void ci_netif_dump_to_logger(ci_netif* ni, oo_dump_log_fn_t logger,
   if(ni->state->netns_id != 0) {
     logger(log_arg, "  namespace=net:[%u]", ni->state->netns_id);
   }
-  logger(log_arg, "  ver=%s uid=%d pid=%d ns_flags=%x %s %s", ONLOAD_VERSION
+  logger(log_arg, "  %s %s uid=%d pid=%d ns_flags=%x %s %s %s",
+         ni->cplane->mib->act_sku->value, ONLOAD_VERSION
       , (int) ns->uuid, (int) ns->pid
       , ns->flags
       , (ns->flags & CI_NETIF_FLAG_ONLOAD_UNSUPPORTED)
@@ -769,6 +903,9 @@ void ci_netif_dump_to_logger(ci_netif* ni, oo_dump_log_fn_t logger,
 #else
       , ""
 #endif
+      /* In most cases, this flag _is_ set, so text-decode the unusual case. */
+      , (~ns->flags & CI_NETIF_FLAG_NO_INIT_NET_CPLANE)
+          ? "INIT_NET_CPLANE" : ""
       );
 #ifdef __KERNEL__
   getnstimeofday(&nowspec);

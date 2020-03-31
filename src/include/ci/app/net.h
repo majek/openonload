@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_HEADER>
@@ -32,6 +19,7 @@
 # include <netinet/in.h>
 # include <sys/types.h>
 # include <sys/socket.h>
+# include <sys/un.h>
 # include <netdb.h>
 
 
@@ -78,6 +66,45 @@ ci_sock_erreq(ci_sock_err_t a, ci_sock_err_t b) { return (a.val == b.val); }
 ci_inline int
 ci_sock_errcode(ci_sock_err_t a) { return -a.val; }
 
+ci_inline int/*bool*/
+is_v4mapped(const struct in6_addr* addr)
+{
+  static const uint16_t prefix[] = {0,0,0,0,0,0xffff};
+  return ! memcmp(prefix, addr, sizeof(prefix));
+}
+
+ci_inline size_t
+sockaddr_size_by_family(int family)
+{
+  switch( family ) {
+    case AF_INET: return sizeof(struct sockaddr_in);
+    case AF_INET6: return sizeof(struct sockaddr_in6);
+    case AF_UNIX: return sizeof(struct sockaddr_un);
+  }
+  return 0;
+}
+
+ci_inline size_t
+sockaddr_size(const struct sockaddr_storage* sa)
+{
+  return sockaddr_size_by_family(sa->ss_family);
+}
+
+/* Change just the port part of 'sa'. 'port' is in host byte order. Returns -1
+ * on error (e.g. sa->ss_family invalid, port number out of range). */
+int sockaddr_set_port(struct sockaddr_storage* sa, int port);
+
+/* Returns the port part of 'sa' in host byte order, or -1 if sa->ss_family is
+ * unknown */
+int sockaddr_get_port(const struct sockaddr_storage* sa);
+
+/* Modifies the host part of 'sa' to the 'any' IP address, based on the
+ * current value of sa->ss_family. Returns -1 on unknown family. */
+int sockaddr_set_any(struct sockaddr_storage* sa);
+
+/* Modifies the host part of 'sa' to the 'loopback' IP address, based on the
+ * current value of sa->ss_family. Returns -1 on unknown family. */
+int sockaddr_set_loopback(struct sockaddr_storage* sa);
 
 /**********************************************************************
  ** Useful helpers (not error checked).
@@ -86,16 +113,18 @@ ci_sock_errcode(ci_sock_err_t a) { return -a.val; }
   /*! Parse [hp], which must be in the format: <host>, <port> or
   ** <host:port>.  Returns 0 on success, or negative error code on failure.
   */
-extern int ci_hostport_to_sockaddr(const char* hp,
-				   struct sockaddr_in* addr_out);
+extern int ci_hostport_to_sockaddr(int hint_af, const char* hp,
+                                   struct sockaddr_storage* addr_out);
 
-extern int ci_hostport_to_addrinfo(const char* hp, struct addrinfo* ai_out);
+/* deprecated (but still widely used in tests) */
+extern int ci_hostport_to_sockaddr_in(const char* hp,
+				   struct sockaddr_in* addr_out);
 
   /*! Convert hostname and port to sockaddr.  [host] may be null, in which
   ** case INADDR_ANY is used.  Returns 0 on success, or negative error code
   ** on failure.
   */
-extern int ci_host_port_to_sockaddr(const char* host, int port,
+extern int ci_host_port_to_sockaddr_in(const char* host, int port,
 				    struct sockaddr_in* addr_out);
 
   /*! Like inet_ntoa(), but puts the result in the given buffer (which

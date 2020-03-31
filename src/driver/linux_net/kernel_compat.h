@@ -1,18 +1,3 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
 /****************************************************************************
  * Driver for Solarflare network controllers and boards
  * Copyright 2005-2006 Fen Systems Ltd.
@@ -1346,6 +1331,21 @@
 	}
 #endif
 
+#ifdef EFX_NEED_SKB_FRAG_OFF
+/**
+ * skb_frag_off() - Returns the offset of a skb fragment
+ * @frag: the paged fragment
+ */
+static inline unsigned int skb_frag_off(const skb_frag_t *frag)
+{
+	/* This later got renamed bv_offset (because skb_frag_t is now really
+	 * a struct bio_vec), but the page_offset name should work in any
+	 * kernel that doesn't already have skb_frag_off defined.
+	 */
+	return frag->page_offset;
+}
+#endif
+
 #if defined(CONFIG_COMPAT) && defined(EFX_NEED_COMPAT_U64)
 	#if defined(CONFIG_X86_64) || defined(CONFIG_IA64)
 		typedef u64 __attribute__((aligned(4))) compat_u64;
@@ -2471,6 +2471,9 @@ int pci_vfs_assigned(struct pci_dev *dev);
 #ifdef EFX_NEED_PCI_ENABLE_MSIX_RANGE
 int pci_enable_msix_range(struct pci_dev *dev, struct msix_entry *entries,
 			  int minvec, int maxvec);
+#endif
+#ifdef EFX_NEED_PCI_MSIX_VEC_COUNT
+int pci_msix_vec_count(struct pci_dev *dev);
 #endif
 
 #ifdef EFX_NEED_KMALLOC_ARRAY

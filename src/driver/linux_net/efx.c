@@ -1,18 +1,3 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
 /****************************************************************************
  * Driver for Solarflare network controllers and boards
  * Copyright 2005-2006 Fen Systems Ltd.
@@ -2075,12 +2060,15 @@ static unsigned int efx_num_rss_channels(struct efx_nic *efx,
 	return rss_channels;
 }
 
-static unsigned int efx_allocate_msix_channels(struct efx_nic *efx,
-					       unsigned int max_channels,
-					       unsigned int extra_channels,
-					       unsigned int parallelism)
+static int efx_allocate_msix_channels(struct efx_nic *efx,
+				      unsigned int max_channels,
+				      unsigned int extra_channels,
+				      unsigned int parallelism)
 {
 	unsigned int n_channels = parallelism;
+#ifdef EFX_HAVE_MSIX_CAP
+	int vec_count;
+#endif
 
 	if (separate_tx_channels)
 		n_channels *= 2;
@@ -2136,6 +2124,19 @@ static unsigned int efx_allocate_msix_channels(struct efx_nic *efx,
 
 	n_channels = min(n_channels, max_channels);
 
+#ifdef EFX_HAVE_MSIX_CAP
+	vec_count = pci_msix_vec_count(efx->pci_dev);
+	if (vec_count < 0)
+		return vec_count;
+	if (vec_count < n_channels) {
+		netif_err(efx, drv, efx->net_dev,
+			  "WARNING: Insufficient MSI-X vectors available (%d < %u).\n",
+			  vec_count, n_channels);
+		netif_err(efx, drv, efx->net_dev,
+			  "WARNING: Performance may be reduced.\n");
+		n_channels = vec_count;
+	}
+#endif
 	efx->n_channels = n_channels;
 
 	/* Do not create the PTP TX queue(s) if PTP uses the MC directly. */
@@ -2189,14 +2190,17 @@ static int efx_probe_interrupts(struct efx_nic *efx)
 	if (efx->interrupt_mode == EFX_INT_MODE_MSIX) {
 		struct msix_entry xentries[EFX_MAX_CHANNELS];
 		unsigned int parallelism = efx_wanted_parallelism(efx);
-		unsigned int n_channels =
-			efx_allocate_msix_channels(efx, efx->max_channels,
-						   extra_channels,
-						   parallelism);
+		unsigned int n_channels;
 
-		for (i = 0; i < n_channels; i++)
-			xentries[i].entry = i;
-		rc = pci_enable_msix_range(efx->pci_dev, xentries, 1, n_channels);
+		rc = efx_allocate_msix_channels(efx, efx->max_channels,
+						extra_channels, parallelism);
+		if (rc >= 0) {
+			n_channels = rc;
+			for (i = 0; i < n_channels; i++)
+				xentries[i].entry = i;
+			rc = pci_enable_msix_range(efx->pci_dev, xentries, 1,
+						   n_channels);
+		}
 		if (rc < 0) {
 			/* Fall back to single channel MSI */
 			netif_err(efx, drv, efx->net_dev,
@@ -2205,6 +2209,7 @@ static int efx_probe_interrupts(struct efx_nic *efx)
 				efx->interrupt_mode = EFX_INT_MODE_MSI;
 			else
 				return rc;
+#ifndef EFX_HAVE_MSIX_CAP
 		} else if (rc < n_channels) {
 			netif_err(efx, drv, efx->net_dev,
 				  "WARNING: Insufficient MSI-X vectors"
@@ -2215,6 +2220,7 @@ static int efx_probe_interrupts(struct efx_nic *efx)
 			efx_allocate_msix_channels(efx, n_channels,
 						   extra_channels,
 						   parallelism);
+#endif
 		}
 
 		if (rc > 0) {
@@ -4730,7 +4736,7 @@ int efx_reset_up(struct efx_nic *efx, enum reset_type method, bool ok)
 	 * here that aren't the result of an MC reset, it is still safe to
 	 * perform the attach operation.
 	 */
-	rc = efx_mcdi_drv_attach(efx, true, MC_CMD_FW_DONT_CARE, &attach_flags);
+	rc = efx_mcdi_drv_attach(efx, MC_CMD_FW_DONT_CARE, &attach_flags, true);
 	if (rc) /* not fatal: the PF will still work */
 		netif_warn(efx, probe, efx->net_dev,
 			   "failed to re-attach driver to MCPU rc=%d, PPS & NCSI may malfunction\n",
@@ -5824,7 +5830,7 @@ static int efx_pci_probe(struct pci_dev *pci_dev,
 		goto fail2;
 
 	rc = efx_pci_probe_post_io(efx);
-	if (rc) {
+	if (rc && (rc != -EBUSY)) {
 		/* On failure, retry once immediately.
 		 * If we aborted probe due to a scheduled reset, dismiss it.
 		 */

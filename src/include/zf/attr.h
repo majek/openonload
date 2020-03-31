@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: Solarflare-Binary */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 **  \brief  TCPDirect API for attribute objects
@@ -122,7 +109,7 @@ ZF_LIBENTRY int zf_attr_set_str(struct zf_attr* attr,
 **
 ** \param attr       The attribute object.
 ** \param name       Name of the attribute.
-** \param val        Value of the attribute (output). This is 
+** \param val        Value of the attribute (output). This is
 **                   allocated with strdup() and must be free()ed
 **                   by the caller.
 **
@@ -179,13 +166,33 @@ ZF_LIBENTRY int zf_attr_set_from_fmt(struct zf_attr* attr,
 */
 ZF_LIBENTRY struct zf_attr* zf_attr_dup(const struct zf_attr* attr);
 
-/*! \brief Returns documentation for an attribute.
+/*! \brief Returns documentation for an attribute, or names of all attributes.
 **
 ** \param attr_name_opt     The attribute name.
-** \param docs_out          On success, the resulting doc string output.
-** \param docs_len_out      On success, the length of the doc string output.
+** \param docs_out          On success, a pointer to an array of pointers to
+**                          doc strings.
+** \param docs_len_out      On success, the number of entries in @p docs_out.
 **
 ** \return 0 on success, or a negative error code.
+**
+** This function returns pointers to the documentation for an attribute, or
+** to the names of all attributes.
+**
+** If @p attr_name_opt is the name of an attribute, the array referenced by
+** @p docs_out contains the following strings in order:
+** - the name of the attribute
+** - the type of the attribute (e.g. "int", "str")
+** - the status of the attribute (e.g. "stable", "hidden", "beta")
+** - a description of the default value of the attribute
+** - the type(s) of objects the attribute applies to (e.g. "zf_stack",
+**   "zf_pool", "zf_vi")
+** - a description of the attribute.
+**
+** If @p attr_name_opt is NULL or the empty string, the array referenced by
+** @p docs_out instead contains all attribute names.
+**
+** After calling this function, the memory it allocates for pointers must be
+** freed by calling free(docs_out).
 */
 ZF_LIBENTRY int zf_attr_doc(const char* attr_name_opt,
                        const char*** docs_out, int* docs_len_out);

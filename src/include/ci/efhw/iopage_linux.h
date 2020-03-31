@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /****************************************************************************
  * Driver for Solarflare network controllers -
  *          resource management for Xen backend, OpenOnload, etc
@@ -62,14 +49,10 @@
 #include <asm/hardirq.h>
 #endif
 #include <linux/types.h>
-#ifdef CONFIG_SFC_RESOURCE_VF_IOMMU
-# include <linux/iommu.h>
-#endif
 #include <linux/errno.h>
 #include <linux/mm.h>
 #include <ci/efhw/debug.h>
 #include <driver/linux_net/kernel_compat.h>
-#include <ci/efrm/config.h>
 
 
 /*--------------------------------------------------------------------
@@ -83,12 +66,7 @@ struct efhw_page {
 	unsigned long kva;
 };
 
-#ifdef CONFIG_SFC_RESOURCE_VF_IOMMU
-typedef struct iommu_domain efhw_iommu_domain;
-extern struct mutex efrm_iommu_mutex;
-#else
 typedef unsigned int efhw_iommu_domain;
-#endif
 
 static inline int efhw_page_alloc(struct efhw_page *p)
 {
@@ -144,6 +122,7 @@ static inline void efhw_page_init_from_va(struct efhw_page *p, void *va)
 struct efhw_iopages {
 	void *ptr;
 	unsigned n_pages;
+	unsigned phys_cont;
 	dma_addr_t *dma_addrs;
 };
 
@@ -154,7 +133,14 @@ static inline caddr_t efhw_iopages_ptr(struct efhw_iopages *p)
 
 static inline unsigned efhw_iopages_pfn(struct efhw_iopages *p, int page_i)
 {
-	return vmalloc_to_pfn(p->ptr + (page_i << PAGE_SHIFT));
+	if (p->phys_cont) {
+		struct page *page = virt_to_page(p->ptr);
+		int order = compound_order(page);
+
+		return page_to_pfn(page) + (page_i & ((1 << order) - 1));
+	} else {
+		return vmalloc_to_pfn(p->ptr + (page_i << PAGE_SHIFT));
+	}
 }
 
 static inline dma_addr_t efhw_iopages_dma_addr(struct efhw_iopages *p,

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: GPL-2.0
+# X-SPDX-Copyright-Text: (c) Solarflare Communications Inc
+
 # We use dirname and basename a lot which can be slow on Cygwin,
 # and they're simple enough to reimplement with built-ins.
 dirname () {

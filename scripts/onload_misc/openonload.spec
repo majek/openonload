@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-2.0
+# X-SPDX-Copyright-Text: (c) Solarflare Communications Inc
 ######################################################################
 # RPM spec file for OpenOnload
 #
@@ -23,6 +25,9 @@
 # If you want debug binary packages add:
 #   --define "debug true"
 #
+# If you want to generate debuginfo rpm package when generating release binary packages add:
+#   --define "debuginfo true"
+#
 # If your distribution does not provide a dist macro (e.g. CentOS) which is used
 # to differentiate the filename, you may overrise it:
 #    --define 'dist .el5'
@@ -34,18 +39,20 @@
 #    --define "build_profile <profile>"
 
 
-%define pkgversion 201811-u1
+%define pkgversion 7.0.0.176
 
 %{!?kernel:  %{expand: %%define kernel %%(uname -r)}}
 %{!?target_cpu:  %{expand: %%define target_cpu %{_host_cpu}}}
 %{!?kpath: %{expand: %%define kpath /lib/modules/%%{kernel}/build}}
 %{!?build32: %{expand: %%define build32 false}}
+%{!?debuginfo: %{expand: %%define debuginfo false}}
 
 %define knownvariants '@(BOOT|PAE|@(big|huge)mem|debug|enterprise|kdump|?(big|large)smp|uml|xen[0U]?(-PAE)|xen|rt?(-trace|-vanilla)|default|big|pae|vanilla|trace|timing)'
 %define knownvariants2 '%{knownvariants}'?(_'%{knownvariants}')
 
 # Assume that all non-suse distributions can be treated as redhat
 %define redhat       %( [ "%{_vendor}" = "suse"   ] ; echo $?)
+%define systemd      %( [ `cat /proc/1/comm` != systemd ] ; echo $?)
 
 # Determine distro to use for package conflicts with SFC.  This is not
 # accurate in various cases, and should be updated to use the sfc-disttag
@@ -85,13 +92,17 @@
 
 %{echo: %{target_cpu}}
 
-# Inhibit debuginfo package
+# Control debuginfo package when generating release package
+%if %{debuginfo}
+%else
 %define debug_package %{nil}
+%endif
+
 
 ###############################################################################
 
-Summary     	: OpenOnload user-space
-Name        	: openonload
+Summary     	: Onload user-space
+Name        	: onload
 Version     	: %(echo '%{pkgversion}' | sed 's/-/_/g')
 Release     	: 1%{?dist}%{?debug:DEBUG}
 Group       	: System Environment/Kernel
@@ -99,11 +110,11 @@ License   	: Various
 URL             : http://www.openonload.org/
 Vendor		: Solarflare Communications, Inc.
 Provides	: openonload = %{version}-%{release}
-Source0		: openonload-%{pkgversion}.tgz
+Source0		: onload-%{pkgversion}.tgz
 BuildRoot   	: %{_builddir}/%{name}-root
 AutoReqProv	: no
 ExclusiveArch	: i386 i586 i686 x86_64 ppc64
-BuildRequires	: gawk gcc sed make bash libpcap-devel automake libtool autoconf
+BuildRequires	: gawk gcc sed make bash libpcap libpcap-devel automake libtool autoconf
 # The glibc, python-devel, and libcap packages we need depend on distro and platform
 %if %{redhat}
 BuildRequires	: glibc-common python2-devel libcap
@@ -125,7 +136,7 @@ This package comprises the user space components of OpenOnload.
 ###############################################################################
 # Kernel version expands into NAME of RPM
 %package kmod-%{kverrel}
-Summary     	: OpenOnload kernel modules
+Summary     	: Onload kernel modules
 Group       	: System Environment/Kernel
 Requires	: openonload = %{version}-%{release}
 Conflicts	: kernel-module-sfc-RHEL%{maindist}-%{kverrel}
@@ -188,7 +199,6 @@ mkdir -p "$i_prefix/etc/depmod.d"
 ./scripts/onload_install --verbose --kernelver "%{kernel}" \
   %{?build_profile:--build-profile %build_profile} \
   %{?debug:--debug} rpm_install
-rm -f "%{buildroot}/etc/modprobe.conf"  # may be created by onload_install
 docdir="$i_prefix%{_defaultdocdir}/%{name}-%{pkgversion}"
 mkdir -p "$docdir"
 install -m 644 LICENSE README* ChangeLog* ReleaseNotes* "$docdir"
@@ -199,21 +209,6 @@ install -D scripts/onload_install "%{buildroot}/lib/onload/onload_install"
 ldconfig -n /usr/lib /usr/lib64
 
 %preun
-if [ -f /etc/modprobe.conf ]; then
-  sed -i '/onload_start/,/onload_end/d' /etc/modprobe.conf
-fi
-
-if [ "$1" = 0 ]; then  # Erase, not upgrade
-  if [ -x /usr/lib/lsb/remove_initd ]; then            \
-    /usr/lib/lsb/remove_initd /etc/init.d/openonload;  \
-  elif which chkconfig &>/dev/null; then               \
-    chkconfig --del openonload;                        \
-  elif which update-rc.d &>/dev/null; then             \
-    update-rc.d -f openonload remove;                  \
-  else                                                 \
-    rm -f /etc/rc.d/rc*.d/*openonload;                 \
-  fi
-fi
 
 %postun
 ldconfig -n /usr/lib /usr/lib64
@@ -277,7 +272,13 @@ rm -fR $RPM_BUILD_ROOT
 %attr(644, -, -) %{_sysconfdir}/modprobe.d/onload.conf
 %attr(644, -, -) %{_sysconfdir}/depmod.d/onload.conf
 %config %attr(644, -, -) %{_sysconfdir}/sysconfig/openonload
-%{_sysconfdir}/init.d/openonload
+
+%if %{systemd}
+  /usr/local/lib/modules-load.d/onload.conf
+%else
+  /etc/sysconfig/modules/onload.module
+%endif
+/etc/solarflare/activation.d/appflex_activation_file
 /usr/lib*/python*/site-packages/*
 
 %files kmod-%{kverrel}
@@ -285,28 +286,9 @@ rm -fR $RPM_BUILD_ROOT
 /lib/modules/%{kernel}/*/*
 
 %changelog
-* Thu Mar 5 2015 Kieran Mansley <kmansley@solarflare.com> 201502-u1
-- Multiple updates to fix customer issues in spec file usage
-
-* Mon May 14 2012 Mark Spender <mspender@solarflare.com> 201205
-- Added fix for MRG trace and vanilla kernel variants
-
-* Mon Feb 13 2012 Mark Spender <mspender@solarflare.com> 201202
-- Added depenency fix for MRG rt kernels and RHEL 4 kernel variants
-
-* Thu Apr 28 2011 David Riddoch <driddoch@solarflare.com> 201104
-- Added kernel module meta-data to help 3rd party modules.
-
-* Wed Sep 22 2010 Konstantin Ushakov <kostik@oktetlabs.ru> 20100910
-- SLES 9, 10, 10 work
-- RHEL 4, 5 work
-- Fedora 12 works
-
-* Tue Jul 20 2010 David Riddoch <driddoch@solarflare.com> 20100604-u2
-- Updates to reflect changes in 20100604 releases.
-- Should support building a binary for kernel other than currently running.
-- Various improvements.
-- Works for me!
+* Mon Jul 1 2019 Solarflare
+- 2010-current: solarflare miscellaneous updates
+- Details can found in onload Changelog
 
 * Thu Apr 1 2010 Mike MacCana <mike.maccana@credit-suisse.com> 20100308-u1
 - Fixed non-cronological changelog order

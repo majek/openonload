@@ -1,12 +1,9 @@
 #!/bin/sh
-######################################################################
-# Copyright 2005  Level 5 Networks.
-# Copyright 2005-2018 Solarflare Communications Inc.
-# Description: Invokes a command so that it runs over the Open Onload
-#            : userlevel IP transport.
-#      Author: David Riddoch
-#     Started: 2005/01/14
-######################################################################
+# SPDX-License-Identifier: BSD-2-Clause
+# X-SPDX-Copyright-Text: (c) Solarflare Communications Inc
+
+# Invokes a command so that it runs over the Open Onload userlevel IP
+# transport.
 
 me=$(basename "$0")
 bin=$(cd "$(dirname "$0")" && /bin/pwd)

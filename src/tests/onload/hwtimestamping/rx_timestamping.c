@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: BSD-2-Clause */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_SOURCE>
@@ -54,6 +41,10 @@
 #include <sys/socket.h>
 #include <sys/ioctl.h>
 #include <net/if.h>
+
+#ifdef ONLOADEXT_AVAILABLE
+#include "onload/extensions_timestamping.h"
+#endif
 
 /* Use the kernel definitions if possible -
  * But if not, use our own local definitions, and Onload will allow it.
@@ -97,6 +88,7 @@
 
 /* Seconds.nanoseconds format */
 #define TIME_FMT "%" PRIu64 ".%.9" PRIu64 " "
+#define OTIME_FMT "%" PRIu64 ".%.9" PRIu32 " "
 
 /* Assert-like macros */
 #define TEST(x)                                                 \
@@ -125,6 +117,7 @@ struct configuration {
   unsigned short cfg_port;      /* listen port */
   int            cfg_protocol;  /* udp or tcp? */
   unsigned int   cfg_max_packets; /* Stop after this many (0=forever) */
+  int            cfg_ext;       /* Use extension API? */
 };
 
 /* Commandline options, configuration etc. */
@@ -140,6 +133,9 @@ void print_help(void)
            "Default: UDP\n"
          "\t--max\t<num>\tStop after n packets.  "
            "Default: Run forever\n"
+#ifdef ONLOADEXT_AVAILABLE
+         "\t--ext\t\tUse extensions API rather than SO_TIMESTAMPING.\n"
+#endif
         );
   exit(-1);
 }
@@ -170,6 +166,7 @@ static void parse_options( int argc, char** argv, struct configuration* cfg )
     { "port", required_argument, 0, 'p' },
     { "proto", required_argument, 0, 'P' },
     { "max", required_argument, 0, 'n' },
+    { "ext", no_argument, 0, 'e' },
     { 0, no_argument, 0, 0 }
   };
   const char* optstring = "i:p:P:n:";
@@ -194,6 +191,11 @@ static void parse_options( int argc, char** argv, struct configuration* cfg )
       case 'n':
         cfg->cfg_max_packets = atoi(optarg);
         break;
+#ifdef ONLOADEXT_AVAILABLE
+      case 'e':
+        cfg->cfg_ext = 1;
+        break;
+#endif
       default:
         print_help();
         break;
@@ -263,14 +265,21 @@ static void do_ioctl(struct configuration* cfg, int sock)
 
 
 /* This routine selects the correct socket option to enable timestamping. */
-static void do_ts_sockopt(int sock)
+static void do_ts_sockopt(struct configuration* cfg, int sock)
 {
-  int enable = 1;
-
   printf("Selecting hardware timestamping mode.\n");
-  enable = SOF_TIMESTAMPING_RX_HARDWARE | SOF_TIMESTAMPING_RAW_HARDWARE
-            | SOF_TIMESTAMPING_SYS_HARDWARE | SOF_TIMESTAMPING_SOFTWARE;
-  TRY(setsockopt(sock, SOL_SOCKET, SO_TIMESTAMPING, &enable, sizeof(int)));
+
+#ifdef ONLOADEXT_AVAILABLE
+  if( cfg->cfg_ext )
+    TRY(onload_timestamping_request(sock, ONLOAD_TIMESTAMPING_FLAG_RX_NIC |
+                                          ONLOAD_TIMESTAMPING_FLAG_RX_CPACKET));
+  else
+#endif
+  {
+    int enable = SOF_TIMESTAMPING_RX_HARDWARE | SOF_TIMESTAMPING_RAW_HARDWARE |
+                 SOF_TIMESTAMPING_SYS_HARDWARE | SOF_TIMESTAMPING_SOFTWARE;
+    TRY(setsockopt(sock, SOL_SOCKET, SO_TIMESTAMPING, &enable, sizeof(int)));
+  }
 }
 
 static int add_socket(struct configuration* cfg)
@@ -331,7 +340,7 @@ static void print_time(struct timespec* ts)
 
 
 /* Given a packet, extract the timestamp(s) */
-static void handle_time(struct msghdr* msg)
+static void handle_time(struct msghdr* msg, struct configuration* cfg)
 {
   struct timespec* ts = NULL;
   struct cmsghdr* cmsg;
@@ -345,6 +354,14 @@ static void handle_time(struct msghdr* msg)
       ts = (struct timespec*) CMSG_DATA(cmsg);
       break;
     case SO_TIMESTAMPING:
+#ifdef ONLOADEXT_AVAILABLE
+      if( cfg->cfg_ext ) {
+        struct onload_timestamp* ts = (struct onload_timestamp*) CMSG_DATA(cmsg);
+        printf("timestamps " OTIME_FMT OTIME_FMT "\n",
+          ts[0].sec, ts[0].nsec, ts[1].sec, ts[1].nsec);
+        return;
+      }
+#endif
       ts = (struct timespec*) CMSG_DATA(cmsg);
       break;
     default:
@@ -357,7 +374,7 @@ static void handle_time(struct msghdr* msg)
 }
 
 /* Receive a packet, and print out the timestamps from it */
-static int do_recv(int sock, unsigned int pkt_num)
+static int do_recv(int sock, unsigned int pkt_num, struct configuration* cfg)
 {
   struct msghdr msg;
   struct iovec iov;
@@ -383,7 +400,7 @@ static int do_recv(int sock, unsigned int pkt_num)
     return 0;
 
   printf("Packet %d - %d bytes\t", pkt_num, got);
-  handle_time(&msg);
+  handle_time(&msg, cfg);
   return got;
 };
 
@@ -402,11 +419,11 @@ int main(int argc, char** argv)
   sock = parent;
   if( cfg.cfg_protocol == IPPROTO_TCP )
     sock = accept_child(parent);
-  do_ts_sockopt(sock);
+  do_ts_sockopt(&cfg, sock);
 
   /* Run forever */
   while((pkt_num++ < cfg.cfg_max_packets || (cfg.cfg_max_packets == 0) ) ) {
-    got = do_recv(sock, pkt_num);
+    got = do_recv(sock, pkt_num, &cfg);
     /* TCP can detect an exit; for UDP, zero payload packets are valid */
     if ( got == 0 && cfg.cfg_protocol == IPPROTO_TCP ) {
       printf( "recvmsg returned 0 - end of stream\n" );

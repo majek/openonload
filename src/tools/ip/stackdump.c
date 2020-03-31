@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_SOURCE>
@@ -32,6 +19,23 @@
 #include <onload/extensions.h>
 
 
+/* Pointer dynamically allocated table of stack, freed in atexit_fn().    */
+static int* s_stack_idx_col;
+
+/* Counter for number of stacks in the s_sock_idx_col.    */
+static unsigned s_stack_idx_count;
+
+/* Pointer dynamically allocated table of stacks created from s_stack_idx_col
+   with only stacks that do exist, freed after use().    */
+static int* s_present_stack_idx_col;
+
+/* Counter for number of stacks in the s_present_sock_idx_col.    */
+static unsigned s_present_stack_idx_count;
+
+/* Pointer dynamically allocated table of stack, freed in atexit_fn().    */
+static int* s_sock_idx_col;
+
+
 static ci_cfg_desc cfg_opts[] = {
   { 'l', "lock",      CI_CFG_FLAG, &cfg_lock,    "hold netif locks"         },
   { 'n', "nolock",    CI_CFG_FLAG, &cfg_nolock,  "don't grab stack lock"    },
@@ -44,6 +48,8 @@ static ci_cfg_desc cfg_opts[] = {
   { 't', "notable",   CI_CFG_FLAG, &cfg_notable, "toggle table mode"},
   { 'z', "zombie",    CI_CFG_FLAG, &cfg_zombie,  "force dump of orphan stacks"},
   {   0, "nopids",    CI_CFG_FLAG, &cfg_nopids,  "disable dumping of PIDs"},
+  {   0, "filter",    CI_CFG_STR,  &cfg_filter,
+                                   "dump only sockets matching pcap filter" },
 };
 #define N_CFG_OPTS (sizeof(cfg_opts) / sizeof(cfg_opts[0]))
 
@@ -223,6 +229,8 @@ static void usage(const char* msg)
 
 static void atexit_fn(void)
 {
+  free(s_stack_idx_col);
+  free(s_sock_idx_col);
   libstack_end();
 }
 
@@ -363,11 +371,238 @@ static void print_docs(int argc, char* argv[])
 }
 
 
-int main(int argc, char* argv[])
+/* The CI_CFG_* options are dumped by the build process into an object file
+ * with the following symbols. */
+extern char _binary_onload_config_start[];
+extern int _binary_onload_config_size;
+
+static void print_config(void)
+{
+  /* The size is the _address_ of the _binary_onload_config_size symbol, for
+   * reasons best known to the linker. */
+  int len = (int) (uintptr_t) &_binary_onload_config_size;
+  printf("%.*s", len, _binary_onload_config_start);
+}
+
+
+/* Function to parse stack numbers from input command line.
+ * @param [in/out] argc - pointer to nr of arguments.
+ * @param [in/out] argv - pointer to arguments table to parse.
+ * @param [out] p_stack_idx - pointer to the parsed collection s_stack_idx_col.
+ * @return Int flag indicating if the stacks are present 1 or not 0.
+ */
+static int parse_stacks(int* argc, char** argv[], int** p_stack_idx)
 {
   char dummy;
+  int doing_stacks = 0, i = 0;
+
+  s_stack_idx_col = calloc(*argc + 1, sizeof(int));
+  s_present_stack_idx_col = calloc(*argc + 1, sizeof(int));
+  *p_stack_idx = s_stack_idx_col;
+
+  while( i < *argc )
+  {
+    unsigned stack_id = 0;
+    if( sscanf((*argv)[i], "%u %c", &stack_id, &dummy) == 1 ) {
+      doing_stacks = 1;
+      s_stack_idx_col[s_stack_idx_count++] = stack_id;
+    }
+    else {
+      break;
+    }
+    ++i;
+  }
+
+  /* Mark the end of the stack indexes. */
+  if( doing_stacks ) {
+    s_stack_idx_col[s_stack_idx_count] = STACK_END_MARKER;
+    *argc -= s_stack_idx_count;
+    *argv += s_stack_idx_count;
+  }
+  return doing_stacks;
+}
+
+
+/* Function to parse sockets numbers from input command line.
+ * @param [in/out] argc - pointer to nr of arguments.
+ * @param [in/out] argv - pointer to arguments table to parse.
+ * @param [out] p_stack_idx - pointer to the parsed collection s_stack_idx_col.
+ * @return Int flag indicating if the sockets are present 1 or not 0.
+ */
+static int parse_sockets(int* argc, char** argv[], int** p_stack_idx)
+{
+  char dummy;
+  int doing_sockets = 0;
+  int i = 0;
+  unsigned sock_size = 0;
+  unsigned stack_id = 0, sock_id = 0;
+
+  s_sock_idx_col = calloc(*argc + 1, sizeof(int));
+  while( i < *argc )
+  {
+    if( sscanf((*argv)[i], "%u:%u %c", &stack_id, &sock_id, &dummy) == 2 ) {
+      doing_sockets = 1;
+      s_stack_idx_col[s_stack_idx_count++] = stack_id;
+      s_sock_idx_col[sock_size++] = sock_id;
+    }
+    else if( sscanf((*argv)[i], "%u:* %c", &stack_id, &dummy) == 1 ) {
+      doing_sockets = 1;
+      s_stack_idx_col[s_stack_idx_count++] = stack_id;
+      s_sock_idx_col[sock_size++] = SOCK_ALL_MARKER;
+    }
+    else if( ! strcmp((*argv)[i], "*:*") ) {
+      doing_sockets = 1;
+      *p_stack_idx = NULL;
+      s_stack_idx_col[s_stack_idx_count++] = STACK_END_MARKER;
+      s_sock_idx_col[sock_size++] = SOCK_ALL_MARKER;
+    }
+    else {
+      break;
+    }
+    ++i;
+  }
+
+  /* Mark the end of the stacks and sockets indexes. */
+  if( doing_sockets ) {
+    s_stack_idx_col[s_stack_idx_count] = STACK_END_MARKER;
+    s_sock_idx_col[sock_size] = SOCK_END_MARKER;
+    *argc -= s_stack_idx_count;
+    *argv += s_stack_idx_count;
+  }
+  return doing_sockets;
+}
+
+
+/* Predicate function to filter stacks for function list_all_stacks2().
+ * Filtering is done based on  the indexes in s_stack_idx_col.
+ * @param [in/out] info - pointer to stack info structure.
+ * @return To include stack return 1, and 0 otherwise.
+ */
+static int stackfilter_match_index(ci_netif_info_t *info)
+{
+  int i = 0;
+  STACK_LOG_DUMP(ci_log(" [%s %d] count=%d, stack=%d", __func__, __LINE__,
+                         s_stack_idx_count, info->ni_index));
+  if( s_stack_idx_count == 0 ) {
+    return 1;
+  } else {
+    while( i < s_stack_idx_count ) {
+      if( s_stack_idx_col[i] == info->ni_index ) {
+        if( info->ni_no_perms_exists ) {
+          ci_log("User %d:%d cannot access full details of stack %d(%s) owned by "
+                "%d:%d share_with=%d", (int) getuid(), (int) geteuid(),
+                info->ni_no_perms_id, info->ni_no_perms_name,
+                (int) info->ni_no_perms_uid, (int) info->ni_no_perms_euid,
+                info->ni_no_perms_share_with);
+          return 0;
+        } else {
+          s_present_stack_idx_col[s_present_stack_idx_count++] =
+            s_stack_idx_col[i];
+          STACK_LOG_DUMP(ci_log(" [%s %d] present_stack=%d", __func__,
+                         __LINE__, info->ni_index));
+          return 1;
+        }
+
+      }
+      ++i;
+    }
+  }
+  return 0; /* Not interested */
+}
+
+
+/* Function to remove all not present stacks from the s_stack_idx_col collection
+ * using a a base all present collection of stacks in s_present_stack_idx_col.
+ * @param [in] doing_sockets - flag that indicate socket option.
+ */
+static void remove_not_present_stacks(int doing_sockets)
+{
+  int i = 0, j = 0, present = 1;
+  STACK_LOG_DUMP(ci_log(" [%s %d] s_present_stack_idx_count = %d ", __func__,
+                        __LINE__, s_present_stack_idx_count));
+  while( i < s_stack_idx_count ) {
+    j = 0;
+    present = 0;
+    while( j < s_present_stack_idx_count ) {
+      if( s_stack_idx_col[i] == s_present_stack_idx_col[j] ) {
+        present = 1;
+        break;
+      }
+      ++j;
+    }
+
+    if( present || s_stack_idx_col[i] == STACK_END_MARKER ) {
+      ++i;
+    } else {
+      /* Stack not present remove it from stack and sock tables */
+      int idx = i;
+      STACK_LOG_DUMP(ci_log(" [%s %d] Removing[%d] = %d", __func__, __LINE__,
+                            idx, s_stack_idx_col[idx]));
+      ci_log("No such stack id: %d", s_stack_idx_col[idx]);
+
+      while( idx < s_stack_idx_count ) {
+        s_stack_idx_col[idx] = s_stack_idx_col[idx+1];
+        ++idx;
+      }
+      if( doing_sockets ) {
+        idx = i;
+        while( idx < s_stack_idx_count ) {
+          s_sock_idx_col[idx] = s_sock_idx_col[idx+1];
+          ++idx;
+        }
+      }
+      --s_stack_idx_count;
+    }
+  }
+  free(s_present_stack_idx_col);
+}
+
+/* Function used for printing out list of stacks for debugging */
+static void debug_print_stacks(void)
+{
+  int i = 0;
+  char buffer[1024];
+  int next_buffer = 0;
+  next_buffer += sprintf(buffer, "stacks [");
+  while( i < s_stack_idx_count + 1 ) {
+    next_buffer += sprintf(buffer + next_buffer, " %d", s_stack_idx_col[i]);
+    ++i;
+  }
+  next_buffer += sprintf(buffer + next_buffer, " ]");
+  STACK_LOG_DUMP(ci_log(" [%s %d] %s", __func__, __LINE__, buffer));
+}
+
+
+/* Function to add sockets to the print list. It is using the stack values in
+ * the s_stack_idx_col collection.
+ */
+static void add_socket(void)
+{
+  int i = 0;
+  while( s_stack_idx_col[i] != STACK_END_MARKER || s_sock_idx_col[i] !=
+          SOCK_END_MARKER ) {
+    if( s_stack_idx_col[i] == STACK_END_MARKER && s_sock_idx_col[i] ==
+        SOCK_ALL_MARKER ) {
+      s_stack_idx_count = 0;
+      list_all_stacks2(stackfilter_match_index, NULL, NULL, NULL);
+      socket_add_all_all();
+    }
+    else if( s_sock_idx_col[i] == SOCK_ALL_MARKER ) {
+      socket_add_all(s_stack_idx_col[i]);
+    }
+    else {
+      socket_add(s_stack_idx_col[i], s_sock_idx_col[i]);
+    }
+    ++i;
+  }
+}
+
+int main(int argc, char* argv[])
+{
   int doing_stacks = 0;
   int doing_sockets = 0;
+  /* An index of available stacks to process */
+  int* stack_idx;
   int no_args = (argc == 1);
 
   ci_app_usage = usage;
@@ -378,16 +613,37 @@ int main(int argc, char* argv[])
     return -1;
   }
 
-  /* onload_stackdump docs does not require the driver to be loaded */
+  /* First handle commands that do not require the driver to be loaded. */
   if( argc == 2 && ! strcmp(argv[1], "doc") ) {
     print_docs(--argc, ++argv);
+    return 0;
+  }
+  else if( argc == 2 && ! strcmp(argv[1], "config") ) {
+    print_config();
     return 0;
   }
 
   ci_app_getopt("[stack-index]", &argc, argv, cfg_opts, N_CFG_OPTS);
   --argc; ++argv;
-  if( libstack_init(NULL) != 0 )
+
+  /* Ensure we clean-up nicely when we exit. */
+  atexit(atexit_fn);
+
+  /* Get stacks numbers from command line */
+  doing_stacks = parse_stacks(&argc, &argv, &stack_idx);
+
+  /* Get sockets numbers from command line */
+  doing_sockets = parse_sockets(&argc, &argv, &stack_idx);
+
+  if( ! (doing_stacks || doing_sockets) && argc == 0 ) {
+    stack_idx = NULL;
+    doing_stacks = 1;
+  }
+
+  /* Initialization of necessary stacks only. */
+  if( libstack_init(NULL) != 0 ) {
     return -1;
+  }
 
   /* Special case for onload_stackdump called with no arguments 
    * - just list stacks and pids and return
@@ -397,63 +653,24 @@ int main(int argc, char* argv[])
     return 0;
   }
 
-  /* Ensure we clean-up nicely when we exit. */
-  atexit(atexit_fn);
-
-  /* Which stack(s) are we doing this to?  If no stack specified then
-   * attach to all stacks 
-   */
-  if( argc == 0 ) {
-    list_all_stacks(1);
-    doing_stacks = 1;
-    goto doit;
-  }
+  list_all_stacks2(stackfilter_match_index, NULL, NULL, NULL);
+  debug_print_stacks();
+  remove_not_present_stacks(doing_sockets);
+  debug_print_stacks();
 
   for( ; argc; --argc, ++argv ) {
-    unsigned stack_id, sock_id;
-    if( sscanf(argv[0], "%u %c", &stack_id, &dummy) == 1 ) {
-      if( doing_sockets )  cant_do_both();
-      if( ! stack_attach(stack_id) ) {
-	ci_log("No such stack id: %d", stack_id);
-	continue;
+    if( ! strcmp(argv[0], "all") ) {
+      if( doing_sockets ) {
+        cant_do_both();
       }
-      doing_stacks = 1;
-    }
-    else if( sscanf(argv[0], "%u:%u %c", &stack_id, &sock_id, &dummy) == 2 ) {
-      if( doing_stacks )  cant_do_both();
-      doing_sockets = 1;
-      if( ! stack_attach(stack_id) ) {
-	ci_log("No such stack id: %d", stack_id);
-	continue;
-      }
-      socket_add(stack_id, sock_id);
-    }
-    else if( sscanf(argv[0], "%u:* %c", &stack_id, &dummy) == 1 ) {
-      if( doing_stacks )  cant_do_both();
-      doing_sockets = 1;
-      if( ! stack_attach(stack_id) ) {
-	ci_log("No such stack id: %d", stack_id);
-	continue;
-      }
-      socket_add_all(stack_id);
-    }
-    else if( ! strcmp(argv[0], "*:*") ) {
-      if( doing_stacks )  cant_do_both();
-      doing_sockets = 1;
-      list_all_stacks(1);
-      socket_add_all_all();
-    }
-    else if( ! strcmp(argv[0], "all") ) {
-      if( doing_sockets )  cant_do_both();
-      list_all_stacks(1);
       doing_stacks = 1;
     }
     else if( ! strcmp(argv[0], "threads") ) {
       if( doing_sockets || doing_stacks )
         ci_app_usage("Cannot mix threads with other commands");
-       if( cfg_nopids )
+      if( cfg_nopids )
         ci_app_usage("Cannot mix threads command with --nopids");
-     CI_TRY(libstack_threads_print());
+      CI_TRY(libstack_threads_print());
     }
     else if( ! strcmp(argv[0], "env") ) {
       if( doing_sockets || doing_stacks )
@@ -479,15 +696,24 @@ int main(int argc, char* argv[])
       break;
     }
     else {
-      if( ! (doing_stacks | doing_sockets) ) {
-	list_all_stacks(1);
-	doing_stacks = 1;
+      if( !doing_sockets ) {
+        doing_stacks = 1;
       }
       break;
     }
   }
+  STACK_LOG_DUMP(ci_log(" [%s %d] doing_stacks=%d, doing_sockets=%d", __func__,
+                        __LINE__, doing_stacks, doing_sockets));
 
- doit:
+  if( doing_sockets ) {
+    if( doing_stacks ) {
+      cant_do_both();
+    }
+    else {
+      add_socket();
+    }
+  }
+
   ci_log_fn = ci_log_stdout;
   if( doing_stacks )
     do_stack_ops(argc, argv);

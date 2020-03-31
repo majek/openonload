@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 #ifndef __ONLOAD_IOCTL_H__
 #define __ONLOAD_IOCTL_H__
 
@@ -187,11 +174,6 @@ enum {
 
 
 
-  /* Cplane operations */
-  OO_OP_CP_USER_DEFER_SEND,
-#define OO_IOC_CP_USER_DEFER_SEND   OO_IOC_RW(CP_USER_DEFER_SEND, \
-                                              cp_user_defer_send_t)
-
   OO_OP_EPLOCK_WAKE,
 #define OO_IOC_EPLOCK_WAKE          OO_IOC_NONE(EPLOCK_WAKE)
   OO_OP_EPLOCK_LOCK_WAIT,
@@ -246,6 +228,14 @@ enum {
                                            oo_alloc_active_wild_t)
 
 
+  OO_OP_VETH_ACCELERATION_ENABLED,
+#define OO_IOC_VETH_ACCELERATION_ENABLED OO_IOC_NONE(VETH_ACCELERATION_ENABLED)
+
+  OO_OP_EVQ_POLL,
+#define OO_IOC_EVQ_POLL         OO_IOC_W(EVQ_POLL, ci_uint32)
+
+  OO_OP_BPF_BIND,
+#define OO_IOC_BPF_BIND         OO_IOC_W(BPF_BIND, oo_bpf_bind_t)
 
   OO_OP_CONTIG_END,  /* This is the last in range of contigous opcodes */
 

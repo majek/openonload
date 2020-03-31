@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: Solarflare-Binary */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 **  \brief  TCPDirect UDP API
@@ -131,7 +118,7 @@ zfur_addr_unbind(struct zfur* us, const struct sockaddr* laddr,
 
 /*! \brief UDP zero-copy RX message structure.
 **
-** This structure is passed to zfur_zc_recv(), which will populate it and a 
+** This structure is passed to zfur_zc_recv(), which will populate it and a
 ** referenced iovec array with pointers to received packets.
 */
 struct zfur_msg {
@@ -141,11 +128,15 @@ struct zfur_msg {
   int dgrams_left;
   /** Reserved. */
   int flags;
-  /** In: Length of #iov array expressed as a count of iovecs; out: number of
-      entries of #iov populated with pointers to packets. */
+  /** In: Length of #iov array expressed as a count of iovecs.\n
+      Out: number of entries of #iov populated with pointers to packets. */
   int iovcnt;
-  /** In: base of separate iovec array, available for writing; out: iovec array
-      is filled with iovecs pointing to the payload of the received packets. */
+  /** In: A separate iovec array, available for writing, with @p iovcnt
+      entries, must immediately follow this structure. This structure and
+      the iovec array are typically wrapped by a structure. For an example,
+      see the \ref zfudppingpong application.\n
+      Out: iovec array is filled with iovecs pointing to the payload of
+      the received packets. */
   struct iovec iov[ZF_FLEXIBLE_ARRAY_COUNT];
 };
 
@@ -375,6 +366,7 @@ zfut_send_single(struct zfut *us, const void* buf, size_t buflen);
 ** \return -EAGAIN         Events need to be processed before warming.
                            Call zf_reactor_perform()
 ** \return -EMSGSIZE       Message too large.
+** \return -ENOBUFS        Out of packet buffers.
 **
 ** This function can be called repeatedly while the application waits
 ** for an input that will trigger a call to zfut_send_single().
@@ -383,7 +375,7 @@ zfut_send_single(struct zfut *us, const void* buf, size_t buflen);
 ** @p buf need not contain the data that will eventually be sent.
 **
 ** This function only supports warming the code path where a PIO
-** send would be performed. If @p buflen is too large for PIO then
+** or CTPIO send would be performed. If @p buflen is too large for PIO then
 ** -EMSGSIZE will be returned. If PIO is currently in use then -EAGAIN
 ** will be returned.  In this case, the application can call
 ** zf_reactor_perform() and then try again.

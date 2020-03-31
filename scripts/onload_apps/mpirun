@@ -1,10 +1,8 @@
 # -*- Mode: shell-script; -*-
-######################################################################
-# Copyright 2005  Level 5 Networks.
-# Description: Onload application handler: mpirun
-#      Author: David Riddoch
-#     Started: 2005/01/14
-######################################################################
+# SPDX-License-Identifier: BSD-2-Clause
+# X-SPDX-Copyright-Text: (c) Solarflare Communications Inc
+
+# Onload application handler: mpirun
 
 # TODO:
 #   - handle multiple [-arch]s (tricky, needs wrapper per arch)

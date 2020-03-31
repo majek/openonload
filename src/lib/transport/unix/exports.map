@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 {
   global:
     /* symbols we want to intercept */
@@ -114,6 +116,7 @@
     onload_move_fd;
     onload_fd_check_feature;
     onload_ordered_epoll_wait;
+    onload_timestamping_request;
     onload_delegated_send_prepare;
     onload_delegated_send_complete;
     onload_delegated_send_cancel;

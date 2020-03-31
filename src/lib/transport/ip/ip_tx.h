@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_HEADER >
@@ -103,7 +90,8 @@ ci_inline void
 ci_ip_set_mac_and_port(ci_netif* ni, const ci_ip_cached_hdrs* ipcache,
                        ci_ip_pkt_fmt* pkt)
 {
-  ci_assert_equal(ipcache->ether_type, CI_ETHERTYPE_IP);
+  ci_uint16 ether_type = ipcache->ether_type;
+  ci_assert(ether_type == CI_ETHERTYPE_IP || ether_type == CI_ETHERTYPE_IP6);
   oo_tx_pkt_layout_update(pkt, ipcache->ether_offset);
   memcpy(oo_tx_ether_hdr(pkt), ci_ip_cache_ether_hdr(ipcache),
          oo_tx_ether_hdr_size(pkt));
@@ -116,8 +104,9 @@ ci_ip_set_mac_and_port(ci_netif* ni, const ci_ip_cached_hdrs* ipcache,
   oo_ether_dhost(pkt)[5]  ^= pkt->netif.tx.intf_swap;
   oo_ether_shost(pkt)[5]  ^= pkt->netif.tx.intf_swap;
 #endif
-  ci_assert_equal(oo_tx_ether_type_get(pkt), CI_ETHERTYPE_IP);
-  ci_assert_equal(CI_IP4_IHL(oo_tx_ip_hdr(pkt)), sizeof(ci_ip4_hdr));
+  ci_assert_equal(oo_tx_ether_type_get(pkt), ether_type);
+  if( ether_type == CI_ETHERTYPE_IP )
+    ci_assert_equal(CI_IP4_IHL(oo_tx_ip_hdr(pkt)), sizeof(ci_ip4_hdr));
 }
 
 
@@ -127,14 +116,19 @@ extern void ci_ip_send_tcp_slow(ci_netif*, ci_tcp_state*, ci_ip_pkt_fmt*)CI_HF;
 ci_inline void
 __ci_ip_send_tcp(ci_netif* ni, ci_ip_pkt_fmt* pkt, ci_tcp_state* ts)
 {
+#if CI_CFG_IPV6
+  if( ipcache_af(&ts->s.pkt) == AF_INET )
+    pkt->flags &=~ CI_PKT_FLAG_IS_IP6;
+  else
+    pkt->flags |= CI_PKT_FLAG_IS_IP6;
+#endif
   if( ts->s.pkt.flags & CI_IP_CACHE_IS_LOCALROUTE ) {
     ci_netif_pkt_hold(ni, pkt);
     ci_ip_local_send(ni, pkt, S_SP(ts), ts->local_peer);
     return;
   }
-  CI_IPV4_STATS_INC_OUT_REQUESTS(ni);
   if(CI_LIKELY( ts->s.pkt.status == retrrc_success &&
-                oo_cp_verinfo_is_valid(ni->cplane, &ts->s.pkt.mac_integrity) )) {
+                oo_cp_ipcache_is_valid(ni, &ts->s.pkt) )) {
     ci_ip_set_mac_and_port(ni, &ts->s.pkt, pkt);
     ci_netif_pkt_hold(ni, pkt);
     ci_netif_send(ni, pkt);

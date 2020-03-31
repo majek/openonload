@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_SOURCE>
@@ -35,6 +22,25 @@
 #include <etherfabric/vi.h>
 #include <ci/internal/pio_buddy.h>
 
+#define CI_BPF_MODE_DISABLED  0
+#define CI_BPF_MODE_COMPAT    1
+#if CI_CFG_BPF && ! defined NO_BPF
+# define CI_USE_BPF CI_BPF_MODE_COMPAT
+#else
+# define CI_USE_BPF CI_BPF_MODE_DISABLED
+#endif
+
+#if CI_USE_BPF == CI_BPF_MODE_COMPAT
+# include <ci/internal/xdp_buff.h>
+# ifdef __KERNEL__
+#  include <onload/bpf_internal.h>
+#  include <ci/efrm/efrm_client.h>
+#  include <ci/efrm/vi_resource_manager.h>
+# else
+#  include <onload/oobpf.h>
+# endif
+#endif
+
 #include <linux/ip.h>
 #ifdef __KERNEL__
 #include <linux/time.h>
@@ -42,20 +48,24 @@
 #include <time.h>
 #endif
 
+#if defined(__KERNEL__) && CI_USE_BPF != CI_BPF_MODE_DISABLED
+# include <etherfabric/internal/evq_rx_iter.h>
+#endif
+
+
 #define SAMPLE(n) (n)
 
 #define LPF "netif: "
 
+#ifndef __KERNEL__
 enum {
   FUTURE_DROP = 0x01,
   FUTURE_IP4  = 0x02,
-  FUTURE_IP6  = 0x04,
-  FUTURE_TCP  = 0x08, /* else TCP */
+  FUTURE_TCP  = 0x04, /* else UDP */
 
   FUTURE_NONE = 0,
   FUTURE_UDP4 = FUTURE_IP4,
-  FUTURE_UDP6 = FUTURE_IP6,
-  FUTURE_TCP4 = FUTURE_IP4 | FUTURE_TCP, /* TCP/IP6 is not accelerated yet */
+  FUTURE_TCP4 = FUTURE_IP4 | FUTURE_TCP,
 };
 
 
@@ -66,6 +76,7 @@ struct oo_rx_future {
     struct ci_udp_rx_future udp;
   };
 };
+#endif
 
 
 struct oo_rx_state {
@@ -99,29 +110,18 @@ static int ci_ip_csum_correct(ci_ip4_hdr* ip, int max_ip_len)
 
 static int ci_tcp_csum_correct(ci_ip_pkt_fmt* pkt, int ip_paylen)
 {
-  ci_ip4_pseudo_hdr ph;
-  ci_tcp_hdr* tcp;
-  unsigned csum;
-  int tcp_hlen;
-
-  tcp = PKT_TCP_HDR(pkt);
-  tcp_hlen = CI_TCP_HDR_LEN(tcp);
+  int af = oo_pkt_af(pkt);
+  ci_ipx_hdr_t* ipx = oo_ipx_hdr(pkt);
+  ci_tcp_hdr* tcp = ipx_hdr_data(af, ipx);
+  int tcp_hlen = CI_TCP_HDR_LEN(tcp);
 
   if( tcp_hlen < sizeof(ci_tcp_hdr) )
     return 0;
   if( ip_paylen < tcp_hlen )
     return 0;
 
-  ph.ip_saddr_be32 = oo_ip_hdr(pkt)->ip_saddr_be32;
-  ph.ip_daddr_be32 = oo_ip_hdr(pkt)->ip_daddr_be32;
-  ph.zero = 0;
-  ph.ip_protocol = IPPROTO_TCP;
-  ph.length_be16 = CI_BSWAP_BE16((ci_uint16) ip_paylen);
-
-  csum = ci_ip_csum_partial(0, &ph, sizeof(ph));
-  csum = ci_ip_csum_partial(csum, tcp, ip_paylen);
-  csum = ci_ip_hdr_csum_finish(csum);
-  return csum == 0;
+  return ci_ipx_tcp_checksum(af, ipx, tcp, CI_TCP_PAYLOAD(tcp)) ==
+         tcp->tcp_check_be16;
 }
 
 
@@ -303,6 +303,51 @@ int ci_ip_options_parse(ci_netif* netif, ci_ip4_hdr* ip, const int hdr_size)
   return error;
 }
 
+
+static void get_rx_timestamp(ci_netif* netif, ci_ip_pkt_fmt* pkt)
+{
+#if CI_CFG_TIMESTAMPING
+  ci_netif_state_nic_t* nsn = &netif->state->nic[pkt->intf_i];
+
+  if( nsn->oo_vi_flags & OO_VI_FLAGS_RX_HW_TS_EN ) {
+    unsigned sync_flags;
+    struct timespec stamp;
+    int rc = ef_vi_receive_get_timestamp_with_sync_flags
+      (&netif->nic_hw[pkt->intf_i].vi,
+       PKT_START(pkt) - nsn->rx_prefix_len, &stamp, &sync_flags);
+    if( rc == 0 ) {
+      int tsf = (NI_OPTS(netif).timestamping_reporting &
+                 CITP_TIMESTAMPING_RECORDING_FLAG_CHECK_SYNC) ?
+                EF_VI_SYNC_FLAG_CLOCK_IN_SYNC :
+                EF_VI_SYNC_FLAG_CLOCK_SET;
+      pkt->hw_stamp.tv_sec = stamp.tv_sec;
+      pkt->hw_stamp.tv_nsec = stamp.tv_nsec =
+                (stamp.tv_nsec & ~CI_IP_PKT_HW_STAMP_FLAG_IN_SYNC) |
+                ((sync_flags & tsf) ? CI_IP_PKT_HW_STAMP_FLAG_IN_SYNC : 0);
+      nsn->last_rx_timestamp = pkt->hw_stamp;
+      nsn->last_sync_flags = sync_flags;
+
+      measure_processing_delay(netif, stamp, sync_flags);
+
+      LOG_NR(log(LPF "RX id=%d timestamp: %lu.%09lu sync %d",
+          OO_PKT_FMT(pkt), stamp.tv_sec, stamp.tv_nsec, sync_flags));
+    } else {
+      LOG_NR(log(LPF "RX id=%d missing timestamp", OO_PKT_FMT(pkt)));
+      pkt->hw_stamp.tv_sec = 0;
+    }
+  }
+  else
+    pkt->hw_stamp.tv_sec = 0;
+    /* no need to set tv_nsec to 0 here as socket layer ignores
+     * timestamps when tv_sec is 0
+     */
+#else
+  (void)netif;
+  (void)pkt;
+#endif
+}
+
+
 static void handle_rx_pkt(ci_netif* netif, struct ci_netif_poll_state* ps,
                           ci_ip_pkt_fmt* pkt)
 {
@@ -327,6 +372,9 @@ static void handle_rx_pkt(ci_netif* netif, struct ci_netif_poll_state* ps,
   if(CI_LIKELY( ether_type == CI_ETHERTYPE_IP )) {
     int ip_tot_len;
     ci_ip4_hdr *ip = oo_ip_hdr(pkt);
+#if CI_CFG_IPV6
+    pkt->flags &=~ CI_PKT_FLAG_IS_IP6;
+#endif
 
     LOG_NR(log(LPF "RX id=%d ip_proto=0x%x", OO_PKT_FMT(pkt),
                (unsigned) ip->ip_protocol));
@@ -366,68 +414,23 @@ static void handle_rx_pkt(ci_netif* netif, struct ci_netif_poll_state* ps,
 
     if( CI_LIKELY(not_fast == 0) ) {
       char* payload = (char*) ip + hdr_size;
-#if CI_CFG_TIMESTAMPING
-      ci_netif_state_nic_t* nsn = &netif->state->nic[pkt->intf_i];
-      struct timespec stamp;
-#endif
 
       ip_paylen = ip_tot_len - hdr_size;
       /* This will go negative if the ip_tot_len was too small even
       ** for the IP header.  The ULP is expected to notice...
       */
 
-#if CI_CFG_TIMESTAMPING
-      if( nsn->oo_vi_flags & OO_VI_FLAGS_RX_HW_TS_EN ) {
-        unsigned sync_flags;
-        int rc = ef_vi_receive_get_timestamp_with_sync_flags
-          (&netif->nic_hw[pkt->intf_i].vi,
-           PKT_START(pkt) - nsn->rx_prefix_len, &stamp, &sync_flags);
-        if( rc == 0 ) {
-          int tsf = (NI_OPTS(netif).timestamping_reporting &
-                     CITP_TIMESTAMPING_RECORDING_FLAG_CHECK_SYNC) ?
-                    EF_VI_SYNC_FLAG_CLOCK_IN_SYNC :
-                    EF_VI_SYNC_FLAG_CLOCK_SET;
-          stamp.tv_nsec =
-                    (stamp.tv_nsec & ~CI_IP_PKT_HW_STAMP_FLAG_IN_SYNC) |
-                    ((sync_flags & tsf) ? CI_IP_PKT_HW_STAMP_FLAG_IN_SYNC : 0);
-          nsn->last_rx_timestamp.tv_sec = stamp.tv_sec;
-          nsn->last_rx_timestamp.tv_nsec = stamp.tv_nsec;
-          nsn->last_sync_flags = sync_flags;
-
-          measure_processing_delay(netif, stamp, sync_flags);
-
-          LOG_NR(log(LPF "RX id=%d timestamp: %lu.%09lu sync %d",
-              OO_PKT_FMT(pkt), stamp.tv_sec, stamp.tv_nsec, sync_flags));
-        } else {
-          LOG_NR(log(LPF "RX id=%d missing timestamp", OO_PKT_FMT(pkt)));
-          stamp.tv_sec = 0;
-        }
-      }
-      else
-        stamp.tv_sec = 0;
-        /* no need to set tv_nsec to 0 here as socket layer ignores
-         * timestamps when tv_sec is 0
-         */
-#endif
+      get_rx_timestamp(netif, pkt);
 
       /* Demux to appropriate protocol. */
       if( ip->ip_protocol == IPPROTO_TCP ) {
-#if CI_CFG_TIMESTAMPING
-        pkt->pf.tcp_rx.rx_hw_stamp.tv_sec = stamp.tv_sec;
-        pkt->pf.tcp_rx.rx_hw_stamp.tv_nsec = stamp.tv_nsec;
-#endif
         ci_tcp_handle_rx(netif, ps, pkt, (ci_tcp_hdr*) payload, ip_paylen);
         CI_IPV4_STATS_INC_IN_DELIVERS( netif );
         return;
       }
 #if CI_CFG_UDP
       else if(CI_LIKELY( ip->ip_protocol == IPPROTO_UDP )) {
-#if CI_CFG_TIMESTAMPING
-        pkt->pf.udp.rx_hw_stamp.tv_sec = stamp.tv_sec;
-        pkt->pf.udp.rx_hw_stamp.tv_nsec = stamp.tv_nsec;
-#endif
-        ci_udp_handle_rx(netif, pkt, (ci_udp_hdr*) payload, ip_paylen,
-                         CI_ETHERTYPE_IP);
+        ci_udp_handle_rx(netif, pkt, (ci_udp_hdr*) payload, ip_paylen);
         CI_IPV4_STATS_INC_IN_DELIVERS( netif );
         return;
       }
@@ -460,22 +463,38 @@ static void handle_rx_pkt(ci_netif* netif, struct ci_netif_poll_state* ps,
     return;
   }
 #if CI_CFG_IPV6
-  else
-  {
-    if(CI_LIKELY( ether_type == CI_ETHERTYPE_IP6 )) {
-      ci_ip6_hdr *ip6_hdr = oo_ip6_hdr(pkt);
-      void *payload = ip6_hdr + 1;
+  else if(CI_LIKELY( ether_type == CI_ETHERTYPE_IP6 )) {
+    ci_ip6_hdr *ip6_hdr = oo_ip6_hdr(pkt);
+    void *payload = ip6_hdr + 1;
 
-      LOG_NR(log(LPF "RX id=%d ip6_proto=0x%x", OO_PKT_FMT(pkt),
-                 ip6_hdr->next_hdr));
+    LOG_NR(log(LPF "RX id=%d ip6_proto=0x%x", OO_PKT_FMT(pkt),
+               ip6_hdr->next_hdr));
+    pkt->flags |= CI_PKT_FLAG_IS_IP6;
 
-      if( ip6_hdr->next_hdr == IPPROTO_UDP ) {
-        ci_udp_handle_rx(netif, pkt, (ci_udp_hdr*) payload,
-                         CI_BSWAP_BE16(ip6_hdr->payload_len),
-                         CI_ETHERTYPE_IP6);
-        return;
-      }
+    CI_IP_STATS_INC_IN6_RECVS( netif );
+
+    if( oo_tcpdump_check(netif, pkt, pkt->intf_i) )
+      oo_tcpdump_dump_pkt(netif, pkt);
+
+    if( ip6_hdr->next_hdr == IPPROTO_TCP ) {
+      ci_tcp_handle_rx(netif, ps, pkt, (ci_tcp_hdr*) payload,
+                       CI_BSWAP_BE16(ip6_hdr->payload_len));
+      CI_IP_STATS_INC_IN6_DELIVERS( netif );
+      return;
     }
+    else if( ip6_hdr->next_hdr == IPPROTO_UDP ) {
+      ci_udp_handle_rx(netif, pkt, (ci_udp_hdr*) payload,
+                       CI_BSWAP_BE16(ip6_hdr->payload_len));
+      CI_IP_STATS_INC_IN6_DELIVERS( netif );
+      return;
+    }
+
+    CI_IP_STATS_INC_IN6_DISCARDS( netif );
+    if( ci_netif_pkt_pass_to_kernel(netif, pkt) )
+      CITP_STATS_NETIF_INC(netif, no_match_pass_to_kernel_ip6_other);
+    else
+      ci_netif_pkt_release_rx_1ref(netif, pkt);
+    return;
   }
 #endif
 
@@ -499,8 +518,10 @@ static void handle_rx_pkt(ci_netif* netif, struct ci_netif_poll_state* ps,
 #endif
 }
 
-
-/* Partially handle an incoming packet before its completion event. */
+#ifndef __KERNEL__
+/* Partially handle an incoming packet before its completion event.
+ * As much work as possible should be done here, before waiting for the packet
+ * to arrive, to minimise work done on the critical path after arrival. */
 ci_inline int handle_rx_pre_future(ci_netif* ni, ci_ip_pkt_fmt* pkt,
                                    struct oo_rx_future* future)
 {
@@ -532,10 +553,6 @@ ci_inline int handle_rx_pre_future(ci_netif* ni, ci_ip_pkt_fmt* pkt,
     int ip_paylen = ip_tot_len - hdr_size;
     int ip_payload_offset = pkt->pkt_eth_payload_off + hdr_size;
     void* payload = (char*)ip + hdr_size;
-#if CI_CFG_TIMESTAMPING
-    ci_netif_state_nic_t* nsn = &ni->state->nic[pkt->intf_i];
-    struct timespec stamp;
-#endif
 
     if( ip_payload_offset > valid_bytes ||
         (hdr_size > sizeof(ci_ip4_hdr) &&
@@ -543,47 +560,13 @@ ci_inline int handle_rx_pre_future(ci_netif* ni, ci_ip_pkt_fmt* pkt,
       goto no_future;
 
     CI_IPV4_STATS_INC_IN_RECVS( ni );
-
-#if CI_CFG_TIMESTAMPING
-    if( nsn->oo_vi_flags & OO_VI_FLAGS_RX_HW_TS_EN ) {
-      unsigned sync_flags;
-      int rc = ef_vi_receive_get_timestamp_with_sync_flags
-        (&ni->nic_hw[pkt->intf_i].vi,
-         PKT_START(pkt) - nsn->rx_prefix_len, &stamp, &sync_flags);
-      if( rc == 0 ) {
-        int tsf = (NI_OPTS(ni).timestamping_reporting &
-                   CITP_TIMESTAMPING_RECORDING_FLAG_CHECK_SYNC) ?
-                  EF_VI_SYNC_FLAG_CLOCK_IN_SYNC :
-                  EF_VI_SYNC_FLAG_CLOCK_SET;
-        stamp.tv_nsec =
-                  (stamp.tv_nsec & ~CI_IP_PKT_HW_STAMP_FLAG_IN_SYNC) |
-                  ((sync_flags & tsf) ? CI_IP_PKT_HW_STAMP_FLAG_IN_SYNC : 0);
-        nsn->last_rx_timestamp.tv_sec = stamp.tv_sec;
-        nsn->last_rx_timestamp.tv_nsec = stamp.tv_nsec;
-        nsn->last_sync_flags = sync_flags;
-
-        measure_processing_delay(ni, stamp, sync_flags);
-
-        LOG_NR(log(LPF "RX id=%d timestamp: %lu.%09lu sync %d",
-                   OO_PKT_FMT(pkt), stamp.tv_sec, stamp.tv_nsec, sync_flags));
-      } else {
-        LOG_NR(log(LPF "RX id=%d missing timestamp", OO_PKT_FMT(pkt)));
-        stamp.tv_sec = 0;
-      }
-    }
-    else {
-      stamp.tv_sec = 0;
-      /* no need to set tv_nsec to 0 here as socket layer ignores
-       * timestamps when tv_sec is 0
-       */
-    }
+#if CI_CFG_IPV6
+    pkt->flags &=~ CI_PKT_FLAG_IS_IP6;
 #endif
+
+    get_rx_timestamp(ni, pkt);
 
     if( ip->ip_protocol == IPPROTO_TCP ) {
-#if CI_CFG_TIMESTAMPING
-      pkt->pf.tcp_rx.rx_hw_stamp.tv_sec = stamp.tv_sec;
-      pkt->pf.tcp_rx.rx_hw_stamp.tv_nsec = stamp.tv_nsec;
-#endif
       CI_IPV4_STATS_INC_IN_DELIVERS( ni );
       if( ip_payload_offset + sizeof(ci_tcp_hdr) <= valid_bytes )
         ci_tcp_handle_rx_pre_future(ni, pkt, payload, ip_paylen, &future->tcp);
@@ -593,10 +576,6 @@ ci_inline int handle_rx_pre_future(ci_netif* ni, ci_ip_pkt_fmt* pkt,
     }
 #if CI_CFG_UDP
     if(CI_LIKELY( ip->ip_protocol == IPPROTO_UDP )) {
-#if CI_CFG_TIMESTAMPING
-      pkt->pf.udp.rx_hw_stamp.tv_sec = stamp.tv_sec;
-      pkt->pf.udp.rx_hw_stamp.tv_nsec = stamp.tv_nsec;
-#endif
       CI_IPV4_STATS_INC_IN_DELIVERS( ni );
       if( ip_payload_offset + sizeof(ci_udp_hdr) <= valid_bytes )
         ci_udp_handle_rx_pre_future(ni, pkt, payload, ip_paylen,
@@ -609,15 +588,6 @@ ci_inline int handle_rx_pre_future(ci_netif* ni, ci_ip_pkt_fmt* pkt,
     LOG_U(log(LPF "IGNORE IP protocol=%d", (int) ip->ip_protocol));
     return FUTURE_DROP;
   }
-#if CI_CFG_IPV6
-  if(CI_LIKELY( ether_type == CI_ETHERTYPE_IP6 )) {
-    ci_ip6_hdr *ip6_hdr = oo_ip6_hdr(pkt);
-    if( ip6_hdr->next_hdr == IPPROTO_UDP ) {
-      /* We should also do some protocol handling now */
-      return FUTURE_UDP6;
-    }
-  }
-#endif
 no_future:
   CI_DEBUG(pkt->pkt_eth_payload_off = 0xff);
   return FUTURE_NONE;
@@ -634,9 +604,10 @@ ci_inline void rollback_rx_future(ci_netif* ni, ci_ip_pkt_fmt* pkt, int status,
   CI_DEBUG(pkt->pkt_eth_payload_off = 0xff);
 
   /* Should we add official macros to decrease these counters? */
+  CITP_STATS_NETIF_ADD(ni, rx_evs, -1);
   if( status & FUTURE_IP4 ) {
-    __CI_NETIF_STATS_DEC(ni, ipv4, in_recvs);
-    __CI_NETIF_STATS_DEC(ni, ipv4, in_delivers);
+    __CI_NETIF_STATS_DEC(ni, ip, in_recvs);
+    __CI_NETIF_STATS_DEC(ni, ip, in_delivers);
     if( status & FUTURE_TCP )
       ci_tcp_rollback_rx_future(ni, &future->tcp);
     else
@@ -645,7 +616,10 @@ ci_inline void rollback_rx_future(ci_netif* ni, ci_ip_pkt_fmt* pkt, int status,
 }
 
 
-/* Finish handling a partially handled packet after its completion event. */
+/* Finish handling a partially handled packet after its completion event.
+ * This is on the critical latency path, so try to avoid any unnecessary work
+ * here. Any work which doesn't require the complete packet should be done
+ * in handle_rx_pre_future if possible. */
 ci_inline void handle_rx_post_future(ci_netif* ni,
                                      struct ci_netif_poll_state* ps,
                                      ci_ip_pkt_fmt* pkt, int status,
@@ -694,8 +668,7 @@ ci_inline void handle_rx_post_future(ci_netif* ni,
         ci_tcp_handle_rx_post_future(ni, ps, pkt, payload, len, &future->tcp);
 #if CI_CFG_UDP
       else
-        ci_udp_handle_rx_post_future(ni, pkt, payload, len, CI_ETHERTYPE_IP,
-                                     &future->udp);
+        ci_udp_handle_rx_post_future(ni, pkt, payload, len, &future->udp);
 #endif
     }
     else {
@@ -715,24 +688,12 @@ ci_inline void handle_rx_post_future(ci_netif* ni,
         ci_netif_pkt_release_rx_1ref(ni, pkt);
     }
   }
-#if CI_CFG_IPV6
-  else if(CI_LIKELY( status == FUTURE_UDP6 )) {
-    ci_ip6_hdr *ip6_hdr = oo_ip6_hdr(pkt);
-    void *payload = ip6_hdr + 1;
-
-    LOG_NR(log(LPF "RX id=%d ip6_proto=0x%x", OO_PKT_FMT(pkt),
-               ip6_hdr->next_hdr));
-
-    ci_udp_handle_rx(ni, pkt, (ci_udp_hdr*) payload,
-                     CI_BSWAP_BE16(ip6_hdr->payload_len),
-                     CI_ETHERTYPE_IP6);
-  }
-#endif
   else {
     ci_assert_equal(status, FUTURE_DROP);
     ci_netif_pkt_release_rx_1ref(ni, pkt);
   }
 }
+#endif
 
 
 /* We accumulate new fragments adding them to the head of queue.  Once we've
@@ -870,10 +831,9 @@ static void handle_rx_scatter_merge(ci_netif* ni, struct oo_rx_state* s,
 static int handle_rx_csum_bad(ci_netif* ni, struct ci_netif_poll_state* ps,
                               ci_ip_pkt_fmt* pkt, int frame_len)
 {
-  ci_ip4_hdr *ip;
   int ip_paylen;
-  int ip_len;
-  int min_ip_paylen;
+  int ip_proto;
+  ci_uint16 ether_type;
 
   /* Packet reached onload -- so must be IP and must at least reach the TCP
    * or UDP header.
@@ -890,55 +850,77 @@ static int handle_rx_csum_bad(ci_netif* ni, struct ci_netif_poll_state* ps,
               FN_PRI_ARGS(ni), pkt->pay_len));
     goto drop;
   }
+  ether_type = *((ci_uint16*)oo_l3_hdr(pkt) - 1);
 
-  ip = oo_ip_hdr(pkt);
-  ip_len = CI_BSWAP_BE16(ip->ip_tot_len_be16);
-  ip_paylen = ip_len - CI_IP4_IHL(ip);
-  /* Strictly speaking, we should validate the IP checksum before relying on
-   * the protocol field, but nothing will go wrong in the event that it's
-   * invalid. */
-  min_ip_paylen = ip->ip_protocol == IPPROTO_UDP ? sizeof(ci_udp_hdr) :
-                                                   sizeof(ci_tcp_hdr);
+  if(CI_LIKELY( ether_type == CI_ETHERTYPE_IP )) {
+    ci_ip4_hdr *ip = oo_ip_hdr(pkt);
+    int ip_len = CI_BSWAP_BE16(ip->ip_tot_len_be16);
+    ip_paylen = ip_len - CI_IP4_IHL(ip);
+    ip_proto = ip->ip_protocol;
 
-  /* Check that we have a full-length transport-layer header. */
-  if( pkt->pay_len < oo_pre_l3_len(pkt) + CI_IP4_IHL(ip) + min_ip_paylen ) {
-    CI_IPV4_STATS_INC_IN_HDR_ERRS(ni);
-    LOG_U(log(FN_FMT "BAD min_ip_paylen=%d frame_len=%d",
-              FN_PRI_ARGS(ni), min_ip_paylen, pkt->pay_len));
+    if( pkt->pay_len < oo_pre_l3_len(pkt) + ip_len  ){
+      CI_IPV4_STATS_INC_IN_HDR_ERRS(ni);
+      LOG_U(log(FN_FMT "BAD ip_len=%d frame_len=%d",
+                FN_PRI_ARGS(ni), ip_len, pkt->pay_len));
+      goto drop;
+    }
+
+    if( ! ci_ip_csum_correct(ip, pkt->pay_len - oo_pre_l3_len(pkt)) ) {
+      CI_IPV4_STATS_INC_IN_HDR_ERRS(ni);
+      LOG_U(log(FN_FMT "IP BAD CHECKSUM", FN_PRI_ARGS(ni)));
+      goto drop;
+    }
+
+  }
+#if CI_CFG_IPV6
+  else if( ether_type == CI_ETHERTYPE_IP6 ) {
+    ci_ip6_hdr *ip = oo_ip6_hdr(pkt);
+    ip_paylen = CI_BSWAP_BE16(ip->payload_len);
+    ip_proto = ip->next_hdr;
+
+    if( ip_paylen <= 0 ||
+        pkt->pay_len < oo_pre_l3_len(pkt) + sizeof(ci_ip6_hdr) + ip_paylen ) {
+      CI_IP_STATS_INC_IN6_HDR_ERRS(ni);
+      LOG_U(log(FN_FMT "BAD frame_len=%d or IPv6 paylen=%d",
+                FN_PRI_ARGS(ni), pkt->pay_len, ip_paylen));
+      goto drop;
+    }
+
+    /* There is no IPv6 checksum to verify. */
+  }
+#endif
+  else {
+    LOG_U(log(FN_FMT "BAD frame ether_type=%d", FN_PRI_ARGS(ni), ether_type));
     goto drop;
   }
 
-  if( pkt->pay_len < oo_pre_l3_len(pkt) + ip_len || ip_paylen < min_ip_paylen ){
-    CI_IPV4_STATS_INC_IN_HDR_ERRS(ni);
-    LOG_U(log(FN_FMT "BAD ip_len=%d min_ip_paylen=%d frame_len=%d",
-              FN_PRI_ARGS(ni), ip_len, min_ip_paylen, pkt->pay_len));
-    goto drop;
-  }
-
-  if( ! ci_ip_csum_correct(ip, pkt->pay_len - oo_pre_l3_len(pkt)) ) {
-    CI_IPV4_STATS_INC_IN_HDR_ERRS(ni);
-    LOG_U(log(FN_FMT "IP BAD CHECKSUM", FN_PRI_ARGS(ni)));
-    goto drop;
-  }
-
-
-  if( ip->ip_protocol == IPPROTO_TCP ) {
-    if( ci_tcp_csum_correct(pkt, ip_paylen) ) {
+  if( ip_proto == IPPROTO_TCP ) {
+    /* Check that we have a full-length transport-layer header,
+     * with a correct checksum. */
+    if( ip_paylen < sizeof(ci_tcp_hdr) ) {
+      LOG_U(log(FN_FMT "BAD TCP ip_paylen=%d", FN_PRI_ARGS(ni), ip_paylen));
+      goto drop;
+    }
+    else if( ci_tcp_csum_correct(pkt, ip_paylen) ) {
       handle_rx_pkt(ni, ps, pkt);
       return 1;
     }
     else {
       LOG_U(log(FN_FMT "BAD TCP CHECKSUM %04x "PKT_DBG_FMT, FN_PRI_ARGS(ni),
-                (unsigned) PKT_TCP_HDR(pkt)->tcp_check_be16,
+                (unsigned) PKT_IPX_TCP_HDR(oo_pkt_af(pkt), pkt)->tcp_check_be16,
                 PKT_DBG_ARGS(pkt)));
       goto drop;
     }
   }
 #if CI_CFG_UDP
-  else if( ip->ip_protocol == IPPROTO_UDP ) {
-    ci_udp_hdr* udp = PKT_UDP_HDR(pkt);
-    pkt->pf.udp.pay_len = CI_BSWAP_BE16(udp->udp_len_be16);
-    if( ci_udp_csum_correct(pkt, udp) ) {
+  else if( ip_proto == IPPROTO_UDP ) {
+    ci_udp_hdr* udp = PKT_IPX_UDP_HDR(oo_pkt_af(pkt), pkt);
+    pkt->pf.udp.pay_len = CI_BSWAP_BE16(udp->udp_len_be16) - sizeof(ci_udp_hdr);
+    if( ip_paylen < sizeof(ci_udp_hdr) ) {
+      LOG_U(log(FN_FMT "BAD UDP ip_paylen=%d", FN_PRI_ARGS(ni), ip_paylen));
+      goto drop;
+    }
+    else if( ci_udp_csum_correct(pkt, udp) ) {
       handle_rx_pkt(ni, ps, pkt);
       return 1;
     }
@@ -1213,7 +1195,7 @@ static void ci_netif_tx_pkt_complete_udp(ci_netif* netif,
   ci_udp_state* us;
   oo_pkt_p frag_next;
 
-  ci_assert(oo_ip_hdr(pkt)->ip_protocol == IPPROTO_UDP);
+  ci_assert(TX_PKT_PROTOCOL(oo_pkt_af(pkt), pkt) == IPPROTO_UDP);
 
   us = SP_TO_UDP(netif, pkt->pf.udp.tx_sock_id);
 
@@ -1285,8 +1267,8 @@ ci_inline void __ci_netif_tx_pkt_complete(ci_netif* ni,
                     EF_VI_SYNC_FLAG_CLOCK_SET;
       int pkt_tsf = EF_EVENT_TX_WITH_TIMESTAMP_SYNC_FLAGS(*ev);
 
-      pkt->tx_hw_stamp.tv_sec = EF_EVENT_TX_WITH_TIMESTAMP_SEC(*ev);
-      pkt->tx_hw_stamp.tv_nsec =
+      pkt->hw_stamp.tv_sec = EF_EVENT_TX_WITH_TIMESTAMP_SEC(*ev);
+      pkt->hw_stamp.tv_nsec =
                     (EF_EVENT_TX_WITH_TIMESTAMP_NSEC(*ev) &
                      (~CI_IP_PKT_HW_STAMP_FLAG_IN_SYNC)) |
                     ((pkt_tsf & opt_tsf) ?
@@ -1297,8 +1279,8 @@ ci_inline void __ci_netif_tx_pkt_complete(ci_netif* ni,
        * to ensure client is notified of missing timestamp -
        * important to keep TCP timestamps in sync with
        * TCP stream */
-      pkt->tx_hw_stamp.tv_sec = 0;
-      pkt->tx_hw_stamp.tv_nsec = 0;
+      pkt->hw_stamp.tv_sec = 0;
+      pkt->hw_stamp.tv_nsec = 0;
     }
     else {
       if( CI_NETIF_TX_VI(ni, pkt->intf_i, ev->tx_timestamp.q_id)->vi_flags &
@@ -1309,6 +1291,9 @@ ci_inline void __ci_netif_tx_pkt_complete(ci_netif* ni,
       pkt->flags &= ~CI_PKT_FLAG_TX_TIMESTAMPED;
     }
 
+    /* Ensure that timestamp is written down before
+     * CI_PKT_FLAG_TX_PENDING removal. */
+    ci_wmb();
   }
 #endif
 
@@ -1342,6 +1327,290 @@ void ci_netif_tx_pkt_complete(ci_netif* ni, struct ci_netif_poll_state* ps,
 }
 
 
+#if CI_USE_BPF == CI_BPF_MODE_COMPAT
+
+#ifdef __KERNEL__
+static void prog_free_wq_callback(struct work_struct* work)
+{
+  ook_bpf_prog_free_only(CI_CONTAINER(struct oo_bpf_prog, work, work));
+}
+#endif
+
+
+static void reload_xdp_config(ci_netif* ni, int intf_i)
+{
+  ci_netif_nic_t* nic = &ni->nic_hw[intf_i];
+#ifdef __KERNEL__
+  tcp_helper_resource_t* trs = netif2tcp_helper_resource(ni);
+  int rc;
+
+  if( nic->xdp_prog ) {
+    if( ook_bpf_prog_decref_only(nic->xdp_prog) == 0 ) {
+      INIT_WORK(&nic->xdp_prog->work, prog_free_wq_callback);
+      queue_work(trs->wq, &nic->xdp_prog->work);
+    }
+    nic->xdp_prog = NULL;
+  }
+
+  rc = ook_get_prog_for_onload(OO_BPF_ATTACH_XDP_INGRESS, trs->name,
+                               ni->intf_i_to_hwport[intf_i],
+                               &nic->xdp_prog);
+  if( rc && rc != -ENOENT ) {
+    ci_log("ERROR: failed to use XDP (%d)", rc);
+    /* continue to update the xdp_active_gen anyway, because there's no point
+     * in retrying (and presumably refailing) on every poll */
+  }
+#else
+  if( nic->xdp_prog_fd >= 0 ) {
+    oo_bpf_jit_free(&nic->xdp_jitted);
+    memset(&nic->xdp_jitted, 0, sizeof(nic->xdp_jitted));
+    close(nic->xdp_prog_fd);
+    nic->xdp_prog_fd = -1;
+  }
+  if( ! NI_OPTS(ni).poll_in_kernel ) {
+    /* No need to load programme if we're polling in kernel, because we'd
+     * never use it anyway and our logic for determining where to run the XDP
+     * depends on it not being loaded in the address space where it shouldn't
+     * be run */
+    int require_kernel_poll = 0;
+    int rc = ci_tcp_helper_bpf_bind(ni, intf_i, OO_BPF_ATTACH_XDP_INGRESS);
+    if( rc < 0 ) {
+      if( rc == -EOPNOTSUPP ) {
+        /* Magic return code (see ook_get_prog_fd_for_onload()) to indicate
+         * that there is a programme attached here, but it can't be given to
+         * us because it calls stuff which only works in the kernel. This
+         * check needs to happen for every address space (except the kernel -
+         * programmes always work in the kernel) because we maintain the
+         * 'poll_in_kernel' variable in non-shared state (alongside the JITted
+         * programme) to make the thread-safety of reloads simpler. */
+        require_kernel_poll = 1;
+      }
+      else if( rc != -ENOENT ) {
+        ci_log("ERROR: failed to bind XDP (%d)", rc);
+      }
+    }
+    else {
+      nic->xdp_prog_fd = rc;
+      rc = oo_bpf_jit(&nic->xdp_jitted, nic->xdp_prog_fd);
+      if( rc ) {
+        ci_log("ERROR: failed to reJIT XDP (%d)", rc);
+        close(nic->xdp_prog_fd);
+        nic->xdp_prog_fd = -1;
+      }
+    }
+    nic->poll_in_kernel = require_kernel_poll;
+  }
+  ni->future_intf_mask = ci_netif_build_future_intf_mask(ni);
+#endif
+
+  nic->xdp_active_gen = ni->state->nic[intf_i].xdp_current_gen;
+}
+
+
+static inline void check_reload_xdp_config(ci_netif* ni, int intf_i)
+{
+  if( ni->state->nic[intf_i].xdp_current_gen !=
+      ni->nic_hw[intf_i].xdp_active_gen ) {
+    /* TODO: figure out some way of achieving this which doesn't involve a
+     * check on every poll */
+    reload_xdp_config(ni, intf_i);
+  }
+}
+
+
+/* Ugly: we can't drag in either our own uapi/linux/bpf.h because that'll
+ * involve messing with the include directories of this file's compilation
+ * (which can cause kernel mismatches), and we can't get the local machine's
+ * copy of the same because it might not exist, so here's some code
+ * duplication: */
+enum oo_xdp_action {
+  OO_XDP_ABORTED = 0,
+  OO_XDP_DROP,
+  OO_XDP_PASS,
+  OO_XDP_TX,
+  OO_XDP_REDIRECT,
+};
+
+ci_inline int xdp_check_pkt(ci_netif* ni, int intf_i, ci_ip_pkt_fmt* pkt)
+{
+  int act;
+  struct oo_xdp_buff xdp;
+  struct oo_xdp_rxq_info xdp_rx_queue = {};
+  bpf_prog_t* func;
+  struct bpf_insn* insns;
+
+#ifdef __KERNEL__
+  if( ! ni->nic_hw[intf_i].xdp_prog )
+    return 1;
+  func = ni->nic_hw[intf_i].xdp_prog->kernel_progs[0].func;
+  insns = ni->nic_hw[intf_i].xdp_prog->insns;
+#else
+  func = ni->nic_hw[intf_i].xdp_jitted.jitted;
+  insns = ni->nic_hw[intf_i].xdp_jitted.insns;
+  if( ! func ) {
+    /* We may have run XDP in the kernel (via the poll-in-kernel feature) but
+     * not in userspace (i.e. here), so we need to check whether the kernel
+     * set the drop flag as a result of it running. See more big comments in
+     * ci_netif_poll_evq and reload_xdp_config. */
+    return ! (pkt->flags & CI_PKT_FLAG_XDP_DROP);
+  }
+#endif
+
+  /* The XDP program wants to see the packet starting at the MAC
+   * header. */
+  xdp.data = oo_ether_hdr(pkt);
+  xdp.data_meta = xdp.data; /* note: netdriver does not support metadata at
+                             * all, we could do the same */
+  /* There are two commonly-discussed behaviours for jumbograms:
+   * 1) Drop the packet here (it would be bad to bypass XDP without dropping
+   *    because that's a firewall bypass)
+   * 2) Pass only the first fragment to the XDP
+   * This code implements option (2), which is not what most kernel drivers
+   * do at time of writing but is likely to be the future. See discussion at
+   * https://github.com/xdp-project/xdp-project/blob/master/areas/core/xdp-multi-buffer01-design.org
+   */
+  xdp.data_end = (char*)xdp.data + oo_offbuf_left(&pkt->buf);
+  xdp.data_hard_start = xdp.data; /* no headroom, should be 256 bytes at
+                                   * least */
+  xdp.rxq = &xdp_rx_queue;
+  /* TODO: more tracking is needed here when we add support for
+   * adjust_head/tail helper functions */
+#ifdef __KERNEL__
+  /* The map implementations which are based on kernel code use RCU (hence
+   * them requiring kernel-only polling), so we need to take a read lock. We
+   * might not be using any of those maps, of course, but the cost of a
+   * conditional is likely to be higher than the cost of this read lock
+   * (which is often nothing).
+   *
+   * In many cases we can get away without the preempt_disable too, however
+   * detecting those cases is difficult and so, since we're already on a
+   * slowish path by being in the kernel, it's safer to do it anyway. */
+  preempt_disable();
+  rcu_read_lock();
+#endif
+  act = func(&xdp, insns);
+#ifdef __KERNEL__
+  rcu_read_unlock();
+  preempt_enable();
+#endif
+  switch( act ) {
+    case OO_XDP_PASS:
+      CITP_STATS_NETIF_INC(ni, rx_xdp_pass);
+      return 1;
+    case OO_XDP_DROP:
+      CITP_STATS_NETIF_INC(ni, rx_xdp_drop);
+      break;
+    case OO_XDP_TX:
+      CITP_STATS_NETIF_INC(ni, rx_xdp_tx);
+      break;
+    case OO_XDP_REDIRECT:
+      CITP_STATS_NETIF_INC(ni, rx_xdp_redirect);
+      break;
+    case OO_XDP_ABORTED:
+      CITP_STATS_NETIF_INC(ni, rx_xdp_aborted);
+      break;
+    default:
+      CITP_STATS_NETIF_INC(ni, rx_xdp_unknown);
+      /* drop */
+      break;
+  }
+
+  return 0;
+}
+#endif /* CI_USE_BPF */
+
+
+#ifdef __KERNEL__
+
+#if CI_USE_BPF == CI_BPF_MODE_COMPAT
+ci_inline int is_xdp_kernel_only(ci_netif* ni, int intf_i)
+{
+  return ni->nic_hw[intf_i].xdp_prog &&
+         ni->nic_hw[intf_i].xdp_prog->kernel_only;
+}
+#endif /* CI_USE_BPF */
+
+int ci_netif_evq_poll(ci_netif* ni, int intf_i)
+{
+  ef_vi* evq = &ni->nic_hw[intf_i].vi;
+  int n_evs;
+#if CI_USE_BPF != CI_BPF_MODE_DISABLED
+  ef_event *ev = ni->state->events;
+#endif
+
+  ci_assert_lt(intf_i, CI_CFG_MAX_INTERFACES);
+  if( intf_i >= oo_stack_intf_max(ni) )
+     return 0; /* for simplicity no error reported */
+  n_evs = ef_eventq_poll(evq, ni->state->events,
+                         sizeof(ni->state->events) / sizeof(ni->state->events[0]));
+
+#if CI_USE_BPF != CI_BPF_MODE_DISABLED
+#if CI_USE_BPF == CI_BPF_MODE_COMPAT
+  /* We must have come here from a userspace poll, so we checked for a
+   * userspace reload but we haven't yet checked for a kernelspace reload. */
+  check_reload_xdp_config(ni, intf_i);
+#endif
+
+  if( ! is_xdp_kernel_only(ni, intf_i) )
+    return n_evs;
+
+  {
+    struct ef_vi_rvq_rx_iter ri;
+    uint32_t id;
+    size_t len = 0; /* placate compiler */
+
+    ef_vi_evq_rx_iter_set(&ri, evq, ev, n_evs);
+
+    while( (id = ef_vi_evq_rx_iter_next(&ri, &id, &len)) != 0 ) {
+      oo_pkt_p pp;
+      ci_ip_pkt_fmt* pkt;
+
+      OO_PP_INIT(ni, pp, id);
+      pkt = PKT_CHK(ni, pp);
+
+      ci_prefetch_ppc(pkt->dma_start);
+      ci_prefetch_ppc(pkt);
+      ci_assert_equal(pkt->intf_i, intf_i);
+
+      /* Whole packet in a single buffer. */
+      if( len == 0 )
+        ef_vi_receive_get_bytes(evq, pkt->dma_start,
+                                (uint16_t*)&pkt->pay_len);
+      else
+        pkt->pay_len = len - evq->rx_prefix_len;
+      oo_offbuf_init(&pkt->buf, PKT_START(pkt), pkt->pay_len);
+      ci_parse_rx_vlan(pkt);
+      if( ! xdp_check_pkt(ni, intf_i, pkt) )
+        pkt->flags |= CI_PKT_FLAG_XDP_DROP; /* schedule drop */
+      pkt->pkt_eth_payload_off = 0xff; /* hack: fixup */
+    }
+  }
+
+#endif
+   return n_evs;
+}
+#endif
+
+
+ci_inline void __handle_rx_pkt(ci_netif* ni, struct ci_netif_poll_state* ps,
+                              int intf_i, ci_ip_pkt_fmt** pkt)
+{
+  if( *pkt != NULL ) {
+#if CI_USE_BPF != CI_BPF_MODE_DISABLED
+    if( ! xdp_check_pkt(ni, intf_i, *pkt) ) {
+      /* just drop */
+      (*pkt)->flags &= ~CI_PKT_FLAG_XDP_DROP;
+      ci_netif_pkt_release_rx_1ref(ni, *pkt);
+      *pkt = NULL;
+      return;
+    }
+#endif
+
+    ci_parse_rx_vlan(*pkt);
+    handle_rx_pkt(ni, ps, *pkt);
+  }
+}
+
 
 static int ci_netif_poll_evq(ci_netif* ni, struct ci_netif_poll_state* ps,
                              int intf_i, int n_evs)
@@ -1350,13 +1619,19 @@ static int ci_netif_poll_evq(ci_netif* ni, struct ci_netif_poll_state* ps,
   ef_vi* evq = &ni->nic_hw[intf_i].vi;
   unsigned total_evs = 0;
   ci_ip_pkt_fmt* pkt;
-  ef_event *ev = ni->events;
+  ef_event *ev = ni->state->events;
   int i;
   oo_pkt_p pp;
   int completed_tx = 0;
-
+#ifndef __KERNEL__
+  int poll_in_kernel;
+#endif
   s.frag_pkt = NULL;
   s.frag_bytes = 0;  /*??*/
+
+#if CI_USE_BPF == CI_BPF_MODE_COMPAT
+  check_reload_xdp_config(ni, intf_i);
+#endif
 
   if( OO_PP_NOT_NULL(ni->state->nic[intf_i].rx_frags) ) {
     pkt = PKT_CHK(ni, ni->state->nic[intf_i].rx_frags);
@@ -1366,11 +1641,31 @@ static int ci_netif_poll_evq(ci_netif* ni, struct ci_netif_poll_state* ps,
     CI_DEBUG(pkt->pay_len = -1);
   }
 
+#ifndef __KERNEL__
+  poll_in_kernel = ni->nic_hw[intf_i].poll_in_kernel;
+#endif
+
   if( n_evs != 0 )
     goto have_events;
 
   do {
-    n_evs = ef_eventq_poll(evq, ev, sizeof(ni->events) / sizeof(ev[0]));
+    /* The model for ensuring we run each packet through XDP exactly once is
+     * tricksy. If this function is running in kernelspace then everything's
+     * simple: the execution happens in __handle_rx_pkt and it's all fine.
+     * Likewise if poll_in_kernel is off then exactly the same happens in
+     * userspace. If poll_in_kernel is on then we'll execute XDP inside
+     * ci_netif_evq_poll in kernelspace but not in __handle_rx_pkt when we get
+     * back to userspace because there will be no programme because
+     * reload_xdp_config() won't have populated it (see comment therein) */
+#ifndef __KERNEL__
+    if( poll_in_kernel ) {
+      n_evs = 0;
+      if( ci_netif_intf_has_event(ni, intf_i) )
+        n_evs = ci_netif_evq_poll_k(ni, intf_i);
+    }
+    else
+#endif
+      n_evs = ef_eventq_poll(evq, ev, sizeof(ni->state->events) / sizeof(ev[0]));
     if( n_evs == 0 )
       break;
 
@@ -1385,10 +1680,7 @@ have_events:
         ci_prefetch_ppc(pkt->dma_start);
         ci_prefetch_ppc(pkt);
         ci_assert_equal(pkt->intf_i, intf_i);
-        if( s.rx_pkt != NULL ) {
-          ci_parse_rx_vlan(s.rx_pkt);
-          handle_rx_pkt(ni, ps, s.rx_pkt);
-        }
+        __handle_rx_pkt(ni, ps, intf_i, &s.rx_pkt);
         if( (ev[i].rx.flags & (EF_EVENT_FLAG_SOP | EF_EVENT_FLAG_CONT))
                                                        == EF_EVENT_FLAG_SOP ) {
           /* Whole packet in a single buffer. */
@@ -1434,10 +1726,7 @@ have_events:
           ci_prefetch_ppc(pkt->dma_start);
           ci_prefetch_ppc(pkt);
           ci_assert_equal(pkt->intf_i, intf_i);
-          if( s.rx_pkt != NULL ) {
-            ci_parse_rx_vlan(s.rx_pkt);
-            handle_rx_pkt(ni, ps, s.rx_pkt);
-          }
+          __handle_rx_pkt(ni, ps, intf_i, &s.rx_pkt);
           if( (ev[i].rx_multi.flags & (EF_EVENT_FLAG_SOP | EF_EVENT_FLAG_CONT))
                == EF_EVENT_FLAG_SOP ) {
             /* Whole packet in a single buffer. */
@@ -1515,10 +1804,7 @@ have_events:
     }
 #endif
 
-    if( s.rx_pkt != NULL ) {
-      ci_parse_rx_vlan(s.rx_pkt);
-      handle_rx_pkt(ni, ps, s.rx_pkt);
-    }
+    __handle_rx_pkt(ni, ps, intf_i, &s.rx_pkt);
 
     total_evs += n_evs;
   } while( total_evs < NI_OPTS(ni).evs_per_poll );
@@ -1603,60 +1889,39 @@ static int ci_netif_poll_intf(ci_netif* ni, int intf_i, int max_evs)
 }
 
 
-int ci_netif_poll_intf_fast(ci_netif* ni, int intf_i, ci_uint64 now_frc)
-{
-  struct ci_netif_poll_state ps;
-  int rc;
-
-  ci_assert(ci_netif_is_locked(ni));
-  ci_assert(ni->state->in_poll == 0);
-
-  if(CI_LIKELY( ni->state->poll_work_outstanding == 0 )) {
-    ci_ip_time_update(IPTIMER_STATE(ni), now_frc);
-    ps.tx_pkt_free_list_insert = &ps.tx_pkt_free_list;
-    ps.tx_pkt_free_list_n = 0;
-    ++ni->state->in_poll;
-    if( (rc = ci_netif_poll_evq(ni, &ps, intf_i, 0)) ) {
-      process_post_poll_list(ni);
-      ni->state->poll_work_outstanding = 1;
-    }
-    --ni->state->in_poll;
-    if( ps.tx_pkt_free_list_n )
-      ci_netif_poll_free_pkts(ni, &ps);
-    return rc;
-  }
-  /* We don't want to just be calling ci_netif_poll_intf_fast(), since
-   * we'll never refill the RX rings.  So we ensure that a full poll
-   * interleaves each fast one.
-   */
-  return ci_netif_poll_n(ni, NI_OPTS(ni).evs_per_poll);
-}
-
-
+#ifndef __KERNEL__
 int ci_netif_poll_intf_future(ci_netif* ni, int intf_i, ci_uint64 start_frc)
 {
   int i, rc = 0, status;
   struct oo_rx_future future;
   ci_uint64 now_frc, max_spin;
   ef_vi* evq = &ni->nic_hw[intf_i].vi;
-  ef_event* ev = ni->events;
+  ef_event* ev = ni->state->events;
   struct ci_netif_poll_state ps;
   ci_ip_pkt_fmt* pkt;
 
   ci_assert(ci_netif_is_locked(ni));
   ci_assert(ni->state->in_poll == 0);
+  ci_assert_equal(NI_OPTS(ni).poll_in_kernel, 0);
 
   pkt = ci_netif_intf_next_rx_pkt(ni, intf_i);
   if( pkt == NULL || ci_netif_rx_pkt_is_poisoned(pkt) )
     return 0;
 
   ci_assert_equal(pkt->intf_i, intf_i);
+  ci_ip_time_update(IPTIMER_STATE(ni), start_frc);
 
   status = handle_rx_pre_future(ni, pkt, &future);
   if( status == FUTURE_NONE )
     return 0;
 
+  /* From this point, the expectation is that we will receive the detected
+   * packet. If that doesn't happen, then we must call rollback_rx_future,
+   * which must undo any changes made here or in handle_rx_pre_future.
+   */
+
   CITP_STATS_NETIF_INC(ni, rx_future);
+  CITP_STATS_NETIF_INC(ni, rx_evs);
 
   ps.tx_pkt_free_list_insert = &ps.tx_pkt_free_list;
   ps.tx_pkt_free_list_n = 0;
@@ -1676,7 +1941,7 @@ int ci_netif_poll_intf_future(ci_netif* ni, int intf_i, ci_uint64 start_frc)
   }
 
   /* The first and second lines should already be cached. Empirically, on some
-   * some platforms, there seems to be a small advantage to prefetching a couple
+   * platforms, there seems to be a small advantage to prefetching a couple
    * more at this point, ahead of copying the packet data.
    */
   for( i = 2; i < 5; ++i )
@@ -1690,7 +1955,6 @@ int ci_netif_poll_intf_future(ci_netif* ni, int intf_i, ci_uint64 start_frc)
       pkt->pay_len = EF_EVENT_RX_BYTES(ev[0]) - evq->rx_prefix_len;
       oo_offbuf_init(&pkt->buf, PKT_START(pkt), pkt->pay_len);
 
-      CITP_STATS_NETIF_INC(ni, rx_evs);
       handle_rx_post_future(ni, &ps, pkt, status, &future);
       if(CI_UNLIKELY( rc > 1 )) {
         /* We have handled the first event, so remove it from the array and
@@ -1719,13 +1983,15 @@ handled:
     ci_netif_poll_free_pkts(ni, &ps);
   return rc;
 }
+#endif
 
 
 static void ci_netif_loopback_pkts_send(ci_netif* ni)
 {
   ci_ip_pkt_fmt* pkt;
   oo_pkt_p send_list = OO_PP_ID_NULL;
-  ci_ip4_hdr* ip;
+  ci_ipx_hdr_t* ip;
+  int af;
 #ifdef __KERNEL__
   int i = 0;
 #endif
@@ -1760,7 +2026,6 @@ static void ci_netif_loopback_pkts_send(ci_netif* ni)
                   OO_SP_FMT(pkt->pf.tcp_tx.lo.tx_sock),
                   OO_SP_FMT(pkt->pf.tcp_tx.lo.rx_sock)));
 
-    ip = oo_ip_hdr(pkt);
     oo_offbuf_init(&pkt->buf, PKT_START(pkt), pkt->buf_len);
     pkt->intf_i = OO_INTF_I_LOOPBACK;
     pkt->flags &= CI_PKT_FLAG_NONB_POOL;
@@ -1768,8 +2033,17 @@ static void ci_netif_loopback_pkts_send(ci_netif* ni)
     if( oo_tcpdump_check(ni, pkt, OO_INTF_I_LOOPBACK) )
       oo_tcpdump_dump_pkt(ni, pkt);
     pkt->next = OO_PP_NULL;
-    ci_tcp_handle_rx(ni, NULL, pkt, (ci_tcp_hdr*)(ip + 1),
-                     CI_BSWAP_BE16(ip->ip_tot_len_be16) - CI_IP4_IHL(ip));
+#if CI_CFG_IPV6
+  if( oo_pkt_ether_type(pkt) == CI_ETHERTYPE_IP6 )
+    pkt->flags |= CI_PKT_FLAG_IS_IP6;
+  else
+    pkt->flags &=~ CI_PKT_FLAG_IS_IP6;
+#endif
+
+    ip = oo_ipx_hdr(pkt);
+    af = oo_pkt_af(pkt);
+    ci_tcp_handle_rx(ni, NULL, pkt, PKT_IPX_TCP_HDR(af, pkt),
+                     ipx_hdr_tot_len(af, ip) - CI_IPX_IHL(af, ip));
   }
 }
 

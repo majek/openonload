@@ -1,21 +1,12 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 
 /* First of all, allow to use ci_log */
 STARTUP_ITEM(CITP_INIT_LOGGING, citp_setup_logging_early)
+
+/* resolve ci_sys_* symbols for a 'basic' set of syscalls, sufficient to get
+ * other early-init libraries functional */
+STARTUP_ITEM(CITP_INIT_BASIC_SYSCALLS, citp_basic_syscall_init)
 
 /* resolve ci_sys_* symbols: now we fake-hanlde the intercepted calls.
  * The only calls we really handle here are exec*() */

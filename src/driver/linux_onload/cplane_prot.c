@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_HEADER >
@@ -43,7 +30,6 @@
 
 
 #include "onload_internal.h"
-#include "onload/cplane_prot.h"
 #include "onload/cplane_ops.h"
 #include "onload/debug.h"
 #include <ci/net/arp.h>
@@ -69,13 +55,6 @@
 #define CODEID "cplane prot"
 
 
-#define CICPOSPL_MAC_TXBUF_PAGEMAX (4)  /* max page parts in jumbo pkt */
-
-/* IP header + 8 bytes is smallest possible ICMP error payload */
-#define CI_ICMP_MIN_PAYLOAD ( 60 + 8 )
-
-
-
 
 /*****************************************************************************
  *                                                                           *
@@ -95,10 +74,6 @@
 #define DPRINTF ci_log
 
 
-/* ARP module statistics access macros */
-#define CICP_STAT_INC_DROPPED_IP(_cpl)     (++(_cpl)->stat.dropped_ip)
-
-
 /*****************************************************************************
  *****************************************************************************
  *									     *
@@ -114,11 +89,9 @@
 
 
 /*! create the raw socket */
-static int cicp_raw_sock_ctor(struct socket **raw_sock)
+static int cicp_raw_sock_ctor(int family, struct socket **raw_sock)
 {
-  int on = 1;
-  mm_segment_t oldfs;
-  int rc = sock_create(PF_INET, SOCK_RAW, IPPROTO_RAW, raw_sock);
+  int rc = sock_create(family, SOCK_RAW, IPPROTO_RAW, raw_sock);
   if (CI_UNLIKELY(rc < 0)) {
     ci_log("%s: failed to create the raw socket, rc=%d", __FUNCTION__, rc);
     return rc;
@@ -130,17 +103,6 @@ static int cicp_raw_sock_ctor(struct socket **raw_sock)
     return -EINVAL;
   }
 
-  /* We've already done all the routing decisions.  Set SO_DONTROUTE */
-  oldfs = get_fs();
-  set_fs(KERNEL_DS);
-  rc = sock_setsockopt(*raw_sock, SOL_SOCKET, SO_DONTROUTE, (void*)&on, sizeof(on));
-  set_fs(oldfs);
-  if( rc != 0 ) {
-    /* If user does not use any complex policy routing, things will work
-     * for them. */
-    ci_log("ERROR: %s failed to set SO_DONTROUTE", __func__);
-  }
-  
   (*raw_sock)->sk->sk_allocation = GFP_ATOMIC;
   return 0;
 }
@@ -160,24 +122,52 @@ static void cicp_raw_sock_dtor(struct socket *raw_sock)
 
 
 static int
-cicp_raw_sock_send(struct socket *raw_sock, ci_ip_addr_t ip_be32, 
+cicp_raw_sock_send(struct socket *raw_sock, int ifindex,
+                   ci_addr_t saddr, ci_addr_t daddr,
                    const void* buf, unsigned int size)
 {
   struct msghdr msg;
   struct kvec iov;
-  struct sockaddr_in addr;
+  struct sockaddr_storage daddr_ss;
+#if CI_CFG_IPV6
+  char cmsg_buf[CMSG_SPACE(sizeof(struct in6_pktinfo))];
+#endif
   int rc;
 
-  memset(&addr, 0, sizeof(addr));
-  addr.sin_family = AF_INET;
-  addr.sin_port = 0;
-  addr.sin_addr.s_addr = ip_be32;
+  daddr_ss = ci_make_sockaddr_storage_from_addr(0, daddr);
 
-  msg.msg_name = &addr;
-  msg.msg_namelen = sizeof(addr);
+  msg.msg_name = &daddr_ss;
+  msg.msg_namelen = sizeof(daddr_ss);
   msg.msg_control = NULL;
   msg.msg_controllen = 0;
   msg.msg_flags = MSG_DONTWAIT;
+
+#if CI_CFG_IPV6
+  /*
+   * IPv6 wants to know the local IP to create a correct neighbour solicitation.
+   * If not set, route lookup in sendmsg() would fail with ENETUNREACH error.
+   */
+  if( CI_IS_ADDR_IP6(saddr) ) {
+    struct cmsghdr *cmsg;
+    struct in6_pktinfo *pktinfo;
+    struct sockaddr_storage saddr_ss;
+
+    saddr_ss = ci_make_sockaddr_storage_from_addr(0, saddr);
+
+    msg.msg_control = cmsg_buf;
+    msg.msg_controllen = sizeof(cmsg_buf);
+
+    cmsg = CMSG_FIRSTHDR(&msg);
+    cmsg->cmsg_level = IPPROTO_IPV6;
+    cmsg->cmsg_type = IPV6_PKTINFO;
+    cmsg->cmsg_len = CMSG_LEN(sizeof(*pktinfo));
+
+    pktinfo = (struct in6_pktinfo *) CMSG_DATA(cmsg);
+    memset(pktinfo, 0, sizeof(*pktinfo));
+    pktinfo->ipi6_addr = ((struct sockaddr_in6*)&saddr_ss)->sin6_addr;
+    pktinfo->ipi6_ifindex = ifindex;
+  }
+#endif
 
   iov.iov_base = (void*) buf;
   iov.iov_len  = size;
@@ -190,8 +180,8 @@ cicp_raw_sock_send(struct socket *raw_sock, ci_ip_addr_t ip_be32,
 
 
 static int
-cicp_raw_sock_send_bindtodev(struct oo_cplane_handle* cp,
-                             int ifindex, ci_ip_addr_t ip_be32,
+cicp_raw_sock_send_bindtodev(struct oo_cplane_handle* cp, int ifindex,
+                             int af, ci_addr_t saddr, ci_addr_t daddr,
                              const void* buf, unsigned int size)
 {
   struct cicppl_instance* cppl = &cp->cppl;
@@ -200,6 +190,17 @@ cicp_raw_sock_send_bindtodev(struct oo_cplane_handle* cp,
   int rc;
   char* ifname;
   const struct cred *orig_creds = NULL;
+  struct socket* sock;
+
+#if CI_CFG_IPV6
+  if( af == AF_INET6 ) {
+    sock = cppl->bindtodev_raw_sock_ip6;
+  }
+  else
+#endif
+  {
+    sock = cppl->bindtodev_raw_sock;
+  }
 
   if( ifindex != cppl->bindtodevice_ifindex ) {
     dev = dev_get_by_index(cppl->cp->cp_netns, ifindex);
@@ -214,7 +215,7 @@ cicp_raw_sock_send_bindtodev(struct oo_cplane_handle* cp,
     orig_creds = oo_cplane_empower_cap_net_raw(cp->cp_netns);
     oldfs = get_fs();
     set_fs(KERNEL_DS);
-    rc = sock_setsockopt(cppl->bindtodev_raw_sock, SOL_SOCKET, SO_BINDTODEVICE, 
+    rc = sock_setsockopt(sock, SOL_SOCKET, SO_BINDTODEVICE,
                          ifname, strlen(ifname));
     set_fs(oldfs);
     oo_cplane_drop_cap_net_raw(orig_creds);
@@ -230,7 +231,7 @@ cicp_raw_sock_send_bindtodev(struct oo_cplane_handle* cp,
     cppl->bindtodevice_ifindex = ifindex;
   }
 
-  return cicp_raw_sock_send(cppl->bindtodev_raw_sock, ip_be32, buf, size);
+  return cicp_raw_sock_send(sock, ifindex, saddr, daddr, buf, size);
 }
 
 
@@ -245,125 +246,38 @@ cicp_raw_sock_send_bindtodev(struct oo_cplane_handle* cp,
 
 
 
-int cicp_raw_ip_send(struct oo_cplane_handle* cp,
-                     const ci_ip4_hdr* ip, int len, ci_ifid_t ifindex,
-                     ci_ip_addr_t next_hop)
+int cicp_raw_ip_send(struct oo_cplane_handle* cp, int af,
+                     ci_ipx_hdr_t* ipx, int len, ci_ifid_t ifindex,
+                     ci_addr_t next_hop)
 {
-  void* ip_data = (char*) ip + CI_IP4_IHL(ip);
+  void* ipx_data = ci_ipx_data_ptr(af, ipx);
   ci_tcp_hdr* tcp;
   ci_udp_hdr* udp;
 
-  switch( ip->ip_protocol ) {
+  switch( ipx_hdr_protocol(af, ipx) ) {
   case IPPROTO_TCP:
-    ci_assert_equal(ip->ip_frag_off_be16, CI_IP4_FRAG_DONT);
-    tcp = ip_data;
-    tcp->tcp_check_be16 = ci_tcp_checksum(ip, tcp, CI_TCP_PAYLOAD(tcp));
+    if( af == AF_INET )
+      ci_assert_equal(ipx->ip4.ip_frag_off_be16, CI_IP4_FRAG_DONT);
+    tcp = ipx_data;
+    tcp->tcp_check_be16 = ci_ipx_tcp_checksum(af, ipx, tcp, CI_TCP_PAYLOAD(tcp));
     break;
   case IPPROTO_UDP:
   {
-    ci_iovec iov;
     /* In case of fragmented UDP packet we have already calculated checksum */
-    if( ip->ip_frag_off_be16 & ~CI_IP4_FRAG_DONT )
+    /* FIXIT: process properly IPv6-fragmented UDP datagram case */
+    if( af == AF_INET && (ipx->ip4.ip_frag_off_be16 & ~CI_IP4_FRAG_DONT) )
       break;
-    udp = ip_data;
-    iov.iov_base = CI_UDP_PAYLOAD(udp);
-    iov.iov_len = CI_BSWAP_BE16(ip->ip_tot_len_be16) - CI_IP4_IHL(ip) -
-        sizeof(ci_udp_hdr);
-    udp->udp_check_be16 = ci_udp_checksum(ip, udp, &iov, 1);
+    udp = ipx_data;
+    udp->udp_check_be16 = ci_ipx_udp_checksum(af, ipx, udp, CI_UDP_PAYLOAD(udp));
     break;
   }
   }
 
-  ci_assert(next_hop);
+  ci_assert(!CI_IPX_ADDR_IS_ANY(next_hop));
   ci_assert_ge(ifindex, 1);
 
-  return cicp_raw_sock_send_bindtodev(cp, ifindex, next_hop, ip, len);
-}
-
-
-struct cicp_raw_sock_work_parcel {
-  struct work_struct wqi;
-  int pktid;
-  struct oo_cplane_handle* cp;
-  ci_ifid_t ifindex;
-  ci_ip_addr_t ip;
-};
-
-
-static void
-cicppl_arp_pkt_tx_queue(struct work_struct *data)
-{
-  struct cicp_raw_sock_work_parcel *wp =
-            container_of(data, struct cicp_raw_sock_work_parcel, wqi);
-  struct cicp_bufpool_pkt* pkt;
-  ci_ip4_hdr* ip;
-  int rc;
-
-  /* Now that we use raw sockets, we don't support sending an ARP requests
-   * if the IP packet that caused the transaction isn't given */
-  if (wp->pktid < 0) goto out;
-  
-  ci_assert(cicppl_pktbuf_is_valid_id(wp->cp->cppl.pktpool, wp->pktid));
-
-  pkt = cicppl_pktbuf_pkt(wp->cp->cppl.pktpool, wp->pktid);
-  if (CI_UNLIKELY(pkt == 0)) {
-    ci_log("%s: BAD packet %d", __FUNCTION__, wp->pktid);
-    goto out;
-  }
-  ip = (void*) (pkt + 1);
-
-  rc = cicp_raw_ip_send(wp->cp, ip, pkt->len, wp->ifindex, wp->ip);
-  OO_DEBUG_ARP(ci_log("%s: send packet to "CI_IP_PRINTF_FORMAT" via raw "
-                    "socket, rc=%d", __FUNCTION__,
-                    CI_IP_PRINTF_ARGS(&wp->ip), rc));
-  if (CI_UNLIKELY(rc < 0)) {
-    /* NB: we have not got a writeable pointer to the control plane -
-           so we shouldn't really increment the statistics in it.
-	   We will anyway though.
-    */
-    CICP_STAT_INC_DROPPED_IP(&wp->cp->cppl);
-    OO_DEBUG_ARP(ci_log("%s: failed to queue packet, rc=%d", __FUNCTION__, rc));
-  }
-
-  /* release the ARP module buffer */
-  spin_lock_bh(&wp->cp->cppl.lock);
-  cicppl_pktbuf_free(wp->cp->cppl.pktpool, wp->pktid);
-  spin_unlock_bh(&wp->cp->cppl.lock);
- out:
-  /* free the work parcel */
-  ci_free(wp);
-}
-
-
-/*! Request IP resolution and queue the ip packet that triggered it
- *  See protocol header for the definition of this function
- *
- *  The supplied buffer ID must be one managed by a cicp_bufpool_t.
- *
- *  The control plane must not be locked when calling this function.
- */
-extern int /*rc*/
-cicpplos_pktbuf_defer_send(struct oo_cplane_handle* cp,
-                           ci_ip_addr_t ip, int pendable_pktid, 
-                           ci_ifid_t ifindex, int in_atomic_context)
-/* schedule a workqueue task to send IP packet using the raw socket */
-{
-  struct cicp_raw_sock_work_parcel *wp = ci_atomic_alloc(sizeof(*wp));
-  
-  if (CI_LIKELY(wp != NULL)) {
-    wp->pktid = pendable_pktid;
-    wp->cp = cp;
-    wp->ifindex = ifindex;
-    wp->ip = ip;
-    INIT_WORK(&wp->wqi, cicppl_arp_pkt_tx_queue);
-    if( ! in_atomic_context )
-      cicppl_arp_pkt_tx_queue(&wp->wqi);
-    else
-      ci_verify(schedule_work(&wp->wqi) != 0);
-    return 0;
-  } else {
-    return -ENOMEM;
-  } 
+  return cicp_raw_sock_send_bindtodev(cp, ifindex, af, ipx_hdr_saddr(af, ipx),
+                                      next_hop, ipx, len);
 }
 
 
@@ -392,94 +306,6 @@ cicpplos_pktbuf_defer_send(struct oo_cplane_handle* cp,
 
 
 
-/** Free buffer pool for deferred network packets awaiting MAC resolution */
-typedef struct {
-    unsigned  istack_size;
-    unsigned  istack_ptr;
-    ci_int16  istack_base[CPLANE_PROT_PKTBUF_COUNT];
-} cicp_pktbuf_istack_t; /* conforming to "istack" definition */
-
-
-struct cicp_bufpool_s
-{  cicp_pktbuf_istack_t freebufs;
-   char* bufmem;
-} /* cicp_bufpool_t */;
-
-
-struct cicp_bufpool_pkt *
-cicppl_pktbuf_pkt(cicp_bufpool_t *pool, int id) 
-{
-  if( cicppl_pktbuf_is_valid_id(pool, id) )
-    return (void*) (pool->bufmem + id * CICPPL_PKTBUF_SIZE);
-  else
-    return NULL;
-}
-
-
-/*  This function requires the control plane to be locked but does not
- *  lock it itself.
- */
-extern int /* packet ID or negative if none available */
-cicppl_pktbuf_alloc(cicp_bufpool_t *pool) 
-{   int id = -1;
-    
-    if (pool != NULL && !ci_istack_empty(&pool->freebufs))
-    {   id = ci_istack_pop(&pool->freebufs);
-	ci_assert(cicppl_pktbuf_is_valid_id(pool, id));
-    }
-
-    return id;
-}
-
-
-void cicppl_pktbuf_free(cicp_bufpool_t *pool, int id)
-{
-  ci_assert(!ci_istack_full(&pool->freebufs));
-  ci_istack_push(&pool->freebufs, (ci_int16) id);
-}
-
-
-static int cicppl_pktbuf_ctor(cicp_bufpool_t** out_pool)
-{
-  struct cicp_bufpool_pkt *pkt;
-  cicp_bufpool_t* pool;
-  int i;
-
-  *out_pool = NULL;
-  if( (pool = kmalloc(sizeof(*pool), GFP_KERNEL)) == NULL ) {
-    ci_log(CODEID": ERROR - failed to allocate memory for buffer pool");
-    return -ENOMEM;
-  }
-  pool->bufmem = vmalloc(CPLANE_PROT_PKTBUF_COUNT * CICPPL_PKTBUF_SIZE);
-  if( pool->bufmem == NULL ) {
-    ci_log(CODEID": ERROR - failed to allocate %ldKB of memory for "
-           "%d packets awaiting MAC resolution",
-           (long)(CICPPL_PKTBUF_SIZE*CPLANE_PROT_PKTBUF_COUNT/1024),
-           CPLANE_PROT_PKTBUF_COUNT);
-    kfree(pool);
-    return -ENOMEM;
-  }
-  ci_istack_init(&pool->freebufs, CPLANE_PROT_PKTBUF_COUNT);
-  for( i = 0; i < CPLANE_PROT_PKTBUF_COUNT; ++i ) {
-    pkt = cicppl_pktbuf_pkt(pool, i);
-    pkt->id = i;
-    cicppl_pktbuf_free(pool, i);
-  }
-  *out_pool = pool;
-  return 0;
-}
-
-
-static void cicppl_pktbuf_dtor(cicp_bufpool_t **ref_pool)
-{
-  cicp_bufpool_t* pool = *ref_pool;
-  if( pool != NULL ) {
-    vfree(pool->bufmem);
-    kfree(pool);
-    *ref_pool = NULL;
-  }
-}
-
 
 /*****************************************************************************
  *                                                                           *
@@ -499,30 +325,28 @@ cicpplos_ctor(struct cicppl_instance* cppl)
 {  
   int rc;
     
-  /* construct ARP table buffers (event queue unused in Linux) */
-  rc = cicppl_pktbuf_ctor(&cppl->pktpool);
-  if (CI_UNLIKELY(rc < 0)) {
-    ci_log(CODEID": ERROR - couldn't construct ARP table buffers, rc=%d",
-           -rc);
-    return rc;
-  } 
-
   /* cicp_raw_sock_ctor() calls sock_create(), which uses
    * current->nsproxy->net_ns.  We expect that we are called in the right
    * namespace. */
   ci_assert_equal(current->nsproxy->net_ns, cppl->cp->cp_netns);
 
   /* construct raw socket */
-  if (CI_UNLIKELY((rc = cicp_raw_sock_ctor(&cppl->bindtodev_raw_sock)) < 0)) {
+  if (CI_UNLIKELY((rc =
+      cicp_raw_sock_ctor(PF_INET, &cppl->bindtodev_raw_sock)) < 0)) {
     ci_log(CODEID": ERROR - couldn't construct raw socket module, rc=%d",
            -rc);
-    cicppl_pktbuf_dtor(&cppl->pktpool);
     return rc;
   } 
+#if CI_CFG_IPV6
+  if (CI_UNLIKELY((rc =
+      cicp_raw_sock_ctor(PF_INET6, &cppl->bindtodev_raw_sock_ip6)) < 0)) {
+    ci_log(CODEID": ERROR - couldn't construct IP6 raw socket module, rc=%d",
+           -rc);
+    cicp_raw_sock_dtor(cppl->bindtodev_raw_sock);
+    return rc;
+  }
+#endif
   cppl->bindtodevice_ifindex = 0; /* invalid ifindex */
-
-  spin_lock_init(&cppl->lock);
-  cppl->stat.dropped_ip = 0;
 
   return 0;
 }
@@ -534,7 +358,10 @@ cicpplos_dtor(struct cicppl_instance *cppl)
 {
   if( cppl->bindtodev_raw_sock != NULL )
     cicp_raw_sock_dtor(cppl->bindtodev_raw_sock);
-  cicppl_pktbuf_dtor(&cppl->pktpool);
+#if CI_CFG_IPV6
+  if( cppl->bindtodev_raw_sock_ip6 != NULL )
+    cicp_raw_sock_dtor(cppl->bindtodev_raw_sock_ip6);
+#endif
 }
 
 

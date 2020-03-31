@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /*
 ** Copyright 2005-2012  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
@@ -573,6 +560,35 @@ asmlinkage int efab_linux_sys_sendmsg(int fd, struct msghdr __user* msg,
       rc = PASS_SYSCALL2(sys_socketcall_fn, SYS_SENDMSG, socketcall_args);
 #else
 #error "Can't find sendmsg syscall number"
+#endif
+  }
+
+  TRAMP_DEBUG ("... = %d", rc);
+  return rc;
+}
+
+asmlinkage int efab_linux_sys_bpf(int cmd, union bpf_attr __user* attr,
+                                  int size)
+{
+  int rc;
+
+  if( syscall_table == NULL ) {
+    ci_log("Unexpected bpf() request before full init");
+    return -EFAULT;
+  }
+
+  {
+#ifdef __NR_bpf
+    SYSCALL_PTR_DEF(sys_bpf_fn, (int, union bpf_attr *, int));
+
+    sys_bpf_fn = syscall_table[__NR_bpf];
+    TRAMP_DEBUG ("bpf(%d,%p,%d) via %p...", cmd, attr, size, sys_bpf_fn);
+    rc = PASS_SYSCALL3(sys_bpf_fn, cmd, attr, size);
+#else
+    /* All callers should have checked for this capability before getting
+     * here */
+    ci_log("Unexpected bpf() call on kernel without BPF support");
+    rc = -ENOSYS;
 #endif
   }
 
@@ -1503,19 +1519,6 @@ efab_linux_trampoline_dtor (int no_sct) {
                 ia32_syscall_table[__NR_ia32_rt_sigaction]);
   }
 #endif
-
-  return 0;
-}
-
-
-int efab_linux_trampoline_debug (ci_uintptr_t *param)
-{
-  unsigned long op = *param;
-
-  TRAMP_DEBUG("Trampoline debug op=%lx", op);
-  (void)op;
-
-  *param = (unsigned long)find_syscall_table();
 
   return 0;
 }

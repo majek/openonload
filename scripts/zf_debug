@@ -1,4 +1,6 @@
 #!/bin/sh
+# SPDX-License-Identifier: BSD-2-Clause
+# X-SPDX-Copyright-Text: (c) Solarflare Communications Inc
 
 me=$(basename "$0")
 bin=$(cd "$(dirname "$0")" && /bin/pwd)

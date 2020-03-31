@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 #include <ci/app.h>
 #include <ci/net/ipv4.h>
 #include <ci/affinity/ul_drv_intf.h>
@@ -391,43 +378,43 @@ static int parse_line(const char* line)
   else if( sscanf(line, "%20s %80s %80s rxq %d %c",
                   protos, las, ras, &rxq, &dummy) == 4 &&
            is_proto(protos) &&
-           ci_hostport_to_sockaddr(las, &la) == 0 &&
-           ci_hostport_to_sockaddr(ras, &ra) == 0 ) {
+           ci_hostport_to_sockaddr_in(las, &la) == 0 &&
+           ci_hostport_to_sockaddr_in(ras, &ra) == 0 ) {
     rc = do_set_affinity(protos, la, ra, rxq, -1);
   }
   else if( sscanf(line, "%20s %80s rxq %d %c",
                   protos, las, &rxq, &dummy) == 3 &&
            is_proto(protos) &&
-           ci_hostport_to_sockaddr(las, &la) == 0 ) {
+           ci_hostport_to_sockaddr_in(las, &la) == 0 ) {
     memset(&ra, 0, sizeof(ra));
     rc = do_set_affinity(protos, la, ra, rxq, -1);
   }
   else if( sscanf(line, "%20s %80s %80s cpu %d %c",
              protos, las, ras, &cpu, &dummy) == 4 &&
            is_proto(protos) &&
-           ci_hostport_to_sockaddr(las, &la) == 0 &&
-           ci_hostport_to_sockaddr(ras, &ra) == 0 ) {
+           ci_hostport_to_sockaddr_in(las, &la) == 0 &&
+           ci_hostport_to_sockaddr_in(ras, &ra) == 0 ) {
     rc = do_set_affinity(protos, la, ra, -1, cpu);
   }
   else if( sscanf(line, "%20s %80s cpu %d %c",
                   protos, las, &cpu, &dummy) == 3 &&
            is_proto(protos) &&
-           ci_hostport_to_sockaddr(las, &la) == 0 ) {
+           ci_hostport_to_sockaddr_in(las, &la) == 0 ) {
     memset(&ra, 0, sizeof(ra));
     rc = do_set_affinity(protos, la, ra, -1, cpu);
   }
   else if( sscanf(line, "%20s %80s %80s %20s %c",
                   protos, las, ras, action, &dummy) == 4 &&
            is_proto(protos) &&
-           ci_hostport_to_sockaddr(las, &la) == 0 &&
-           ci_hostport_to_sockaddr(ras, &ra) == 0 &&
+           ci_hostport_to_sockaddr_in(las, &la) == 0 &&
+           ci_hostport_to_sockaddr_in(ras, &ra) == 0 &&
            ! strcmp(action, "clear") ) {
     rc = do_clear_affinity(protos, la, ra);
   }
   else if( sscanf(line, "%20s %80s %20s %c",
                   protos, las, action, &dummy) == 3 &&
            is_proto(protos) &&
-           ci_hostport_to_sockaddr(las, &la) == 0 &&
+           ci_hostport_to_sockaddr_in(las, &la) == 0 &&
            ! strcmp(action, "clear") ) {
     memset(&ra, 0, sizeof(ra));
     rc = do_clear_affinity(protos, la, ra);

@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_SOURCE>
@@ -27,6 +14,7 @@
 /*! \cidoxg_lib_transport_ip */
 
 #include "ip_internal.h"
+#include <ci/internal/ip_timestamp.h>
 
 
 #define LPF "TCP RECV "
@@ -38,10 +26,6 @@ struct tcp_recv_info {
   int rc;
   int stack_locked;
   ci_iovec_ptr piov;
-  ci_uint64 timestamp;
-#if CI_CFG_TIMESTAMPING
-  struct timespec hw_timestamp;
-#endif
   const ci_tcp_recvmsg_args* a;
   int msg_flags;
 };
@@ -71,13 +55,13 @@ ci_tcp_recv_fill_msgname(ci_tcp_state* ts, struct sockaddr *name,
     if( CI_LIKELY(*namelen >= sizeof(struct sockaddr_in)) ) {
       sinp = (struct sockaddr_in *)name;
       sinp->sin_family = AF_INET;
-      sinp->sin_port = TS_TCP(ts)->tcp_dest_be16;
+      sinp->sin_port = TS_IPX_TCP(ts)->tcp_dest_be16;
       sinp->sin_addr.s_addr = ts->s.pkt.ip.ip_daddr_be32;
       *namelen = sizeof(struct sockaddr_in);
     }
     else {
       sin_buf.sin_family = AF_INET;
-      sin_buf.sin_port = TS_TCP(ts)->tcp_dest_be16;
+      sin_buf.sin_port = TS_IPX_TCP(ts)->tcp_dest_be16;
       sin_buf.sin_addr.s_addr = ts->s.pkt.ip.ip_daddr_be32;
       memcpy(name, &sin_buf, *namelen);
     }
@@ -264,6 +248,48 @@ ci_tcp_recvmsg_get_nopeek(int peek_off, ci_tcp_state *ts, ci_netif *netif,
 }
 
 
+#ifndef __KERNEL__
+#if CI_CFG_TIMESTAMPING
+/* We currently don't need to do any cmsg recvmsg stuff in-kernel
+ * as calls are all via recv/read
+ */
+
+/* Turn timestamps into the requested cmsg structure(s). */
+ci_inline void
+ci_tcp_fill_recv_timestamp(struct tcp_recv_info* rinf, ci_ip_pkt_fmt* pkt)
+{
+  ci_netif* ni = rinf->a->ni;
+  ci_tcp_state* ts = rinf->a->ts;
+  ci_msghdr* msg = rinf->a->msg;
+
+  if( msg != NULL ) {
+    struct cmsg_state cmsg_state;
+    if( CI_UNLIKELY( ts->s.cmsg_flags & CI_IP_CMSG_TIMESTAMP_ANY ) ) {
+      cmsg_state.msg = msg;
+      cmsg_state.cmsg_bytes_used = 0;
+      cmsg_state.cm = CMSG_FIRSTHDR(msg);
+      cmsg_state.p_msg_flags = &rinf->msg_flags;
+
+      if ( ts->s.cmsg_flags & CI_IP_CMSG_TIMESTAMPNS )
+        ip_cmsg_recv_timestampns(ni, pkt->tstamp_frc, &cmsg_state);
+      else /* CI_IP_CMSG_TIMESTAMP flag gets ignored if NS counterpart is set */
+        if( ts->s.cmsg_flags & CI_IP_CMSG_TIMESTAMP )
+          ip_cmsg_recv_timestamp(ni, pkt->tstamp_frc, &cmsg_state);
+
+      if( ts->s.cmsg_flags & CI_IP_CMSG_TIMESTAMPING )
+        ip_cmsg_recv_timestamping(ni, pkt, ts->s.timestamping_flags,
+                                  &cmsg_state);
+
+      msg->msg_controllen = cmsg_state.cmsg_bytes_used;
+    }
+    else
+      msg->msg_controllen = 0;
+  }
+}
+#endif
+#endif
+
+
 /* Copy data from the receive queue to the app's buffer(s).  Returns the
 ** number of bytes copied.  This function also sends window updates as
 ** appropriate.
@@ -314,10 +340,8 @@ ci_tcp_recvmsg_get(struct tcp_recv_info *rinf)
    * ci_tcp_recvmsg_get could be called multiple times; so only update
    * if zero bytes received so far. */
   if( rinf->rc == 0 ) {
-    rinf->timestamp = pkt->tstamp_frc;
-#if CI_CFG_TIMESTAMPING
-    rinf->hw_timestamp.tv_sec = pkt->pf.tcp_rx.rx_hw_stamp.tv_sec;
-    rinf->hw_timestamp.tv_nsec = pkt->pf.tcp_rx.rx_hw_stamp.tv_nsec;
+#if CI_CFG_TIMESTAMPING && ! defined(__KERNEL__)
+    ci_tcp_fill_recv_timestamp(rinf, pkt);
 #endif
   }
   else if( rinf->rc > 0 ) {
@@ -400,6 +424,7 @@ ci_tcp_recvmsg_get(struct tcp_recv_info *rinf)
 }
 
 
+#ifndef __KERNEL__
 /* Returns >0 if socket is readable.  Returns 0 if spin times-out.  Returns
  * -ve error code otherwise.
  */
@@ -408,11 +433,9 @@ static int ci_tcp_recvmsg_spin(ci_netif* ni, ci_tcp_state* ts,
 {
   ci_uint64 now_frc;
   ci_uint64 schedule_frc = start_frc;
-#ifndef __KERNEL__
   citp_signal_info* si = citp_signal_get_specific_inited();
-#endif
   ci_uint64 max_spin = ts->s.b.spin_cycles;
-  int rc, spin_limit_by_so = 0, intf_i = ts->s.pkt.intf_i;
+  int rc, spin_limit_by_so = 0;
 
   /* Cache the next expected packet buffer to save work within the loop.
    * We need to update this after polling. If someone else polls, then this
@@ -423,6 +446,7 @@ static int ci_tcp_recvmsg_spin(ci_netif* ni, ci_tcp_state* ts,
    * If there is no future packet to poll, then we point to a local location
    * which always contains the "poison" value.
    */
+  int intf_i = ts->s.pkt.intf_i;
   const uint32_t poison = CI_PKT_RX_POISON;
   const volatile uint32_t* future = ci_netif_intf_rx_future(ni, intf_i, &poison);
 
@@ -479,6 +503,7 @@ static int ci_tcp_recvmsg_spin(ci_netif* ni, ci_tcp_state* ts,
   ni->state->is_spinner = 0;
   return rc;
 }
+#endif
 
 
 /* This macro returns true if the combination of [flags] and receive
@@ -495,51 +520,6 @@ static int ci_tcp_recvmsg_spin(ci_netif* ni, ci_tcp_state* ts,
    ((~flags & MSG_WAITALL) && (bytes) >= (ts)->s.so.rcvlowat))
 
 
-#ifndef __KERNEL__
-#if CI_CFG_TIMESTAMPING
-/* We currently don't need to do any cmsg recvmsg stuff in-kernel
- * as calls are all via recv/read
- */
-
-/* Turn timestamps into the requested cmsg structure(s). */
-ci_inline void
-ci_tcp_fill_recv_timestamp(struct tcp_recv_info* rinf)
-{
-  ci_netif* ni = rinf->a->ni;
-  ci_tcp_state* ts = rinf->a->ts;
-  ci_msghdr* msg = rinf->a->msg;
-
-  if( msg != NULL ) {
-    struct cmsg_state cmsg_state;
-    if( CI_UNLIKELY( ts->s.cmsg_flags & CI_IP_CMSG_TIMESTAMP_ANY ) ) {
-      cmsg_state.msg = msg;
-      cmsg_state.cmsg_bytes_used = 0;
-      cmsg_state.cm = CMSG_FIRSTHDR(msg);
-      cmsg_state.p_msg_flags = &rinf->msg_flags;
-
-      if ( ts->s.cmsg_flags & CI_IP_CMSG_TIMESTAMPNS )
-        ip_cmsg_recv_timestampns(ni, rinf->timestamp, &cmsg_state);
-      else /* CI_IP_CMSG_TIMESTAMP flag gets ignored if NS counterpart is set */
-        if( ts->s.cmsg_flags & CI_IP_CMSG_TIMESTAMP )
-          ip_cmsg_recv_timestamp(ni, rinf->timestamp, &cmsg_state);
-
-      if( ts->s.cmsg_flags & CI_IP_CMSG_TIMESTAMPING ) {
-        if( !(rinf->hw_timestamp.tv_nsec & CI_IP_PKT_HW_STAMP_FLAG_IN_SYNC) )
-          ts->s.timestamping_flags &= ~ONLOAD_SOF_TIMESTAMPING_SYS_HARDWARE;
-        ip_cmsg_recv_timestamping(ni, rinf->timestamp, &rinf->hw_timestamp,
-                ts->s.timestamping_flags, &cmsg_state);
-      }
-
-      msg->msg_controllen = cmsg_state.cmsg_bytes_used;
-    }
-    else
-      msg->msg_controllen = 0;
-  }
-}
-#endif
-#endif
-
-
 int ci_tcp_recvmsg(const ci_tcp_recvmsg_args* a)
 {
   int                   have_polled;
@@ -548,7 +528,9 @@ int ci_tcp_recvmsg(const ci_tcp_recvmsg_args* a)
   ci_netif*             ni = a->ni;
   int                   flags = a->flags;
   ci_uint64             start_frc = 0; /* suppress compiler warning */
+#ifndef __KERNEL__
   unsigned              tcp_recv_spin = 0;
+#endif
   ci_uint32             timeout = ts->s.so.rcvtimeo_msec;
   struct tcp_recv_info  rinf;
 
@@ -676,6 +658,7 @@ int ci_tcp_recvmsg(const ci_tcp_recvmsg_args* a)
   /* Must not delay return if we have any data and are peeking. */
   ci_assert(!(flags & MSG_PEEK) || rinf.rc == 0);
 
+#ifndef __KERNEL__
   /* Spin (if enabled) until timeout, or something happens, or we get
   ** contention on the netif lock.
   */
@@ -702,6 +685,7 @@ int ci_tcp_recvmsg(const ci_tcp_recvmsg_args* a)
       }
     }
   }
+#endif
 
   /* Time to block. */
 
@@ -732,9 +716,6 @@ int ci_tcp_recvmsg(const ci_tcp_recvmsg_args* a)
 #ifndef __KERNEL__
         ci_tcp_recv_fill_msgname(ts, (struct sockaddr*) a->msg->msg_name,
                                  &a->msg->msg_namelen);
-#if CI_CFG_TIMESTAMPING
-        ci_tcp_fill_recv_timestamp(&rinf);
-#endif
 #endif
       } else
         CI_SET_ERROR(rinf.rc, -rc2);
@@ -751,46 +732,84 @@ int ci_tcp_recvmsg(const ci_tcp_recvmsg_args* a)
   if( flags & MSG_ERRQUEUE ) {
 #if CI_CFG_TIMESTAMPING
     ci_ip_pkt_fmt* pkt;
-    if( (pkt = ci_udp_recv_q_get(ni, &ts->timestamp_q)) != NULL ) {
-      struct onload_scm_timestamping_stream stamps;
+
+  timestamp_q_check:
+
+    /* The timestamp is stored at TX complete event.  We should not read it
+     * until TX_PENDING flag is removed. */
+    if( (pkt = ci_udp_recv_q_get(ni, &ts->timestamp_q)) != NULL &&
+        ! (pkt->flags & CI_PKT_FLAG_TX_PENDING) ) {
       struct cmsg_state cmsg_state;
-      int tx_hw_stamp_in_sync;
 
     timestamp_q_nonempty:
 
       ci_udp_recv_q_deliver(ni, &ts->timestamp_q, pkt);
 
+      /* Ensure we read the proper timestamp - see
+       * __ci_netif_tx_pkt_complete() for the counterpart ci_wmb(). */
+      ci_rmb();
+
+      if( ! (pkt->flags & CI_PKT_FLAG_TX_TIMESTAMPED) ) {
+        if( ! rinf.stack_locked ) {
+          ci_netif_lock(ni);
+          rinf.stack_locked = 1;
+        }
+
+        ci_netif_pkt_release(ni, pkt);
+        goto slow_path;
+      }
+
       cmsg_state.msg = a->msg;
       cmsg_state.cm = a->msg->msg_control;
       cmsg_state.cmsg_bytes_used = 0;
       cmsg_state.p_msg_flags = &rinf.msg_flags;
-      memset(&stamps, 0, sizeof(stamps));
-      tx_hw_stamp_in_sync = pkt->tx_hw_stamp.tv_nsec &
-                            CI_IP_PKT_HW_STAMP_FLAG_IN_SYNC;
 
-      if( pkt->flags & CI_PKT_FLAG_RTQ_RETRANS ) {
-        if( pkt->pf.tcp_tx.first_tx_hw_stamp.tv_nsec &
-            CI_IP_PKT_HW_STAMP_FLAG_IN_SYNC ) {
-          stamps.first_sent.tv_sec = pkt->pf.tcp_tx.first_tx_hw_stamp.tv_sec;
-          stamps.first_sent.tv_nsec = pkt->pf.tcp_tx.first_tx_hw_stamp.tv_nsec;
+      if( ts->s.timestamping_flags & ONLOAD_SOF_TIMESTAMPING_ONLOAD ) {
+        if( pkt->flags & ~CI_PKT_FLAG_RTQ_RETRANS ) {
+          struct onload_timestamp ts = {pkt->hw_stamp.tv_sec,
+                                        pkt->hw_stamp.tv_nsec};
+          ci_put_cmsg(&cmsg_state, SOL_SOCKET, ONLOAD_SCM_TIMESTAMPING,
+                      sizeof(ts), &ts);
         }
-        if( tx_hw_stamp_in_sync ) {
-          stamps.last_sent.tv_sec = pkt->tx_hw_stamp.tv_sec;
-          stamps.last_sent.tv_nsec = pkt->tx_hw_stamp.tv_nsec;
+        else {
+          /* Ignore retransmit timestamps. We might want something like
+           * ONLOAD_SCM_TIMESTAMPING_STREAM to report them along with the
+           * original transmission time */
+          goto timestamp_q_check;
         }
       }
-      else if( tx_hw_stamp_in_sync ) {
-        stamps.first_sent.tv_sec = pkt->tx_hw_stamp.tv_sec;
-        stamps.first_sent.tv_nsec = pkt->tx_hw_stamp.tv_nsec;
+      else {
+        struct onload_scm_timestamping_stream stamps;
+        int tx_hw_stamp_in_sync;
+        memset(&stamps, 0, sizeof(stamps));
+        tx_hw_stamp_in_sync = pkt->hw_stamp.tv_nsec &
+                              CI_IP_PKT_HW_STAMP_FLAG_IN_SYNC;
+
+        if( pkt->flags & CI_PKT_FLAG_RTQ_RETRANS ) {
+          if( pkt->pf.tcp_tx.first_tx_hw_stamp.tv_nsec &
+              CI_IP_PKT_HW_STAMP_FLAG_IN_SYNC ) {
+            stamps.first_sent.tv_sec = pkt->pf.tcp_tx.first_tx_hw_stamp.tv_sec;
+            stamps.first_sent.tv_nsec = pkt->pf.tcp_tx.first_tx_hw_stamp.tv_nsec;
+          }
+          if( tx_hw_stamp_in_sync ) {
+            stamps.last_sent.tv_sec = pkt->hw_stamp.tv_sec;
+            stamps.last_sent.tv_nsec = pkt->hw_stamp.tv_nsec;
+          }
+        }
+        else if( tx_hw_stamp_in_sync ) {
+          stamps.first_sent.tv_sec = pkt->hw_stamp.tv_sec;
+          stamps.first_sent.tv_nsec = pkt->hw_stamp.tv_nsec;
+        }
+        stamps.len = pkt->pf.tcp_tx.end_seq - pkt->pf.tcp_tx.start_seq;
+
+        /* FIN and SYN eat seq space, but the user is not interested in them */
+        if( TX_PKT_IPX_TCP(ipcache_af(&ts->s.pkt), pkt)->tcp_flags &
+            (CI_TCP_FLAG_SYN|CI_TCP_FLAG_FIN) )
+          stamps.len--;
+
+        ci_put_cmsg(&cmsg_state, SOL_SOCKET, ONLOAD_SCM_TIMESTAMPING_STREAM,
+                    sizeof(stamps), &stamps);
       }
-      stamps.len = pkt->pf.tcp_tx.end_seq - pkt->pf.tcp_tx.start_seq;
-
-      /* FIN and SYN eat seq space, but the user is not interested in them */
-      if( TX_PKT_TCP(pkt)->tcp_flags & (CI_TCP_FLAG_SYN|CI_TCP_FLAG_FIN) )
-        stamps.len--;
-
-      ci_put_cmsg(&cmsg_state, SOL_SOCKET, ONLOAD_SCM_TIMESTAMPING_STREAM,
-                  sizeof(stamps), &stamps);
 
       ci_ip_cmsg_finish(&cmsg_state);
       rinf.msg_flags |= MSG_ERRQUEUE;
@@ -807,8 +826,14 @@ int ci_tcp_recvmsg(const ci_tcp_recvmsg_args* a)
           ci_netif_trylock(ni) ) {
         ci_netif_poll_n(ni, NI_OPTS(ni).evs_per_poll);
         ci_netif_unlock(ni);
-        if( (pkt = ci_udp_recv_q_get(ni, &ts->timestamp_q)) != NULL )
+        if( pkt != NULL ) {
+          if( ! (pkt->flags & CI_PKT_FLAG_TX_PENDING) )
+            goto timestamp_q_nonempty;
+        }
+        else if( (pkt = ci_udp_recv_q_get(ni, &ts->timestamp_q)) != NULL
+                 && ! (pkt->flags & CI_PKT_FLAG_TX_PENDING) ) {
           goto timestamp_q_nonempty;
+        }
       }
     }
 #endif
@@ -853,9 +878,6 @@ int ci_tcp_recvmsg(const ci_tcp_recvmsg_args* a)
 #ifndef __KERNEL__
   ci_tcp_recv_fill_msgname(ts, (struct sockaddr*) a->msg->msg_name,
                            &a->msg->msg_namelen);  /*!\TODO fixme remove cast*/
-#if CI_CFG_TIMESTAMPING
-  ci_tcp_fill_recv_timestamp(&rinf);
-#endif
 #endif
  unlock_out:
 
@@ -1113,6 +1135,7 @@ static int ci_tcp_recvmsg_recv2_peek(struct tcp_recv_info *rinf)
   ci_ip_pkt_fmt* pkt;
   int skip, stop_at_mark;
   unsigned rd_nxt_seq;
+  int af = ipcache_af(&ts->s.pkt);
 
   if( !rinf->stack_locked ) {
     int rc = ci_netif_lock(ni);
@@ -1122,19 +1145,19 @@ static int ci_tcp_recvmsg_recv2_peek(struct tcp_recv_info *rinf)
   }
 
   pkt = PKT_CHK(ni, recv2->head);
-  rd_nxt_seq = PKT_RX_BUF_SEQ(pkt);
+  rd_nxt_seq = PKT_IPX_RX_BUF_SEQ(af, pkt);
 
   /* Double-check for packets added to recv1 after we finished sucking data
   ** from it.
   */
   if( OO_PP_NOT_NULL(ts->recv1_extract) ) {
     ci_ip_pkt_fmt* r1pkt = PKT_CHK(ni, ts->recv1_extract);
-    unsigned seq = PKT_RX_BUF_SEQ(r1pkt) + rinf->rc;
+    unsigned seq = PKT_IPX_RX_BUF_SEQ(af, r1pkt) + rinf->rc;
     /* We think we've read everything in recv1, and [seq] points just
     ** beyond that.  So it ought to match the beginning of recv2.  If it
     ** doesn't, then something else has been added to recv1.
     */
-    if( seq != CI_BSWAP_BE32(PKT_TCP_HDR(pkt)->tcp_seq_be32) )
+    if( seq != CI_BSWAP_BE32(PKT_IPX_TCP_HDR(af, pkt)->tcp_seq_be32) )
       /* Ooops...more data appended to recv1.  But it arrived after we
       ** started reading, so we can legitimately return without reading
       ** this data.  If we've not read anything yet, we can safely return
@@ -1208,6 +1231,7 @@ static int ci_tcp_recvmsg_recv2(struct tcp_recv_info *rinf)
   oo_offbuf* buf;
   unsigned rd_nxt_seq, n;
   int must_return_from_recv = 0;
+  int af = ipcache_af(&ts->s.pkt);
 
   if( rinf->a->flags & MSG_PEEK )
     return ci_tcp_recvmsg_recv2_peek(rinf);
@@ -1237,7 +1261,7 @@ static int ci_tcp_recvmsg_recv2(struct tcp_recv_info *rinf)
   ci_assert(oo_offbuf_left(buf));
 
   /* Calculate the sequence number of the first un-read byte in this pkt. */
-  rd_nxt_seq = PKT_RX_BUF_SEQ(pkt);
+  rd_nxt_seq = PKT_IPX_RX_BUF_SEQ(af, pkt);
 
   LOG_URG(log("%s: "NTS_FMT "so_far=%d flags=%x nxt_seq=%08x rcv_up=%08x "
               "urg_data=%03x", __FUNCTION__, NTS_PRI_ARGS(ni, ts),
@@ -1245,9 +1269,6 @@ static int ci_tcp_recvmsg_recv2(struct tcp_recv_info *rinf)
               tcp_urg_data(ts)));
 
   ci_assert(tcp_urg_data(ts) & CI_TCP_URG_PTR_VALID);
-
-  if ( rinf->rc == 0 )
-    rinf->timestamp = pkt->tstamp_frc;
 
   if( tcp_rcv_up(ts) == rd_nxt_seq ) {
     /* We are staring at the urgent byte. */

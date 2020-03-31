@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /****************************************************************************
  * Driver for Solarflare network controllers -
  *          resource management for Xen backend, OpenOnload, etc
@@ -75,8 +62,8 @@ efhw_nic_event_queue_alloc_iobuffer(struct efhw_nic *nic,
 	/* Allocate an iobuffer. */
 	EFHW_TRACE("allocating eventq size %x",
 		   1u << (page_order + PAGE_SHIFT));
-	rc = efhw_iopages_alloc(dev, &h->iobuff, page_order, NULL,
-				0UL);
+	rc = efhw_iopages_alloc(dev, &h->iobuff, page_order,
+				0, NULL, 0UL);
 	if (rc < 0) {
 		EFHW_WARN("%s: failed to allocate %u pages",
 			  __FUNCTION__, 1u << page_order);

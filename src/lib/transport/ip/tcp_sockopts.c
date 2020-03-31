@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_SOURCE>
@@ -71,7 +58,7 @@ ci_tcp_info_get(ci_netif* netif, ci_sock_cmn* s, struct ci_tcp_info* uinfo,
   if( s->b.state != CI_TCP_LISTEN ) {
     ci_tcp_state* ts = SOCK_TO_TCP(s);
 
-    info.tcpi_pmtu       = ts->pmtus.pmtu;
+    info.tcpi_pmtu       = ci_tcp_get_pmtu(netif, ts);
     info.tcpi_ca_state = sock_congstate_linux_map[ts->congstate];
     info.tcpi_retransmits = ts->retransmits;
     info.tcpi_probes = ts->ka_probes;
@@ -273,7 +260,7 @@ int ci_tcp_getsockopt(citp_socket* ep, ci_fd_t fd, int level,
   }
   else if (level ==  IPPROTO_IPV6 && s->domain == AF_INET6) {
     /* IP6 level options valid for TCP */
-    return ci_get_sol_ip6(s, fd, optname, optval, optlen);
+    return ci_get_sol_ip6(netif, s, fd, optname, optval, optlen);
 #endif
 
   }
@@ -358,6 +345,10 @@ static int ci_tcp_setsockopt_lk(citp_socket* ep, ci_fd_t fd, int level,
   else if( level == IPPROTO_IP ) {
     /* IP level options valid for TCP */
     return ci_set_sol_ip(netif, s, optname, optval, optlen);
+  }
+  else if( level == IPPROTO_IPV6 ) {
+    /* IPv6 level options valid for TCP */
+    return ci_set_sol_ip6(netif, s, optname, optval, optlen);
   }
   else if( level == IPPROTO_TCP ) {
     switch(optname) {
@@ -531,15 +522,6 @@ int ci_tcp_setsockopt(citp_socket* ep, ci_fd_t fd, int level,
   if( level == SOL_SOCKET ) {
     rc = ci_set_sol_socket_nolock(ni, s, optname, optval, optlen);
     if( rc <= 0 )  goto unlock_out;
-  }
-  else if( level == IPPROTO_IPV6 ) {
-#ifdef IPV6_V6ONLY
-    if( optname == IPV6_V6ONLY && *(unsigned*) optval )
-      rc = CI_SOCKET_HANDOVER;
-#endif
-    /* All socket options are already set for system socket, and we do not
-    ** handle IPv6 option natively. */
-    goto unlock_out;
   }
 
   rc = ci_tcp_setsockopt_lk(ep, fd, level, optname, optval, optlen);

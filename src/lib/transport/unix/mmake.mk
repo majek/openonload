@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-2.0
+# X-SPDX-Copyright-Text: (c) Solarflare Communications Inc
 ifeq ($(ISA),amd64)
 BUILD_TREE_COPY	:= mapfile.lp64
 endif
@@ -10,11 +12,20 @@ TARGET		:= libcitransport0.so
 MMAKE_TYPE	:= DLL
 
 LDEP	:= $(CITPCOMMON_LIB_DEPEND) $(CIIP_LIB_DEPEND) $(CPLANE_LIB_DEPEND) \
-	$(CIUL_LIB_DEPEND) $(CITOOLS_LIB_DEPEND)
+	$(CITOOLS_LIB_DEPEND) $(CIUL_LIB_DEPEND)
 
 LLNK	:= $(LINK_CITPCOMMON_LIB) $(LINK_CIIP_LIB) $(LINK_CPLANE_LIB) \
-	$(LINK_CIUL_LIB) $(LINK_CITOOLS_LIB)
+	$(LINK_CITOOLS_LIB) $(LINK_CIUL_LIB)
 
+ifneq ($(wildcard $(TOP)/$(CURRENT)/../../bpf),)
+LDEP += $(KCOMPAT_LIB_DEPEND) $(BPFIMPL_LIB_DEPEND)
+LLNK += $(LINK_BPFIMPL_LIB) $(LINK_KCOMPAT_LIB)
+ifeq ($(HAVE_LIBELF),1)
+LLNK += -lelf
+endif
+else
+MMAKE_CFLAGS += -DNO_BPF
+endif
 
 LIB_SRCS	:=			\
 		startup.c		\

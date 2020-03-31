@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_SOURCE>
@@ -97,17 +84,26 @@ ci_inline void ci_udp_recvmsg_fill_msghdr(ci_netif* ni, ci_msghdr* msg,
 					  ci_sock_cmn* s)
 {
 #ifndef __KERNEL__
-  const ci_udp_hdr* udp;
-  const ci_ip4_hdr* ip;
-
   if( msg != NULL ) {
     if( msg->msg_name != NULL ) {
+      int af;
+      const ci_udp_hdr* udp;
+      ci_addr_t saddr;
+
       if( pkt->flags & CI_PKT_FLAG_RX_INDIRECT )
         pkt = PKT_CHK_NNL(ni, pkt->frag_next);
-      ip = oo_ip_hdr_const(pkt);
-      udp = (const ci_udp_hdr*) ((char*) ip + CI_IP4_IHL(ip));
-      ci_addr_to_user(CI_SA(msg->msg_name), &msg->msg_namelen, AF_INET,
-                      s->domain, udp->udp_source_be16, &ip->ip_saddr_be32);
+      af = oo_pkt_af(pkt);
+      udp = oo_ipx_data(af, (ci_ip_pkt_fmt*)pkt);
+      saddr = RX_PKT_SADDR((ci_ip_pkt_fmt*)pkt);
+
+#if CI_CFG_IPV6
+      if( CI_IPX_IS_LINKLOCAL(saddr) )
+        s->cp.so_bindtodevice = ci_rx_pkt_ifindex(ni, pkt);
+#endif
+
+      ci_addr_to_user(CI_SA(msg->msg_name), &msg->msg_namelen, af, s->domain,
+                      udp->udp_source_be16, CI_IPX_ADDR_PTR(af, saddr),
+                      s->cp.so_bindtodevice);
     }
   }
 #endif
@@ -355,7 +351,7 @@ static int ci_udp_recvmsg_get(ci_udp_recv_info* rinf, ci_iovec_ptr* piov)
   }
 #endif
   us->stamp = pkt->tstamp_frc;
-  us->s.pkt.intf_i = pkt->intf_i;
+  us->future_intf_i = pkt->intf_i;
 
   rc = oo_copy_pkt_to_iovec_no_adv(ni, pkt, piov, pkt->pf.udp.pay_len);
 
@@ -544,13 +540,17 @@ static int ci_udp_recvmsg_socklocked_slowpath(ci_udp_recv_info* rinf,
 #if CI_CFG_TIMESTAMPING
     ci_ip_pkt_fmt* pkt;
     if( (pkt = ci_udp_recv_q_get(ni, &us->timestamp_q)) != NULL ) {
-      struct timespec ts[3];
       struct cmsg_state cmsg_state;
 
       struct {
         struct oo_sock_extended_err ee;
-        struct sockaddr_in          offender;
-      } errhdr;
+        union {
+          struct sockaddr_in        offender;
+#if CI_CFG_IPV6
+          struct sockaddr_in6       offender6;
+#endif
+        };
+      } __attribute__((packed, aligned(sizeof(ci_uint32)))) errhdr;
       int do_data = ( rinf->msg->msg_iovlen > 0 );
 
       cmsg_state.msg = rinf->msg;
@@ -559,19 +559,30 @@ static int ci_udp_recvmsg_socklocked_slowpath(ci_udp_recv_info* rinf,
       cmsg_state.p_msg_flags = &rinf->msg_flags;
       if( do_data )
         ci_iovec_ptr_init_nz(piov, rinf->msg->msg_iov, rinf->msg->msg_iovlen);
-      memset(ts, 0, sizeof(ts));
 
-      if( us->s.timestamping_flags & ONLOAD_SOF_TIMESTAMPING_RAW_HARDWARE ) {
-        ts[2].tv_sec = pkt->tx_hw_stamp.tv_sec;
-        ts[2].tv_nsec = pkt->tx_hw_stamp.tv_nsec;
+      if( us->s.timestamping_flags & ONLOAD_SOF_TIMESTAMPING_ONLOAD ) {
+        struct onload_timestamp ts = {pkt->hw_stamp.tv_sec,
+                                      pkt->hw_stamp.tv_nsec};
+        ci_put_cmsg(&cmsg_state, SOL_SOCKET, ONLOAD_SCM_TIMESTAMPING,
+                    sizeof(ts), &ts);
       }
-      if( (us->s.timestamping_flags & ONLOAD_SOF_TIMESTAMPING_SYS_HARDWARE) &&
-          (pkt->tx_hw_stamp.tv_nsec & CI_IP_PKT_HW_STAMP_FLAG_IN_SYNC) ) {
-        ts[1].tv_sec = pkt->tx_hw_stamp.tv_sec;
-        ts[1].tv_nsec = pkt->tx_hw_stamp.tv_nsec;
+      else {
+        struct timespec ts[3];
+        memset(ts, 0, sizeof(ts));
+
+        if( us->s.timestamping_flags & ONLOAD_SOF_TIMESTAMPING_RAW_HARDWARE ) {
+          ts[2].tv_sec = pkt->hw_stamp.tv_sec;
+          ts[2].tv_nsec = pkt->hw_stamp.tv_nsec;
+        }
+        if( (us->s.timestamping_flags & ONLOAD_SOF_TIMESTAMPING_SYS_HARDWARE) &&
+            (pkt->hw_stamp.tv_nsec & CI_IP_PKT_HW_STAMP_FLAG_IN_SYNC) ) {
+          ts[1].tv_sec = pkt->hw_stamp.tv_sec;
+          ts[1].tv_nsec = pkt->hw_stamp.tv_nsec;
+        }
+        ci_put_cmsg(&cmsg_state, SOL_SOCKET, ONLOAD_SCM_TIMESTAMPING,
+                    sizeof(ts), &ts);
       }
-      ci_put_cmsg(&cmsg_state, SOL_SOCKET, ONLOAD_SCM_TIMESTAMPING,
-                  sizeof(ts), &ts);
+
       if( us->s.timestamping_flags & ONLOAD_SOF_TIMESTAMPING_OPT_TSONLY ) {
         rc = SLOWPATH_RET_ZERO;
       }
@@ -591,14 +602,27 @@ static int ci_udp_recvmsg_socklocked_slowpath(ci_udp_recv_info* rinf,
       errhdr.ee.ee_info = 0;
       errhdr.ee.ee_data = pkt->ts_key;
       if( us->s.timestamping_flags & ONLOAD_SOF_TIMESTAMPING_OPT_CMSG ) {
-        errhdr.offender.sin_family = AF_INET;
-        errhdr.offender.sin_addr.s_addr = oo_ip_hdr(pkt)->ip_saddr_be32;
+        ci_addr_t saddr = ipx_hdr_saddr(oo_pkt_af(pkt), oo_ipx_hdr(pkt));
+#if CI_CFG_IPV6
+        if( IS_AF_INET6(us->s.domain) )
+          ci_make_sockaddr_in6_from_ip6(&errhdr.offender6, 0,
+                                        (ci_uint32*)saddr.ip6);
+        else
+#endif
+          ci_make_sockaddr_from_ip4(&errhdr.offender, 0, saddr.ip4);
       }
 
       ci_rmb(); /* we are done with pkt - somebody can free it now */
       ci_udp_recv_q_deliver(ni, &us->timestamp_q, pkt);
 
-      ci_put_cmsg(&cmsg_state, SOL_IP, IP_RECVERR, sizeof(errhdr), &errhdr);
+#if CI_CFG_IPV6
+      if( IS_AF_INET6(us->s.domain) )
+        ci_put_cmsg(&cmsg_state, SOL_IPV6, IPV6_RECVERR,
+                    sizeof(errhdr.ee) + sizeof(errhdr.offender6), &errhdr);
+      else
+#endif
+        ci_put_cmsg(&cmsg_state, SOL_IP, IP_RECVERR,
+                    sizeof(errhdr.ee) + sizeof(errhdr.offender), &errhdr);
 
       ci_ip_cmsg_finish(&cmsg_state);
       rinf->msg_flags |= MSG_ERRQUEUE_CHK;
@@ -650,9 +674,9 @@ struct recvmsg_spinstate {
   int do_spin;
   int spin_limit_by_so;
   ci_uint32 timeout;
+#ifndef __KERNEL__
   uint32_t poison;
   const volatile uint32_t* future;
-#ifndef __KERNEL__
   citp_signal_info* si;
 #endif
 };
@@ -751,12 +775,13 @@ ci_udp_recvmsg_socklocked_spin(ci_netif* ni, ci_udp_state* us,
     ni->state->stats.spin_udp_recv++;
 #endif
     if( ci_netif_may_poll(ni) ) {
+#ifndef __KERNEL__
       if( spin_state->future == NULL )
-        spin_state->future = ci_netif_intf_rx_future(ni, us->s.pkt.intf_i,
+        spin_state->future = ci_netif_intf_rx_future(ni, us->future_intf_i,
                                                      &spin_state->poison);
 
       if( *spin_state->future != CI_PKT_RX_POISON && ci_netif_trylock(ni) ) {
-        if( ! ci_netif_poll_intf_future(ni, us->s.pkt.intf_i, now_frc) ) {
+        if( ! ci_netif_poll_intf_future(ni, us->future_intf_i, now_frc) ) {
           /* If PftF failed (e.g. IPv6) then we still need to be able to
            * consume the packet (it might not be in the evq just yet, but it
            * will be one of these times) */
@@ -766,12 +791,15 @@ ci_udp_recvmsg_socklocked_spin(ci_netif* ni, ci_udp_state* us,
         spin_state->future = NULL;
         return 0;
       }
+#endif
       if( ni->state->poll_work_outstanding ||
           ci_netif_need_poll_spinning(ni, now_frc) )
         if( ci_netif_trylock(ni) ) {
           ci_netif_poll(ni);
           ci_netif_unlock(ni);
+#ifndef __KERNEL__
           spin_state->future = NULL;
+#endif
           return 0;
         }
       if( ! ni->state->is_spinner )

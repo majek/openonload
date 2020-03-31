@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 #ifndef __ONLOAD_TCP_POLL_H__
 #define __ONLOAD_TCP_POLL_H__
 
@@ -35,13 +22,25 @@ ci_tcp_poll_events_listen(ci_netif *ni, ci_tcp_socket_listen *tls)
   return 0;
 }
 
+#if CI_CFG_TIMESTAMPING
+/* When the first packet in the timestamp queue is TX-pending, then
+ * ci_tcp_recvmsg() does not put it into control message, so we should not
+ * signal poll() that there is an event. */
+ci_inline int/*bool*/
+ci_tcp_poll_timestamp_q_nonempty(ci_netif *ni, ci_tcp_state *ts)
+{
+  ci_ip_pkt_fmt* pkt = ci_udp_recv_q_get(ni, &ts->timestamp_q);
+  return pkt != NULL && ! (pkt->flags & CI_PKT_FLAG_TX_PENDING);
+}
+#endif
+
 ci_inline int/*bool*/
 ci_tcp_poll_events_nolisten_haspri(ci_netif *ni, ci_tcp_state *ts)
 {
   return ( tcp_urg_data(ts) & CI_TCP_URG_IS_HERE )
 #if CI_CFG_TIMESTAMPING
          || ( (ts->s.s_aflags & CI_SOCK_AFLAG_SELECT_ERR_QUEUE)
-              && ci_udp_recv_q_not_empty(&ts->timestamp_q) )
+              && ci_tcp_poll_timestamp_q_nonempty(ni, ts) )
 #endif
          ;
 }

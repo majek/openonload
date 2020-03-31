@@ -1,9 +1,14 @@
+# SPDX-License-Identifier: GPL-2.0 OR Solarflare-Binary
+# X-SPDX-Copyright-Text: (c) Solarflare Communications Inc
+
 ifeq ($(LINUX),1)
 SUBDIRS		:= ip sfcaffinity solar_clusterd dlopen_no_deepbind \
 		   onload_remote_monitor
-OTHER_SUBDIRS	:= firmware
 ifneq ($(ONLOAD_ONLY),1)
-SUBDIRS		+= cplane ftl unifdef misc onload_mibdump
+SUBDIRS		+= cplane unifdef misc onload_mibdump
+endif
+ifeq ($(PLATFORM),gnu_x86_64)
+SUBDIRS		+= onload_bpftool
 endif
 
 endif

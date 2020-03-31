@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_SOURCE>
@@ -73,15 +60,15 @@
 #endif
 
 /* dlfilter_lookup will lookup the exact set of parameters provided. */
-static int dlfilter_lookup(efx_dlfilter_cb_t*, ci_uint32 laddr,
-                           ci_uint16 lport, ci_uint32 raddr,
+static int dlfilter_lookup(efx_dlfilter_cb_t*, ci_addr_t laddr,
+                           ci_uint16 lport, ci_addr_t raddr,
                            ci_uint16 rport, ci_uint8 protocol, int* thr_id);
 /* dlfilter_full_lookup will first try an exact parameter lookup, but if that
  * fails it will fall back to a wild match lookup, ignoring the raddr/rport.
  */
 static int dlfilter_full_lookup(efx_dlfilter_cb_t* fcb,
-                                ci_uint32 laddr, ci_uint16 lport,
-                                ci_uint32 raddr, ci_uint16 rport,
+                                ci_addr_t laddr, ci_uint16 lport,
+                                ci_addr_t raddr, ci_uint16 rport,
                                 ci_uint8 protocol, int* thr_id );
 
 #define EFAB_DLFILT_ENTRY_MASK (EFAB_DLFILT_ENTRY_COUNT-1)
@@ -94,17 +81,6 @@ static int dlfilter_full_lookup(efx_dlfilter_cb_t* fcb,
   (EFAB_DLFILT_ENTRY_STATE(e)==EFAB_DLFILT_INUSE) 
 #define EFAB_DLFILT_ENTRY_EMPTY(e) \
   (EFAB_DLFILT_ENTRY_STATE(e)==EFAB_DLFILT_EMPTY) 
-
-
-static const char* dlfilt_addr_str(ci_uint32 addr_be32)
-{
-  static char strbuf[2][16];
-  static int strbuf_i;
-
-  strbuf_i = !strbuf_i;
-  ci_format_ip4_addr(strbuf[strbuf_i], addr_be32);
-  return strbuf[strbuf_i];
-}
 
 
 /* ************************************************************
@@ -192,8 +168,7 @@ dlfilter_icmp_checks(const ci_ip4_hdr* ip)
  * 
  */
 #define CI_ICMP_PASS_UP 1
-#define CI_ICMP_ROUTE 2
-static int icmp_handled[ CI_ICMP_TYPE_MAX ] = {
+static int icmp_handled_ip4[ CI_ICMP_TYPE_MAX ] = {
   0,                      /* Echo reply */ 
   0, 
   0, 
@@ -216,6 +191,13 @@ static int icmp_handled[ CI_ICMP_TYPE_MAX ] = {
   0                       /* Address mask reply (RFC950) */
 };
 
+#if CI_CFG_IPV6
+static int icmp_handled_ip6[ CI_ICMPV6_TYPE_MAX ] = {
+  0,
+  CI_ICMP_PASS_UP         /* Destination Unreachable */
+};
+#endif
+
 /*! efab_ipp_icmp_parse -
  * Get the important info out of the ICMP hdr & it's payload.  This function
  * assumes that we've already filtered the ICMP messages we're planning to
@@ -229,33 +211,37 @@ static int icmp_handled[ CI_ICMP_TYPE_MAX ] = {
  * \return 1 - ok, 0 - failed
  */
 static int
-dlfilter_ipp_icmp_parse(const ci_ip4_hdr *ip, int ip_len, efab_ipp_addr* addr)
+dlfilter_ipp_icmp_parse(const ci_ipx_hdr_t* ipx, int ip_len, efab_ipp_addr* addr)
 {
-  ci_ip4_hdr* data_ip;
+  const ci_ipx_hdr_t* data_ipx;
   ci_icmp_msg* icmpl;
   ci_tcp_hdr* data_tcp;
+  int af, data_ipx_af;
+  ci_uint8 data_ipx_proto;
 
-  ci_assert( ip );
+  ci_assert( ipx );
   ci_assert( addr );
 
+  af = ipx_hdr_af(ipx);
+
   CI_ASSERT_ICMP_TYPES_VALID;
-  icmpl = (ci_icmp_msg*)((char*)ip + CI_IP4_IHL(ip));
+  icmpl = (ci_icmp_msg*)((char*)ipx + CI_IPX_IHL(af, ipx));
 
   /* SEE WARNING IN FUNCTION COMMENT ABOVE */
-  data_ip = (ci_ip4_hdr*)(icmpl + 1);
+  data_ipx = (ci_ipx_hdr_t*)(icmpl + 1);
+  data_ipx_af = ipx_hdr_af(data_ipx);
+  data_ipx_proto = ipx_hdr_protocol(data_ipx_af, data_ipx);
 
-  if( data_ip->ip_protocol == IPPROTO_IP || 
-      data_ip->ip_protocol == IPPROTO_TCP ) {
+  if( data_ipx_proto == IPPROTO_IP || data_ipx_proto == IPPROTO_TCP ) {
     addr->protocol = IPPROTO_TCP;
-  } else if ( data_ip->ip_protocol == IPPROTO_UDP ) {
+  } else if ( data_ipx_proto == IPPROTO_UDP ) {
     addr->protocol = IPPROTO_UDP;
   } else {
-    OO_DEBUG_DLF(ci_log("%s: Unknown protocol %d", __FUNCTION__, 
-		    data_ip->ip_protocol));
+    OO_DEBUG_DLF(ci_log("%s: Unknown protocol %d", __FUNCTION__, data_ipx_proto));
     return 0;
   }
 
-  data_tcp = (ci_tcp_hdr*)((char*)data_ip + CI_IP4_IHL(data_ip));
+  data_tcp = (ci_tcp_hdr*)((char*)data_ipx + CI_IPX_IHL(data_ipx_af, data_ipx));
 
   ci_assert( CI_MEMBER_OFFSET(ci_tcp_hdr, tcp_source_be16) ==
 	     CI_MEMBER_OFFSET(ci_udp_hdr, udp_source_be16));
@@ -267,8 +253,8 @@ dlfilter_ipp_icmp_parse(const ci_ip4_hdr *ip, int ip_len, efab_ipp_addr* addr)
    * that the sense of the addresses is correct for the lookup */
   addr->sport_be16 = data_tcp->tcp_dest_be16;
   addr->dport_be16 = data_tcp->tcp_source_be16;
-  addr->saddr_be32 = data_ip->ip_daddr_be32;
-  addr->daddr_be32 = data_ip->ip_saddr_be32;
+  addr->saddr = ipx_hdr_daddr(data_ipx_af, data_ipx);
+  addr->daddr = ipx_hdr_saddr(data_ipx_af, data_ipx);
   return 1;
 }
 
@@ -286,22 +272,37 @@ dlfilter_ipp_icmp_parse(const ci_ip4_hdr *ip, int ip_len, efab_ipp_addr* addr)
  *         1 : want to pass this over the link
  */
 static int dlfilter_handle_icmp(struct net* netns, int ifindex,
-                                efx_dlfilter_cb_t* fcb,
-                                const ci_ip4_hdr *ip, int len, int* thr_id )
+                                efx_dlfilter_cb_t* fcb, const ci_ipx_hdr_t* ipx,
+                                int len, int* thr_id )
 {
   ci_icmp_hdr* icmp;
   efab_ipp_addr addr;
+  int* icmp_handled_ipx, icmp_type_max;
+  int af = ipx_hdr_af(ipx);
 
   ci_assert(fcb);
-  ci_assert(ip);
-  
+  ci_assert(ipx);
+
   CI_ASSERT_ICMP_TYPES_VALID;
-  ci_assert_ge(len, CI_IP4_IHL(ip) + sizeof(ci_icmp_msg));
+  ci_assert_ge(len, CI_IPX_IHL(af, ipx) + sizeof(ci_icmp_msg));
 
   /* Reject request codes we don't do (the kernel can do it for us) */
-  icmp = (ci_icmp_hdr *)((char *)ip + CI_IP4_IHL(ip));
-  if( ( icmp->type >= CI_ICMP_TYPE_MAX) || 
-      !(icmp_handled[icmp->type] & CI_ICMP_PASS_UP) ) {
+  icmp = (ci_icmp_hdr *)((char *)ipx + CI_IPX_IHL(af, ipx));
+
+#if CI_CFG_IPV6
+  if( af == AF_INET6 ) {
+    icmp_handled_ipx = icmp_handled_ip6;
+    icmp_type_max = CI_ICMPV6_TYPE_MAX;
+  }
+  else
+#endif
+  {
+    icmp_handled_ipx = icmp_handled_ip4;
+    icmp_type_max = CI_ICMP_TYPE_MAX;
+  }
+
+  if( ( icmp->type >= icmp_type_max) ||
+      !(icmp_handled_ipx[icmp->type] & CI_ICMP_PASS_UP) ) {
     OO_DEBUG_DLF(ci_log(LPF "handle_icmp: not interested in ICMP type:%d",
 		    icmp->type));
     return 0;
@@ -309,13 +310,14 @@ static int dlfilter_handle_icmp(struct net* netns, int ifindex,
 
   /* Parse the message to get the addressing info.  Note that ONLY
    * the source & dest addr/ports & protocol are filled in [addr] */
-  if( !dlfilter_ipp_icmp_parse( ip, len, &addr ) ) {
+  if( !dlfilter_ipp_icmp_parse( ipx, len, &addr ) ) {
     OO_DEBUG_DLF(ci_log(LPF "handle_icmp: couldn't parse ICMP pkt"));
     return 0;
   }
 
-  /* sums etc? */
-  if( !dlfilter_icmp_checks(ip) ) {
+  /* sums etc?
+   * IPv6 header does not have checksum field, so IPv4-only check is left. */
+  if( af == AF_INET && !dlfilter_icmp_checks(&ipx->ip4) ) {
     OO_DEBUG_DLF(ci_log(LPF "handle_icmp: ICMP sums fail etc."));
     return 0;
   }
@@ -332,8 +334,7 @@ static int dlfilter_handle_icmp(struct net* netns, int ifindex,
   /* Finally, do we have a filter?
    * NOTE: this is the point at which the char driver's TCP helper
    *       resource handle is picked up */
-  if( dlfilter_full_lookup(fcb, addr.daddr_be32, 
-                           addr.dport_be16, addr.saddr_be32, 
+  if( dlfilter_full_lookup(fcb, addr.daddr, addr.dport_be16, addr.saddr,
                            addr.sport_be16, addr.protocol, thr_id) < 0 ) {
     OO_DEBUG_DLF( ci_log( LPF "handle_icmp: no filter"));
     return 0;
@@ -350,13 +351,16 @@ static int dlfilter_handle_icmp(struct net* netns, int ifindex,
  * Filter management
  */
 
-/* These hash funcs mimic those in the char driver's addr table */
+/* These hash funcs mimic those in the char driver's addr table.
+ * For IPv6, caller should use onload_addr_xor() for laddr and raddr. */
 ci_inline ci_uint32
-dlfilter_hash1( ci_uint32 laddr, ci_uint16 lport,
-		ci_uint32 raddr, ci_uint16 rport, ci_uint8 prot)
+dlfilter_hash1(ci_addr_t laddr, ci_uint16 lport,
+               ci_addr_t raddr, ci_uint16 rport,
+               ci_uint8 prot)
 {
-  ci_uint32 h = laddr ^ (ci_uint32)lport ^ raddr ^ (ci_uint32)rport ^ 
-    (ci_uint32)prot;
+  ci_uint32 h = onload_addr_xor(laddr) ^ (ci_uint32)lport ^
+                onload_addr_xor(raddr) ^ (ci_uint32)rport ^
+                (ci_uint32)prot;
   h ^= h >> 16;
   h ^= h >> 8;
   return h & EFAB_DLFILT_ENTRY_MASK;
@@ -364,19 +368,21 @@ dlfilter_hash1( ci_uint32 laddr, ci_uint16 lport,
 }
 
 ci_inline ci_uint32
-dlfilter_hash2( ci_uint32 laddr, ci_uint16 lport,
-		ci_uint32 raddr, ci_uint16 rport, ci_uint8 prot)
+dlfilter_hash2(ci_addr_t laddr, ci_uint16 lport,
+               ci_addr_t raddr, ci_uint16 rport,
+               ci_uint8 prot)
 {
-  return ( laddr  ^ (ci_uint32)lport  ^ raddr ^ (ci_uint32)rport ^ 
-	   (ci_uint32)prot) | 1u;
+  return ( onload_addr_xor(laddr) ^ (ci_uint32)lport ^
+           onload_addr_xor(raddr) ^ (ci_uint32)rport ^
+           (ci_uint32)prot) | 1u;
 }
 
 /* returns 0 on a match.  Will match on the protocol, the local address
  * and port and optionally on the remote addr/port if both are not 0 */
 ci_inline int 
-dlfilter_match( efx_dlfilter_cb_t* fcb, efx_dlfilt_entry_t* ent, 
-		ci_uint32 laddr, ci_uint16 lport, ci_uint32 raddr,
-		ci_uint32 rport, ci_uint8 protocol )
+dlfilter_match(efx_dlfilter_cb_t* fcb, efx_dlfilt_entry_t* ent,
+               ci_addr_t laddr, ci_uint16 lport, ci_addr_t raddr,
+               ci_uint32 rport, ci_uint8 protocol)
 {
   ci_assert(fcb);
   ci_assert(ent);
@@ -384,26 +390,26 @@ dlfilter_match( efx_dlfilter_cb_t* fcb, efx_dlfilt_entry_t* ent,
   if( !EFAB_DLFILT_ENTRY_IN_USE(ent) )
     return -1;
 
-  if( rport | raddr ) {
+  if( rport != 0 || !CI_IPX_ADDR_IS_ANY(raddr) ) {
     /* not wildcard */
-    return (int)((raddr - ent->raddr_be32) |
-                 (laddr - ent->laddr_be32)   |
-                 (rport - ent->rport_be16) |
-                 (lport - ent->lport_be16) |
-                 (protocol - ent->ip_protocol));
+    return !CI_IPX_ADDR_EQ(raddr, ent->raddr) ||
+           !CI_IPX_ADDR_EQ(laddr, ent->laddr) ||
+           rport != ent->rport_be16 ||
+           lport != ent->lport_be16 ||
+           protocol != ent->ip_protocol;
   }
   else {
-    return (int)( (laddr - ent->laddr_be32)   |
-                  (lport - ent->lport_be16) |
-                  (protocol - ent->ip_protocol));
+    return !CI_IPX_ADDR_EQ(laddr, ent->laddr) ||
+           lport != ent->lport_be16 ||
+           protocol != ent->ip_protocol;
   }
 }
 
 
-static int 
-dlfilter_lookup( efx_dlfilter_cb_t* fcb, ci_uint32 laddr, ci_uint16 lport,  
-		 ci_uint32 raddr, ci_uint16 rport, ci_uint8 protocol, 
-		 int* thr_id)  
+static int
+dlfilter_lookup(efx_dlfilter_cb_t* fcb, ci_addr_t laddr, ci_uint16 lport,
+                ci_addr_t raddr, ci_uint16 rport, ci_uint8 protocol,
+                int* thr_id)
 {
   unsigned hash1, hash2, first;
 #ifndef NDEBUG
@@ -417,10 +423,10 @@ dlfilter_lookup( efx_dlfilter_cb_t* fcb, ci_uint32 laddr, ci_uint16 lport,
   hash1 = first = dlfilter_hash1(laddr, lport, raddr, rport, protocol);
   hash2 = dlfilter_hash2(laddr, lport, raddr, rport, protocol);
 
-  VERB(ci_log(LPF " dlfilter_lookup %s R:%s:%u L:%s:%u hash=%u:%u",
+  VERB(ci_log(LPF " dlfilter_lookup %s R:" IPX_PORT_FMT " L:" IPX_PORT_FMT
 	      protocol != IPPROTO_UDP ? "TCP" : "UDP",
-	      dlfilt_addr_str(raddr), (unsigned) CI_BSWAP_BE16(rport),
-	      dlfilt_addr_str(laddr), (unsigned) CI_BSWAP_BE16(lport),
+             IPX_ARG(AF_IP(raddr)), CI_BSWAP_BE16(rport),
+             IPX_ARG(AF_IP(laddr)), CI_BSWAP_BE16(lport),
 	      hash1, hash2));
 
   while( 1 ) {
@@ -439,9 +445,10 @@ dlfilter_lookup( efx_dlfilter_cb_t* fcb, ci_uint32 laddr, ci_uint16 lport,
     ++hops;
     if( hash1 == first ) {
       ci_log(LPF " dlfilter_lookup: Got into a loop");
-      ci_log(LPF "lookup: LOOP R:%s:%u L:%s:%u hash=%x:%x hops=%d",
-		   dlfilt_addr_str(raddr), rport,
-		   dlfilt_addr_str(laddr), lport, hash1, hash2, hops);
+      ci_log(LPF "lookup: LOOP R:" IPX_PORT_FMT " L:" IPX_PORT_FMT
+                 " hash=%x:%x hops=%d",
+		   IPX_ARG(AF_IP(raddr)), rport,
+		   IPX_ARG(AF_IP(laddr)), lport, hash1, hash2, hops);
       return -ELOOP;
     }
 #endif
@@ -452,8 +459,8 @@ dlfilter_lookup( efx_dlfilter_cb_t* fcb, ci_uint32 laddr, ci_uint16 lport,
 
 
 static int
-dlfilter_full_lookup(efx_dlfilter_cb_t* fcb, ci_uint32 laddr, ci_uint16 lport,
-                     ci_uint32 raddr, ci_uint16 rport, ci_uint8 protocol,
+dlfilter_full_lookup(efx_dlfilter_cb_t* fcb, ci_addr_t laddr, ci_uint16 lport,
+                     ci_addr_t raddr, ci_uint16 rport, ci_uint8 protocol,
                      int* thr_id )
 {
   int rc;
@@ -463,7 +470,7 @@ dlfilter_full_lookup(efx_dlfilter_cb_t* fcb, ci_uint32 laddr, ci_uint16 lport,
 
   if( 0 > (rc = dlfilter_lookup(fcb, laddr, lport, raddr, rport, protocol,
                                 thr_id)))
-    rc = dlfilter_lookup( fcb, laddr, lport,  0, 0, protocol, thr_id );
+    rc = dlfilter_lookup( fcb, laddr, lport,  addr_any, 0, protocol, thr_id );
   VERB(ci_log("%s: rc:%d thr_id:%x", __FUNCTION__, rc, *thr_id));
   return rc;
 }
@@ -471,8 +478,8 @@ dlfilter_full_lookup(efx_dlfilter_cb_t* fcb, ci_uint32 laddr, ci_uint16 lport,
 
 /* Insert a new entry in the hash table & the index table */
 static int
-dlfilter_insert(efx_dlfilter_cb_t* fcb, ci_uint32 laddr, ci_uint16 lport,
-                ci_uint32 raddr, ci_uint16 rport, ci_uint8 protocol,
+dlfilter_insert(efx_dlfilter_cb_t* fcb, ci_addr_t laddr, ci_uint16 lport,
+                ci_addr_t raddr, ci_uint16 rport, ci_uint8 protocol,
                 int thr_id, unsigned* handle_out)
 {
   unsigned first, hash1, hash2, h1, h2;
@@ -483,8 +490,8 @@ dlfilter_insert(efx_dlfilter_cb_t* fcb, ci_uint32 laddr, ci_uint16 lport,
   ci_assert(protocol == IPPROTO_TCP || protocol == IPPROTO_UDP);
   ci_assert_nequal(thr_id, CI_ID_POOL_ID_NONE);
 
-  h1= hash1= first= dlfilter_hash1( laddr, lport, raddr, rport, protocol);
-  h2= hash2= dlfilter_hash2( laddr, lport, raddr, rport, protocol);
+  h1= hash1= first= dlfilter_hash1(laddr, lport, raddr, rport, protocol);
+  h2= hash2= dlfilter_hash2(laddr, lport, raddr, rport, protocol);
 
   /* First find a free slot (and check for duplicates). */
   while( 1 ) {
@@ -497,20 +504,18 @@ dlfilter_insert(efx_dlfilter_cb_t* fcb, ci_uint32 laddr, ci_uint16 lport,
 
     if(!dlfilter_match( fcb, &fcb->table[hash1], laddr, lport, 
 			raddr, rport, protocol)) {
-      OO_DEBUG_DLF( ci_log(LPF " DUP %s R:%s:%u L:%s:%u",
+      OO_DEBUG_DLF( ci_log(LPF " DUP %s R:" IPX_PORT_FMT " L:" IPX_PORT_FMT,
 		       protocol != IPPROTO_UDP ? "TCP" : "UDP",
-		       dlfilt_addr_str(raddr),
-		       (unsigned) CI_BSWAP_BE16(rport), 
-		       dlfilt_addr_str(laddr),
-		       (unsigned) CI_BSWAP_BE16(lport)));
+		       IPX_ARG(AF_IP(raddr)), (unsigned) CI_BSWAP_BE16(rport),
+		       IPX_ARG(AF_IP(laddr)), (unsigned) CI_BSWAP_BE16(lport)));
       return -ESRCH;
     }
     hash1 = (hash1 + hash2) & EFAB_DLFILT_ENTRY_MASK;
     if( hash1 == first ) {
-      ci_log(LPF " INSERT LOOP %sP R:%s:%u L:%s:%u", 
+      ci_log(LPF " INSERT LOOP %sP R:" IPX_PORT_FMT " L:" IPX_PORT_FMT,
 	     protocol != IPPROTO_UDP ? "TC" : "UD",
-	     dlfilt_addr_str(raddr), (unsigned) CI_BSWAP_BE16(rport),
-	     dlfilt_addr_str(laddr), (unsigned) CI_BSWAP_BE16(lport));
+	     IPX_ARG(AF_IP(raddr)), (unsigned) CI_BSWAP_BE16(rport),
+	     IPX_ARG(AF_IP(laddr)), (unsigned) CI_BSWAP_BE16(lport));
 #ifndef NDEBUG
       dlfilter_dump_on_error(fcb);
 #endif
@@ -527,10 +532,11 @@ dlfilter_insert(efx_dlfilter_cb_t* fcb, ci_uint32 laddr, ci_uint16 lport,
   }
 
   /* insert the new entry. */
-  OO_DEBUG_DLF(ci_log(LPF " INS thr:%d %sP R:%s:%u L:%s:%u hash=%u:%u",
+  OO_DEBUG_DLF(ci_log(LPF " INS thr:%d %sP R:" IPX_PORT_FMT " L:" IPX_PORT_FMT
+                          " hash=%u:%u",
                       thr_id, protocol != IPPROTO_UDP ? "TC" : "UD",
-                      dlfilt_addr_str(raddr), (unsigned) CI_BSWAP_BE16(rport),
-                      dlfilt_addr_str(laddr), (unsigned) CI_BSWAP_BE16(lport),
+                      IPX_ARG(AF_IP(raddr)), (unsigned) CI_BSWAP_BE16(rport),
+                      IPX_ARG(AF_IP(laddr)), (unsigned) CI_BSWAP_BE16(lport),
                       hash1, hash2));
 
   /* Now being used, gets a route count INCREMENT of 1 (this entry) 
@@ -540,9 +546,9 @@ dlfilter_insert(efx_dlfilter_cb_t* fcb, ci_uint32 laddr, ci_uint16 lport,
   ci_assert( !EFAB_DLFILT_ENTRY_IN_USE(&fcb->table[hash1]) );
   fcb->table[hash1].state = EFAB_DLFILT_INUSE + 1
             + EFAB_DLFILT_ENTRY_ROUTE(&fcb->table[hash1]);
-  fcb->table[hash1].raddr_be32 = raddr;
+  fcb->table[hash1].raddr = raddr;
   fcb->table[hash1].rport_be16 = rport;
-  fcb->table[hash1].laddr_be32 = laddr;
+  fcb->table[hash1].laddr = laddr;
   fcb->table[hash1].lport_be16 = lport;
   fcb->table[hash1].ip_protocol = protocol;
   fcb->table[hash1].thr_id = thr_id;
@@ -564,12 +570,12 @@ void efx_dlfilter_remove(efx_dlfilter_cb_t* fcb, unsigned handle)
   ent = &fcb->table[handle];
   ci_assert( EFAB_DLFILT_ENTRY_IN_USE(ent) );
 
-  hash1 = first = dlfilter_hash1(ent->laddr_be32, ent->lport_be16,
-				 ent->raddr_be32, ent->rport_be16, 
-				 ent->ip_protocol );
-  hash2 = dlfilter_hash2(ent->laddr_be32, ent->lport_be16,
-			 ent->raddr_be32, ent->rport_be16, 
-			 ent->ip_protocol );
+  hash1 = first = dlfilter_hash1(ent->laddr, ent->lport_be16,
+                                 ent->raddr, ent->rport_be16,
+                                 ent->ip_protocol );
+  hash2 = dlfilter_hash2(ent->laddr, ent->lport_be16,
+                         ent->raddr, ent->rport_be16,
+                         ent->ip_protocol );
   while( 1 ) {
     
     ent = &fcb->table[hash1];
@@ -611,11 +617,12 @@ void efx_dlfilter_remove(efx_dlfilter_cb_t* fcb, unsigned handle)
 
   ci_assert(hash1 == handle);
 
-  OO_DEBUG_DLF(ci_log(LPF " REM %s R:%s:%u L:%s:%u St:%x h:%u:%u", 
+  OO_DEBUG_DLF(ci_log(LPF " REM %s R:" IPX_PORT_FMT " L:" IPX_PORT_FMT
+                          " St:%x h:%u:%u",
                       ent->ip_protocol != IPPROTO_UDP ? "TCP" : "UDP",
-                      dlfilt_addr_str(ent->raddr_be32), 
+                      IPX_ARG(AF_IP(ent->raddr)),
                       (unsigned) CI_BSWAP_BE16(ent->rport_be16),
-                      dlfilt_addr_str(ent->laddr_be32),
+                      IPX_ARG(AF_IP(ent->laddr)),
                       (unsigned) CI_BSWAP_BE16(ent->lport_be16),
                       ent->state, hash1, hash2));
 
@@ -630,8 +637,8 @@ void efx_dlfilter_remove(efx_dlfilter_cb_t* fcb, unsigned handle)
 
 
 void efx_dlfilter_add(efx_dlfilter_cb_t* fcb, unsigned protocol,
-                      unsigned laddr, ci_uint16 lport,
-                      unsigned raddr, ci_uint16 rport, int thr_id,
+                      ci_addr_t laddr, ci_uint16 lport,
+                      ci_addr_t raddr, ci_uint16 rport, int thr_id,
                       unsigned* handle_out)
 {
   ci_assert(protocol == IPPROTO_TCP || protocol == IPPROTO_UDP);
@@ -723,16 +730,18 @@ CI_BUILD_ASSERT(EFAB_DLFILT_ENTRY_COUNT >= EFHW_IP_FILTER_NUM);
 int efx_dlfilter_handler(struct net* netns, int ifindex, efx_dlfilter_cb_t* fcb,
                          const ci_ether_hdr* hdr, const void* ip_hdr, int len)
 {
-  const ci_ip4_hdr* ip;
+  const ci_ipx_hdr_t* ipx;
   int thr_id;
   int ip_hlen, ip_paylen;
+  int af = ci_ethertype2af(hdr->ether_type);
+  ci_uint8 proto;
 
   /* ASSUMED: IP4, IHL sensible */
-  if( CI_UNLIKELY(len < sizeof(ci_ip4_hdr)) )
+  if( CI_UNLIKELY(len < CI_IPX_HDR_SIZE(af)) )
     return 0;
-  ip = (const ci_ip4_hdr*) ip_hdr;
-  ip_paylen = CI_BSWAP_BE16(ip->ip_tot_len_be16);
-  ip_hlen = CI_IP4_IHL(ip);
+  ipx = ip_hdr;
+  ip_paylen = ipx_hdr_tot_len(af, ipx);
+  ip_hlen = CI_IPX_IHL(af, ipx);
   if( len < ip_hlen || len < ip_paylen || ip_hlen >= ip_paylen )
     return 0;
   ip_paylen -= ip_hlen;
@@ -742,21 +751,27 @@ int efx_dlfilter_handler(struct net* netns, int ifindex, efx_dlfilter_cb_t* fcb,
    * payload. */
 
   /* We do not handle fragmented packets. */
-  if( CI_UNLIKELY( CI_IP4_FRAG_OFFSET(ip) ))
+  /* FIXIT: process properly IPv6 fragmentation case */
+  if( af == AF_INET && CI_UNLIKELY( CI_IP4_FRAG_OFFSET(&ipx->ip4) ))
     return 0;
 
+  proto = ipx_hdr_protocol(af, ipx);
+
   /* ICMP only, no fragments */
-  if( ip->ip_protocol == IPPROTO_ICMP ) {
-    if(CI_UNLIKELY( ip->ip_frag_off_be16 & CI_BSWAPC_BE16(0xafff) ))
+  if( (af == AF_INET && proto == IPPROTO_ICMP) ||
+      (af == AF_INET6 && proto == IPPROTO_ICMPV6) ) {
+    /* FIXIT: process properly IPv6 fragmentation case */
+    if( af == AF_INET &&
+        CI_UNLIKELY( ipx->ip4.ip_frag_off_be16 & CI_BSWAPC_BE16(0xafff) ))
       return 0;
     if( CI_UNLIKELY(ip_paylen < sizeof(ci_icmp_hdr)) )
       return 0;
 
-    if( dlfilter_handle_icmp(netns, ifindex, fcb, ip, len, &thr_id) ) {
+    if( dlfilter_handle_icmp(netns, ifindex, fcb, ipx, len, &thr_id) ) {
       if( thr_id != -1 ) {
         OO_DEBUG_DLF(ci_log(LPF "handler: pass ICMP len:%d thr:%d", 
                             len, thr_id));
-        efab_handle_ipp_pkt_task(thr_id, ifindex, ip, len);
+        efab_handle_ipp_pkt_task(thr_id, ifindex, ipx, len);
       }
       else {
         OO_DEBUG_DLF(ci_log(LPF "handler: reject ICMP, INVALID THR ID %d",
@@ -777,9 +792,9 @@ int efx_dlfilter_handler(struct net* netns, int ifindex, efx_dlfilter_cb_t* fcb,
 #ifndef NDEBUG
 
 #define __DLF_ENT_DUMP_HDR \
-  "  Idx   St Rt R.Addr    RPort L.Addr         LPort Pr THR"
+  "  Idx   St Rt R.Addr:RPort L.Addr:LPort Pr THR"
 #define __DLF_ENT_DUMP_FMT \
-  "%s %5d %2d %2d %8s %4u %15s %5u %2d %08x"
+  "%s %5d %2d %2d " IPX_PORT_FMT " " IPX_PORT_FMT " %2d %08x"
 
 static void dlfilter_dump_entry( efx_dlfilter_cb_t* fcb, const char * pfx, 
 				 int idx, efx_dlfilt_entry_t* ent )
@@ -789,8 +804,8 @@ static void dlfilter_dump_entry( efx_dlfilter_cb_t* fcb, const char * pfx,
   ci_log(__DLF_ENT_DUMP_FMT, pfx ? pfx : "", idx,
          ent->state >> EFAB_DLFILT_STATE_SHIFT, 
          ent->state & ~EFAB_DLFILT_STATE_MASK,
-         dlfilt_addr_str(ent->raddr_be32), CI_BSWAP_BE16(ent->rport_be16),
-         dlfilt_addr_str(ent->laddr_be32), CI_BSWAP_BE16(ent->lport_be16),
+         IPX_ARG(AF_IP(ent->raddr)), CI_BSWAP_BE16(ent->rport_be16),
+         IPX_ARG(AF_IP(ent->laddr)), CI_BSWAP_BE16(ent->lport_be16),
          ent->ip_protocol, ent->thr_id);
 }
 

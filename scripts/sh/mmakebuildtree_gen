@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
-######################################################################
-# (c) 2002 Cambridge Internetworking Ltd.
-# Author: David Riddoch
-#
+# SPDX-License-Identifier: BSD-2-Clause
+# X-SPDX-Copyright-Text: (c) Solarflare Communications Inc
+
 # Helper for mmakebuildtree
 ######################################################################
 

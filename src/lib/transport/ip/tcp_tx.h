@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 #ifndef __TCP_TX_H__
 #define __TCP_TX_H__
 
@@ -41,7 +28,7 @@ ci_inline int ci_tcp_tx_opt_tso(ci_uint8** opt,
 ci_inline void ci_tcp_tx_finish(ci_netif* netif, ci_tcp_state* ts,
                                 ci_ip_pkt_fmt* pkt)
 {
-  ci_tcp_hdr* tcp = TX_PKT_TCP(pkt);
+  ci_tcp_hdr* tcp = TX_PKT_IPX_TCP(ipcache_af(&ts->s.pkt), pkt);
   ci_uint8* opt = CI_TCP_HDR_OPTS(tcp);
   int seq = pkt->pf.tcp_tx.start_seq;
 
@@ -83,8 +70,23 @@ ci_inline void ci_tcp_ip_hdr_init(ci_ip4_hdr* ip, unsigned len)
   ci_assert_equal(CI_IP4_IHL(ip), sizeof(ci_ip4_hdr));
   ip->ip_tot_len_be16 = CI_BSWAP_BE16((ci_uint16) len);
   ip->ip_check_be16 = 0;
+  ip->ip_id_be16 = 0;
 }
 
+ci_inline void ci_tcp_ipx_hdr_init(int af, ci_ipx_hdr_t* hdr, unsigned len)
+{
+#if CI_CFG_IPV6
+  if( af == AF_INET6 ) {
+    ci_ip6_hdr* ip6 = &hdr->ip6;
+    /* Set proper values for payload_len and next_hdr fields of IPv6 header */
+    ip6->payload_len = CI_BSWAP_BE16(len - sizeof(ci_ip6_hdr));
+    ip6->next_hdr = IPPROTO_TCP;
+  } else
+#endif
+  {
+    ci_tcp_ip_hdr_init((ci_ip4_hdr*)hdr, len);
+  }
+}
 
 ci_inline void __ci_tcp_calc_rcv_wnd(ci_tcp_state* ts, int advance)
 {
@@ -128,7 +130,7 @@ ci_inline void __ci_tcp_calc_rcv_wnd(ci_tcp_state* ts, int advance)
   }
 
   tmp = ts->rcv_wnd_advertised >> ts->rcv_wscl;
-  TS_TCP(ts)->tcp_window_be16 = CI_BSWAP_BE16(tmp);
+  TS_IPX_TCP(ts)->tcp_window_be16 = CI_BSWAP_BE16(tmp);
   CI_IP_SOCK_STATS_VAL_RXWIN(ts, ts->rcv_wnd_advertised);
 }
 

@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 ** <L5_PRIVATE L5_SOURCE>
 **   Copyright: (c) Level 5 Networks Limited.
@@ -82,7 +69,8 @@ static int efab_file_move_supported_tcp(ci_netif *ni, ci_tcp_state *ts,
       !ci_ip_queue_is_empty(&ts->retrans) ||
       ci_ip_timer_pending(ni, &ts->rto_tid) ||
       ci_ip_timer_pending(ni, &ts->zwin_tid) ||
-      ci_ip_timer_pending(ni, &ts->cork_tid) ) {
+      ci_ip_timer_pending(ni, &ts->cork_tid) ||
+      OO_PP_NOT_NULL(ts->pmtus) ) {
     if( do_assert ) {
       ci_assert(ci_ip_queue_is_empty(&ts->send));
       ci_assert_equal(ts->send_prequeue, OO_PP_ID_NULL);
@@ -91,6 +79,7 @@ static int efab_file_move_supported_tcp(ci_netif *ni, ci_tcp_state *ts,
       ci_assert(! ci_ip_timer_pending(ni, &ts->rto_tid));
       ci_assert(! ci_ip_timer_pending(ni, &ts->zwin_tid));
       ci_assert(! ci_ip_timer_pending(ni, &ts->cork_tid));
+      ci_assert(OO_PP_IS_NULL(ts->pmtus));
     }
     return false;
   }
@@ -367,8 +356,6 @@ int efab_file_move_to_alien_stack(ci_private_t *priv, ci_netif *alien_ni,
     oo_atomic_set(&mid_ts->send_prequeue_in, 0);
 
     *new_ts = *mid_ts;
-    ci_pmtu_state_init(alien_ni, &new_ts->s, &new_ts->pmtus,
-                       CI_IP_TIMER_PMTU_DISCOVER);
 #if CI_CFG_FD_CACHING
     sp = TS_OFF(alien_ni, new_ts);
     OO_P_ADD(sp, CI_MEMBER_OFFSET(ci_tcp_state, epcache_link));

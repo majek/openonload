@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_HEADER >
@@ -162,12 +149,21 @@ struct oo_stacklist_update {
 /*! Comment? */
 typedef struct {
 
-#define __CI_DEBUG_OP_DUMP_INODE__	(1)
-#define __CI_DEBUG_OP_TRAMPOLINE__	(2)
-#define __CI_DEBUG_OP_FDS_DUMP__	(3)
 #define __CI_DEBUG_OP_DUMP_STACK__	(5)
 #define __CI_DEBUG_OP_KILL_STACK__	(6)
 #define __CI_DEBUG_OP_NETSTAT_STACK__	(7)
+#define __CI_DEBUG_OP_NETIF_DUMP__ (8)
+#define __CI_DEBUG_OP_NETIF_DUMP_EXTRA__ (9)
+#define __CI_DEBUG_OP_DUMP_SOCKETS__ (10)
+#define __CI_DEBUG_OP_STACK_STATS__ (11)
+#define __CI_DEBUG_OP_STACK_MORE_STATS__ (12)
+#define __CI_DEBUG_OP_IP_STATS__ (13)
+#define __CI_DEBUG_OP_TCP_STATS__ (14)
+#define __CI_DEBUG_OP_TCP_EXT_STATS__ (15)
+#define __CI_DEBUG_OP_UDP_STATS__ (16)
+#define __CI_DEBUG_OP_NETIF_CONFIG_OPTS_DUMP__ (17)
+#define __CI_DEBUG_OP_STACK_TIME__ (18)
+#define __CI_DEBUG_OP_VI_INFO__ (19)
 
   ci_uint32			what;		/* which operation */
 

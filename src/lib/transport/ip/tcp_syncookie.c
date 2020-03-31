@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 
 #include <ci/internal/ip.h>
 
@@ -139,14 +126,14 @@ ci_tcp_syncookie_hash(ci_netif* netif, ci_tcp_socket_listen* tls,
   hash_data[1] = tcp_lport_be16(tls) >> 8;
   hash_data[2] = tsr->r_port & 0xff;
   hash_data[3] = tsr->r_port >> 8;
-  hash_data[4] = tsr->l_addr & 0xff;
-  hash_data[5] = (tsr->l_addr & 0xff00) >> 8;
-  hash_data[6] = (tsr->l_addr & 0xff0000) >> 16;
-  hash_data[7] = (tsr->l_addr & 0xff000000) >> 24;
-  hash_data[8] = tsr->r_addr & 0xff;
-  hash_data[9] = (tsr->r_addr & 0xff00) >> 8;
-  hash_data[10] = (tsr->r_addr & 0xff0000) >> 16;
-  hash_data[11] = (tsr->r_addr & 0xff000000) >> 24;
+  hash_data[4] = tsr->l_addr.ip4 & 0xff;
+  hash_data[5] = (tsr->l_addr.ip4 & 0xff00) >> 8;
+  hash_data[6] = (tsr->l_addr.ip4 & 0xff0000) >> 16;
+  hash_data[7] = (tsr->l_addr.ip4 & 0xff000000) >> 24;
+  hash_data[8] = tsr->r_addr.ip4 & 0xff;
+  hash_data[9] = (tsr->r_addr.ip4 & 0xff00) >> 8;
+  hash_data[10] = (tsr->r_addr.ip4 & 0xff0000) >> 16;
+  hash_data[11] = (tsr->r_addr.ip4 & 0xff000000) >> 24;
   hash_data[12] = t << 3 | m;
 
   ci_assert_equal(sizeof(netif->state->hash_salt),
@@ -239,8 +226,8 @@ ci_tcp_syncookie_ack(ci_netif* netif, ci_tcp_socket_listen* tls,
   tsr->tcpopts.flags = CI_TCPT_FLAG_SYNCOOKIE;
 
   tsr->r_port = rxp->tcp->tcp_source_be16;
-  tsr->l_addr = oo_ip_hdr(rxp->pkt)->ip_daddr_be32;
-  tsr->r_addr = oo_ip_hdr(rxp->pkt)->ip_saddr_be32;
+  tsr->l_addr = CI_ADDR_FROM_IP4(oo_ip_hdr(rxp->pkt)->ip_daddr_be32);
+  tsr->r_addr = CI_ADDR_FROM_IP4(oo_ip_hdr(rxp->pkt)->ip_saddr_be32);
   tsr->tcpopts.smss = syncookie_mss[m];
   tsr->snd_isn = isn;
   tsr->rcv_nxt = rxp->seq;

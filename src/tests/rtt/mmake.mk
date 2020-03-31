@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-2.0
+# X-SPDX-Copyright-Text: (c) Solarflare Communications Inc
 
 TEST_APPS	:= rtt
 TARGETS		:= $(TEST_APPS:%=$(AppPattern))
@@ -9,8 +11,8 @@ clean:
 	@$(MakeClean)
 
 
-MMAKE_LIBS	:= $(LINK_CIUL_LIB) $(LINK_CIAPP_LIB) $(LINK_CITOOLS_LIB)
-MMAKE_LIB_DEPS	:= $(CIUL_LIB_DEPEND) $(CIAPP_LIB_DEPEND) $(CITOOLS_LIB_DEPEND)
+MMAKE_LIBS	:= $(LINK_CIAPP_LIB) $(LINK_CITOOLS_LIB) $(LINK_CIUL_LIB)
+MMAKE_LIB_DEPS	:= $(CIAPP_LIB_DEPEND) $(CITOOLS_LIB_DEPEND) $(CIUL_LIB_DEPEND)
 
 
 rtt: rtt.o rtt_socket.o rtt_efvi.o

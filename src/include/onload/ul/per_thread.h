@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_HEADER >
@@ -31,6 +18,24 @@
 #include <onload/ul/stackname.h>
 
 
+#ifdef __i386__
+# define OO_VFORK_SCRATCH_SIZE  2   /* rtaddr, ebx */
+#endif
+#ifdef __x86_64__
+# define OO_VFORK_SCRATCH_SIZE  1   /* rtaddr */
+#endif
+#ifdef __powerpc__
+# ifdef __powerpc64__
+#  define OO_VFORK_SCRATCH_SIZE  2   /* rtaddr, r31 */
+# else
+#  define OO_VFORK_SCRATCH_SIZE  3   /* rtaddr, r31, r3 */
+# endif
+#endif
+#ifdef __aarch64__
+# define OO_VFORK_SCRATCH_SIZE  1   /* rtaddr */
+#endif
+
+
 struct oo_per_thread {
   ci_netif_config_opts*      thread_local_netif_opts;
   int                        initialised;
@@ -41,6 +46,7 @@ struct oo_per_thread {
   struct oo_timesync         timesync;
   unsigned                   spinstate; 
   int                        in_vfork_child;
+  void*                      vfork_scratch[OO_VFORK_SCRATCH_SIZE];
 };
 
 

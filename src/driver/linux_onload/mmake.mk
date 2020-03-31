@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-2.0
+# X-SPDX-Copyright-Text: (c) Solarflare Communications Inc
 ############################
 # 
 # EtherFabric linux kernel drivers 
@@ -7,26 +9,35 @@
 ############################
 
 
-ONLOAD_SRCS	:= driver.c linux_cplane_netif.c timesync.c \
+ONLOAD_SRCS	:= driver.c timesync.c \
 		tcp_sendpage.c driverlink_ip.c linux_stats.c pinbuf.c \
 		linux_trampoline.c shmbuf.c compat.c \
-		ossock_calls.c linux_sock_ops.c mmap.c \
+		ossock_calls.c mmap.c \
 		epoll_device.c terminate.c sigaction_calls.c onloadfs.c \
 		dshm.c cplane.c cplane_prot.c
 
+# This is a kernel makefile, so gets re-called by kbuild with 'src' set
+src ?= .
+ifeq ($(KBUILD_BPF_SUPPORTED),1)
+ONLOAD_OBJS_BPF := $(BUILD)/lib/bpf/bpfimpl/bpf_lib.o
+ONLOAD_SRCS += bpf_init.c
+else
+ONLOAD_OBJS_BPF :=
+EXTRA_CFLAGS += -DNO_BPF
+endif
 
-EFTHRM_SRCS	:= cplane_netif.c eplock_resource_manager.c \
+EFTHRM_SRCS	:= eplock_resource_manager.c \
 		tcp_helper_endpoint.c tcp_helper_resource.c \
 		tcp_helper_ioctl.c tcp_helper_mmap.c tcp_helper_sleep.c \
 		tcp_helper_endpoint_move.c \
 		tcp_filters.c oof_filters.c oof_onload.c \
 		driverlink_filter.c ip_prot_rx.c ip_protocols.c \
 		onload_nic.c id_pool.c dump_to_user.c iobufset.c \
-		tcp_helper_cluster.c oof_interface.c
+		tcp_helper_cluster.c oof_interface.c tcp_helper_stats_dump.c
 
 EFTHRM_HDRS	:= oo_hw_filter.h oof_impl.h tcp_filters_internal.h \
 		tcp_helper_resource.h tcp_filters_deps.h oof_tproxy_ipproto.h \
-		oof_onload_types.h
+		oof_onload_types.h tcp_helper_stats_dump.h
 
 ifeq ($(LINUX),1)
 EFTHRM_SRCS	+= tcp_helper_linux.c
@@ -111,7 +122,8 @@ onload-objs  := $(IP_TARGET_SRCS:%.c=%.o) $($(ARCH)_TARGET_SRCS:%.c=%.o)
 onload-objs  += $(BUILD)/lib/transport/ip/ci_ip_lib.o	\
 		$(BUILD)/lib/cplane/cplane_lib.o \
 		$(BUILD)/lib/citools/citools_lib.o	\
-		$(BUILD)/lib/ciul/ci_ul_lib.o
+		$(BUILD)/lib/ciul/ci_ul_lib.o	\
+		$(ONLOAD_OBJS_BPF)
 
 ifdef OFE_TREE
 ifdef CONFIG_X86_64

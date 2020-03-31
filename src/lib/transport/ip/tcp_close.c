@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_SOURCE>
@@ -42,6 +29,10 @@
 void __ci_tcp_listen_to_normal(ci_netif* netif, ci_tcp_socket_listen* tls)
 {
   citp_waitable_obj* wo = SOCK_TO_WAITABLE_OBJ(&tls->s);
+  ci_tcp_state* ts = &wo->tcp;
+#if CI_CFG_IPV6
+  int af = ipcache_af(&ts->s.pkt);
+#endif
 
   ci_assert(tls->n_listenq == 0);
   ci_assert_equal(ci_tcp_acceptq_n(tls), 0);
@@ -50,7 +41,27 @@ void __ci_tcp_listen_to_normal(ci_netif* netif, ci_tcp_socket_listen* tls)
   if( ci_tcp_listen_has_timer(tls) )
     ci_ip_timer_clear(netif, &tls->listenq_tid);
   ci_ni_dllist_remove_safe(netif, &tls->s.b.post_poll_link);
-  ci_tcp_state_reinit(netif, &wo->tcp);
+
+#if CI_CFG_IPV6
+  ts->s.cp.laddr = ip4_addr_any;
+  /*
+   * Convert IPv6-ipcache into IPv4 state if necessary because
+   * ci_tcp_state_reinit() is supposed to re-initialize ipcache as IPv4.
+   */
+  ci_tcp_ipcache_convert(AF_INET, ts);
+#endif
+
+  ci_tcp_state_reinit(netif, ts);
+
+#if CI_CFG_IPV6
+  if( (ts->s.cp.sock_cp_flags & OO_SCP_BOUND_ADDR) ) {
+    if( IS_AF_INET6(af) )
+      ci_tcp_ipcache_convert(AF_INET6, ts);
+    /* Restore local address */
+    ts->s.cp.laddr = ts->s.laddr;
+  }
+  ci_sock_set_raddr_port(&ts->s, addr_any, 0);
+#endif
 }
 
 
@@ -68,7 +79,7 @@ int ci_tcp_add_fin(ci_tcp_state* ts, ci_netif* netif)
   if( sendq->num ) {
     /* Bang the fin on the end of the send queue. */
     pkt = PKT_CHK(netif, sendq->tail);
-    tcp_hdr = TX_PKT_TCP(pkt);
+    tcp_hdr = TX_PKT_IPX_TCP(ipcache_af(&ts->s.pkt), pkt);
     tcp_hdr->tcp_flags |= CI_TCP_FLAG_FIN | CI_TCP_FLAG_PSH;
     tcp_enq_nxt(ts) += 1;
     pkt->pf.tcp_tx.end_seq = tcp_enq_nxt(ts);
@@ -83,8 +94,9 @@ int ci_tcp_add_fin(ci_tcp_state* ts, ci_netif* netif)
    * state results in weirdness. */
   pkt = ci_netif_pkt_alloc(netif, CI_PKT_ALLOC_USE_NONB);
 
-  if( pkt )
+  if( pkt ) {
     ci_tcp_enqueue_no_data(ts, netif, pkt);
+  }
   else {
     LOG_U(log(LNTS_FMT "%s: out of pkt bufs",
               LNTS_PRI_ARGS(netif, ts), __FUNCTION__));
@@ -530,15 +542,21 @@ int ci_tcp_close(ci_netif* netif, ci_tcp_state* ts)
     ci_tcp_send_rst(netif, ts);
     goto drop;
   }
-  if( (ts->s.s_flags & CI_SOCK_FLAG_LINGER) && ts->s.so.linger == 0
-      && ! (ts->s.b.state & CI_TCP_STATE_NOT_CONNECTED) ) {
-    /* TCP abort, drop connection, send reset only if connected,
-    ** rfc793 p62.
-    */
+  if( (ts->s.s_flags & CI_SOCK_FLAG_LINGER) && ts->s.so.linger == 0 ) {
+    /* Linux calls sk_prot->disconnect() in this case.  And increments
+     * LINUX_MIB_TCPABORTONDATA. */
     CI_TCP_EXT_STATS_INC_TCP_ABORT_ON_DATA(netif);
-    LOG_TV(log(LPF "%d ABORT sent reset", S_FMT(ts)));
-    ci_tcp_send_rst(netif, ts);
-    goto drop;
+    if( ! (ts->s.b.state & CI_TCP_STATE_NOT_CONNECTED) ) {
+      /* TCP abort, drop connection, send reset only if connected,
+      ** rfc793 p62.
+      */
+      LOG_TV(log(LPF "%d ABORT sent reset", S_FMT(ts)));
+      ci_tcp_send_rst(netif, ts);
+    }
+
+    /* Do not drop a connection which is already in TIME_WAIT */
+    if( ts->s.b.state != CI_TCP_TIME_WAIT )
+      goto drop;
   }
 
   if( CI_UNLIKELY( ts->tcpflags & CI_TCPT_FLAG_FIN_PENDING ) )

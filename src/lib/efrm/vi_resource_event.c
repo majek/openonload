@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /****************************************************************************
  * Driver for Solarflare network controllers -
  *          resource management for Xen backend, OpenOnload, etc
@@ -55,9 +42,6 @@
 #include <ci/efhw/eventq.h>
 #include <ci/efrm/private.h>
 #include <ci/efrm/vi_resource_private.h>
-#ifdef CONFIG_SFC_RESOURCE_VF
-#include <ci/efrm/vf_resource_private.h>
-#endif
 #include <ci/efrm/vf_resource.h>
 #include <ci/efrm/efrm_nic.h>
 #include <ci/efrm/buffer_table.h>
@@ -137,17 +121,9 @@ void efrm_eventq_kill_callback(struct efrm_vi *virs)
 	cb_info->vi = NULL;
 
 	/* Disable the callback. */
-#ifdef CONFIG_SFC_RESOURCE_VF
-	if (virs->allocation.vf)
-		spin_lock(&virs->allocation.vf->vf_evq_cb_lock);
-#endif
 	bit = test_and_clear_bit(VI_RESOURCE_EVQ_STATE_CALLBACK_REGISTERED,
 				 &cb_info->state);
 	EFRM_ASSERT(bit);	/* do not call me twice! */
-#ifdef CONFIG_SFC_RESOURCE_VF
-	if (virs->allocation.vf)
-		spin_unlock(&virs->allocation.vf->vf_evq_cb_lock);
-#endif
 
 	/* If the vi had been primed, unset it. */
 	test_and_clear_bit(VI_RESOURCE_EVQ_STATE_WAKEUP_PENDING,
@@ -255,10 +231,6 @@ void efrm_handle_sram_event(struct efhw_nic *nic)
 
 int efrm_vi_irq_moderate(struct efrm_vi *vi, int usec)
 {
-#ifdef CONFIG_SFC_RESOURCE_VF
-	if (vi->allocation.vf)
-		return efrm_vf_vi_qmoderate(vi, usec);
-#endif
 	return -EINVAL;
 }
 EXPORT_SYMBOL(efrm_vi_irq_moderate);
@@ -266,10 +238,6 @@ EXPORT_SYMBOL(efrm_vi_irq_moderate);
 
 int efrm_vi_irq_affinity(struct efrm_vi *vi, int cpu_core_id)
 {
-#ifdef CONFIG_SFC_RESOURCE_VF
-	if (vi->allocation.vf)
-		return efrm_vf_vi_set_cpu_affinity(vi, cpu_core_id);
-#endif
 	return -EINVAL;
 }
 EXPORT_SYMBOL(efrm_vi_irq_affinity);

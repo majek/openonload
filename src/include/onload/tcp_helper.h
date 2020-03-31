@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 ** <L5_PRIVATE L5_SOURCE>
 **   Copyright: (c) Level 5 Networks Limited.
@@ -81,7 +68,7 @@ struct efab_ephemeral_port_keeper {
    struct efab_ephemeral_port_keeper* global_next;
    struct socket* sock;
    struct file* os_file;
-   uint32_t laddr_be32;
+   ci_addr_t laddr;
    uint16_t port_be16;
 };
 
@@ -93,7 +80,7 @@ struct efab_ephemeral_port_head {
    * indicating the point up to which it has been consumed by this local IP in
    * our attempts to use ports already allocated for other IPs. */
   struct efab_ephemeral_port_keeper* global_consumed;
-  uint32_t laddr_be32;
+  ci_addr_t laddr;
   uint32_t port_count;
 };
 
@@ -109,7 +96,7 @@ typedef struct tcp_helper_cluster_s {
 #define THC_REHEAT_FLAG_STICKY_MODE     0x2
   unsigned                        thc_reheat_flags;
   /* Port used to determine if we should switch stack for this bind. */
-  uint32_t                        thc_switch_addr;
+  ci_addr_t                       thc_switch_addr;
   uint16_t                        thc_switch_port;
   char                            thc_name[CI_CFG_CLUSTER_NAME_LEN + 1];
   int                             thc_cluster_size;
@@ -149,7 +136,7 @@ typedef struct tcp_helper_reheat_state_s {
   int       thr_prior_index;
   pid_t     thc_tid_effective;
   unsigned  thc_reheat_flags;
-  unsigned  thc_switch_addr;
+  ci_addr_t thc_switch_addr;
   unsigned  thc_switch_port;
 } tcp_helper_reheat_state_t;
 
@@ -304,6 +291,7 @@ typedef struct tcp_helper_resource_s {
    *    - wakeup_list
    *    - n_ep_closing_refs
    *    - intfs_to_reset 
+   *    - intfs_to_xdp_update
    */
   ci_irqlock_t          lock;
 
@@ -311,6 +299,8 @@ typedef struct tcp_helper_resource_s {
   unsigned              intfs_to_reset;
   /* Bit mask of intf_i that have been removed/suspended and not yet reset */
   unsigned              intfs_suspended;
+  /* Bit mask of intf_i that need xdp updating by the lock holder */
+  unsigned              intfs_to_xdp_update;
 
   unsigned              mem_mmap_bytes;
   unsigned              io_mmap_bytes;
@@ -537,6 +527,12 @@ ci_inline struct pid* ci_netif_pid_lookup(ci_netif* ni, pid_t pid)
   return find_vpid(pid);
 #endif
 }
+
+/* Given an index into the nic_hw array, return the kernel's ifindex.
+ * Implemented as a macro rather than an inline function, to avoid required
+ * dependencies on additional headers in this file */
+#define ci_trs_get_ifindex(thr, intf_i)                 \
+  (efrm_client_get_ifindex((thr)->nic[(intf_i)].thn_vi_rs->rs.rs_client))
 
 #endif /* defined(__KERNEL__) */
 

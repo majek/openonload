@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_HEADER >
@@ -63,9 +50,10 @@ typedef struct ci_private_s {
   /* List of dshm segments owned by this file. */
   ci_dllist             dshm_list;
 
-  /* Handle to the control plane.  This is only needed in the case where we
-   * don't have a stack. */
+  /* Handle to the control plane, and the ID of the fwd table to use.  These
+   * are only valid in the case where we don't have a stack. */
   struct oo_cplane_handle* priv_cp;
+  cp_fwd_table_id fwd_table_id;
 } ci_private_t;
 
 #endif  /* __CI_DRIVER_EFAB_FDPRIVATE_H__ */

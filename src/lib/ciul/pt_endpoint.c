@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This library is free software; you can redistribute it and/or
-** modify it under the terms of version 2.1 of the GNU Lesser General Public
-** License as published by the Free Software Foundation.
-**
-** This library is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-** Lesser General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: LGPL-2.1 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_SOURCE>
@@ -253,10 +240,13 @@ int ef_vi_transmit_alt_free(struct ef_vi* vi, ef_driver_handle vi_dh)
 
 
 
-int ef_vi_transmit_alt_query_buffering(struct ef_vi* vi,
-                                       int ifindex,
-                                       ef_driver_handle dh, 
-                                       int n_alts)
+static int
+__ef_vi_transmit_alt_query_buffering(ef_vi * vi,
+                                     int ifindex,
+                                     ef_driver_handle dh, int pd_id,
+                                     ef_driver_handle pd_dh,
+                                     int n_alts)
+
 {
   unsigned long buffer_size;
   unsigned long available_buffering;
@@ -265,19 +255,18 @@ int ef_vi_transmit_alt_query_buffering(struct ef_vi* vi,
     LOGVV(ef_log("%s: ERROR: EF_VI_TX_ALT flag not set", __func__));
     return -EINVAL;
   }
-
-  int rc = ef_vi_capabilities_get(dh, ifindex,
-                                  EF_VI_CAP_TX_ALTERNATIVES_CP_BUFFERS,
-                                  &available_buffering);
+  int rc = __ef_vi_capabilities_get(dh, ifindex, pd_id, pd_dh,
+                                    EF_VI_CAP_TX_ALTERNATIVES_CP_BUFFERS,
+                                    &available_buffering);
   if( rc != 0 ) {
     LOGVV(ef_log("%s: ERROR: failed to query buffer count: rc=%d", __func__,
                  rc));
     return rc;
   }
 
-  rc = ef_vi_capabilities_get(dh, ifindex,
-                              EF_VI_CAP_TX_ALTERNATIVES_CP_BUFFER_SIZE,
-                              &buffer_size);
+  rc = __ef_vi_capabilities_get(dh, ifindex, pd_id, pd_dh,
+                                EF_VI_CAP_TX_ALTERNATIVES_CP_BUFFER_SIZE,
+                                &buffer_size);
   if( rc != 0 ) {
     LOGVV(ef_log("%s: ERROR: failed to query buffer size: rc=%d", __func__,
                  rc));
@@ -295,6 +284,22 @@ int ef_vi_transmit_alt_query_buffering(struct ef_vi* vi,
   return 0;
 }
 
+int ef_vi_transmit_alt_query_buffering(struct ef_vi* vi,
+                                       int ifindex,
+                                       ef_driver_handle dh, 
+                                       int n_alts)
+{
+  return __ef_vi_transmit_alt_query_buffering(vi, ifindex, dh, -1, -1, n_alts);
+}
+
+
+int ef_pd_transmit_alt_query_buffering(ef_vi * vi,
+                                       ef_driver_handle dh, ef_pd* pd,
+                                       ef_driver_handle pd_dh,
+                                       int n_alts)
+{
+  return __ef_vi_transmit_alt_query_buffering(vi, -1, dh, pd->pd_resource_id, pd_dh, n_alts);
+}
 
 int ef_vi_transmit_alt_query_overhead(ef_vi* vi,
                                       struct ef_vi_transmit_alt_overhead *out)
@@ -333,9 +338,9 @@ void ef_vi_set_intf_ver(char* intf_ver, size_t len)
    */
   strncpy(intf_ver, "1518b4f7ec6834a578c7a807736097ce", len);
       /* when built from repo */
-  if( strcmp(EFCH_INTF_VER, "f93c9d1605ef209e0953c74dbddc6275") &&
+  if( strcmp(EFCH_INTF_VER, "02e60fe32b852148668b30f204c730a5") &&
       /* when built from distro */
-      strcmp(EFCH_INTF_VER, "67db91857bc2a611e6653f61edd02188") ) {
+      strcmp(EFCH_INTF_VER, "5c1c482de0fe41124c3dddbeb0bd5a1a") ) {
     fprintf(stderr, "ef_vi: ERROR: char interface has changed\n");
     abort();
   }

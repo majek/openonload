@@ -1,27 +1,87 @@
-OpenOnload-201811-u1
-====================
+Onload-7.0.0
+============
 
- This is a minor update to refresh the sfc net driver included in
- the Onload package and to provide fixes to various bugs found in
- openonload-201811.
+ This is a major feature release of Onload that adds support for
+ accelerating IPv6 and XDP ingress filtering as well as minor features
+ and bugfixes. The features available will depend on the Onload license
+ you have purchased and activated.
 
- See the accompanying ChangeLog for a list of bugs fixed.
+ This release is the successor to the 201811-u1 version of OpenOnload
+ and Cloud Onload.
 
 
 Linux distribution support
 --------------------------
-
  This package is supported on:
- - Red Hat Enterprise Linux 6.8 - 6.10
- - Red Hat Enterprise Linux 7.4 - 7.6
- - Red Hat Enterprise Linux 8.0
+ - Red Hat Enterprise Linux 6.8 - 6.10*
+ - Red Hat Enterprise Linux 7.4 - 7.7
+ - Red Hat Enterprise Linux 8.0 - 8.1**
  - SuSE Linux Enterprise Server 12 sp3 and sp4
  - SuSE Linux Enterprise Server 15 and sp1
- - Canonical Ubuntu Server LTS 18.04
+ - Canonical Ubuntu Server LTS 16.04 and 18.04
  - Canonical Ubuntu Server 19.04
- - Debian 8 "Jessie"
  - Debian 9 "Stretch"
- - Linux kernels 3.0 - 5.0
+ - Debian 10 "Buster"
+ - Linux kernels 3.10* - 5.2
+
+ * The IPv6 and eBPF/XDP features are not supported on Red Hat Enterprise
+   Linux 6 or Linux kernels prior to 4.4 (except RHEL 7 kernels, which are
+   supported).
+
+** RHEL8.1 was only available in pre-release form at the point this Onload
+   release was tested.
+
+
+Long Term Support with EnterpriseOnload
+---------------------------------------
+
+Users seeking long term support for Onload are encouraged to ask their
+sales representative about EnterpriseOnload. Particular feature releases of
+Onload are periodically designated as the basis for long term support
+as EnterpriseOnload. For example, EnterpriseOnload-6.0.x is the current
+series of EnterpriseOnload and will receive bugfix updates for a number
+of years.
+
+
+Onload version numbering
+------------------------
+
+This release of Onload replaces date-based version numbering with a semantic
+version number of the form X.Y.Z.B, like the sfc netdriver, where the components
+have the following meanings:
+
+ - X major version number, incremented after an EnterpriseOnload designation
+ - Y minor version number, incremented for every feature release
+ - Z bugfix number, incremented for every update release
+ - B build number, fixed for each release at the final release candidate
+
+The major and minor version numbers for this scheme start at 7.0.0, following on
+from the latest EnterpriseOnload version, 6.0.1 therefore converging the
+numbering for all Onload packages.
+
+The build number will typically be a larger number of 3 or 4 digits.
+
+
+Activation files
+----------------
+
+This release of Onload adds support for activation files, which, when deployed
+to a system, enable sets of Onload features according to the purchased
+licenses.  Once purchased, these files should be copied to the
+/etc/solarflare/activation.d directory, which is created when Onload is
+installed.
+
+Onload is also enabled (without the need for an activation file) for NICs where
+a suitable AppFlex key is present on the adapter.
+
+Users that have purchased a Cloud Onload activation should typically build
+onload with the 'cloud' build profile. (Pass --build-profile cloud to
+onload_build or onload_install). The 'cloud' build profile is necessary to make
+all Cloud Onload features work and is suitable for cloud applications. This
+profile requires Linux kernels from 4.4 onwards or RHEL versions from RHEL 7.4
+onwards.
+
+For further information, please contact your sales representative.
 
 
 Running control plane server as non-root user
@@ -32,217 +92,222 @@ using the ONLOAD_CPLANE_USER setting in /etc/sysconfig/openonload, or by passing
 the cplane_server_uid and cplane_server_gid parameters to the onload module. The
 server retains CAP_NET_ADMIN capability.
 
-This also means that the server depends on libcap library.
 
-
-Red Hat Enterprise Linux 8.0
-----------------------------
+Red Hat Enterprise Linux 8
+--------------------------
 
 Users of RHEL 8 will need to ensure that the new Codeready-Builder
 repository is included in their system's repository list to provide
 the libpcap-devel build dependency.
 
-Onload Docker support has not been qualified for RHEL 8.0 in this release.
+
+IPv6
+----
+
+The following features are not supported:
+
+ - multicast
+ - fragmentation headers
+ - IPV6-specific socket options (supported exception is IPV6_V6ONLY)
+ - flowinfo (neither set nor considered)
+ - SYN cookies
+ - from the Onload extensions API: delegated send; zero-copy send
+ - opportunistic packet processing
+
+IPv6 is not compiled in by default. To compile IPv6 support into
+Onload give the following options to onload_install:
+
+ --build-profile cloud
 
 
-OpenOnload-201811
-=================
+eBPF/XDP
+--------
 
- This is a feature release that adds new features to TCPDirect,
- extends architecture, NIC and OS support, provides improvements
- to Onload's performance in lossy network environments and includes
- many bug fixes.
+The eBPF/XDP support is based on that provided by the Linux 4.20
+kernel.
 
- Preview-level support is provided for ARM's 64-bit architecture and
- support for AMD CPUs prior to the Zen architecture is deprecated.
+eBPF is not compiled in by default. To compile eBPF support into
+Onload give the following option to onload_install:
 
- The notes below describe some of the new features. See the Onload
- user guide for full details of new features and associated
- configuration options.
+ --build-profile cloud
 
- See the accompanying ChangeLog for a list of bugs fixed.
+Onload tries to be completely compatible with kernel eBPF/XDP
+programmes in both source and binary form for a specifc set of
+supported features. The administrative interface (i.e. loading
+and attaching BPF programmes, manipulating maps, etc.) is not
+compatible but has similarities.
 
+The following quick-start example installs an XDP programme to
+drop all packets in Onload:
 
-Linux distribution support
---------------------------
+# apt-get install clang    # or yum on redhatish distros
+# >test-bpf.c cat - <<HERE
+#include <linux/bpf.h>
 
- This package is supported on:
- - Red Hat Enterprise Linux 6.7 - 6.10
- - Red Hat Enterprise Linux 7.3 - 7.6
- - SuSE Linux Enterprise Server 12 sp3 and sp4*
- - SuSE Linux Enterprise Server 15
- - Canonical Ubuntu Server LTS 18.04
- - Canonical Ubuntu Server 18.10
- - Debian 8 "Jessie"
- - Debian 9 "Stretch"
- - Linux kernels 3.0 - 4.19
+__attribute__((section("prog"), used))
+int xdp_drop(struct xdp_md *ctx)
+{
+    return XDP_DROP;
+}
 
-* SLES 12 sp4 was only available in pre-release form at the time this
-  OpenOnload release was tested.
+char __license[] __attribute__((section("license"), used)) = "GPL";
+HERE
+# clang -Wall -O2 -target bpf -o test-bpf.o -c test-bpf.c
+# onload_bpftool prog load obj test-bpf.o section prog attach xdp_ingress
 
+This will immediately affect all Onloaded applications (both
+currently-running and in the future) on all Solarflare NICs,
+causing them to drop all incoming packets; no additional EF_
+environment variables are required. It will have no effect on
+the kernel stack.
 
-TCPDirect bonding
------------------
+Use "onload_bpftool help" for usage information. The "load"
+subcommand takes "dev" and "stack" qualifiers to allow a
+programme to be attached to only one NIC or to only one named
+Onload stack. This semantic allows more than one BPF programme
+to be considered applicable to a given packet; it is currently
+the case that Onload will run only the most-specific programme,
+however this behaviour may change before release. In this
+release, "dev" is only supported for attaching to physical
+Solarflare NICs (i.e. not VLANs, bonds, etc. on top of them).
 
- This release enables TCPDirect to send and receive traffic over a bonded
- interface. Bonded interfaces can now be specified using the interface
- attribute, as with regular interfaces. See the user guide for further
- details.
-
- The following bonding modes are supported:
- - Active-backup
- - LACP with layer2, layer2+3 and layer3+4 transmit hash policies
-
- TCPDirect bonding has the following constraints:
- - Bonded interfaces of up to 4 Solarflare network adapters are supported.
- - Failover is supported, however bonds may not be otherwise reconfigured
-   while TCPDirect is running.
- - TX Alternatives must be disabled in stacks using bonding.
- - All interfaces in the bond must be in the same network namespace.
- - VLAN, IPVLAN and MACVLAN interfaces created over a bond are not supported.
- - As with Onload, bonding of VLAN, IPVLAN and MACVLAN interfaces is not
-   supported.
+The above quick-start requires both clang>=3.7 and linux/bpf.h
+in the include path. An easy way to make this work is to do the
+BPF build on a recent machine with native kernel support, then
+to copy the .o file to the DUT(s) before using onload_bpftool.
 
 
-TCPDirect transmit timestamping
+eBPF/XDP: advanced functionality
+--------------------------------
+
+For programmatic access, Onload exposes a library libbpfintf
+which provides the underlying feature set of onload_bpftool.
+See the doc-comments in onload/oobpf.h for usage information.
+
+
+eBPF/XDP: supported feature set
 -------------------------------
 
- Transmit timestamping support was added to TCPDirect and can be enabled by
- specifying tx_timestamping attribute. Transmit timestamps can be retrieved
- by calling zft_get_tx_timestamps for TCP and zfut_get_tx_timestamps for UDP
- zockets. Please see the TCPDirect user guide and zftcppingpong/zfudppingpong
- sample applications for more details.
+Return values:
+
+  - XDP_PASS
+  - XDP_DROP
+
+Map types supported:
+
+  - BPF_MAP_TYPE_ARRAY
+  - BPF_MAP_TYPE_HASH
+  - BPF_MAP_TYPE_LPM_TRIE
+  - BPF_MAP_TYPE_PERF_EVENT_ARRAY
+
+ BPF_MAP_TYPE_ARRAY supports only preallocated mode, i.e. map_flags=0.
+
+Helper functions:
+
+  - bpf_map_lookup_elem
+  - bpf_map_update_elem
+  - bpf_map_delete_elem
+  - bpf_ktime_get_ns
+  - bpf_perf_event_output
+
+ BTF is not currently supported.
+
+There is set of Onload stats named rx_xdp_* counting the
+number of packets passed through the XDP programme, categorised
+by the return value from the programme.
+
+The packet given to an XDP programme is the full Ethernet frame
+(just like with kernel XDP).
+
+Like the kernel, onload_tcpdump runs after XDP, so packets
+dropped by the XDP programme will not be dumped.
+
+Perf events are only supported where the running kernel supports XDP
+perf events.  This is the case for kernels where enum perf_sw_ids
+includes PERF_COUNT_SW_BPF_OUTPUT, which includes the
+latest released kernel for all supported distributions.
 
 
-Onload TCP performance in lossy network environments
-----------------------------------------------------
+Enhanced packet timestamps
+--------------------------
 
- This release makes several improvements to Onload's TCP core in the presence
- of loss and reordering, as can be the case, for example, where the route to
- the peer traverses the internet.
+A new extension API, onload_timestamping_request, allows applications to
+receive packet timestamps from multiple sources with sub-nanosecond resolution.
+Currently supported sources are hardware timestamps generated by Solarflare
+network adapters, and timestamps applied to received packets by external
+equipment using the cPacket format.
 
- - EF_TAIL_DROP_PROBE
-
-   Classical TCP implementations recover poorly from the case where the last
-   segment(s) in flight are dropped. This results in no visible gap in
-   sequence space, and so there is nothing to trigger fast retransmissions;
-   instead, the segments are retransmitted by the RTO mechanism. In order to
-   attempt to trigger a fast retransmission in the case where such tail-loss is
-   suspected, a "tail-drop probe" segment can be sent after a short timeout.
-   This segment would either be the next segment due to be transmitted, or an
-   opportunistic retransmission of the most recent in-flight segment.
-
-   Previous releases of Onload had a tail-drop probe implementation, but it was
-   not compiled in by default. In this release, the mechanism has been
-   rewritten, and is now built by default. Its use is controlled at runtime by
-   the EF_TAIL_DROP_PROBE environment variable, which previously defaulted to 0
-   (off) but now defaults to the value read from the kernel configuration at
-   /proc/sys/net/ipv4/tcp_early_retrans, which defaults to on.
-
- - EF_TCP_EARLY_RETRANSMIT
-
-   This release implements the Early Retransmit (RFC 5827) algorithm for TCP,
-   and also the Limited Transmit (RFC 3042) algorithm, on which Early
-   Retransmit depends. As for tail-drop probes, the purpose of these algorithms
-   is to allow fast retransmissions to happen more readily. The use of these
-   algorithms is controlled by the EF_TCP_EARLY_RETRANSMIT environment
-   variable, whose default value is read from the kernel configuration at
-   /proc/sys/net/ipv4/tcp_early_retrans.
-
- - SACK improvements
-
-   Selective acknowledgments received from the peer are now used to grow the
-   congestion window more aggressively when recovering from loss.
+This release also adds experimental support for the use of external timestamps
+for packet ordering when using onload_ordered_epoll_wait. This is enabled using
+the EF_RX_TIMESTAMPING_ORDERING environment variable. When using external
+timestamps, some packets may appear out of order due to external delays unknown
+to Onload.
 
 
-Onload initial sequence number caching
---------------------------------------
-
-Applications which rapidly open and close a large number of connections to
-other machines may experience occasional connection failures due to the rapid
-reuse of TCP sequence numbers being detected as retransmits in the TIME-WAIT
-state. This is most commonly a problem with Windows and FreeBSD TCP stacks.
-
-The standard RFC-derived algorithm for avoiding this problem relies on a
-clock ticking at a rate which is faster than bytes are transmitted. A link
-running at 100Mb can theoretically transmit faster than the clock can tick,
-however, and 10Gb+ links can practically do this.
-
-Onload has added the EF_TCP_ISN_MODE option to provide a solution. The
-default "clocked" setting uses the standard best-effort algorithm. The
-"clocked+cache" setting will store the last sequence number used for every
-remote endpoint to guarantee that the problem is avoided. This mode is
-recommended for applications such as proxies which rapidly open and close
-connections to a variety of unknown, third-party servers.
-
-The following settings may be used to fine-tune the clocked+cache mode:
-
- - EF_TCP_ISN_CACHE_SIZE
-   Number of entries to allocate in the cache of remote endpoints. The default
-   value of 0 selects a size automatically.
-
- - EF_TCP_ISN_INCLUDE_PASSIVE
-   Store data for closed passively-opened connections in the cache. This data
-   would only be needed by an application which closed its listening socket
-   and continued to run, so the option is disabled by default
-
- - EF_TCP_ISN_OFFSET
-   Distance by which to step the initial sequence number of new connections
-   relative to the previous connection. Only extremely specialized
-   applications would consider changing the default.
-
- - EF_TCP_ISN_2MSL
-   Maximum amount of time that any remote TCP stack's implementation will
-   leave a socket in the TIME-WAIT state. This is configurable in many
-   systems, however the default value of 240 seconds is a maximum common value
-   across a variety of operating systems.
+Ipvlan interfaces
+-------------------------
+Support for IPVLAN interfaces has been added allowing acceleration of traffic
+using this virtual interface type.  Currently, only L2 mode is supported,
+that is modes L3 and L3s will not be accelerated.
+MAC filter-based scalable filter modes are not supported with IPVLAN interfaces.
 
 
-Other Onload configuration options changes
-------------------------------------------
+New configuration options
+-------------------------
 
-In addition to those already mentioned, this release of Onload
-adds or modifies the following environmental options:
+ - EF_DEFER_ARP_TIMEOUT
+   Onload now handles the deferral of packet sends during neighbour resolution
+   (IPv4 ARP or IPv6 ND) rather than delegating the sends to the OS. This option
+   specifies a timeout in seconds to wait for the OS to complete neighbour
+   resolution before sending deferred packets.
+   Defaults to 60.
 
- - EF_TCP_URG_MODE
-   New option to allow disabling TCP urgent data processing. Urgent data is
-   a rarely-used feature which is inconsistently implemented on various
-   operating systems, however applications which are written to the Linux
-   convention will experience corrupt data if they use the "ignore" setting
-   and actually receive urgent data.
+ - EF_DEFER_ARP_MAX
+   Limits the total number of packets to queue in a stack for all next hops
+   while waiting for the OS to complete neighbour resolution.
+   Defaults to 128.
 
- - EF_TCP_TIME_WAIT_ASSASSINATION
-   New option to implement the RFC 1337 behaviour of replacing old TIME-WAIT
-   sockets with newly-received incoming connections. The default value is
-   read from /proc/sys/net/ipv4/tcp_rfc1337.
+ - EF_AUTO_FLOWLABELS
+   Defines whether to generate non-zero IPv6 flow labels.
+   Defaults to the sysctl net.ipv6.auto_flowlabels setting.
 
- - EF_TCP_SHARED_LOCAL_PORTS_PER_IP_MAX
-   New option to fine-tune the shared local ports feature. Sets the maximum
-   size of the pool of local shared ports for given local IP address. When
-   used with scalable RSS mode this setting limits the total number within the
-   cluster.
+ - EF_INVALID_ACK_RATELIMIT
+   Governs rate limiting for duplicate ACKs.
+   Defaults to the sysctl net.ipv4.tcp_invalid_ratelimit setting.
 
- - EF_TCP_SHARED_LOCAL_PORTS_STEP
-   New option to fine-tune the shared local ports feature. Controls the number
-   of ports allocated when expanding the pool of shared local ports.
+ - EF_USE_DSACK
+   Controls the use of Duplicate Selective Acknowledgment.
+   Defaults to 1 (on).
+
+ - EF_CHALLENGE_ACK_LIMIT
+   Specifies limit for the number of RFC5961 Challenge ACKs to send per second.
+   Defaults to the sysctl net.ipv4.tcp_challenge_ack_limit setting if
+   available, else 1000.
+
+ - EF_POLL_IN_KERNEL
+   If set, ensures that epoll mode 3 polling always occurs in kernel context.
+   Defaults to 0 (off).
+
+ - EF_RX_TIMESTAMP_ORDERING
+   Defines whether ordered packet delivery is governed by timestamps from the
+   NIC ('nic') or from timestamps decoded from packet trailers ('cpacket').
+   Defaults to 'nic'.
 
 
-TCPDirect errors issued by newer C++ compilers
-----------------------------------------------
+Modified configuration options
+------------------------------
 
-Applications using TCPDirect may fail to build with g++ version 6 and above
-with the message "error: flexible array member 'zft_msg::iov' not at end of
-'struct my_msg'". To work around this issue, application code may be modified
-from
+ - EF_UDP_CONNECT_HANDOVER
+   The cases covered by EF_UDP_CONNECT_HANDOVER have been extended to include
+   the situation where resource limitations prevent RX filter installation.
+   The default setting remains the same, such that if the result of a connect
+   operation is that a socket will not receive acclerated traffic it is handed
+   over to the kernel.
 
-struct my_msg {
-  zft_msg msg;
-  iovec iov[1];
-};
 
-to
+Deprecation
+-----------
 
-typedef struct {
-  zft_msg msg;
-  iovec iov[1];
-} my_msg;
+The ability to insert filters to steer kernel traffic using sfcaffinity
+is deprecated and will be removed in a future release. Instead ethtool should
+be used for this purpose.

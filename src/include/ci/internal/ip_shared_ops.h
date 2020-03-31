@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_HEADER >
@@ -181,16 +168,11 @@ extern int no_shared_state_panic;
 /* Get from a pointer to an [oo_p].  This must only be used for a pointer
 ** that lies within the contiguous region of the netif state.
 */
-#if CI_CFG_OOP_IS_PTR
-ci_inline oo_p oo_ptr_to_statep(const ci_netif* ni, void* ptr)
-{ return ptr; }
-#else
 ci_inline oo_p oo_ptr_to_statep(const ci_netif* ni, void* ptr) {
   oo_p sp;
   OO_P_INIT(sp, ni, (ci_uint32) ((char*) ptr - (char*) ni->state));
   return sp;
 }
-#endif
 
 
 /* The driver has a trusted version of ep_ofs. */
@@ -201,27 +183,20 @@ ci_inline oo_p oo_ptr_to_statep(const ci_netif* ni, void* ptr) {
 #endif
 
 
+/* Both in the kernel and at UL, the logical stack address space is mapped as
+ * a single contiguous region beginning at the base address of the shared
+ * state. */
+ci_inline char* oo_state_off_to_ptr(ci_netif* ni, unsigned off)
+{
+  char* ptr = (char*) ni->state + off;
 #ifdef __ci_driver__
-
-ci_inline char* oo_state_off_to_ptr(ci_netif* ni, unsigned off) {
-  return off < ci_netif_ep_ofs(ni)
-    ? (char*) ni->state + off
-    : ci_shmbuf_ptr(&ni->pages_buf, off - ci_netif_ep_ofs(ni));
+  ci_assert_equal(ptr, ci_shmbuf_ptr(&ni->pages_buf, off));
+#endif
+  return ptr;
 }
 
-#else /* not driver */
 
-ci_inline char* oo_state_off_to_ptr(ci_netif* ni, unsigned off)
-{ return (char*) ni->state + off; }
-
-#endif  /* __ci_driver__ */
-
-
-#if CI_CFG_OOP_IS_PTR
-# define __CI_NETIF_PTR(ni, oop)  (oop)
-#else
 # define __CI_NETIF_PTR(ni, oop)  oo_state_off_to_ptr((ni), OO_P_OFF(oop))
-#endif
 
 
 #if CI_CFG_DETAILED_CHECKS
@@ -245,7 +220,8 @@ ci_inline char* oo_state_off_to_ptr(ci_netif* ni, unsigned off)
 
 /* Aux buffers are sub-buffers of EP buffers.  Header at beginning,
  * and 7 aux buffer per 1024 bytes. */
-#define AUX_PER_BUF (CI_CFG_EP_BUF_SIZE / CI_AUX_MEM_SIZE - 1)
+#define AUX_PER_BUF ((CI_CFG_EP_BUF_SIZE - CI_AUX_HEADER_SIZE) /  \
+                     CI_AUX_MEM_SIZE)
 
 
 /* TRUSTED_SOCK_ID(ni, id)
@@ -284,21 +260,11 @@ ci_inline unsigned oo_sockid_to_state_off(ci_netif* ni, unsigned sock_id)
 ** Convert an [oo_sp] to an [oo_p].  The result is guaranteed valid
 ** provided the socket id is valid.
 */
-#if CI_CFG_OOP_IS_PTR && CI_CFG_SOCKP_IS_PTR
-ci_inline oo_p oo_sockp_to_statep(ci_netif* ni, oo_sp sockp)
-{ return (char*) sockp; }
-#elif CI_CFG_OOP_IS_PTR
-ci_inline oo_p oo_sockp_to_statep(ci_netif* ni, oo_sp sockp) {
-  return
-    oo_state_off_to_ptr(ni, oo_sockid_to_state_off(ni, OO_SP_TO_INT(sockp)));
-}
-#else
 ci_inline oo_p oo_sockp_to_statep(ci_netif* ni, oo_sp sockp) {
   oo_p sp;
   OO_P_INIT(sp, ni, oo_sockid_to_state_off(ni, OO_SP_TO_INT(sockp)));
   return sp;
 }
-#endif
 
 
 
@@ -306,16 +272,8 @@ ci_inline oo_p oo_sockp_to_statep(ci_netif* ni, oo_sp sockp) {
 **
 ** Convert a socket id to a pointer.  Safe if [sockp] is valid.
 */
-#if CI_CFG_SOCKP_IS_PTR
-ci_inline char* oo_sockp_to_ptr(ci_netif* ni, oo_sp sockp)
-{ return (char*) sockp; }
-#elif defined(__KERNEL__)
-ci_inline char* oo_sockp_to_ptr(ci_netif* ni, oo_sp sockp)
-{ return ci_shmbuf_ptr(&ni->pages_buf, OO_SP_TO_INT(sockp) * EP_BUF_SIZE); }
-#else
 ci_inline char* oo_sockp_to_ptr(ci_netif* ni, oo_sp sockp)
 { return CI_NETIF_PTR(ni, oo_sockp_to_statep(ni, sockp)); }
-#endif
 
 
 /* oo_sockp_to_ptr_safe(ni, sockp)
@@ -323,14 +281,10 @@ ci_inline char* oo_sockp_to_ptr(ci_netif* ni, oo_sp sockp)
 ** Convert a socket id to a pointer.  This operation is safe even if
 ** [sockp] is invalid (in which case some arbitrary buffer is returned).
 */
-#if ! CI_CFG_SOCKP_IS_PTR
 # define TRUSTED_SOCK_P(ni, sockp)                                      \
   OO_SP_FROM_INT((ni), TRUSTED_SOCK_ID((ni), OO_SP_TO_INT(sockp)))
 # define oo_sockp_to_ptr_safe(ni, sockp)                \
   oo_sockp_to_ptr((ni), TRUSTED_SOCK_P((ni), (sockp)))
-#else
-# define oo_sockp_to_ptr_safe(ni, sockp)  oo_sockp_to_ptr((ni), (sockp))
-#endif
 
 
 /* SP_TO_foo(ni, oo_sp)
@@ -499,7 +453,7 @@ ci_inline ci_ip_pkt_fmt* __ci_pkt_chk(ci_netif* ni, oo_pkt_p pp, int ni_locked,
 ********************* Ethernet header access *************************
 *********************************************************************/
 
-ci_inline struct oo_eth_hdr* oo_ether_hdr(ci_ip_pkt_fmt* pkt)
+ci_inline struct oo_eth_hdr* oo_ether_hdr(const ci_ip_pkt_fmt* pkt)
 {
   return (void*) (pkt->dma_start + pkt->pkt_start_off);
 }
@@ -530,9 +484,9 @@ ci_inline int oo_pre_l3_len(const ci_ip_pkt_fmt* pkt)
 ************************ IP header access ****************************
 *********************************************************************/
 
-ci_inline void* oo_l3_hdr(ci_ip_pkt_fmt* pkt)
+ci_inline void* oo_l3_hdr(const ci_ip_pkt_fmt* pkt)
 {
-  return pkt->dma_start + pkt->pkt_eth_payload_off;
+  return (void*)(pkt->dma_start + pkt->pkt_eth_payload_off);
 }
 
 ci_inline ci_ip4_hdr* oo_ip_hdr(ci_ip_pkt_fmt* pkt)
@@ -547,8 +501,7 @@ ci_inline const ci_ip4_hdr* oo_ip_hdr_const(const ci_ip_pkt_fmt* pkt)
 
 ci_inline void* oo_ip_data(ci_ip_pkt_fmt* pkt)
 {
-  const ci_ip4_hdr* ip = oo_ip_hdr(pkt);
-  return (uint8_t*) ip + CI_IP4_IHL(ip);
+  return ci_ip_data(oo_ip_hdr(pkt));
 }
 
 #if CI_CFG_IPV6
@@ -559,8 +512,39 @@ ci_inline ci_ip6_hdr* oo_ip6_hdr(ci_ip_pkt_fmt* pkt)
 
 ci_inline void* oo_ip6_data(ci_ip_pkt_fmt* pkt)
 {
-  return oo_ip6_hdr(pkt) + 1;
+  return ci_ip6_data(oo_ip6_hdr(pkt));
 }
+#endif
+
+ci_inline ci_ipx_hdr_t* oo_ipx_hdr(const ci_ip_pkt_fmt* pkt)
+{
+  return (ci_ipx_hdr_t*)oo_l3_hdr(pkt);
+}
+
+#define oo_ipx_data(af, pkt) ipx_hdr_data(af, oo_ipx_hdr(pkt))
+
+ci_inline uint16_t oo_pkt_ether_type(ci_ip_pkt_fmt* pkt)
+{
+  const uint16_t* p = oo_l3_hdr(pkt);
+  return p[-1];
+}
+
+#if CI_CFG_IPV6
+ci_inline int oo_pkt_af(const ci_ip_pkt_fmt* pkt)
+{
+  return (pkt->flags & CI_PKT_FLAG_IS_IP6) ? AF_INET6 : AF_INET;
+}
+
+ci_inline void oo_pkt_af_set(ci_ip_pkt_fmt* pkt, int af)
+{
+  if( IS_AF_INET6(af) )
+    pkt->flags |= CI_PKT_FLAG_IS_IP6;
+  else
+    pkt->flags &=~ CI_PKT_FLAG_IS_IP6;
+}
+#else
+#define oo_pkt_af(pkt) AF_INET
+#define oo_pkt_af_set(pkt, af)
 #endif
 
 
@@ -660,6 +644,30 @@ ci_inline void* oo_tx_ip_data(ci_ip_pkt_fmt* pkt)
 {
   return oo_tx_ip_hdr(pkt) + 1;
 }
+
+#if CI_CFG_IPV6
+ci_inline ci_ip6_hdr* oo_tx_ip6_hdr(ci_ip_pkt_fmt* pkt)
+{
+  return oo_tx_l3_hdr(pkt);
+}
+
+ci_inline void* oo_tx_ip6_data(ci_ip_pkt_fmt* pkt)
+{
+  return oo_tx_ip6_hdr(pkt) + 1;
+}
+#endif
+
+#if CI_CFG_IPV6
+#define oo_tx_ipx_hdr(af, pkt) ((af == AF_INET6) ? \
+  (ci_ipx_hdr_t*)oo_tx_ip6_hdr(pkt) : (ci_ipx_hdr_t*)oo_tx_ip_hdr(pkt))
+#define oo_tx_ipx_data(af, pkt) ((af == AF_INET6) ? \
+  oo_tx_ip6_data(pkt) : oo_tx_ip_data(pkt))
+#else
+ci_inline ci_ipx_hdr_t* oo_tx_ipx_hdr(int af, ci_ip_pkt_fmt* pkt)
+  { (void) af; return (ci_ipx_hdr_t*)oo_tx_ip_hdr(pkt); }
+ci_inline void* oo_tx_ipx_data(int af, ci_ip_pkt_fmt* pkt)
+  { (void) af; return oo_tx_ip_data(pkt); }
+#endif
 
 
 /*********************************************************************

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-2.0 OR Solarflare-Binary
+# X-SPDX-Copyright-Text: (c) Solarflare Communications Inc
 
 ####################################################################################
 ####################################################################################
@@ -48,7 +50,6 @@ endif
 #keep this list upto date, as it really improves performance of rsync
 TOHOST_EXCLUDES= --exclude "CVS/" \
                  --exclude ".hg/" \
-                 --exclude "scripts/py/"  \
                  --exclude "scripts/benchmark/" \
                  --exclude "scripts/cluster-scripts/" \
                  --exclude "scripts/efabdailytest/" \

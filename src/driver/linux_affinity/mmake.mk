@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-2.0
+# X-SPDX-Copyright-Text: (c) Solarflare Communications Inc
 SFCAFF_SRCS	:= sfcaffinity.c
 
 SFCAFF_TARGET	:= sfc_affinity.o

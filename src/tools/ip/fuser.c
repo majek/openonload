@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_SOURCE>
@@ -23,9 +10,6 @@
 ** </L5_PRIVATE>
 *//*
 \**************************************************************************/
-
-/* Most of the code is shamelessly stolen from Craig Small, fuser.c from
- * linux psmisc. */
 
 /*! \cidoxg_tests_ef */
 #define _GNU_SOURCE /* for strsignal */
@@ -67,6 +51,15 @@ static void usage(const char* msg)
   exit(-1);
 }
 
+/* X-SPDX-Source-URL: https://gitlab.com/psmisc/psmisc.git */
+/* X-SPDX-Source-Tag: 5b655f1ec99b86de0336bdabdaaf425e1570c88a */
+/* X-SPDX-Source-File: src/fuser.c */
+/* X-SPDX-Copyright-Text: Copyright (C) 1993-2005 Werner Almesberger and Craig
+ *                        Small, Copyright (C) 2005-2017 Craig Small */
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Comment: Heavily cut-down and modified from that source by
+ *                 Solarflare, such that only the basic algorithm and data
+ *                 structures remain. */
 
 #define MAX_PATHNAME 300
 #define MAX_CMDNAME 16
@@ -90,6 +83,8 @@ main(int argc, char* argv[])
   pid_t pid;
   struct stat st;
   struct procs *proc;
+  unsigned long stack_dev, epoll_dev;
+  dev_t fs_dev;
 
   ci_app_usage = usage;
   ci_app_getopt(USAGE_STR, &argc, argv, cfg_opts, N_CFG_OPTS);
@@ -99,6 +94,11 @@ main(int argc, char* argv[])
     perror("open /proc");
     exit(1);
   }
+
+  stack_dev = oo_get_st_rdev(OO_STACK_DEV);
+  epoll_dev = oo_get_st_rdev(OO_EPOLL_DEV);
+  fs_dev = oo_onloadfs_dev_t();
+
   while( (proc_dent = readdir(proc_dir)) != NULL ) {
     if (proc_dent->d_name[0] < '0' || proc_dent->d_name[0] > '9')
       continue; /* not a pid */
@@ -115,9 +115,9 @@ main(int argc, char* argv[])
                 pid, fd_dent->d_name);
        if (stat(filepath, &st) != 0)
         continue;
-       if( st.st_rdev == oo_get_st_rdev(OO_STACK_DEV) ||
-           st.st_rdev == oo_get_st_rdev(OO_EPOLL_DEV) ||
-           st.st_dev == oo_onloadfs_dev_t() ) {
+       if( st.st_rdev == stack_dev ||
+           st.st_rdev == epoll_dev ||
+           st.st_dev == fs_dev ) {
         proc = malloc(sizeof(struct procs));
         proc->pid = pid;
 

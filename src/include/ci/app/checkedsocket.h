@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_HEADER>
@@ -232,10 +219,10 @@ ci_inline int _CiGetsockopt_int(int sock, int level, int optname,
 /*! Comment? */
 ci_inline int _CiGetsockport(int sock, const char* file, int line)
 {
-  struct sockaddr_in sa;
+  struct sockaddr_storage sa;
   socklen_t l = sizeof(sa);
   _CiGetsockname(sock, (struct sockaddr*) &sa, &l, file, line);
-  return ntohs(sa.sin_port);
+  return sockaddr_get_port(&sa);
 }
 #endif
 

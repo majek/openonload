@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-2.0
+# X-SPDX-Copyright-Text: (c) Solarflare Communications Inc
 
 TARGET		:= $(EFRM_LIB)
 MMAKE_TYPE	:= LIB
@@ -16,7 +18,6 @@ LIB_SRCS	:= assert_valid.c \
 		   vi_resource_manager.c \
 		   vi_resource_info.c \
 		   vi_allocator.c \
-		   vf_resource.c \
 		   buddy.c \
 		   kfifo.c \
 		   driver_object.c \

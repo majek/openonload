@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-2.0
+# X-SPDX-Copyright-Text: (c) Solarflare Communications Inc
 ############################
 # 
 # EtherFabric linux kernel drivers 
@@ -66,6 +68,8 @@ LIB_OBJS := $(LIB_SRCS:%.c=%.o)
 
 obj-m := $(CHAR_TARGET) 
 
-sfc_char-objs := $(CHAR_TARGET_SRCS:%.c=%.o) $(BUILD)/lib/citools/citools_lib.o
+sfc_char-objs := $(CHAR_TARGET_SRCS:%.c=%.o) \
+		$(BUILD)/lib/citools/citools_lib.o \
+		$(BUILD)/lib/ciul/ci_ul_lib.o
 
 endif # MMAKE_IN_KBUILD

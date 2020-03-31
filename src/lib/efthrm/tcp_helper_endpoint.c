@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_SOURCE>
@@ -94,9 +81,9 @@ tcp_helper_endpoint_dtor(tcp_helper_endpoint_t * ep)
      it is freed - therefore ensure properly cleaned up */
   OO_DEBUG_VERB(ci_log(FEP_FMT, FEP_PRI_ARGS(ep)));
 
-  if( s->s_flags & CI_SOCK_FLAG_MAC_FILTER )
-    ci_tcp_sock_clear_scalable_filter(&ep->thr->netif,
-                                      SP_TO_TCP(&ep->thr->netif, ep->id));
+  if( s->s_flags & CI_SOCK_FLAG_STACK_FILTER )
+    ci_tcp_sock_clear_stack_filter(&ep->thr->netif,
+                                   SP_TO_TCP(&ep->thr->netif, ep->id));
   oof_socket_del(oo_filter_ns_to_manager(ep->thr->filter_ns), &ep->oofilter);
   oof_socket_mcast_del_all(oo_filter_ns_to_manager(ep->thr->filter_ns),
                            &ep->oofilter);
@@ -150,9 +137,9 @@ tcp_helper_endpoint_reuseaddr_cleanup(ci_netif* ni, ci_sock_cmn* s)
     if( wo->waitable.state != CI_TCP_TIME_WAIT )
       continue;
 
-    if( sock_raddr_be32(s) != sock_raddr_be32(&wo->sock) ||
+    if( ! CI_IPX_ADDR_EQ(sock_ipx_raddr(s), sock_ipx_raddr(&wo->sock)) ||
         sock_rport_be16(s) != sock_rport_be16(&wo->sock) ||
-        sock_laddr_be32(s) != sock_laddr_be32(&wo->sock) ||
+        ! CI_IPX_ADDR_EQ(sock_ipx_laddr(s), sock_ipx_laddr(&wo->sock)) ||
         sock_lport_be16(s) != sock_lport_be16(&wo->sock) )
       continue;
 
@@ -351,10 +338,10 @@ tcp_helper_endpoint_set_filters(tcp_helper_endpoint_t* ep,
         IPX_ARG(AF_IP(laddr)), lport, IPX_ARG(AF_IP(raddr)), rport));
       ci_assert(0);
     }
-    if( protocol == IPPROTO_UDP && CI_IPX_ADDR_CMP_ANY(raddr) &&
-        !CI_IPX_ADDR_CMP_ANY(ep->oofilter.sf_raddr) ) {
+    if( protocol == IPPROTO_UDP && !CI_IPX_ADDR_IS_ANY(raddr) &&
+        CI_IPX_ADDR_IS_ANY(ep->oofilter.sf_raddr) ) {
       return oof_udp_connect(oo_filter_ns_to_manager(ep->thr->filter_ns),
-                             &ep->oofilter, laddr.ip4, raddr.ip4, rport);
+                             &ep->oofilter, af_space, laddr, raddr, rport);
     }
     if( protocol != IPPROTO_UDP ) {
       /* UDP re-connect is OK, but we do not expect anything else.
@@ -379,10 +366,10 @@ tcp_helper_endpoint_set_filters(tcp_helper_endpoint_t* ep,
 
   /* Assuming that sockets that already use MAC filter do not enter here.
    * We would have no information on how to clear the MAC filter. */
-  ci_assert((s->s_flags & CI_SOCK_FLAG_MAC_FILTER) == 0);
+  ci_assert((s->s_flags & CI_SOCK_FLAG_STACK_FILTER) == 0);
 
   if( use_mac_filter )
-    rc = ci_tcp_sock_set_scalable_filter(ni, SP_TO_SOCK(ni, ep->id));
+    rc = ci_tcp_sock_set_stack_filter(ni, SP_TO_SOCK(ni, ep->id));
   else if( OO_SP_NOT_NULL(from_tcp_id) )
     rc = oof_socket_share(oo_filter_ns_to_manager(ep->thr->filter_ns),
                           &ep->oofilter, &listen_ep->oofilter,
@@ -459,7 +446,7 @@ tcp_helper_endpoint_clear_filters(tcp_helper_endpoint_t* ep,
   ci_assert_impl(! (s->b.state == CI_TCP_LISTEN &&
                     (s->s_flags & CI_SOCK_FLAG_REUSEPORT) != 0),
                  (s->s_flags & CI_SOCK_FLAG_FILTER) == 0 ||
-                 (s->s_flags & CI_SOCK_FLAG_MAC_FILTER) == 0);
+                 (s->s_flags & CI_SOCK_FLAG_STACK_FILTER) == 0);
 
 #if CI_CFG_FD_CACHING
   if( need_update && !(s->s_flags & CI_SOCK_FLAGS_SCALABLE) )
@@ -470,10 +457,10 @@ tcp_helper_endpoint_clear_filters(tcp_helper_endpoint_t* ep,
     ci_assert( supress_hw_ops );
   }
 
-  if( (s->s_flags & (CI_SOCK_FLAGS_SCALABLE | CI_SOCK_FLAG_MAC_FILTER)) != 0 ) {
-    if( (s->s_flags & CI_SOCK_FLAG_MAC_FILTER) != 0 )
-      ci_tcp_sock_clear_scalable_filter(&ep->thr->netif,
-                                        SP_TO_TCP(&ep->thr->netif,ep->id));
+  if( (s->s_flags & (CI_SOCK_FLAGS_SCALABLE | CI_SOCK_FLAG_STACK_FILTER)) != 0 ) {
+    if( (s->s_flags & CI_SOCK_FLAG_STACK_FILTER) != 0 )
+      ci_tcp_sock_clear_stack_filter(&ep->thr->netif,
+                                     SP_TO_TCP(&ep->thr->netif,ep->id));
 
     if( (s->s_flags & CI_SOCK_FLAG_FILTER) == 0 ) {
       os_sock_ref = oo_file_ref_xchg(&ep->os_port_keeper, NULL);
@@ -516,7 +503,7 @@ tcp_helper_endpoint_clear_filters(tcp_helper_endpoint_t* ep,
 
 bail_out:
   SP_TO_SOCK(&ep->thr->netif, ep->id)->s_flags &=
-                              ~(CI_SOCK_FLAG_FILTER | CI_SOCK_FLAG_MAC_FILTER);
+                              ~(CI_SOCK_FLAG_FILTER | CI_SOCK_FLAG_STACK_FILTER);
 
   return rc;
 }
@@ -631,9 +618,9 @@ tcp_helper_endpoint_update_filter_details(tcp_helper_endpoint_t* ep)
   ci_sock_cmn* s = SP_TO_SOCK(ni, ep->id);
   struct oof_manager* om = oo_filter_ns_to_manager(ep->thr->filter_ns);
 
-  if( !(s->s_flags & (CI_SOCK_FLAG_MAC_FILTER | CI_SOCK_FLAGS_SCALABLE)) )
+  if( !(s->s_flags & (CI_SOCK_FLAG_STACK_FILTER | CI_SOCK_FLAGS_SCALABLE)) )
     oof_socket_update_sharer_details(om, &ep->oofilter,
-                                     sock_raddr_be32(s), sock_rport_be16(s));
+                                     sock_ipx_raddr(s), sock_rport_be16(s));
 }
 
 static void oof_socket_dump_fn(void* arg, oo_dump_log_fn_t log, void* log_arg)
@@ -701,7 +688,7 @@ tcp_helper_endpoint_shutdown(tcp_helper_resource_t* thr, oo_sp ep_id,
    * tcp_helper_endpoint_clear_filters.
    */
   ci_assert_nflags(SP_TO_SOCK(&thr->netif, ep_id)->s_flags,
-                   (CI_SOCK_FLAG_FILTER | CI_SOCK_FLAG_MAC_FILTER));
+                   (CI_SOCK_FLAG_FILTER | CI_SOCK_FLAG_STACK_FILTER));
 
   rc = efab_tcp_helper_shutdown_os_sock(ep, how);
 

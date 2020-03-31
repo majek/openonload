@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_SOURCE >
@@ -93,26 +80,22 @@ int efab_handle_ipp_pkt_task(int thr_id, ci_ifid_t ifindex,
                              const void* in_data, int len)
 {
   tcp_helper_resource_t* thr;
-  const ci_ip4_hdr* in_ip;
+  const ci_ipx_hdr_t* in_ipx;
   efab_ipp_addr addr;
 
   /* NOTE: the efab_ipp_icmp_validate fills the addr struct with
    * references to the in_ip param - make sure that in_ip remains
    * accessible while addr is in use */
-  in_ip = (const ci_ip4_hdr*) in_data;
+  in_ipx = in_data;
 
   /* Have a full IP,ICMP hdr - so [data_only] arg is 0 */
-  if( !efab_ipp_icmp_parse( in_ip, len, &addr, 0))
+  if( !efab_ipp_icmp_parse( in_ipx, len, &addr, 0))
     goto exit_handler;
   addr.ifindex = ifindex;
 
   if( (thr = efab_ipp_get_locked_thr_from_tcp_handle(thr_id))) {
     ci_sock_cmn* s;
 
-    CI_ICMP_IN_STATS_COLLECT( &thr->netif,
-                              (ci_icmp_hdr*)((char*)in_ip + 
-                                             CI_IP4_IHL(in_ip)) );
-    CI_ICMP_STATS_INC_IN_MSGS( &thr->netif );
     s = efab_ipp_icmp_for_thr( thr, &addr );
     if( s )  efab_ipp_icmp_qpkt( thr, s, &addr );
     efab_tcp_helper_netif_unlock( thr, 1 );

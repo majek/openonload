@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /*
 ** Copyright 2012     Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
@@ -132,9 +119,6 @@ int setup_trampoline32(struct pt_regs *regs, int opcode, int data,
  *  were called via our thunk).
  */
 #define PT_REGS_FROM_SYSCALL()  ((struct pt_regs *)(&((u8 *)__builtin_frame_address(1))[STACK_FRAME_OVERHEAD]))
-
-/* Wanted by efab_linux_trampoline_debug() */
-uint64_t *find_syscall_table(void **return_addr);
 
 #endif
 

@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 ** <L5_PRIVATE L5_SOURCE>
 **   Copyright: (c) Level 5 Networks Limited.
@@ -27,8 +14,10 @@
 #include "ip_internal.h"
 #include "uk_intf_ver.h"
 #include <ci/internal/efabcfg.h>
+#include <ci/internal/banner.h>
 #include <onload/version.h>
 #include <etherfabric/internal/internal.h>
+#include <stddef.h>
 
 #ifndef __KERNEL__
 #include <cplane/cplane.h>
@@ -40,12 +29,6 @@
 #ifdef ONLOAD_OFE
 #include "ofe/onload.h"
 #endif
-#endif
-
-#ifdef NDEBUG
-# define IS_DEBUG  0
-#else
-# define IS_DEBUG  1
 #endif
 
 
@@ -105,6 +88,18 @@ void ci_netif_state_init(ci_netif* ni, int cpu_khz, const char* name)
   /* Pool of packet buffers for transmit. */
   assert_zero(nis->n_async_pkts);
   nis->nonb_pkt_pool = CI_ILL_END;
+
+  /* Deferred packets */
+  ci_ni_dllist_init(ni, &nis->deferred_list,
+                    oo_ptr_to_statep(ni, &nis->deferred_list), "dfp");
+  ci_ni_dllist_init(ni, &nis->deferred_list_free,
+                    oo_ptr_to_statep(ni, &nis->deferred_list_free), "dfp");
+  for( i = 0; i < NI_OPTS(ni).defer_arp_pkts; i++ ) {
+    ci_ni_dllist_link_init(ni, &ni->deferred_pkts[i].link,
+                           oo_ptr_to_statep(ni, &ni->deferred_pkts[i].link),
+                           "dfp");
+    ci_ni_dllist_put(ni, &nis->deferred_list_free, &ni->deferred_pkts[i].link);
+  }
 
   /* Endpoint lookup table.
    * - table must be a power of two in size
@@ -212,8 +207,8 @@ void ci_netif_state_init(ci_netif* ni, int cpu_khz, const char* name)
   /* This gets set appropriately in tcp_helper_init_max_mss() */
   nis->max_mss = 0;
 
-  if( nis->opts.tcp_syncookies )
-    get_random_bytes(&nis->hash_salt, sizeof(nis->hash_salt));
+  /* hash_salt is used for TCP syncookies and IPv6 flowlabel generation */
+  get_random_bytes(&nis->hash_salt, sizeof(nis->hash_salt));
 
   nis->ready_lists_in_use = 0;
   for( i = 0; i < CI_CFG_N_READY_LISTS; i++ ) {
@@ -299,8 +294,15 @@ static ci_uint32 citp_keepalive_time = CI_TCP_TCONST_KEEPALIVE_TIME;
 static ci_uint32 citp_keepalive_intvl = CI_TCP_TCONST_KEEPALIVE_INTVL;
 static ci_uint32 citp_syn_opts = CI_TCPT_SYN_FLAGS;
 static ci_uint32 citp_tcp_dsack = CI_CFG_TCP_DSACK;
-static ci_uint32 citp_tcp_time_wait_assassinate = 1;
+static ci_uint32 citp_tcp_time_wait_assassinate = CI_CFG_TIME_WAIT_ASSASSINATE;
 static ci_uint32 citp_tcp_early_retransmit = 3;  /* default as of 3.10 */
+static ci_uint32 citp_challenge_ack_limit = CI_CFG_CHALLENGE_ACK_LIMIT;
+static ci_uint32 citp_tcp_invalid_ratelimit =
+                        CI_CFG_TCP_OUT_OF_WINDOW_ACK_RATELIMIT;
+
+#if CI_CFG_IPV6
+static ci_uint32 citp_auto_flowlabels = CI_AUTO_FLOWLABELS_DEFAULT;
+#endif
 
 #ifndef __KERNEL__
 static int try_get_hp_sz(const char* line, unsigned* hp_sz)
@@ -505,6 +507,17 @@ ci_setup_ipstack_params(void)
   if (ci_sysctl_get_values("net/ipv4/tcp_early_retrans", opt, 1) == 0)
     citp_tcp_early_retransmit = opt[0];
 
+  if (ci_sysctl_get_values("net/ipv4/tcp_challenge_ack_limit", opt, 1) == 0)
+    citp_challenge_ack_limit = opt[0];
+
+  if (ci_sysctl_get_values("net/ipv4/tcp_invalid_ratelimit", opt, 1) == 0)
+    citp_tcp_invalid_ratelimit = opt[0];
+
+#if CI_CFG_IPV6
+  if( ci_sysctl_get_values("net/ipv6/auto_flowlabels", opt, 1) == 0 )
+    citp_auto_flowlabels = opt[0];
+#endif
+
   citp_ipstack_params_inited = 1;
   return 0;
 }
@@ -575,6 +588,11 @@ void ci_netif_config_opts_defaults(ci_netif_config_opts* opts)
     opts->tcp_early_retransmit = citp_tcp_early_retransmit > 0 &&
                                  citp_tcp_early_retransmit < 4;
     opts->tail_drop_probe = citp_tcp_early_retransmit >= 3;
+    opts->challenge_ack_limit = citp_challenge_ack_limit;
+    opts->oow_ack_ratelimit = citp_tcp_invalid_ratelimit;
+#if CI_CFG_IPV6
+    opts->auto_flowlabels = citp_auto_flowlabels;
+#endif
     opts->inited = CI_TRUE;
   }
 }
@@ -833,6 +851,8 @@ void ci_netif_config_opts_getenv(ci_netif_config_opts* opts)
 
   if( (s = getenv("EF_INT_DRIVEN")) )
     opts->int_driven = atoi(s);
+  if( (s = getenv("EF_POLL_IN_KERNEL")) )
+    opts->poll_in_kernel = atoi(s);
   if( opts->int_driven )
     /* Disable count-down timer when interrupt driven. */
     opts->timer_usec = 0;
@@ -946,6 +966,10 @@ void ci_netif_config_opts_getenv(ci_netif_config_opts* opts)
     opts->max_ep_bufs = atoi(s);
   if ( (s = getenv("EF_ENDPOINT_PACKET_RESERVE")) )
     opts->endpoint_packet_reserve = atoi(s);
+  if ( (s = getenv("EF_DEFER_ARP_MAX")) )
+    opts->defer_arp_pkts = atoi(s);
+  if ( (s = getenv("EF_DEFER_ARP_TIMEOUT")) )
+    opts->defer_arp_timeout = atoi(s);
   if ( (s = getenv("EF_SHARE_WITH")) )
     opts->share_with = atoi(s);
 #if CI_CFG_PKTS_AS_HUGE_PAGES
@@ -1002,6 +1026,11 @@ void ci_netif_config_opts_getenv(ci_netif_config_opts* opts)
    */
   opts->dynack_thresh = CI_MAX(opts->dynack_thresh, opts->delack_thresh);
 #endif
+
+  if ( (s = getenv("EF_CHALLENGE_ACK_LIMIT")) )
+    opts->challenge_ack_limit = atoi(s);
+  if ( (s = getenv("EF_INVALID_ACK_RATELIMIT")) )
+    opts->oow_ack_ratelimit = atoi(s);
 #if CI_CFG_FD_CACHING
   if ( (s = getenv("EF_SOCKET_CACHE_MAX")) )
     opts->sock_cache_max = atoi(s);
@@ -1293,6 +1322,10 @@ void ci_netif_config_opts_getenv(ci_netif_config_opts* opts)
   if( (s = getenv("EF_RX_TIMESTAMPING")) )
     opts->rx_timestamping = atoi(s);
 
+  static const char* const timestamping_opts[] = { "nic", "cpacket", 0 };
+  opts->rx_timestamping_ordering =
+    parse_enum(opts, "EF_RX_TIMESTAMPING_ORDERING", timestamping_opts, "nic");
+
   if( (s = getenv("EF_TX_TIMESTAMPING")) )
     opts->tx_timestamping = atoi(s);
 
@@ -1307,6 +1340,9 @@ void ci_netif_config_opts_getenv(ci_netif_config_opts* opts)
       opts->syn_opts = citp_syn_opts;
     }
   }
+
+  if( (s = getenv("EF_USE_DSACK")) )
+    opts->use_dsack = atoi(s);
 
   if( (s = getenv("EF_PERIODIC_TIMER_CPU")) ) {
     int cpu = atoi(s);
@@ -1398,6 +1434,11 @@ void ci_netif_config_opts_getenv(ci_netif_config_opts* opts)
 
   if( (s = getenv("EF_TCP_EARLY_RETRANSMIT")) )
     opts->tcp_early_retransmit = atoi(s);
+
+#if CI_CFG_IPV6
+  if( (s = getenv("EF_AUTO_FLOWLABELS")) )
+    opts->auto_flowlabels = atoi(s);
+#endif
 }
 
 static int
@@ -1738,62 +1779,6 @@ invalid_mode:
 #endif
 
 
-void ci_netif_config_opts_dump(ci_netif_config_opts* opts)
-{
-  static const ci_netif_config_opts defaults = {
-    #undef CI_CFG_OPTFILE_VERSION
-    #undef CI_CFG_OPT
-    #undef CI_CFG_STR_OPT
-    #undef CI_CFG_OPTGROUP
-
-    #define CI_CFG_OPTFILE_VERSION(version)
-    #define CI_CFG_OPTGROUP(group, category, expertise)
-    #define CI_CFG_OPT(env, name, type, doc, bits, group, default, min, max, presentation) \
-            default,
-    #define CI_CFG_STR_OPT CI_CFG_OPT
-    #include <ci/internal/opts_netif_def.h>
-  };
-
-  #undef CI_CFG_OPTFILE_VERSION
-  #undef CI_CFG_OPT
-  #undef CI_CFG_STR_OPT
-  #undef CI_CFG_OPTGROUP
-
-  #define ci_uint32_fmt   "%u"
-  #define ci_uint16_fmt   "%u"
-  #define ci_uint8_fmt    "%u"
-  #define ci_int32_fmt    "%d"
-  #define ci_int16_fmt    "%d"
-  #define ci_int8_fmt     "%d"
-  #define ci_iptime_t_fmt "%u"
-  #define ci_string256_fmt "\"%s\""
-
-  #define CI_CFG_OPTFILE_VERSION(version)
-  #define CI_CFG_OPTGROUP(group, category, expertise)
-  #define CI_CFG_OPT(env, name, type, doc, bits, group, default, min, max, presentation) \
-    if( strlen(env) != 0 ) {                                            \
-      if( opts->name == defaults.name )                                 \
-        ci_log("%30s: " type##_fmt, env, opts->name);                   \
-      else                                                              \
-        ci_log("%30s: " type##_fmt " (default: " type##_fmt")", env,    \
-               opts->name, defaults.name);                              \
-    }
-
-  #define CI_CFG_STR_OPT(env, name, type, doc, bits, group, default, min, max, presentation) \
-    if( strlen(env) != 0 ) {                                            \
-      if( strcmp(opts->name, defaults.name) == 0 )                                 \
-        ci_log("%30s: " type##_fmt, env, opts->name);                   \
-      else                                                              \
-        ci_log("%30s: " type##_fmt " (default: " type##_fmt")", env,    \
-               opts->name, defaults.name);                              \
-    }
-
-
-  ci_log("                        NDEBUG: %d", ! IS_DEBUG);
-  #include <ci/internal/opts_netif_def.h>
-}
-
-
 /*****************************************************************************
  *                                                                           *
  *          TCP-helper Construction                                          *
@@ -1807,6 +1792,9 @@ static void netif_tcp_helper_build2(ci_netif* ni)
     (ci_ni_dllist_t*) ((char*) ni->state + ni->state->active_wild_ofs);
   ni->seq_table =
     (ci_tcp_prev_seq_t*) ((char*) ni->state + ni->state->seq_table_ofs);
+  ni->deferred_pkts =
+    (struct oo_deferred_pkt*) ((char*) ni->state +
+                               ni->state->deferred_pkts_ofs);
   ni->filter_table =
     (ci_netif_filter_table*) ((char*) ni->state + ni->state->table_ofs);
 #if CI_CFG_IPV6
@@ -2084,6 +2072,26 @@ static void init_ef_vi(ci_netif* ni, int nic_i, int vi_state_offset,
 }
 
 
+unsigned ci_netif_build_future_intf_mask(ci_netif* ni)
+{
+  int nic_i;
+  unsigned mask = 0;
+
+  OO_STACK_FOR_EACH_INTF_I(ni, nic_i) {
+    /* Disable future when there's an XDP prog attached because that prog may
+     * alter the destination socket, in which case the future code would be
+     * wrong */
+    if( ! ni->nic_hw[nic_i].poll_in_kernel &&
+#if CI_CFG_BPF
+        ni->nic_hw[nic_i].xdp_prog_fd < 0 &&
+#endif
+        ~ef_vi_flags(&ni->nic_hw[nic_i].vi) & EF_VI_RX_EVENT_MERGE )
+      mask |= 1u << nic_i;
+  }
+  return mask;
+}
+
+
 static int netif_tcp_helper_build(ci_netif* ni)
 {
   /* On entry we require the following to be initialised:
@@ -2123,6 +2131,8 @@ static int netif_tcp_helper_build(ci_netif* ni)
   vi_io_offset = 0;
   vi_mem_offset = 0;
   vi_state_offset = sizeof(*ni->state);
+
+  ni->future_intf_mask = 0;
 
   OO_STACK_FOR_EACH_INTF_I(ni, nic_i) {
     ci_netif_state_nic_t* nsn = &ns->nic[nic_i];
@@ -2206,7 +2216,14 @@ static int netif_tcp_helper_build(ci_netif* ni)
       ef_vi_ctpio_init(&(ni->nic_hw[nic_i].vi));
     }
 #endif
+    ni->nic_hw[nic_i].poll_in_kernel = NI_OPTS(ni).poll_in_kernel;
+#if CI_CFG_BPF
+    ni->nic_hw[nic_i].xdp_prog_fd = -1;
+    memset(&ni->nic_hw[nic_i].xdp_jitted, 0,
+           sizeof(ni->nic_hw[nic_i].xdp_jitted));
+#endif
   }
+  ni->future_intf_mask = ci_netif_build_future_intf_mask(ni);
 
   ci_assert_equal(ctpio_io_offset, ns->ctpio_mmap_bytes);
 
@@ -2258,6 +2275,15 @@ static int netif_tcp_helper_build(ci_netif* ni)
     for( i = 0; i < ni->state->max_ep_bufs; ++ i )
       ni->eps[i] = ref;
   }
+
+  /* For diagnostic purposes, mark the stack as lacking a mapping of init_net's
+   * cplane if such is the case.  We couldn't set this flag in ci_netif_init()
+   * when the failure happened, as we didn't have access to the shared state at
+   * that point.  We set the flag even if we decided in the first place that we
+   * didn't need init_net's cplane.*/
+  if( ni->cplane_init_net == NULL )
+    ns->flags |= CI_NETIF_FLAG_NO_INIT_NET_CPLANE;
+
   return 0;
 
 fail2:
@@ -2458,8 +2484,9 @@ netif_tcp_helper_alloc_u(ef_driver_handle fd, ci_netif* ni,
       LOG_E(ci_log("%s: ENODEV.\n"
                    "This error can occur if no Solarflare network interfaces\n"
                    "are active/UP, or they are running packed stream\n"
-                   "firmware, disabled or unlicensed for Onload.  Please\n"
-                   "check your configuration.",
+                   "firmware, are disabled or lack Onload activation keys.\n"
+                   "Please check your configuration.  To obtain activation\n"
+                   "keys, please contact your sales representative.",
                    __FUNCTION__));
       break;
     default:
@@ -2581,13 +2608,20 @@ static void ci_netif_sanity_checks(void)
   CI_BUILD_ASSERT( (1u << CI_SB_FLAG_WAKE_TX_B) == CI_SB_FLAG_WAKE_TX );
   CI_BUILD_ASSERT( sizeof(ci_ni_aux_mem) == CI_AUX_MEM_SIZE );
 
-  /* AUX_PER_BUF aux buffers + header = ep buffer, where header has
-   * the same size as the aux buffer fitting to a cache line. */
-  CI_BUILD_ASSERT( CI_AUX_MEM_SIZE * (AUX_PER_BUF + 1) == EP_BUF_SIZE );
+  /* AUX_PER_BUF aux buffers + header = ep buffer, where header is
+   * oo_ep_header and fits in exactly one cache line. */
+  CI_BUILD_ASSERT( sizeof(struct oo_ep_header) <= CI_AUX_HEADER_SIZE );
+  CI_BUILD_ASSERT( CI_AUX_MEM_SIZE * AUX_PER_BUF + CI_AUX_HEADER_SIZE
+                   <= EP_BUF_SIZE );
+  /* This constraint isn't strictly necessary for functionality, but it makes
+   * debugging/dumping saner */
+  CI_BUILD_ASSERT( offsetof(citp_waitable, sb_aflags) +
+                      sizeof(((citp_waitable*)0)->sb_aflags)
+                   <= CI_AUX_HEADER_SIZE );
 
 #ifndef NDEBUG
   {
-    int i = CI_MEMBER_OFFSET(ci_ip_cached_hdrs, ip);
+    int i = CI_MEMBER_OFFSET(ci_ip_cached_hdrs, ipx.ip4);
     int e = CI_MEMBER_OFFSET(ci_ip_cached_hdrs, ether_header);
     int h = CI_MEMBER_OFFSET(ci_ip_cached_hdrs, hwport);
     ci_assert_equal(i - e, ETH_HLEN + 4);
@@ -2726,20 +2760,52 @@ void ci_netif_cluster_prefault(ci_netif* ni)
 static int ci_netif_init(ci_netif* ni, ef_driver_handle fd)
 {
   int rc;
+  ef_driver_handle init_net_fd;
 
   ni->driver_handle = fd;
   CI_MAGIC_SET(ni, NETIF_MAGIC);
   ni->flags = 0;
   ni->error_flags = 0;
+  ni->cplane_init_net = NULL;
 
   ni->cplane = malloc(sizeof(struct oo_cplane_handle));
   if( ni->cplane == NULL )
     return -ENOMEM;
 
-  rc = oo_cp_create(fd, ni->cplane, CITP_OPTS.sync_cplane);
+  rc = oo_cp_create(fd, ni->cplane, CITP_OPTS.sync_cplane, 0);
   if( rc != 0 ) {
-    ci_log("%s: failed to get control plane handle: %d", __func__, rc);
+    ci_log("%s: failed to get local control plane handle: %d", __func__, rc);
     goto fail;
+  }
+
+  /* If we need veth acceleration, map in the control plane for the main
+   * namespace. */
+  rc = oo_resource_op(fd, OO_IOC_VETH_ACCELERATION_ENABLED, NULL);
+  if( rc > 0 ) {
+    ni->cplane_init_net = malloc(sizeof(struct oo_cplane_handle));
+    if( ni->cplane_init_net == NULL )
+      goto fail;
+
+    rc = ef_onload_driver_open(&init_net_fd, OO_STACK_DEV, 1);
+    if( rc != 0 ) {
+      ci_log("%s: failed to open driver handle: %d", __func__, rc);
+    }
+    else {
+      rc = oo_cp_create(init_net_fd, ni->cplane_init_net,
+                        CITP_OPTS.sync_cplane, CP_CREATE_FLAGS_INIT_NET);
+      if( rc != 0 ) {
+        ci_log("%s: failed to get init_net control plane handle: %d", __func__,
+               rc);
+        ef_onload_driver_close(init_net_fd);
+      }
+    }
+
+    if( rc != 0 ) {
+      /* We can tolerate failure to map init_net's control plane. */
+      ci_log("%s: support for containers will be limited", __func__);
+      free(ni->cplane_init_net);
+      ni->cplane_init_net = NULL;
+    }
   }
 
   return 0;
@@ -2751,9 +2817,18 @@ static int ci_netif_init(ci_netif* ni, ef_driver_handle fd)
 
 static void ci_netif_deinit(ci_netif* ni)
 {
+  if( ni->cplane_init_net != NULL ) {
+    oo_cp_destroy(ni->cplane_init_net);
+    ef_onload_driver_close(ni->cplane_init_net->fd);
+    free(ni->cplane_init_net);
+  }
+
+  /* The local cplane handle uses the stack's fd, so we don't need to close
+   * that fd now. */
   oo_cp_destroy(ni->cplane);
   free(ni->cplane);
 }
+
 
 int ci_netif_ctor(ci_netif* ni, ef_driver_handle fd, const char* stack_name,
                   unsigned flags)
@@ -2790,9 +2865,7 @@ int ci_netif_ctor(ci_netif* ni, ef_driver_handle fd, const char* stack_name,
   ci_netif_pkt_prefault_reserve(ni);
   ci_netif_pkt_prefault(ni);
 
-  NI_LOG(ni, BANNER,
-         "Using "ONLOAD_PRODUCT" "ONLOAD_VERSION" "ONLOAD_COPYRIGHT" [%s]",
-         ni->state->pretty_name);
+  ci_netif_log_startup_banner(ni, "Using", /* check_expiry*/ 1);
 
   return 0;
 }
@@ -2899,8 +2972,8 @@ int ci_netif_init_fill_rx_rings(ci_netif* ni)
   if( n_accounted < n_requested ) {
     if( NI_OPTS(ni).prealloc_packets )
       LOG_E(ci_log("%s: ERROR: Insufficient packet buffers available for "
-                   "EF_PREALLOC_PKTS=1 EF_MAX_PACKETS=%d got %d", __FUNCTION__,
-                   n_requested, n_accounted));
+                   "EF_PREALLOC_PACKETS=1 EF_MAX_PACKETS=%d got %d",
+                   __FUNCTION__, n_requested, n_accounted));
     else
       LOG_E(ci_log("%s: ERROR: Insufficient packet buffers available for "
                    "EF_MIN_FREE_PACKETS=%d", __FUNCTION__, n_requested));
@@ -3080,9 +3153,7 @@ int ci_netif_restore_name(ci_netif* ni, const char* name)
     goto fail4;
   ef_onload_driver_close(fd2);
 
-  NI_LOG(ni, BANNER,
-         "Sharing "ONLOAD_PRODUCT" "ONLOAD_VERSION" "ONLOAD_COPYRIGHT " [%s]",
-         ni->state->pretty_name);
+  ci_netif_log_startup_banner(ni, "Sharing", /* check_expiry*/ 1);
 
   return 0;
 

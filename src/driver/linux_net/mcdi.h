@@ -1,18 +1,3 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
 /****************************************************************************
  * Driver for Solarflare network controllers and boards
  * Copyright 2008-2017 Solarflare Communications Inc.
@@ -470,8 +455,8 @@ void efx_mcdi_sensor_event(struct efx_nic *efx, efx_qword_t *ev);
 	EFX_QWORD_FIELD(_ev, MCDI_EVENT_ ## _field)
 
 void efx_mcdi_print_fwver(struct efx_nic *efx, char *buf, size_t len);
-int efx_mcdi_drv_attach(struct efx_nic *efx, bool driver_operating,
-			u32 fw_variant, u32 *flags);
+int efx_mcdi_drv_attach(struct efx_nic *efx, u32 fw_variant, u32 *out_flags,
+			bool reattach);
 int efx_mcdi_drv_detach(struct efx_nic *efx);
 int efx_mcdi_get_board_cfg(struct efx_nic *efx, int port_num, u8 *mac_address,
 			   u16 *fw_subtype_list, u32 *capabilities);

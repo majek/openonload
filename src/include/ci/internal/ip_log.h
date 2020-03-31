@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_HEADER >
@@ -57,7 +44,7 @@
 #define CI_TP_LOG_IPP	0x2000000	/* IPP (ICMP, IGMP etc) verbose */
 #define CI_TP_LOG_STATS	0x4000000	/* Statistics */
 #define CI_TP_LOG_TO	0x8000000	/* TCP out of order */
-#define CI_TP_LOG_ARPV	0x10000000	/* ARP verbose */
+#define CI_TP_LOG_TE	0x10000000	/* TCP explain */
 #define CI_TP_LOG_SIG	0x40000000	/* Signals */
 #define CI_TP_LOG_URG	0x80000000	/* TCP urgent data */
 
@@ -65,9 +52,9 @@
 #define CI_TP_LOG_SV   (CI_TP_LOG_TV|CI_TP_LOG_UV) /* socket verbose */
 
 #ifdef __KERNEL__
-#define CI_TP_LOG_DEFAULT (CI_TP_LOG_E|CI_TP_LOG_U|CI_TP_LOG_S)
+#define CI_TP_LOG_DEFAULT (CI_TP_LOG_E|CI_TP_LOG_U|CI_TP_LOG_S|CI_TP_LOG_TE)
 #else
-#define CI_TP_LOG_DEFAULT (CI_TP_LOG_E|CI_TP_LOG_U)
+#define CI_TP_LOG_DEFAULT (CI_TP_LOG_E|CI_TP_LOG_U|CI_TP_LOG_TE)
 #endif
 
 # define LOG_C(c,x)	do{ if(c) do{x;}while(0); }while(0)
@@ -109,7 +96,7 @@
 #define LOG_IPP(x)	LOG_FL(CI_TP_LOG_IPP, x)
 #define LOG_STATS(x)	LOG_FL(CI_TP_LOG_STATS, x)
 #define LOG_TO(x)	LOG_FL(CI_TP_LOG_TO, x)
-#define LOG_ARPV(x)	LOG_FL(CI_TP_LOG_ARPV, x)
+#define LOG_TE(x)	LOG_FL(CI_TP_LOG_TE, x)
 #define LOG_IDO(x)	LOG_FL(CI_TP_LOG_IDO, x)
 #define LOG_SIG(x)	LOG_FL(CI_TP_LOG_SIG, x)
 #define LOG_URG(x)	LOG_FL(CI_TP_LOG_URG, x)
@@ -174,11 +161,12 @@
                               ((int) ((const ci_uint8*)&(ip4))[3])
 
 /* FIXME: add ip6 support in ci_addr_t */
-#define OOF_IPX               OOF_IP4
-#define OOFA_IPX(addr)        OOFA_IP4((addr).ip4)
+#define OOF_IPX               IPX_FMT
+#define OOFA_IPX(addr)        IPX_ARG(AF_IP(addr))
+#define OOFA_IPX_L3(addr)     IPX_ARG(AF_IP_L3(addr))
 
-#define OOF_IP4PORT           OOF_IP4":"OOF_PORT
-#define OOFA_IP4PORT(ip,port) OOFA_IP4(ip), OOFA_PORT(port)
+#define OOF_IPXPORT           OOF_IPX":"OOF_PORT
+#define OOFA_IPXPORT(ip,port) OOFA_IPX(ip), OOFA_PORT(port)
 
 
 /**********************************************************************
@@ -195,8 +183,7 @@
 
 #define OOF_IPCACHE_VALID            "%s"
 #define OOFA_IPCACHE_VALID(ni, ipc)                                     \
-  (oo_cp_verinfo_is_valid((ni)->cplane, &(ipc)->mac_integrity) ?        \
-   "Valid" : "Old")
+  (oo_cp_ipcache_is_valid((ni), (ipc)) ? "Valid" : "Old")
 
 
 #define OOF_IPCACHE_STATE            OOF_IPCACHE_STATUS"("OOF_IPCACHE_VALID")"
@@ -240,7 +227,7 @@
 
 
 #define CI_SOCK_FLAGS_FMT \
-  "%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s"
+  "%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s"
 #define CI_SOCK_FLAGS_PRI_ARG(s)                                        \
   ((s)->s_aflags & CI_SOCK_AFLAG_CORK     ? "CORK ":""),                \
   ((s)->s_aflags & CI_SOCK_AFLAG_NEED_SHUT_RD ? "SHUTRD ":""),          \
@@ -255,7 +242,6 @@
   ((s)->s_flags & CI_SOCK_FLAG_DONTROUTE  ? "DONTROUTE ":""),           \
   ((s)->s_flags & CI_SOCK_FLAG_FILTER     ? "FILTER ":""),              \
   ((s)->s_flags & CI_SOCK_FLAG_BOUND      ? "BOUND ":""),               \
-  ((s)->s_flags & CI_SOCK_FLAG_ADDR_BOUND ? "ABOUND ":""),              \
   ((s)->s_flags & CI_SOCK_FLAG_PORT_BOUND ? "PBOUND ":""),              \
   ((s)->s_flags & CI_SOCK_FLAG_SET_SNDBUF ? "SNDBUF ":""),              \
   ((s)->s_flags & CI_SOCK_FLAG_SET_RCVBUF ? "RCVBUF ":""),              \
@@ -263,7 +249,7 @@
   ((s)->s_flags & CI_SOCK_FLAG_TPROXY ? "TRANSPARENT ":""),             \
   ((s)->s_flags & CI_SOCK_FLAG_SCALACTIVE ? "SCALACTIVE ":""),          \
   ((s)->s_flags & CI_SOCK_FLAG_SCALPASSIVE ? "SCALPASSIVE ":""),        \
-  ((s)->s_flags & CI_SOCK_FLAG_MAC_FILTER ? "MAC_FILTER ":""),          \
+  ((s)->s_flags & CI_SOCK_FLAG_STACK_FILTER ? "STACK_FILTER ":""),      \
   ((s)->s_flags & CI_SOCK_FLAG_REUSEPORT  ? "REUSEPORT ":""),           \
   ((s)->s_flags & CI_SOCK_FLAG_BOUND_ALIEN  ? "BOUND_ALIEN ":""),       \
   ((s)->s_flags & CI_SOCK_FLAG_CONNECT_MUST_BIND  ? "CONNECT_MUST_BIND ":""),   \
@@ -271,6 +257,8 @@
   ((s)->s_flags & CI_SOCK_FLAG_ALWAYS_DF  ? "ALWAYS_DF ":""),           \
   ((s)->s_flags & CI_SOCK_FLAG_SET_IP_TTL  ? "IP_TTL ":""),             \
   ((s)->s_flags & CI_SOCK_FLAG_DEFERRED_BIND  ? "DEFERRED_BIND ":""),   \
+  ((s)->s_flags & CI_SOCK_FLAG_V6ONLY  ? "V6ONLY ":""),                 \
+  ((s)->s_flags & CI_SOCK_FLAG_DNAT       ? "DNAT ":""),                \
   ((s)->cp.sock_cp_flags & OO_SCP_NO_MULTICAST ? "NOMCAST ":"")
 
 
@@ -335,7 +323,7 @@
  * UDP
  */
 
-#define CI_UDP_STATE_FLAGS_FMT		"%s%s%s%s%s%s%s%s%s%s%s%s%s"
+#define CI_UDP_STATE_FLAGS_FMT		"%s%s%s%s%s%s%s%s%s%s%s%s%s%s"
 #define CI_UDP_STATE_FLAGS_PRI_ARG(ts)				\
   (UDP_FLAGS(ts) & CI_UDPF_FILTERED     ? "FILT ":""),          \
   (UDP_FLAGS(ts) & CI_UDPF_MCAST_LOOP   ? "MCAST_LOOP ":""),    \
@@ -349,7 +337,8 @@
   (UDP_FLAGS(ts) & CI_UDPF_SO_TIMESTAMP ? "SO_TS ":""),         \
   (UDP_FLAGS(ts) & CI_UDPF_MCAST_JOIN   ? "MC ":""),            \
   (UDP_FLAGS(ts) & CI_UDPF_MCAST_FILTER ? "MC_FILT ":""),       \
-  (UDP_FLAGS(ts) & CI_UDPF_NO_UCAST_FILTER ? "NO_UC_FILT ":"")
+  (UDP_FLAGS(ts) & CI_UDPF_NO_UCAST_FILTER ? "NO_UC_FILT ":""), \
+  (UDP_FLAGS(ts) & CI_UDPF_LAST_SEND_NOMAC ? "LAST_SEND_NOMAC":"")
 
 
 extern unsigned ci_tp_log CI_HV;

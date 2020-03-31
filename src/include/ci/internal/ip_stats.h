@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_SOURCE>
@@ -57,76 +44,13 @@
 /** IPv4 group of statistics reported in /proc/net/snmp */
 typedef struct {
 #define OO_STAT(desc, type, name, kind)  type name CI_ALIGN(sizeof(type));
-#include <ci/internal/ipv4_stats_count_def.h>
+#include <ci/internal/ip_stats_count_def.h>
 #undef OO_STAT
-} ci_ipv4_stats_count;
+} ci_ip_stats_count;
 /** this macro is used to get the number of fields in
- * @e ci_ipv4_stats_count structure */
+ * @e ci_ip_stats_count structure */
 #define CI_IPV4_STATS_COUNT_LEN \
-  (sizeof(ci_ipv4_stats_count)/sizeof( CI_IP_STATS_TYPE))
-
-/** ICMP group of statistics reported in /proc/net/snmp */
-typedef struct {
-  /** the number of invalid ICMP messages received */
-  CI_IP_STATS_TYPE icmp_in_msgs;
-  /** the number of incorrect ICMP messages received */
-  CI_IP_STATS_TYPE icmp_in_errs;
-  /** the number of ICMP Destination Unreachable messages received */
-  CI_IP_STATS_TYPE icmp_in_dest_unreachs;
-  /** the number of ICMP Time Exceeded messages received */
-  CI_IP_STATS_TYPE icmp_in_time_excds;
-  /** the number of ICMP Parameter Problem messages received */
-  CI_IP_STATS_TYPE icmp_in_parm_probs;
-  /** the number of ICMP Source Quench messages received */
-  CI_IP_STATS_TYPE icmp_in_src_quenchs;
-  /** the number of ICMP Redirect messages received */
-  CI_IP_STATS_TYPE icmp_in_redirects;
-  /** the number of ICMP Echo (request) messages received */
-  CI_IP_STATS_TYPE icmp_in_echos;
-  /** the number of ICMP Echo (reply) messages received */
-  CI_IP_STATS_TYPE icmp_in_echo_reps;
-  /** the number of ICMP Timestamp (request) messages received */
-  CI_IP_STATS_TYPE icmp_in_timestamps;
-  /** the number of ICMP Timestamp (reply) messages received */
-  CI_IP_STATS_TYPE icmp_in_timestamp_reps;
-  /** the number of ICMP Address Mask (request) messages received */
-  CI_IP_STATS_TYPE icmp_in_addr_masks;
-  /** the number of ICMP Address Mask (reply) messages received */
-  CI_IP_STATS_TYPE icmp_in_addr_mask_reps;
-
-  /** the total number of ICMP messages which this entity 
-   * attempted to send */
-  CI_IP_STATS_TYPE icmp_out_msgs;
-  /** the number of ICMP messages which this entity did not send due to
-   * problems discovered within ICMP */
-  CI_IP_STATS_TYPE icmp_out_errs;
-  /** the number of ICMP Destination Unreachable messages sent */
-  CI_IP_STATS_TYPE icmp_out_dest_unreachs;
-  /** the number of ICMP Time Exceeded messages sent */
-  CI_IP_STATS_TYPE icmp_out_time_excds;
-  /** the number of ICMP Parameter Problem messages sent */
-  CI_IP_STATS_TYPE icmp_out_parm_probs;
-  /** the number of ICMP Source Quench messages sent */
-  CI_IP_STATS_TYPE icmp_out_src_quenchs;
-  /** the number of ICMP Redirect messages sent */
-  CI_IP_STATS_TYPE icmp_out_redirects;
-  /** the number of ICMP Echo (request) messages sent */
-  CI_IP_STATS_TYPE icmp_out_echos;
-  /** the number of ICMP Echo (reply) messages sent */
-  CI_IP_STATS_TYPE icmp_out_echo_reps;
-  /** the number of ICMP Timestamp (request) messages sent */
-  CI_IP_STATS_TYPE icmp_out_timestamps;
-  /** the number of ICMP Timestamp (reply) messages sent */
-  CI_IP_STATS_TYPE icmp_out_timestamp_reps;
-  /** the number of ICMP Address Mask (request) messages sent */
-  CI_IP_STATS_TYPE icmp_out_addr_masks;
-  /** the number of ICMP Address Mask (reply) messages sent */
-  CI_IP_STATS_TYPE icmp_out_addr_mask_reps;
-} ci_icmp_stats_count;
-/** this macro is used to get the number of fields in
- * @e ci_icmp_stats_count structure */
-#define CI_ICMP_STATS_COUNT_LEN \
-  (sizeof(ci_icmp_stats_count)/sizeof( CI_IP_STATS_TYPE))
+  (sizeof(ci_ip_stats_count)/sizeof( CI_IP_STATS_TYPE))
 
 /** TCP group of statistics reported in /proc/net/snmp */
 typedef struct {
@@ -154,14 +78,15 @@ typedef struct {
 } ci_tcp_ext_stats_count;
 
 
-/** main ip statistics structure */
+/** The main ip statistics structure
+ * It was designed after Linux's /proc/net/snmp, but there is no
+ * compatibilty requirement. */
 typedef struct {
   __TIME_TYPE__ now;
-  ci_ipv4_stats_count     ipv4;    /**< /proc/net/snmp, IPv4 group */
-  ci_icmp_stats_count     icmp;    /**< /proc/net/snmp, ICMP group */
-  ci_tcp_stats_count      tcp;     /**< /proc/net/snmp, TCP group  */
-  ci_udp_stats_count      udp;     /**< /proc/net/snmp, UDP group  */
-  ci_tcp_ext_stats_count  tcp_ext; /**< /proc/net/netstat          */
+  ci_ip_stats_count       ip;      /**< IPv4 group */
+  ci_tcp_stats_count      tcp;     /**< TCP group  */
+  ci_udp_stats_count      udp;     /**< UDP group  */
+  ci_tcp_ext_stats_count  tcp_ext; /**< Similar to /proc/net/netstat */
 } ci_ip_stats;
 
 /** per socket statistics structure */

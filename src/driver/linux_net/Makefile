@@ -212,9 +212,15 @@ $(obj)/.kpath: FORCE
 		$(if $(MMAKE_IN_KBUILD),,rm -f $(obj)/*.symvers;)	\
 	fi
 
+ifdef KBUILD_SRC
 define filechk_autocompat.h
-	$(src)/kernel_compat.sh -k $(CURDIR) $(if $(filter 1,$(V)),-v,-q)
+	$(src)/kernel_compat.sh -k $(KBUILD_SRC) -o "$(CURDIR)" $(if $(filter 1,$(V)),-v,-q)
 endef
+else
+define filechk_autocompat.h
+	$(src)/kernel_compat.sh -k "$(CURDIR)" -o "$(CURDIR)" $(if $(filter 1,$(V)),-v,-q)
+endef
+endif
 
 $(obj)/autocompat.h: $(obj)/.kpath $(src)/kernel_compat.sh
 	+$(call filechk,autocompat.h)
@@ -282,8 +288,8 @@ endif
 modules :
 	$(MAKE) -C $(KPATH) $(EXTRA_MAKEFLAGS) M=$$(pwd)
 # strip objects
-ifndef DEBUG
-	@strip --strip-debug $(all_sfc_ko)
+ifdef NDEBUG
+	strip --strip-debug $(all_sfc_ko)
 endif
 
 modules_install :
@@ -320,7 +326,7 @@ export-xen:
 # Export for SRPM
 export-srpm:
 	mkdir -p $(KPATH)/mtd
-	./export.sh -o $(KPATH) $(sfc-y:%.o=%.c) mtd/mtd-abi.h trace/events/sfc.h kernel_compat.sh
+	./export.sh -o $(KPATH) $(sfc-y:%.o=%.c) mtd/mtd-abi.h trace/events/sfc.h kernel_compat.sh kernel_compat_funcs.sh
 
 .PHONY : intranet doc clean_doc util clean_util export export-xen export-srpm
 

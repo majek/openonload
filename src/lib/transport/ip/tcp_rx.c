@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_SOURCE>
@@ -55,9 +42,8 @@
 
 /* TCP RX status */
 #define TCP_RX_FMT              "pkt=%08x-%08x " RCV_WND_FMT
-#define TCP_RX_ARGS(pkt, ts)    (unsigned) \
-                        CI_BSWAP_BE32(PKT_TCP_HDR((pkt))->tcp_seq_be32), \
-                        (pkt)->pf.tcp_rx.end_seq, RCV_WND_ARGS(ts)
+#define TCP_RX_ARGS(rxp, ts)     rxp->seq, rxp->pkt->pf.tcp_rx.end_seq, \
+    RCV_WND_ARGS(ts)
 
 #define ARP_REINFORCE_ON_SYN
 
@@ -104,12 +90,8 @@ ci_ip_pkt_fmt* __ci_netif_pkt_rx_to_tx(ci_netif* ni, ci_ip_pkt_fmt* pkt,
 }
 
 
-ci_inline void ci_tcp_rx_update_state_on_add(ci_netif* ni, ci_tcp_state* ts,
-                                             int recvd)
+ci_inline void ci_tcp_rx_update_state_on_add(ci_tcp_state* ts, int recvd)
 {
-  /* Update metrics before rcv_added. */
-  ci_tcp_metrics_on_rx(ni, ts);
-
   /* Ensure packet has been enqueued onto async receive queue. */
   ci_wmb();
   /* Only then make data available to receive path. */
@@ -174,7 +156,8 @@ static void ci_tcp_rx_enqueue_packet(ci_netif *netif, ci_tcp_state *ts,
 
   ci_assert(ci_netif_is_locked(netif));
   ci_assert_equal(SEQ_SUB(pkt->pf.tcp_rx.end_seq, tcp_rcv_nxt(ts)) -
-                  ((PKT_TCP_HDR(pkt)->tcp_flags & CI_TCP_FLAG_FIN) ? 1 : 0),
+                  ((PKT_IPX_TCP_HDR(ipcache_af(&ts->s.pkt),
+                  pkt)->tcp_flags & CI_TCP_FLAG_FIN) ? 1 : 0),
                   oo_offbuf_left(&pkt->buf));
 
   tcp_rcv_nxt(ts) = pkt->pf.tcp_rx.end_seq;
@@ -199,7 +182,7 @@ static void ci_tcp_rx_enqueue_packet(ci_netif *netif, ci_tcp_state *ts,
     ci_tcp_rx_reap_rxq_bufs(netif, ts);
   }
 
-  ci_tcp_rx_update_state_on_add(netif, ts, bytes);
+  ci_tcp_rx_update_state_on_add(ts, bytes);
 }
 
 
@@ -259,7 +242,7 @@ static void ci_tcp_rx_enqueue_chain(ci_netif *netif, ci_tcp_state *ts,
 #endif
 
   bytes = last->pf.tcp_rx.end_seq - tcp_rcv_nxt(ts);
-  if( PKT_TCP_HDR(last)->tcp_flags & CI_TCP_FLAG_FIN )
+  if( PKT_IPX_TCP_HDR(ipcache_af(&ts->s.pkt), last)->tcp_flags & CI_TCP_FLAG_FIN )
     --bytes;
 
 #if DO_SLOW_CHAIN_LENGTH_CHECK
@@ -279,7 +262,7 @@ static void ci_tcp_rx_enqueue_chain(ci_netif *netif, ci_tcp_state *ts,
     ci_tcp_rx_reap_rxq_bufs(netif, ts);
   }
 
-  ci_tcp_rx_update_state_on_add(netif, ts, bytes);
+  ci_tcp_rx_update_state_on_add(ts, bytes);
 }
 
 
@@ -579,7 +562,6 @@ static void handle_unacceptable_ack(ci_netif* netif, ci_tcp_state* ts,
 {
   /* ACK is unacceptable.  Reply with RST if unsynchronised, or empty ACK
   ** otherwise (rfc793 p37).
-  ** See bug 76157 for explanation why "replying with an ACK" is a bad idea.
   */
   CI_IP_SOCK_STATS_INC_ACKERR( ts );
   LOG_U(log(LPF "%d ACK UNACCEPTABLE %s snd_nxt=%08x ack=%08x", S_FMT(ts),
@@ -588,7 +570,10 @@ static void handle_unacceptable_ack(ci_netif* netif, ci_tcp_state* ts,
   CITP_STATS_NETIF_INC(netif, unacceptable_acks);
 
   if( ts->s.b.state & CI_TCP_STATE_SYNCHRONISED ) {
-    ci_netif_pkt_release(netif, rxp->pkt);
+    if( ! ci_tcp_send_challenge_ack(netif, ts, rxp->pkt) ) {
+      ci_netif_pkt_release(netif, rxp->pkt);
+      return;
+    }
   }
   else {
     CITP_STATS_NETIF_INC(netif, rst_sent_unacceptable_ack);
@@ -1304,6 +1289,9 @@ static void ci_tcp_rx_free_acked_bufs(ci_netif* netif, ci_tcp_state* ts,
 
   while( 1 ) {
     ci_ip_pkt_fmt* p = PKT_CHK(netif, rtq->head);
+#ifndef NDEBUG
+    int af = ipcache_af(&ts->s.pkt);
+#endif
 
     if( SEQ_LT(rxp->ack, p->pf.tcp_tx.end_seq) ) {
       /* New data acknowledged: restart RTO/TLP timer. */
@@ -1321,7 +1309,8 @@ static void ci_tcp_rx_free_acked_bufs(ci_netif* netif, ci_tcp_state* ts,
     LOG_TV(log(LNT_FMT "ACKED id=%d seq=%08x-%08x ["CI_TCP_FLAGS_FMT"]"
                " (%08x) %d", LNT_PRI_ARGS(netif, ts), OO_PKT_FMT(p),
                p->pf.tcp_tx.start_seq, p->pf.tcp_tx.end_seq,
-               CI_TCP_HDR_FLAGS_PRI_ARG(PKT_TCP_HDR(p)), rxp->ack, rtq->num));
+               CI_TCP_HDR_FLAGS_PRI_ARG(PKT_IPX_TCP_HDR(af, p)),
+               rxp->ack, rtq->num));
 
     ci_ip_queue_dequeue(netif, rtq, p);
 
@@ -1681,13 +1670,14 @@ static int ci_tcp_rx_deliver_rob(ci_netif* netif, ci_tcp_state* ts)
   ci_uint32 last_seq;
   int num;
   ci_uint32 seq;
+  int af = ipcache_af(&ts->s.pkt);
 
   ++ts->stats.rx_ooo_fill;
   rob = &ts->rob;
   ci_assert(ci_ip_queue_is_valid(netif, rob));
   id = rob->head;
   pkt = PKT_CHK(netif, id);
-  seq = CI_BSWAP_BE32(PKT_TCP_HDR(pkt)->tcp_seq_be32);
+  seq = CI_BSWAP_BE32(PKT_IPX_TCP_HDR(af, pkt)->tcp_seq_be32);
 
   /* Remove all packets covered by already delivered packets. */
   end_block_id = PKT_TCP_RX_ROB(pkt)->end_block;
@@ -1716,13 +1706,13 @@ static int ci_tcp_rx_deliver_rob(ci_netif* netif, ci_tcp_state* ts)
       return 0;
     id = rob->head;
     pkt = PKT_CHK(netif, id);
-    seq = CI_BSWAP_BE32(PKT_TCP_HDR(pkt)->tcp_seq_be32);
+    seq = CI_BSWAP_BE32(PKT_IPX_TCP_HDR(af, pkt)->tcp_seq_be32);
     if( OO_PP_IS_NULL(end_block_id) ) {
       end_block_id = PKT_TCP_RX_ROB(pkt)->end_block;
       ASSERT_VALID_PKT_ID(netif, end_block_id);
     }
   }
-  tcp = PKT_TCP_HDR(pkt);
+  tcp = PKT_IPX_TCP_HDR(af, pkt);
 
   /* Check that first packet could be delivered. */
   if( SEQ_LT(tcp_rcv_nxt(ts), seq) ) {
@@ -1779,7 +1769,7 @@ static int ci_tcp_rx_deliver_rob(ci_netif* netif, ci_tcp_state* ts)
       break;
     id = pkt->next;
     pkt = PKT_CHK(netif, id);
-    tcp = PKT_TCP_HDR(pkt);
+    tcp = PKT_IPX_TCP_HDR(af, pkt);
     seq = CI_BSWAP_BE32(tcp->tcp_seq_be32);
   }
 
@@ -1908,9 +1898,10 @@ static void ci_tcp_rx_glue_rob(ci_netif* netif, ci_tcp_state* ts,
   for( next_id = PKT_TCP_RX_ROB(pkt)->next_block;
        OO_PP_NOT_NULL(next_id);
        next_id = PKT_TCP_RX_ROB(pkt)->next_block) {
+    int af = ipcache_af(&ts->s.pkt);
     next_pkt = PKT_CHK(netif, next_id);
     last_seq = PKT_TCP_RX_ROB(pkt)->end_block_seq;
-    if( SEQ_LT(last_seq, CI_BSWAP_BE32(PKT_TCP_HDR(next_pkt)->tcp_seq_be32)) )
+    if( SEQ_LT(last_seq, CI_BSWAP_BE32(PKT_IPX_TCP_HDR(af, next_pkt)->tcp_seq_be32)) )
         return;
     LOG_TV(log(LPF "ROB glue %d and %d blocks",
                OO_PKT_FMT(pkt), OO_PP_FMT(next_id)));
@@ -2001,6 +1992,7 @@ static int ci_tcp_rx_ooo_stripe(ci_netif* netif, ci_tcp_state* ts,
   ** in fact >1 missing packets, only the first in the gap is checked.
   */
   unsigned gap_start_seqno = tcp_rcv_nxt(ts);
+  int af = ipcache_af(&ts->s.pkt);
 
   LOG_TV(log(LNT_FMT "OOO port_swap=%d s=%08x-%08x", LNT_PRI_ARGS(netif, ts),
              tx_port_swap, rxp->seq, rxp->pkt->pf.tcp_rx.end_seq));
@@ -2015,14 +2007,14 @@ static int ci_tcp_rx_ooo_stripe(ci_netif* netif, ci_tcp_state* ts,
       */
       LOG_TV(log(LNT_FMT "OOO terminated at gap %08x-%08x",
                  LNT_PRI_ARGS(netif, ts), gap_start_seqno,
-                 CI_BSWAP_BE32(PKT_TCP_HDR(block_pkt)->tcp_seq_be32)));
+                 CI_BSWAP_BE32(PKT_IPX_TCP_HDR(af, block_pkt)->tcp_seq_be32)));
       return 0;
     }
 
     gap_port_swap = ci_ts_port_swap(gap_start_seqno, ts);
     LOG_TV(log(LNT_FMT "OOO comparing port %d gap %08x-%08x",
                LNT_PRI_ARGS(netif, ts), gap_port_swap, gap_start_seqno,
-               CI_BSWAP_BE32(PKT_TCP_HDR(block_pkt)->tcp_seq_be32)));
+               CI_BSWAP_BE32(PKT_IPX_TCP_HDR(af, block_pkt)->tcp_seq_be32)));
 
     if( gap_port_swap == tx_port_swap ) {
       /* Gap on same port => loss. */
@@ -2058,6 +2050,7 @@ static int ci_tcp_rx_enqueue_ooo(ci_netif* netif, ci_tcp_state* ts,
   ci_ip_pkt_fmt* prev_pkt = NULL;  /* \todo Initialize in debug build only */
   oo_pkt_p       block_id;
   ci_ip_pkt_fmt* block_pkt = NULL;  /* \todo Initialize in debug build only */
+  int af = ipcache_af(&ts->s.pkt);
 
   CITP_STATS_NETIF_INC(netif, rx_out_of_order);
   CI_IP_SOCK_STATS_INC_OOO( ts );
@@ -2070,7 +2063,7 @@ static int ci_tcp_rx_enqueue_ooo(ci_netif* netif, ci_tcp_state* ts,
   for( prev_id = OO_PP_NULL, block_id = rob->head;
        OO_PP_NOT_NULL(block_id) &&
        (block_pkt = PKT_CHK(netif, block_id),
-        SEQ_LT(CI_BSWAP_BE32(PKT_TCP_HDR(block_pkt)->tcp_seq_be32),
+        SEQ_LT(CI_BSWAP_BE32(PKT_IPX_TCP_HDR(af, block_pkt)->tcp_seq_be32),
                rxp->seq));
        prev_id = block_id, prev_pkt = block_pkt,
        block_id = PKT_TCP_RX_ROB(block_pkt)->next_block ) {
@@ -2078,11 +2071,11 @@ static int ci_tcp_rx_enqueue_ooo(ci_netif* netif, ci_tcp_state* ts,
     LOG_TV(log(LNT_FMT "OOO check: from %08x-%08x to %08x-%08x",
                LNT_PRI_ARGS(netif, ts),
                OO_PP_NOT_NULL(prev_id) ?
-                 CI_BSWAP_BE32(PKT_TCP_HDR(prev_pkt)->tcp_seq_be32) : 0,
+                 CI_BSWAP_BE32(PKT_IPX_TCP_HDR(af, prev_pkt)->tcp_seq_be32) : 0,
                OO_PP_NOT_NULL(prev_id) ?
                  PKT_TCP_RX_ROB(prev_pkt)->end_block_seq : 0,
                OO_PP_NOT_NULL(block_id) ?
-                 CI_BSWAP_BE32(PKT_TCP_HDR(block_pkt)->tcp_seq_be32) : 0,
+                 CI_BSWAP_BE32(PKT_IPX_TCP_HDR(af, block_pkt)->tcp_seq_be32) : 0,
                OO_PP_NOT_NULL(block_id) ?
                  PKT_TCP_RX_ROB(block_pkt)->end_block_seq : 0));
   }
@@ -2093,7 +2086,7 @@ static int ci_tcp_rx_enqueue_ooo(ci_netif* netif, ci_tcp_state* ts,
               PKT_TCP_RX_ROB(prev_pkt)->end_block_seq)) ||
       (OO_PP_NOT_NULL(block_id) &&
        SEQ_EQ(rxp->seq,
-              CI_BSWAP_BE32(PKT_TCP_HDR(block_pkt)->tcp_seq_be32)) &&
+              CI_BSWAP_BE32(PKT_IPX_TCP_HDR(af, block_pkt)->tcp_seq_be32)) &&
        SEQ_LE(pkt->pf.tcp_rx.end_seq,
               PKT_TCP_RX_ROB(block_pkt)->end_block_seq)) ) {
     LOG_TL(log(LNT_FMT "OOO DROP duplicate %08x-%08x",
@@ -2288,8 +2281,7 @@ static void handle_rx_rst(ci_tcp_state* ts, ci_netif* netif,
     **    and return.
     */
     if( (tcp->tcp_flags & CI_TCP_FLAG_ACK) &&
-        SEQ_LE(tcp_snd_una(ts), rxp->ack) &&
-        SEQ_LE(rxp->ack, tcp_snd_nxt(ts)) ) {
+        SEQ_EQ(rxp->ack, ts->snd_max) ) {
       LOG_TC(log(LPF "%d SYN-SENT->CLOSED (RESET)", S_FMT(ts)));
       CITP_STATS_NETIF(++netif->state->stats.tcp_connect_refused);
       ci_tcp_drop(netif, ts, ECONNREFUSED);
@@ -2321,6 +2313,13 @@ static void handle_rx_rst(ci_tcp_state* ts, ci_netif* netif,
 #if CI_CFG_STATS_NETIF
     CITP_STATS_NETIF_INC(netif, rst_recv_after_fin);
 #endif
+  }
+  else if( ! SEQ_EQ(rxp->seq, tcp_rcv_nxt(ts)) ) {
+    /* RFC 5961: non-precise SEQ number in RST results in challenge ACK.
+     * ci_tcp_send_challenge_ack() returns true if it consumed the packet. */
+    if( ci_tcp_send_challenge_ack(netif, ts, pkt) )
+      return;
+    goto freepkt_out;
   }
 
 #if CI_CFG_STATS_NETIF
@@ -2490,7 +2489,8 @@ static void handle_rx_synrecv_ack(ci_netif* netif, ci_tcp_socket_listen* tls,
     CITP_STATS_TCP_LISTEN(++netif->state->stats.accepts_deferred);
     ci_netif_pkt_release(netif, pkt);
   }
-  else if( ci_tcp_listenq_try_promote(netif, tls, tsr, ipcache, &ts) < 0 ) {
+  else if( ci_tcp_listenq_try_promote(netif, tls, tsr, ipcache, pkt,
+                                      &ts) < 0 ) {
     CI_TCP_EXT_STATS_INC_LISTEN_DROPS( netif );
     LOG_U(log(LNT_FMT "SYNRECV failed to promote to acceptq, seq=%08x",
               LNT_PRI_ARGS(netif, tls), rxp->seq));
@@ -2549,12 +2549,16 @@ static void handle_rx_listen(ci_netif* netif, ci_tcp_socket_listen* tls,
 {
   ci_ip_pkt_fmt* pkt = rxp->pkt;
   ci_ip_pkt_fmt* tx_pkt;
-  ci_ip4_hdr* ip = oo_ip_hdr(pkt);
+  ci_ipx_hdr_t* ip = RX_PKT_IPX_HDR(pkt);
   ci_tcp_hdr* tcp = rxp->tcp;
   ci_tcp_state_synrecv* tsr;
   ci_ip_cached_hdrs ipcache;
   oo_sp local_peer = OO_SP_NULL;
   int do_syncookie = 0;
+#if CI_CFG_IPV6
+  int af = oo_pkt_af(pkt);
+#endif
+  ci_addr_t saddr, daddr;
 
   ci_assert(tls);
   ci_assert(tls->s.b.state == CI_TCP_LISTEN);
@@ -2586,7 +2590,8 @@ static void handle_rx_listen(ci_netif* netif, ci_tcp_socket_listen* tls,
     return;
   }
 
-  if (!already_parsed)  ci_tcp_parse_options(netif, rxp, NULL);
+  if (!already_parsed)
+    ci_tcp_parse_options(netif, rxp, NULL);
 
   if( CI_UNLIKELY(tcp->tcp_flags & CI_TCP_FLAG_RST) ) {
     handle_rx_listen_rst(netif, tls, rxp);
@@ -2654,8 +2659,8 @@ static void handle_rx_listen(ci_netif* netif, ci_tcp_socket_listen* tls,
    * bit fiddly though: Route etc. is independent of the port numbers, but
    * some info in the ipcache does depend on them when interface is a bond.
    */
-  ci_ip_cache_init(&ipcache);
-  ipcache.ip.ip_daddr_be32 = ip->ip_saddr_be32;
+  ci_ip_cache_init(&ipcache, oo_pkt_af(pkt));
+  ci_ipcache_set_daddr(&ipcache, RX_PKT_SADDR(pkt));
   ipcache.dport_be16 = tcp->tcp_source_be16;
   if( CI_UNLIKELY( pkt->intf_i == OO_INTF_I_LOOPBACK ) ) {
     /* This packet was received via loopback, so there is no need to call
@@ -2668,12 +2673,21 @@ static void handle_rx_listen(ci_netif* netif, ci_tcp_socket_listen* tls,
     ipcache.mtu = netif->state->max_mss;
     /* Fixme: make this verinfo "valid" so the route is not re-resolved
      * later. */
-    oo_cp_verinfo_init(&ipcache.mac_integrity);
+    ci_ip_cache_invalidate(&ipcache);
   }
   else {
     struct oo_sock_cplane sock_cp = tls->s.cp;
-    sock_cp.ip_laddr_be32 = ip->ip_daddr_be32;
+    sock_cp.laddr = RX_PKT_DADDR(pkt);
+#if CI_CFG_IPV6
+    if( CI_IPX_IS_LINKLOCAL(sock_cp.laddr) &&
+        (sock_cp.so_bindtodevice = ci_rx_pkt_ifindex(netif, pkt)) == 0 ) {
+      LOG_U(ci_log("%s: no interface matching link-local address " IPX_FMT
+                   " found", __FUNCTION__, IPX_ARG(AF_IP_L3(sock_cp.laddr))));
+      goto freepkt_out;
+    }
+#endif
     sock_cp.lport_be16 = tcp->tcp_dest_be16;
+    sock_cp.sock_cp_flags |= OO_SCP_BOUND_ADDR;
     cicp_user_retrieve(netif, &ipcache, &sock_cp);
   }
 
@@ -2684,15 +2698,16 @@ static void handle_rx_listen(ci_netif* netif, ci_tcp_socket_listen* tls,
   case retrrc_localroute:
     if( pkt->intf_i == OO_INTF_I_LOOPBACK ) {
       ipcache.flags |= CI_IP_CACHE_IS_LOCALROUTE;
-      ipcache.ip_saddr.ip4 = ipcache.ip.ip_saddr_be32 = ip->ip_daddr_be32;
+      ci_ipcache_set_saddr(&ipcache, RX_PKT_DADDR(pkt));
       break;
     }
     /* fall through */
   default:
-    LOG_U(ci_log("%s: no return route to %s exists, dropping listen response pkt",
-		 __FUNCTION__, ip_addr_str(ip->ip_saddr_be32)));
+    LOG_U(ci_log("%s: no return route to "IPX_FMT" exists, "
+                 "dropping listen response pkt",
+		 __FUNCTION__, IPX_ARG(AF_IP_L3(ipcache_raddr(&ipcache)))));
     LOG_DU(ci_hex_dump(ci_log_fn, PKT_START(pkt),
-                       ip_pkt_dump_len(CI_BSWAP_BE16(ip->ip_tot_len_be16)),
+                       ip_pkt_dump_len(RX_PKT_PAYLOAD_LEN(pkt)),
 		       0));
     CITP_STATS_NETIF(++netif->state->stats.syn_drop_no_return_route);
     goto freepkt_out;
@@ -2711,7 +2726,7 @@ static void handle_rx_listen(ci_netif* netif, ci_tcp_socket_listen* tls,
     ci_tcp_state_synrecv* tsr;
     ci_tcp_syncookie_ack(netif, tls, rxp, &tsr);
     if( tsr != NULL ) {
-      tsr->amss = ci_tcp_amss(netif, &tls->c, ipcache.mtu, __func__);
+      tsr->amss = ci_tcp_amss(netif, &tls->c, &ipcache, __func__);
       handle_rx_synrecv_ack(netif, tls, tsr, rxp, &ipcache);
       return;
     }
@@ -2721,12 +2736,12 @@ static void handle_rx_listen(ci_netif* netif, ci_tcp_socket_listen* tls,
   ** This should be the first SYN of a new connection on a listening socket
   ** process as rfc793 p65.
   */
-  LOG_TC(log(LNT_FMT "LISTEN %s:%d->%s:%d on socket %s:%d",
-             LNT_PRI_ARGS(netif, tls), ip_addr_str(ip->ip_saddr_be32),
+  LOG_TC(log(LNT_FMT "LISTEN "IPX_FMT":%d->"IPX_FMT":%d on socket "IPX_FMT":%d",
+             LNT_PRI_ARGS(netif, tls), IPX_ARG(AF_IP(RX_PKT_SADDR(pkt))),
              (unsigned) CI_BSWAP_BE16(tcp->tcp_source_be16),
-             ip_addr_str(ip->ip_daddr_be32),
+             IPX_ARG(AF_IP(RX_PKT_DADDR(pkt))),
              (unsigned) CI_BSWAP_BE16(tcp->tcp_dest_be16),
-             ip_addr_str(tcp_laddr_be32(tls)),
+             IPX_ARG(AF_IP(sock_ipx_laddr(&tls->s))),
              (unsigned) CI_BSWAP_BE16(tcp_lport_be16(tls))));
 
   /* Want to do minimum work when overloaded, so check for listen queue
@@ -2755,7 +2770,7 @@ static void handle_rx_listen(ci_netif* netif, ci_tcp_socket_listen* tls,
     LOG_U(log(LNT_FMT "LISTEN got packet without SYN, will drop",
               LNT_PRI_ARGS(netif, tls)));
     LOG_DU(ci_hex_dump(ci_log_fn, PKT_START(pkt),
-                       ip_pkt_dump_len(CI_BSWAP_BE16(ip->ip_tot_len_be16)),
+                       ip_pkt_dump_len(RX_PKT_PAYLOAD_LEN(pkt)),
 		       0));
     /* shouldn't get here but silence is response, rfc793 p66 */
     goto freepkt_out;
@@ -2766,36 +2781,70 @@ static void handle_rx_listen(ci_netif* netif, ci_tcp_socket_listen* tls,
     LOG_U(log(LNT_FMT "LISTEN got SYN with other flags",
               LNT_PRI_ARGS(netif, tls)));
     LOG_DU(ci_hex_dump(ci_log_fn, PKT_START(pkt),
-                       ip_pkt_dump_len(CI_BSWAP_BE16(ip->ip_tot_len_be16)),
+                       ip_pkt_dump_len(RX_PKT_PAYLOAD_LEN(pkt)),
 		       0));
   }
 
+  saddr = ipx_hdr_saddr(af, ip);
+  daddr = ipx_hdr_daddr(af, ip);
+
   /* ANVL tcp-core 23.x tests - check the source address is OK */
-  if( /* 23.1: if source address is our destination address then reject */
-      (ip->ip_daddr_be32 == ip->ip_saddr_be32 &&
-       pkt->intf_i != OO_INTF_I_LOOPBACK)
-      /* 23.2: if source address is 0 or -1 then reject */
-      || (0 == ip->ip_saddr_be32) || (0xffffffff == ip->ip_saddr_be32)
-      /* 23.4: reject connections from 127.x.x.x */
-      || (CI_IP_ADDR_EQUAL(ip->ip_saddr_be32, 127,0,0,0, 0xff000000) &&
-          pkt->intf_i != OO_INTF_I_LOOPBACK)
-      || (!NI_OPTS(netif).unconfine_syn &&
-	/* 23.3: accept 10.x.x.x connections only from 10.x.x.x */
-	(  (CI_IP_ADDR_EQUAL(ip->ip_saddr_be32, 10,0,0,0, 0xff000000) &&
-	   !CI_IP_ADDR_EQUAL(ip->ip_daddr_be32, 10,0,0,0, 0xff000000))
-	/* 23.5: accept 172.16.x.x connections only from 172.16.x.x */
-	|| (CI_IP_ADDR_EQUAL(ip->ip_saddr_be32, 172,16,0,0, 0xffff0000) &&
-	   !CI_IP_ADDR_EQUAL(ip->ip_daddr_be32, 172,16,0,0, 0xffff0000))
-	/* 23.6: accept 192.168.x.x connections only from 192.168.x.x */
-	|| (CI_IP_ADDR_EQUAL(ip->ip_saddr_be32, 192,168,0,0, 0xffff0000) &&
-	   !CI_IP_ADDR_EQUAL(ip->ip_daddr_be32, 192,168,0,0, 0xffff0000))
-	))
-      ) {
-    LOG_U(log(LNT_FMT "LISTEN ignoring SYN: bad src/dst",
-              LNT_PRI_ARGS(netif, tls));
-          log(LPF " ----> S[%s], D[%s]", ip_addr_str(ip->ip_saddr_be32),
-              ip_addr_str(ip->ip_daddr_be32)));
-    goto freepkt_out;
+  /* 23.1: if source address is our destination address then reject */
+  if( CI_IPX_ADDR_EQ(daddr, saddr) && pkt->intf_i != OO_INTF_I_LOOPBACK)
+    goto ignore_pkt;
+
+  /* 23.2: if source address is 0 then reject */
+  if( CI_IPX_ADDR_IS_ANY(saddr) )
+    goto ignore_pkt;
+
+#if CI_CFG_IPV6
+  if( CI_IS_ADDR_IP6(saddr) ) {
+    const ci_ip6_addr_t addr_none =
+        {0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff};
+
+    /* if source address is -1 then reject */
+    if( CI_IP6_ADDR_CMP(saddr.ip6, addr_none) == 0 )
+      goto ignore_pkt;
+
+    /* reject connections from loopback address */
+    if( CI_IP6_ADDR_CMP(saddr.ip6, ip6_addr_loop.ip6) == 0 &&
+        pkt->intf_i != OO_INTF_I_LOOPBACK )
+      goto ignore_pkt;
+
+    if( !NI_OPTS(netif).unconfine_syn ) {
+      const ci_addr_t unique_local_addr = {.ip6 = {0xfc}};
+      const ci_addr_t unique_local_mask = {.ip6 = {0xfe}};
+
+      /* accept fc00::/7 connections only from fc00::/7 */
+      if( ci_ipx_addr_masked_eq(&saddr, &unique_local_addr, &unique_local_mask) &&
+         !ci_ipx_addr_masked_eq(&daddr, &unique_local_addr, &unique_local_mask) )
+        goto ignore_pkt;
+    }
+  }
+  else
+#endif
+  {
+    /* 23.2: if source address is -1 then reject */
+    if( saddr.ip4 == 0xffffffff )
+      goto ignore_pkt;
+
+    /* 23.4: reject connections from 127.x.x.x */
+    if( CI_IP_ADDR_EQUAL(saddr.ip4, 127,0,0,0, 0xff000000) &&
+        pkt->intf_i != OO_INTF_I_LOOPBACK )
+      goto ignore_pkt;
+
+    if( !NI_OPTS(netif).unconfine_syn &&
+        /* 23.3: accept 10.x.x.x connections only from 10.x.x.x */
+        (  (CI_IP_ADDR_EQUAL(saddr.ip4, 10,0,0,0, 0xff000000) &&
+           !CI_IP_ADDR_EQUAL(daddr.ip4, 10,0,0,0, 0xff000000))
+        /* 23.5: accept 172.16.x.x connections only from 172.16.x.x */
+        || (CI_IP_ADDR_EQUAL(saddr.ip4, 172,16,0,0, 0xffff0000) &&
+           !CI_IP_ADDR_EQUAL(daddr.ip4, 172,16,0,0, 0xffff0000))
+        /* 23.6: accept 192.168.x.x connections only from 192.168.x.x */
+        || (CI_IP_ADDR_EQUAL(saddr.ip4, 192,168,0,0, 0xffff0000) &&
+           !CI_IP_ADDR_EQUAL(daddr.ip4, 192,168,0,0, 0xffff0000))
+        ))
+      goto ignore_pkt;
   }
 
   /* It is legal to pass data with a SYN, but it is not desirable to keep
@@ -2806,7 +2855,7 @@ static void handle_rx_listen(ci_netif* netif, ci_tcp_socket_listen* tls,
     LOG_U(log(LPF "%d LISTEN SYN with data (%d bytes)", S_FMT(tls),
           pkt->pf.tcp_rx.pay_len));
     LOG_DU(ci_hex_dump(ci_log_fn, PKT_START(pkt),
-                       ip_pkt_dump_len(CI_BSWAP_BE16(ip->ip_tot_len_be16)),
+                       ip_pkt_dump_len(RX_PKT_PAYLOAD_LEN(pkt)),
 		       0));
   }
 
@@ -2828,9 +2877,6 @@ static void handle_rx_listen(ci_netif* netif, ci_tcp_socket_listen* tls,
                                               CI_TCP_AUX_TYPE_SYNRECV));
     tsr->bucket_link = OO_P_NULL;
     tsr->hash = rxp->hash;
-#if CI_CFG_TCP_METRICS
-    tsr->tstamp = oo_metrics_stack_now(netif);
-#endif
   }
 
   /* parse the SYN options */
@@ -2842,7 +2888,8 @@ static void handle_rx_listen(ci_netif* netif, ci_tcp_socket_listen* tls,
     tsr->local_peer = OO_SP_NULL;
 
   tsr->tcpopts.flags = 0;
-  if( ci_tcp_parse_options(netif, rxp, &tsr->tcpopts) < 0 ) {
+  if( ci_tcp_parse_options(netif, rxp, &tsr->tcpopts)
+      < 0 ) {
 #if CI_CFG_TCP_INVALID_OPT_RST
     /* bad option block, send reset rfc1122 4.2.2.5 */
     LOG_U(log(LPF "%d LISTEN bad SYN options will reset", S_FMT(tls)));
@@ -2860,14 +2907,14 @@ static void handle_rx_listen(ci_netif* netif, ci_tcp_socket_listen* tls,
     tsr->tspeer = rxp->timestamp;
 
   if( !do_syncookie ) {
-    if( ! ci_tcp_can_stripe(netif, ip->ip_daddr_be32,ip->ip_saddr_be32) )
+    if( ! ci_tcp_can_stripe(netif, ip->ip4.ip_daddr_be32,ip->ip4.ip_saddr_be32) )
       tsr->tcpopts.flags &=~ CI_TCPT_FLAG_STRIPE;
     tsr->tcpopts.flags &= NI_OPTS(netif).syn_opts | CI_TCPT_FLAG_STRIPE;
   }
 
   /* setup synrecv state */
-  tsr->l_addr = ip->ip_daddr_be32;
-  tsr->r_addr = ip->ip_saddr_be32;
+  tsr->l_addr = RX_PKT_DADDR(pkt);
+  tsr->r_addr = RX_PKT_SADDR(pkt);
   tsr->r_port = tcp->tcp_source_be16;
 
   /* store timestamp in echo reply */
@@ -2890,9 +2937,9 @@ static void handle_rx_listen(ci_netif* netif, ci_tcp_socket_listen* tls,
   if( do_syncookie )
     ci_tcp_syncookie_syn(netif, tls, tsr);
   else {
-    tsr->snd_isn = ci_tcp_initial_seqno(netif, tsr->l_addr,
-                                        tcp_lport_be16(tls), tsr->r_addr,
-                                        tsr->r_port);
+    tsr->snd_isn = ci_tcp_initial_seqno(netif,
+                                        tsr->l_addr, tcp_lport_be16(tls),
+                                        tsr->r_addr, tsr->r_port);
 
     /* Insert synrecv into the listen queue. */
     ci_tcp_listenq_insert(netif, tls, tsr);
@@ -2927,7 +2974,8 @@ static void handle_rx_listen(ci_netif* netif, ci_tcp_socket_listen* tls,
       LOG_TC(log(LNT_FMT "loopback connection deferred",
                  LNT_PRI_ARGS(netif, peer)));
     }
-    else if( ci_tcp_listenq_try_promote(netif, tls, tsr, &ipcache, &ts) < 0 ) {
+    else if( ci_tcp_listenq_try_promote(netif, tls, tsr, &ipcache, pkt,
+                                        &ts) < 0 ) {
       CI_TCP_EXT_STATS_INC_LISTEN_DROPS( netif );
       LOG_U(log(LNT_FMT "SYNRECV failed to promote local connection "
                 "to acceptq", LNT_PRI_ARGS(netif, tls)));
@@ -2939,6 +2987,12 @@ static void handle_rx_listen(ci_netif* netif, ci_tcp_socket_listen* tls,
   if( do_syncookie )
     ci_free(tsr);
   return;
+
+ ignore_pkt:
+  LOG_U(log(LNT_FMT "LISTEN ignoring SYN: bad src/dst",
+            LNT_PRI_ARGS(netif, tls));
+        log(LPF " ----> S[" IPX_FMT "], D[" IPX_FMT "]",
+            IPX_ARG(AF_IP(saddr)), IPX_ARG(AF_IP(daddr))));
 
  freepkt_out:
   ci_netif_pkt_release_rx(netif, pkt);
@@ -2959,6 +3013,7 @@ static int handle_syn_sent_opts(ci_netif* netif, ci_tcp_state* ts,
 {
   ci_tcp_options tcpopts;
   int optlen = 0;
+  int af = ipcache_af(&ts->s.pkt);
 
   /* parse TCP options */
   memset(&tcpopts, 0, sizeof(tcpopts));
@@ -3012,8 +3067,8 @@ static int handle_syn_sent_opts(ci_netif* netif, ci_tcp_state* ts,
 
       for( id = txq->head; OO_PP_NOT_NULL(id); id = p->next ) {
         p = PKT_CHK(netif, id);
-        opt = CI_TCP_HDR_OPTS(TX_PKT_TCP(p));
-        if( CI_TCP_HDR_OPT_LEN(TX_PKT_TCP(p)) >= 12 )
+        opt = CI_TCP_HDR_OPTS(TX_PKT_IPX_TCP(af, p));
+        if( CI_TCP_HDR_OPT_LEN(TX_PKT_IPX_TCP(af, p)) >= 12 )
           *opt = 0; /* end of options */
       }
       ts->tcpflags &= ~CI_TCPT_FLAG_TSO;
@@ -3024,7 +3079,7 @@ static int handle_syn_sent_opts(ci_netif* netif, ci_tcp_state* ts,
   if( !(tcpopts.flags & CI_TCPT_FLAG_STRIPE) )
     ts->tcpflags &=~ CI_TCPT_FLAG_STRIPE;
 
-  ts->outgoing_hdrs_len = sizeof(ci_ip4_hdr) + sizeof(ci_tcp_hdr) + optlen;
+  ts->outgoing_hdrs_len = CI_IPX_HDR_SIZE(af) + sizeof(ci_tcp_hdr) + optlen;
   ci_tcp_set_hdr_len(ts, sizeof(ci_tcp_hdr) + optlen);
 
   ts->smss = tcpopts.smss;
@@ -3146,8 +3201,8 @@ set_isn:
   ci_tcp_set_established_state(netif, ts);
   CITP_STATS_NETIF(++netif->state->stats.active_opens);
 
-  ci_assert(CI_TCP_HDR_LEN(TS_TCP(ts)) ==
-            sizeof(ci_tcp_hdr) + tcp_outgoing_opts_len(ts));
+  ci_assert(CI_TCP_HDR_LEN(TS_IPX_TCP(ts)) ==
+      sizeof(ci_tcp_hdr) + tcp_ipx_outgoing_opts_len(ipcache_af(&ts->s.pkt), ts));
   ci_tcp_set_initialcwnd(netif, ts);
   ci_assert_gt(ts->rcv_window_max,0);
   ci_tcp_init_rcv_wnd(ts, "SYN SENT");
@@ -3195,30 +3250,36 @@ static void handle_rx_close_wait(ci_tcp_state* ts, ci_netif* netif,
                                  ciip_tcp_rx_pkt* rxp)
 {
   ci_ip_pkt_fmt* pkt = rxp->pkt;
+  int send_challenge_ack = 0;
 
   /* RST handled elsewhere; we shouldn't see it here. */
   ci_assert(~rxp->tcp->tcp_flags & CI_TCP_FLAG_RST);
 
-#ifndef NDEBUG
   /* We've already seen a FIN from the other guy, so any data we see should
   ** be duplicates only.
   */
   if( SEQ_LT(tcp_rcv_nxt(ts), pkt->pf.tcp_rx.end_seq) ) {
-    LOG_U(log(LPF "%d CLOSE-WAIT data after FIN " TCP_RX_FMT,
-              S_FMT(ts), TCP_RX_ARGS(pkt, ts)));
+    LOG_TR(log(LPF "%d CLOSE-WAIT data after FIN " TCP_RX_FMT,
+              S_FMT(ts), TCP_RX_ARGS(rxp, ts)));
+    send_challenge_ack = 1;
   }
   else if( pkt->pf.tcp_rx.pay_len ) {
     LOG_TR(log(LPF "%d CLOSE-WAIT duplicate data " TCP_RX_FMT,
-               S_FMT(ts), TCP_RX_ARGS(pkt, ts)));
+               S_FMT(ts), TCP_RX_ARGS(rxp, ts)));
+    send_challenge_ack = 1;
   }
-  if( rxp->tcp->tcp_flags & CI_TCP_FLAG_SYN )
-    LOG_U(log(LPF "%d CLOSE-WAIT got SYN", S_FMT(ts)));
-#endif
+  if( rxp->tcp->tcp_flags & CI_TCP_FLAG_SYN ) {
+    LOG_TR(log(LPF "%d CLOSE-WAIT got SYN", S_FMT(ts)));
+    send_challenge_ack = 1;
+  }
 
-  if( ci_tcp_sendq_not_empty(ts) )
+  if( ci_tcp_sendq_not_empty(ts) ) {
     ci_tcp_tx_advance(ts, netif);
+    send_challenge_ack = 0;
+  }
 
-  ci_netif_pkt_release_rx(netif, pkt);
+  if( ! send_challenge_ack || ! ci_tcp_send_challenge_ack(netif, ts, pkt) )
+    ci_netif_pkt_release_rx(netif, pkt);
 }
 
 
@@ -3257,7 +3318,7 @@ static void handle_rx_last_ack_or_closing(ci_tcp_state* ts, ci_netif* netif,
     */
     if( pkt->pf.tcp_rx.pay_len ) {
       LOG_U(log(LPF "%d %s bad data " TCP_RX_FMT,
-                S_FMT(ts), state_str(ts), TCP_RX_ARGS(pkt, ts)));
+                S_FMT(ts), state_str(ts), TCP_RX_ARGS(rxp, ts)));
     }
 
     LOG_TC(log(LNT_FMT "%s->%s", LNT_PRI_ARGS(netif, ts), state_str(ts),
@@ -3300,11 +3361,11 @@ static void handle_rx_last_ack_or_closing(ci_tcp_state* ts, ci_netif* netif,
     */
     if( SEQ_LT(tcp_rcv_nxt(ts), pkt->pf.tcp_rx.end_seq) ) {
       LOG_U(log(LPF "%d %s data after " TCP_RX_FMT,
-                S_FMT(ts), state_str(ts), TCP_RX_ARGS(pkt, ts)));
+                S_FMT(ts), state_str(ts), TCP_RX_ARGS(rxp, ts)));
     }
     else if( pkt->pf.tcp_rx.pay_len ) {
       LOG_TR(log(LPF "%d %s duplicate data " TCP_RX_FMT,
-                 S_FMT(ts), state_str(ts), TCP_RX_ARGS(pkt, ts)));
+                 S_FMT(ts), state_str(ts), TCP_RX_ARGS(rxp, ts)));
     }
 #endif
   }
@@ -3372,7 +3433,7 @@ static int handle_rx_minor_states(ci_tcp_state* ts, ci_netif* netif,
       if (SEQ_LT(tcp_rcv_nxt(ts), rxp->seq) ||
           ((ts->tcpflags & rxp->flags & CI_TCPT_FLAG_TSO) &&
            TIME_GE(rxp->timestamp, ts->tsrecent)) ){
-        int filter_id;
+        oo_sp sock_id;
         ci_sock_cmn* s;
         LOG_TV(
             if (!SEQ_LT(tcp_rcv_nxt(ts), rxp->seq))
@@ -3385,14 +3446,14 @@ static int handle_rx_minor_states(ci_tcp_state* ts, ci_netif* netif,
            remove this connection from TIME WAIT, and
            pass to listen socket for processing */
 
-        filter_id = ci_netif_listener_lookup(netif,
-                                             oo_ip_hdr(pkt)->ip_daddr_be32,
-                                             tcp->tcp_dest_be16);
-        if( filter_id < 0 ) {
+        sock_id = ci_netif_listener_lookup(netif, sock_af_space(&ts->s),
+                                           sock_ipx_laddr(&ts->s),
+                                           sock_lport_be16(&ts->s));
+        if( OO_SP_IS_NULL(sock_id) ) {
           LOG_U(log(LPF "no matching listener for SYN in TIME_WAIT"));
           goto reopen_failed;
         }
-        s = SP_TO_SOCK(netif, CI_NETIF_FILTER_ID_TO_SOCK_ID(netif, filter_id));
+        s = SP_TO_SOCK(netif, sock_id);
         if( s->b.state != CI_TCP_LISTEN ) {
           LOG_U(log(LPF "non-listener targeted by SYN in TIME_WAIT"));
           goto reopen_failed;
@@ -3417,10 +3478,12 @@ static int handle_rx_minor_states(ci_tcp_state* ts, ci_netif* netif,
      * about those. */
     if( pkt->pf.tcp_rx.pay_len > 0 ||
         (tcp->tcp_flags & CI_TCP_FLAG_MASK) != CI_TCP_FLAG_ACK ) {
-      LOG_U(log(LPF "unexpected packet received while in TIME_WAIT"));
-      LOG_DU(ci_hex_dump(ci_log_fn, PKT_START(pkt), 64, 0));
+      if( ! ci_tcp_send_challenge_ack(netif, ts, pkt) )
+        ci_netif_pkt_release(netif, pkt);
     }
-    ci_netif_pkt_release_rx(netif, pkt);
+    else {
+      ci_netif_pkt_release(netif, pkt);
+    }
     break;
   case CI_TCP_CLOSED:
     /* For non-loopback connections:
@@ -3458,7 +3521,7 @@ static void explain_why_seq_unacceptable(ci_netif* netif, ci_tcp_state* ts,
   ci_ip_pkt_fmt* pkt = rxp->pkt;
 
   log(LNTS_FMT "SEQ UNACCEPTABLE "TCP_RX_FMT" ...",
-         LNTS_PRI_ARGS(netif, ts), TCP_RX_ARGS(rxp->pkt, ts));
+         LNTS_PRI_ARGS(netif, ts), TCP_RX_ARGS(rxp, ts));
 
   /* Fast exit if nothing interesting */
   if( ! SEQ_EQ(pkt->pf.tcp_rx.end_seq, rxp->seq) &&
@@ -3618,7 +3681,7 @@ static void handle_unacceptable_seq(ci_netif* netif, ci_tcp_state* ts,
     ++ts->stats.rx_ack_seq_errs;
 #ifndef NDEBUG
     if( ts->stats.rx_ack_seq_errs <= NI_OPTS(netif).tcp_max_seqerr_msg )
-      LOG_U(explain_why_seq_unacceptable(netif, ts, rxp));
+      LOG_TE(explain_why_seq_unacceptable(netif, ts, rxp));
 #endif
   }
   else {
@@ -3626,7 +3689,7 @@ static void handle_unacceptable_seq(ci_netif* netif, ci_tcp_state* ts,
     ++ts->stats.rx_seq_errs;
 #ifndef NDEBUG
     if( ts->stats.rx_seq_errs <= NI_OPTS(netif).tcp_max_seqerr_msg )
-      LOG_U(explain_why_seq_unacceptable(netif, ts, rxp));
+      LOG_TE(explain_why_seq_unacceptable(netif, ts, rxp));
 #endif
   }
 
@@ -3642,9 +3705,15 @@ static void handle_unacceptable_seq(ci_netif* netif, ci_tcp_state* ts,
 
   /* Reply with RST if unsynchronised, or empty ACK otherwise (rfc793 p37). */
   if( ts->s.b.state & CI_TCP_STATE_SYNCHRONISED ) {
-    pkt = ci_netif_pkt_rx_to_tx(netif, pkt);
-    if( pkt != NULL )
-      ci_tcp_send_ack(netif, ts, pkt, CI_FALSE);
+    if( OO_PP_EQ(ts->dsack_block, OO_PP_INVALID) &&
+        ! ci_tcp_may_send_ack_ratelimited(netif, ts) ) {
+      ci_netif_pkt_release(netif, pkt);
+    }
+    else {
+      pkt = ci_netif_pkt_rx_to_tx(netif, pkt);
+      if( pkt != NULL )
+        ci_tcp_send_ack(netif, ts, pkt, CI_FALSE);
+    }
   }
   else{
     LOG_U(log(LPF "%d handle unacceptable seq RSTACK needed because "
@@ -3698,10 +3767,13 @@ static void handle_rx_slow(ci_tcp_state* ts, ci_netif* netif,
            log(LNT_FMT "ECN flags=%x not implemented (ignored)",
                LNT_PRI_ARGS(netif, ts), (unsigned) tcp->tcp_flags));
 
-  ci_assert_equal(oo_ip_hdr(pkt)->ip_saddr_be32, ts->s.pkt.ip.ip_daddr_be32);
-  ci_assert_equal(oo_ip_hdr(pkt)->ip_daddr_be32, ts->s.pkt.ip.ip_saddr_be32);
-  ci_assert_equal(tcp->tcp_source_be16,  TS_TCP(ts)->tcp_dest_be16);
-  ci_assert_equal(tcp->tcp_dest_be16,    TS_TCP(ts)->tcp_source_be16);
+  ci_assert(CI_IPX_ADDR_EQ(RX_PKT_SADDR(pkt),
+                             ipcache_raddr(&ts->s.pkt)));
+  ci_assert(CI_IPX_ADDR_EQ(RX_PKT_DADDR(pkt),
+                             ipcache_laddr(&ts->s.pkt)));
+
+  ci_assert_equal(tcp->tcp_source_be16, TS_IPX_TCP(ts)->tcp_dest_be16);
+  ci_assert_equal(tcp->tcp_dest_be16, TS_IPX_TCP(ts)->tcp_source_be16);
 
   /* Okay, we can now check the ACKs and sequence nos in detail.
   ** First PAWS rfc1323
@@ -3753,7 +3825,8 @@ static void handle_rx_slow(ci_tcp_state* ts, ci_netif* netif,
 
   /* Reconfirm ARP entry if necessary. */
   if( SEQ_GT(rxp->ack, tcp_snd_una(ts)) )
-    oo_cp_arp_confirm(netif->cplane, &ts->s.pkt.mac_integrity);
+    oo_cp_arp_confirm(netif->cplane, &ts->s.pkt.fwd_ver,
+                      ci_ni_fwd_table_id(netif));
 
   /* Once you're synchronised rfc793 says all segments must have an ACK.
   ** So we don't even bother to check the ACK flag.  The worst that can
@@ -3812,25 +3885,15 @@ static void handle_rx_slow(ci_tcp_state* ts, ci_netif* netif,
       ci_tcp_urg_pkt_process(ts, netif, rxp);
 
     if( CI_UNLIKELY(tcp->tcp_flags & CI_TCP_FLAG_SYN) ) {
-      /* We can get a SYN when connected: A duplicate.  Of course it could
-      ** also be carrying new data (or could be completely bogus), but
-      ** figuring that out requires us to know what our initial sequence
-      ** number was, and this sounds like a PITA to me.  We could just ACK
-      ** it and bin it in the hope that the other end will then just
-      ** retransmit the data part.  But we'd get stuck if the other end
-      ** insists on retransmitting the SYN as well.
-      **
-      ** So we just assume that the SYN is a correct duplicate, skip over
-      ** it, and carry on.
+      /* We can get a SYN when connected: A duplicate, or blind window
+       * attack.  Send challenge ACK, in the same way as Linux does it
+       * (see tcp_validate_incoming()).
       */
       LOG_TC(log(LNTS_FMT "SYN (duplicate?) ignored "TCP_RX_FMT,
-                 LNTS_PRI_ARGS(netif,ts), TCP_RX_ARGS(pkt, ts)));
-      /* [rxp->seq] is used by the RX path, but there are other places, notably
-       * in ci_tcp_rx_deliver_rob(), where we re-read the sequence number from
-       * the TCP header, so we need to update both. */
-      ++rxp->seq;
-      tcp->tcp_seq_be32 = CI_BSWAP_BE32(rxp->seq);
-      tcp->tcp_flags &=~ CI_TCP_FLAG_SYN;
+                 LNTS_PRI_ARGS(netif,ts), TCP_RX_ARGS(rxp, ts)));
+      if( ! ci_tcp_send_challenge_ack(netif, ts, rxp->pkt) )
+        ci_netif_pkt_release(netif, rxp->pkt);
+      return;
     }
 
     /* Delivering data needs to be the last thing we do, 'cos we may not
@@ -3877,7 +3940,7 @@ static void handle_rx_slow(ci_tcp_state* ts, ci_netif* netif,
         */
         n = SEQ_SUB(pkt->pf.tcp_rx.end_seq,tcp_rcv_wnd_right_edge_sent(ts));
         LOG_U(log(LPF "%d %s EXCEEDS WIN by %d " TCP_RX_FMT " flags %x",
-                  S_FMT(ts), state_str(ts), n, TCP_RX_ARGS(pkt, ts),
+                  S_FMT(ts), state_str(ts), n, TCP_RX_ARGS(rxp, ts),
                   tcp->tcp_flags));
         ci_assert( OO_SP_IS_NULL(ts->local_peer) );
         pkt->pf.tcp_rx.end_seq -= n;
@@ -4029,7 +4092,7 @@ static void handle_rx_slow(ci_tcp_state* ts, ci_netif* netif,
       /* This is either bad incoming data, or an unanticipated case */
       LOG_U(log(LPF "%d %s packet with no ACK flags %x " TCP_RX_FMT,
                 S_FMT(ts), state_str(ts), tcp->tcp_flags,
-                TCP_RX_ARGS(pkt,ts)));
+                TCP_RX_ARGS(rxp, ts)));
     }
 
     goto not_unacceptable_ack;
@@ -4051,10 +4114,11 @@ static void handle_rx_slow(ci_tcp_state* ts, ci_netif* netif,
 
   /* Is it a zero-window probe? */
   if( (ts->s.b.state & CI_TCP_STATE_SYNCHRONISED) &&
-      SEQ_EQ(rxp->seq + 1, tcp_rcv_nxt(ts)) ) {
+      SEQ_EQ(rxp->seq + 1, tcp_rcv_nxt(ts)) &&
+      tcp->tcp_flags == CI_TCP_FLAG_ACK ) {
     ci_uint32 snd_nxt_before, snd_nxt_after;
     LOG_TR(log(LNT_FMT "ZWIN probe "TCP_RX_FMT,
-               LNT_PRI_ARGS(netif, ts), TCP_RX_ARGS(pkt, ts)));
+               LNT_PRI_ARGS(netif, ts), TCP_RX_ARGS(rxp, ts)));
     snd_nxt_before = tcp_snd_nxt(ts);
     /* Even though it's a zwin probe it may give us more window, so
      * have to look more closely at the ACK.  NB. There's more we
@@ -4148,10 +4212,14 @@ static void handle_no_match(ci_netif* ni, ciip_tcp_rx_pkt* rxp)
   ** level.
   */
   ci_ip_pkt_fmt* pkt = rxp->pkt;
-  ci_ip4_hdr* ip = oo_ip_hdr(pkt);
+  int af = oo_pkt_af(pkt);
+  ci_ipx_hdr_t* ip = oo_ipx_hdr(pkt);
   ci_tcp_hdr* tcp = rxp->tcp;
   int reset = 1; /* We send a TCP reset unless we have a good reason
                         not to. See RFC793 p36 */
+#if ! CI_CFG_IPV6
+  (void)af;
+#endif
 
   if( oo_tcpdump_check_no_match(ni, pkt, pkt->intf_i) ) {
     /* note: metada of the packet might get overwritten below on reply
@@ -4164,23 +4232,22 @@ static void handle_no_match(ci_netif* ni, ciip_tcp_rx_pkt* rxp)
     /* Do not print message in RST case: it is pretty normal for
      * just-dropped connection with some packets inflight. */
     if( !(tcp->tcp_flags & CI_TCP_FLAG_RST) )
-        log(LN_FMT "NO MATCH %s:%u->%s:%u ["CI_TCP_FLAGS_FMT"] "
-	    "s=%08x a=%08x", LN_PRI_ARGS(ni),
-	    ip_addr_str(ip->ip_saddr_be32),
+        log(LN_FMT "NO MATCH "IPX_FMT":%u->"IPX_FMT":%u "
+            "["CI_TCP_FLAGS_FMT"] " "s=%08x a=%08x", LN_PRI_ARGS(ni),
+	    IPX_ARG(AF_IP(ipx_hdr_saddr(af, ip))),
 	    (unsigned) CI_BSWAP_BE16(tcp->tcp_source_be16),
-	    ip_addr_str(ip->ip_daddr_be32),
+	    IPX_ARG(AF_IP(ipx_hdr_daddr(af, ip))),
 	    (unsigned) CI_BSWAP_BE16(tcp->tcp_dest_be16),
 	    CI_TCP_HDR_FLAGS_PRI_ARG(tcp),
 	    SEQ(rxp->seq), SEQ(rxp->ack))
         );
-
 
   /*! \TODO: The following two calls to cicp_user_is_local_addr() could be
    *         merged into a one. If this code is run in U/L context each call
    *         results in a system call.
    */
   
-  if( ! cicp_user_is_local_addr(ni->cplane, ip->ip_daddr_be32) ) {
+  if( ! cicp_user_is_local_addr(ni->cplane, ipx_hdr_daddr(af, ip)) ) {
     /* The EF1 hardware filter only checks (remote ip, remote port, local
     ** port) matches; it is possible that a correct packet for another flow
     ** matches, so discard it (bug 1119).
@@ -4189,7 +4256,7 @@ static void handle_no_match(ci_netif* ni, ciip_tcp_rx_pkt* rxp)
     	      LN_PRI_ARGS(ni)));
     reset = 0;
   }
-  else if( cicp_user_is_local_addr(ni->cplane, ip->ip_saddr_be32) ) {
+  else if( cicp_user_is_local_addr(ni->cplane, ipx_hdr_saddr(af, ip)) ) {
     /* Either someone is lying, or packets are somehow making their way
     ** back to us.  Either way, the proper route for packets to us from us
     ** is via loopback, so just drop this.
@@ -4242,7 +4309,8 @@ int ci_tcp_rx_deliver_to_conn(ci_sock_cmn* s, void* opaque_arg)
   }
 #endif
 
-  ci_assert_equal(oo_ip_hdr(pkt)->ip_daddr_be32, s->pkt.ip.ip_saddr_be32);
+  ci_assert(CI_IPX_ADDR_EQ(RX_PKT_DADDR(pkt),
+                             ipcache_laddr(&s->pkt)));
 #ifndef NDEBUG
   if( NI_OPTS(ni).tcp_rx_checks )
     ci_tcp_rx_checks(ni, ts, pkt);
@@ -4317,6 +4385,9 @@ int ci_tcp_rx_deliver_to_conn(ci_sock_cmn* s, void* opaque_arg)
   /* All DSACKs should be cleared when ACK is sent;
    * dsack_block may be != CI_ILL_UNUSED only when duplicate packet is
    * processed now.
+   *
+   * NB strictly speaking, this assertion is not true.  It may happen that
+   * we failed to send ACK because we are out of packets.
    */
   ci_ss_assert_or(ni, ts->s.b.state == CI_TCP_LISTEN,
                   OO_PP_EQ(ts->dsack_block, OO_PP_INVALID));
@@ -4430,24 +4501,27 @@ static int ci_tcp_rx_deliver_to_listen(ci_sock_cmn* s, void* opaque_arg)
 void ci_tcp_handle_rx(ci_netif* netif, struct ci_netif_poll_state* ps,
                       ci_ip_pkt_fmt* pkt, ci_tcp_hdr* tcp, int ip_paylen)
 {
-  ci_ip4_hdr* ip = oo_ip_hdr(pkt);
+  ci_ip4_hdr* ip4 = oo_ip_hdr(pkt);
   ciip_tcp_rx_pkt rxp;
+  ci_addr_t daddr, saddr;
 
   ci_assert(netif);
   ASSERT_VALID_PKT(netif, pkt);
-  ci_ss_assert_eq(netif, ip->ip_protocol, IPPROTO_TCP);
+  ci_ss_assert_eq(netif, RX_PKT_PROTOCOL(pkt), IPPROTO_TCP);
 
   CI_TCP_STATS_INC_IN_SEGS( netif );
 
-  /* TCP MUST use the DF flags, but some TCP implementations don't.
-   * We accept both, but we do not accept fragmented packets. */
-  if( ip->ip_frag_off_be16 != CI_IP4_FRAG_DONT &&
-      ip->ip_frag_off_be16 != 0 ) {
-    goto scattered;
-  }
+  if( oo_pkt_af(pkt) == AF_INET ) {
+    /* TCP MUST use the DF flags, but some TCP implementations don't.
+     * We accept both, but we do not accept fragmented packets. */
+    if( ip4->ip_frag_off_be16 != CI_IP4_FRAG_DONT &&
+        ip4->ip_frag_off_be16 != 0 ) {
+      goto scattered;
+    }
 
-  if( OO_PP_NOT_NULL(pkt->frag_next) )
-    goto scattered;
+    if( OO_PP_NOT_NULL(pkt->frag_next) )
+      goto scattered;
+  }
 
   rxp.ni = netif;
   rxp.poll_state = ps;
@@ -4459,12 +4533,18 @@ void ci_tcp_handle_rx(ci_netif* netif, struct ci_netif_poll_state* ps,
   rxp.seq = CI_BSWAP_BE32(tcp->tcp_seq_be32);
   rxp.ack = CI_BSWAP_BE32(tcp->tcp_ack_be32);
 
+  daddr = RX_PKT_DADDR(pkt);
+  saddr = RX_PKT_SADDR(pkt);
+
   if( pkt->intf_i == OO_INTF_I_LOOPBACK ) {
     ci_sock_cmn *s = ID_TO_SOCK_CMN(netif, pkt->pf.tcp_rx.lo.rx_sock);
     ci_sock_cmn *sender = ID_TO_SOCK_CMN(netif, pkt->pf.tcp_rx.lo.tx_sock);
     int bad_recipient = (s == NULL) ||
         (~s->b.state & CI_TCP_STATE_TCP) ||
-        (tcp->tcp_dest_be16 != S_TCP_HDR(s)->tcp_source_be16);
+        (tcp->tcp_dest_be16 != S_IPX_TCP_HDR(s)->tcp_source_be16);
+    ci_addr_t cache_daddr = ipcache_raddr(&s->pkt);
+    /* s->laddr is faster than ipcache_laddr(), so we use it */
+    ci_addr_t cache_saddr = s->laddr;
 
     /* Fast path: these sockets are connected */
     if( !bad_recipient && sender != NULL &&
@@ -4477,12 +4557,12 @@ void ci_tcp_handle_rx(ci_netif* netif, struct ci_netif_poll_state* ps,
       return;
     }
 
-    if( !bad_recipient && tcp->tcp_dest_be16 != S_TCP_HDR(s)->tcp_source_be16 )
+    if( !bad_recipient && tcp->tcp_dest_be16 != S_IPX_TCP_HDR(s)->tcp_source_be16 )
       bad_recipient = 1;
 
     if( !bad_recipient && s->b.state == CI_TCP_LISTEN &&
-        ( s->pkt.ip.ip_saddr_be32 == INADDR_ANY ||
-          s->pkt.ip.ip_saddr_be32 == ip->ip_daddr_be32 )) {
+        ( CI_IPX_ADDR_IS_ANY(cache_saddr) ||
+          CI_IPX_ADDR_EQ(cache_saddr, daddr) )) {
       ci_assert( ((tcp->tcp_flags & CI_TCP_FLAG_SYN) &&
                   ! (tcp->tcp_flags & CI_TCP_FLAG_ACK)) ||
                  (! (tcp->tcp_flags & CI_TCP_FLAG_SYN) &&
@@ -4491,15 +4571,15 @@ void ci_tcp_handle_rx(ci_netif* netif, struct ci_netif_poll_state* ps,
                    CI_TCPT_FLAG_LOOP_DEFERRED)) );
       /* SYN to listening socket or data with TCP_DEFER_ACCEPT */
       rxp.hash = ci_netif_filter_hash(netif,
-                                      ip->ip_daddr_be32, tcp->tcp_dest_be16,
-                                      ip->ip_saddr_be32, tcp->tcp_source_be16,
+                                      daddr, tcp->tcp_dest_be16,
+                                      saddr, tcp->tcp_source_be16,
                                       IPPROTO_TCP);
       ci_tcp_rx_deliver_to_listen(s, &rxp);
     }
     else if( !bad_recipient && s->b.state & CI_TCP_STATE_TCP_CONN &&
-            ip->ip_daddr_be32 == s->pkt.ip.ip_saddr_be32 &&
-            ip->ip_saddr_be32 == s->pkt.ip.ip_daddr_be32 &&
-            tcp->tcp_source_be16 == S_TCP_HDR(s)->tcp_dest_be16) {
+            CI_IPX_ADDR_EQ(daddr, cache_saddr) &&
+            CI_IPX_ADDR_EQ(saddr, cache_daddr) &&
+            tcp->tcp_source_be16 == S_IPX_TCP_HDR(s)->tcp_dest_be16) {
       /* FIN from now-dead socket or SINACK */
       ci_assert( (tcp->tcp_flags & (CI_TCP_FLAG_FIN | CI_TCP_FLAG_RST)) ||
                  ( (tcp->tcp_flags & CI_TCP_FLAG_SYN) &&
@@ -4512,38 +4592,70 @@ void ci_tcp_handle_rx(ci_netif* netif, struct ci_netif_poll_state* ps,
              pkt->pf.tcp_rx.lo.rx_sock);
       if( (sender->b.state & CI_TCP_STATE_TCP_CONN) &&
           sender->b.state != CI_TCP_TIME_WAIT &&
-          ip->ip_daddr_be32 == sender->pkt.ip.ip_daddr_be32 &&
-          ip->ip_saddr_be32 == sender->pkt.ip.ip_saddr_be32 &&
-          tcp->tcp_source_be16 == S_TCP_HDR(sender)->tcp_source_be16 &&
-          tcp->tcp_dest_be16 == S_TCP_HDR(sender)->tcp_dest_be16 )
+          CI_IPX_ADDR_EQ(daddr, cache_daddr) &&
+          CI_IPX_ADDR_EQ(saddr, cache_saddr) &&
+          tcp->tcp_source_be16 == S_IPX_TCP_HDR(sender)->tcp_source_be16 &&
+          tcp->tcp_dest_be16 == S_IPX_TCP_HDR(sender)->tcp_dest_be16 )
         ci_tcp_drop(netif, SOCK_TO_TCP(sender), ECONNRESET);
       ci_netif_pkt_release(netif, pkt);
       return;
     }
     return;
   }
-  ci_netif_filter_for_each_match(netif,
-                                 ip->ip_daddr_be32, tcp->tcp_dest_be16,
-                                 ip->ip_saddr_be32, tcp->tcp_source_be16,
-                                 IPPROTO_TCP, pkt->intf_i, pkt->vlan,
-                                 ci_tcp_rx_deliver_to_conn, &rxp,
-                                 &rxp.hash);
-  if(CI_LIKELY( rxp.pkt == NULL ))
-    return;
 
-  ci_netif_filter_for_each_match(netif,
-                                 ip->ip_daddr_be32, tcp->tcp_dest_be16,
-                                 0, 0, IPPROTO_TCP, pkt->intf_i, pkt->vlan,
-                                 ci_tcp_rx_deliver_to_listen, &rxp, NULL);
-  if(CI_LIKELY( rxp.pkt == NULL ))
-    return;
+#if CI_CFG_IPV6
+  if( oo_pkt_af(pkt) == AF_INET6 ) {
+    ci_netif_filter_for_each_match_ip6(netif,
+                                       &daddr, tcp->tcp_dest_be16,
+                                       &saddr, tcp->tcp_source_be16,
+                                       IPPROTO_TCP, pkt->intf_i, pkt->vlan,
+                                       ci_tcp_rx_deliver_to_conn, &rxp,
+                                       &rxp.hash);
+    if(CI_LIKELY( rxp.pkt == NULL ))
+      return;
 
-  ci_netif_filter_for_each_match(netif,
-                                 0, tcp->tcp_dest_be16,
-                                 0, 0, IPPROTO_TCP, pkt->intf_i, pkt->vlan,
-                                 ci_tcp_rx_deliver_to_listen, &rxp, NULL);
-  if(CI_LIKELY( rxp.pkt == NULL ))
-    return;
+    ci_netif_filter_for_each_match_ip6(netif,
+                                       &daddr, tcp->tcp_dest_be16,
+                                       NULL, 0, IPPROTO_TCP, pkt->intf_i,
+                                       pkt->vlan, ci_tcp_rx_deliver_to_listen,
+                                       &rxp, NULL);
+    if(CI_LIKELY( rxp.pkt == NULL ))
+      return;
+
+    ci_netif_filter_for_each_match_ip6(netif,
+                                       &addr_any, tcp->tcp_dest_be16,
+                                       NULL, 0, IPPROTO_TCP, pkt->intf_i,
+                                       pkt->vlan, ci_tcp_rx_deliver_to_listen,
+                                       &rxp, NULL);
+    if(CI_LIKELY( rxp.pkt == NULL ))
+      return;
+  }
+  else
+#endif
+  {
+    ci_netif_filter_for_each_match(netif,
+                                   ip4->ip_daddr_be32, tcp->tcp_dest_be16,
+                                   ip4->ip_saddr_be32, tcp->tcp_source_be16,
+                                   IPPROTO_TCP, pkt->intf_i, pkt->vlan,
+                                   ci_tcp_rx_deliver_to_conn, &rxp,
+                                   &rxp.hash);
+    if(CI_LIKELY( rxp.pkt == NULL ))
+      return;
+
+    ci_netif_filter_for_each_match(netif,
+                                   ip4->ip_daddr_be32, tcp->tcp_dest_be16,
+                                   0, 0, IPPROTO_TCP, pkt->intf_i, pkt->vlan,
+                                   ci_tcp_rx_deliver_to_listen, &rxp, NULL);
+    if(CI_LIKELY( rxp.pkt == NULL ))
+      return;
+
+    ci_netif_filter_for_each_match(netif,
+                                   0, tcp->tcp_dest_be16,
+                                   0, 0, IPPROTO_TCP, pkt->intf_i, pkt->vlan,
+                                   ci_tcp_rx_deliver_to_listen, &rxp, NULL);
+    if(CI_LIKELY( rxp.pkt == NULL ))
+      return;
+  }
 
   if( ci_netif_pkt_pass_to_kernel(netif, pkt) ) {
     CITP_STATS_NETIF_INC(netif, no_match_pass_to_kernel_tcp);

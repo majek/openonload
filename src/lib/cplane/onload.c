@@ -1,21 +1,12 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 OR Solarflare-Binary */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /* Cplane interface to be used from Onload */
 #include <cplane/cplane.h>
 #include <cplane/mmap.h>
+
+#ifdef __KERNEL__
+#include <driver/linux_affinity/kernel_compat.h>
+#endif
 
 #ifdef __CI_INTERNAL_TRANSPORT_CONFIG_OPT_H__
 #error "don't include ci/internal/transport_config_opt.h from binary-only code"
@@ -27,22 +18,44 @@
  * control plane and its clients.  On failure, this function will clean up any
  * partially-initialised state. */
 int
-oo_cp_create(int fd, struct oo_cplane_handle* cp, enum cp_sync_mode mode)
+oo_cp_create(int fd, struct oo_cplane_handle* cp, enum cp_sync_mode mode,
+             ci_uint32 flags)
 {
+  static const ci_uint32 SUPPORTED_FLAGS = CP_CREATE_FLAGS_INIT_NET;
+
+  size_t fwd_offset, fwd_len, fwd_rw_offset, fwd_rw_len;
+
   struct cp_mibs* mibs = cp->mib;
   int rc;
-  void* mem;
-  ci_uint32 op = mode;
+  void* mib_mem;
+  void* fwd_mem;
+  ci_uint32 op;
+
+  if( flags & ~SUPPORTED_FLAGS )
+    return -EINVAL;
 
   /* Check user-kernel interface version. */
   rc = cp_ioctl(fd, OO_IOC_CP_CHECK_VERSION, &oo_cplane_api_version);
   if( rc != 0 )
     return rc;
 
+  /* If the caller has requested init_net, we need to associate the file with
+   * that instance before we do any other cplane ioctls. */
+  if( flags & CP_CREATE_FLAGS_INIT_NET ) {
+    op = CP_SELECT_INSTANCE_INIT_NET;
+    rc = cp_ioctl(fd, OO_IOC_CP_SELECT_INSTANCE, &op);
+    if( rc != 0 ) {
+      ci_log("ERROR: failed to select control plane instance: %s",
+             strerror(-rc));
+      return rc;
+    }
+  }
+
   /* Wait for the control plane server to start if necessary.  This ioctl does
    * an interruptible sleep while waiting.  If a non-fatal signal is received
    * while we're asleep, the ioctl will fail with EINTR, and we want to try
    * again. */
+  op = mode;
   do {
     rc = cp_ioctl(fd, OO_IOC_CP_WAIT_FOR_SERVER, &op);
   } while( rc == -EINTR );
@@ -58,34 +71,53 @@ oo_cp_create(int fd, struct oo_cplane_handle* cp, enum cp_sync_mode mode)
   ci_assert_equal(cp->bytes & (CI_PAGE_SIZE - 1), 0);
 
   /* Mmap MIBs */
-  mem = mmap(NULL, cp->bytes, PROT_READ , MAP_SHARED, fd,
-             OO_MMAP_TYPE_CPLANE << OO_MMAP_TYPE_SHIFT);
-  if( mem == MAP_FAILED ) {
+  mib_mem = mmap(NULL, cp->bytes, PROT_READ , MAP_SHARED, fd,
+                 OO_MMAP_MAKE_OFFSET(OO_MMAP_TYPE_CPLANE,
+                                     OO_MMAP_CPLANE_ID_MIB));
+  if( mib_mem == MAP_FAILED ) {
     ci_log("ERROR: failed to mmap cplane MIBs: %s", strerror(errno));
     return -errno;
   }
 
   /* Build MIBs */
-  mibs[1].dim = mibs[0].dim = mem;
-  cp_init_mibs(mem, mibs);
+  mibs[1].dim = mibs[0].dim = mib_mem;
+  cp_init_mibs(mib_mem, mibs);
 
-  /* Mmap rw memory */
-  mibs[1].fwd_rw = mibs[0].fwd_rw = mmap(
-          NULL,
-          CI_ROUND_UP((mibs[0].dim->fwd_mask + 1) * sizeof(mibs[0].fwd_rw[0]),
-                      CI_PAGE_SIZE),
-          PROT_READ | PROT_WRITE, MAP_SHARED, fd,
+  /* Mmap fwd (and associated fields) memory */
 #ifdef CP_SYSUNIT
-          /* see server.c init_memory() */
-          CI_ROUND_UP(cp->bytes, CI_PAGE_SIZE) +
+  fwd_len = CP_SHIM_FWD_BYTES;
+#else
+  fwd_len = CI_ROUND_UP(cp_calc_fwd_blob_size(mibs[0].dim), CI_PAGE_SIZE);
 #endif
-          ((OO_MMAP_TYPE_CPLANE << OO_MMAP_TYPE_SHIFT) |
-           (OO_MMAP_CPLANE_ID_FWD_RW << OO_MMAP_ID_SHIFT)));
-  if( mibs[0].fwd_rw == MAP_FAILED ) {
-    ci_log("ERROR: failed to mmap rw part of Control Plane memory: %s",
+  fwd_offset = CP_MMAP_LOCAL_FWD_OFFSET();
+  fwd_mem = mmap(NULL, fwd_len, PROT_READ, MAP_SHARED, fd, fwd_offset);
+  if( fwd_mem == MAP_FAILED ) {
+    ci_log("ERROR: failed to mmap fwd part of Control Plane memory: %s",
            strerror(errno));
     rc = -errno;
-    munmap(mem, cp->bytes);
+    munmap(mib_mem, cp->bytes);
+    return rc;
+  }
+  mibs[0].fwd_table.mask = mibs[1].fwd_table.mask = mibs->dim->fwd_mask;
+  cp_init_mibs_fwd_blob(fwd_mem, mibs);
+
+  /* Mmap fwd_rw memory */
+#ifdef CP_SYSUNIT
+  fwd_rw_len = CP_SHIM_FWD_RW_BYTES;
+#else
+  fwd_rw_len = CI_ROUND_UP(cp_calc_fwd_rw_size(mibs[0].dim), CI_PAGE_SIZE);
+#endif
+  fwd_rw_offset = CP_MMAP_LOCAL_FWD_RW_OFFSET();
+  mibs[1].fwd_table.rw_rows = mibs[0].fwd_table.rw_rows = mmap(
+          NULL, fwd_rw_len, PROT_READ | PROT_WRITE, MAP_SHARED,
+          fd, fwd_rw_offset);
+  if( mibs[0].fwd_table.rw_rows == MAP_FAILED ) {
+    ci_log("ERROR: failed to mmap fwd_rw part of Control Plane memory: %s",
+           strerror(errno));
+    rc = -errno;
+    munmap(fwd_mem, CI_ROUND_UP(cp_calc_fwd_blob_size(mibs[0].dim),
+                                CI_PAGE_SIZE));
+    munmap(mib_mem, cp->bytes);
     return rc;
   }
 
@@ -99,9 +131,10 @@ oo_cp_create(int fd, struct oo_cplane_handle* cp, enum cp_sync_mode mode)
 void
 oo_cp_destroy(struct oo_cplane_handle* cp)
 {
-  munmap(cp->mib->fwd_rw,
-         CI_ROUND_UP((cp->mib->dim->fwd_mask + 1) * sizeof(cp->mib->fwd_rw[0]),
-                     CI_PAGE_SIZE));
+  munmap(cp->mib->fwd_table.rows, /* rows pointer is equivalent to fwd_blob */
+         CI_ROUND_UP(cp_calc_fwd_blob_size(cp->mib->dim), CI_PAGE_SIZE));
+  munmap(cp->mib->fwd_table.rw_rows,
+         CI_ROUND_UP(cp_calc_fwd_rw_size(cp->mib->dim), CI_PAGE_SIZE));
   munmap(cp->mib->dim, cp->bytes);
 }
 #endif
@@ -120,26 +153,63 @@ oo_op_route_resolve(struct oo_cplane_handle* cp, struct cp_fwd_key* key)
 }
 #endif
 
+
+#ifdef __KERNEL__
+static DEFINE_PER_CPU(unsigned, seed);
+#endif
+static int oo_cp_multipath_hash(struct cp_fwd_key* key, int max)
+{
+  /* We'd better use hash from the key and some data from the connection -
+   * ports, socket_id, etc.
+   * However we do not have enough info here, and it is not easy to pass such
+   * data.  So we just do a very basic pseudo-random number generator.
+   *
+   * The specific LCRNG parameters here are taken from the C spec's
+   * recommendation.
+   */
+
+  unsigned p;
+#define NEXT_SEED(seed) (1103515245 * (seed) + 12345)
+#ifdef __KERNEL__
+  /* NB: not worrying about the possibility of preemption in this function.
+   * It'll just make the randomness slightly lower quality.
+   * See also the comments for raw_cpu_read in
+   * driver/linux_affinity/kernel_compat.h. */
+  p = NEXT_SEED(raw_cpu_read(seed));
+  raw_cpu_write(seed, p);
+#else
+  static __thread unsigned seed = 0;
+  seed = p = NEXT_SEED(seed);
+#endif
+  return ((p >> 16) & 0x7fff) % max;
+}
+
 int __oo_cp_route_resolve(struct oo_cplane_handle* cp,
                           cicp_verinfo_t* verinfo,
                           struct cp_fwd_key* key,
                           int/*bool*/ ask_server,
-                          struct cp_fwd_data* data)
+                          struct cp_fwd_data* data,
+                          cp_fwd_table_id fwd_table_id)
 {
-  struct cp_mibs* mib = &cp->mib[0];
+  struct cp_fwd_table* fwd_table = oo_cp_get_fwd_table(cp, fwd_table_id);
   cp_version_t ver, old_ver;
   cicp_mac_rowid_t id;
   struct cp_fwd_row* fwd;
+  int first_pass = 1;
+  ci_uint32 weight = CP_FWD_MULTIPATH_WEIGHT_NONE;
 
  find_again:
-  id = cp_fwd_find_match(mib, key);
+  id = cp_fwd_find_match(fwd_table, key, weight);
   if( id == CICP_MAC_ROWID_BAD ||
-      ~(fwd = cp_get_fwd_by_id(mib, id))->flags & CICP_FWD_FLAG_DATA_VALID ||
-      ! cp_fwd_find_row_found_perfect_match(mib, id, key) ) {
+      ~(fwd = cp_get_fwd_by_id(fwd_table, id))->flags &
+        CICP_FWD_FLAG_DATA_VALID ||
+      ! cp_fwd_find_row_found_perfect_match(fwd_table, id, key) ) {
     if( ! ask_server )
       return -ENOENT;
-    oo_op_route_resolve(cp, key);
+    oo_op_route_resolve(cp, key CI_KERNEL_ARG(fwd_table_id));
     ask_server = CI_FALSE;
+    first_pass = 1;
+    weight = CP_FWD_MULTIPATH_WEIGHT_NONE;
     goto find_again;
   }
 
@@ -150,10 +220,16 @@ int __oo_cp_route_resolve(struct oo_cplane_handle* cp,
         goto find_again;
     ci_rmb();
     *data = *cp_get_fwd_data_current(fwd);
+    if( first_pass && data->weight.end > 1 ) {
+      weight = oo_cp_multipath_hash(key, data->weight.end);
+      first_pass = 0;
+      if( ! cp_fwd_weight_match(weight, &data->weight) )
+        goto find_again;
+    }
 
     /* We can accidentally increase TTL for a wrong row  - we do not care */
     if( fwd->flags & CICP_FWD_FLAG_STALE )
-      mib->fwd_rw[id].frc_used = ci_frc64_get();
+      fwd_table->rw_rows[id].frc_used = ci_frc64_get();
     old_ver = ver;
     ci_rmb();
   } while( old_ver != (ver = OO_ACCESS_ONCE(*cp_fwd_version(fwd))) );
@@ -161,16 +237,16 @@ int __oo_cp_route_resolve(struct oo_cplane_handle* cp,
   verinfo->id = id;
   verinfo->version = ver;
 
-  /* Cplane server will refresh ARP when it reads fwd_rw[id], but it may
+  /* Cplane server will refresh ARP when it reads rw_rows[id], but it may
    * happen after some time.  Ask for the ARP immediately. */
-  if( ask_server && ! data->arp_valid )
-    oo_cp_arp_resolve(cp, verinfo);
+  if( ask_server && ! (data->flags & CICP_FWD_DATA_FLAG_ARP_VALID) )
+    oo_cp_arp_resolve(cp, verinfo, fwd_table_id);
   return 0;
 }
 
 int
 oo_cp_get_hwport_properties(struct oo_cplane_handle* cp, ci_hwport_id_t hwport,
-                            ci_uint8* out_mib_flags,
+                            cp_hwport_flags_t* out_mib_flags,
                             ci_uint32* out_oo_vi_flags_mask,
                             ci_uint32* out_efhw_flags_extra,
                             ci_uint8* out_pio_len_shift,

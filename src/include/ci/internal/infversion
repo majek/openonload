@@ -1,6 +1,0 @@
-# STAMPINF sets the DriverVer line in the [Version] section
-# of the INF files to "$STAMPINF_DATE$,$STAMPINF_VERSION$"
-#
-# STAMPINF_DATE defaults to the current date
-# STAMPINF_VERSION is set below:
-STAMPINF_VERSION=3.3.0.6207

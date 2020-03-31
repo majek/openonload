@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_HEADER >
@@ -276,6 +263,9 @@
 #define CI_IP_MAX_TOS 255
 /* 8-bit field - but individual bits have (ignored) meaning */
 
+/* IPv6 Traffic Class default */
+#define CI_IPV6_DFLT_TCLASS 0
+
 /* Should we generate code that protects us against invalid shared state?
 ** By default we want the kernel to be robust to arbitrary shared state,
 ** but user-level to be fast.
@@ -292,12 +282,6 @@
  * for a while.
  */
 #define CI_CFG_HW_TIMER                 1
-
-/* Implement stack pointers as actual pointers. */
-#define CI_CFG_OOP_IS_PTR               0
-
-/* Implement socket pointers as actual pointers. */
-#define CI_CFG_SOCKP_IS_PTR             0
 
 /* Enable invariant checking on entry/exit to library (sockcall intercept) */
 #define CI_CFG_FDTABLE_CHECKS          0
@@ -390,6 +374,18 @@
 
 /* Should we send DSACK option in TCP? */
 #define CI_CFG_TCP_DSACK 1
+
+/* Do we assassinate TIME-WAIT TCP connections when needed?
+ * Default value for EF_TCP_TIME_WAIT_ASSASSINATION. */
+#define CI_CFG_TIME_WAIT_ASSASSINATE 1
+
+/* Default challenge ACK limitation (in count per second),
+ * same as of linux-4.19 */
+#define CI_CFG_CHALLENGE_ACK_LIMIT 1000
+
+/* Default ACK limitation when sending respnse to invalid packet,
+ * in ms, same as of linux-4.19 */
+#define CI_CFG_TCP_OUT_OF_WINDOW_ACK_RATELIMIT 500
 
 /* Path to the /proc/sys/ */
 #define CI_CFG_PROC_PATH		"/proc/sys/"
@@ -539,9 +535,6 @@
 #define CI_CFG_SPIN_STATS 1
 #endif
 
-/* Enable IPv6 support */
-#define CI_CFG_IPV6 0
-
 /*
  * install broadcast hardware filters for UDP
  * - not needed currently as all such sockets get passed to OS
@@ -552,15 +545,6 @@
  * overhead when packets are large, but wastes memory when they aren't.
  */
 #define CI_CFG_PKT_BUF_SIZE             2048
-
-/* Size of socket shared state buffer.  Must be 1024 or 2048.  Larger
- * value is needed if you enable too many CI_CFG_* options, such as
- * CI_CFG_TCP_SOCK_STATS. */
-#if CI_CFG_IPV6
-#define CI_CFG_EP_BUF_SIZE              2048
-#else
-#define CI_CFG_EP_BUF_SIZE              1024
-#endif
 
 /* Allow WaitFor[Single,Multiple]Object to spin polling netifs before
  * blocking.
@@ -694,10 +678,6 @@
 /* Do we need SO_TIMESTAMPING, WODA, ...? */
 #define CI_CFG_TIMESTAMPING 1
 
-/* Enable gathering various performance metrics. */
-#define CI_CFG_TCP_METRICS              0
-#define CI_CFG_METRICS_RING_SIZE        256  /* must be 2^x */
-
 /* Set to 1 to enable measuring the delta between packets being
  * received by the NIC and processed by the stack.
  */
@@ -705,9 +685,17 @@
 #define CI_CFG_PROC_DELAY_BUCKETS       20
 #define CI_CFG_PROC_DELAY_NS_SHIFT      10
 
-
 /* Include "extra" transport_config_opt to allow build-time profiles */
 #include TRANSPORT_CONFIG_OPT_HDR
+
+/* Size of socket shared state buffer.  Must be 1024 or 2048.  Larger
+ * value is needed if you enable too many CI_CFG_* options, such as
+ * CI_CFG_TCP_SOCK_STATS. */
+#define CI_CFG_EP_BUF_SIZE              1024
+
+#if CI_CFG_IPV6 && !CI_CFG_FAKE_IPV6
+#error "CI_CFG_FAKE_IPV6 should be enabled to support IPv6"
+#endif
 
 #endif /* __CI_INTERNAL_TRANSPORT_CONFIG_OPT_H__ */
 /*! \cidoxg_end */

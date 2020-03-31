@@ -1,8 +1,7 @@
-######################################################################
-# Description: Library of routines for manipulating representations
-#              of sets of integers.
-#      Author: David Riddoch <driddoch@solarflare.com>
-######################################################################
+# SPDX-License-Identifier: GPL-2.0
+# X-SPDX-Copyright-Text: (c) Solarflare Communications Inc
+
+# Library of routines for manipulating representations of sets of integers.
 
 import re
 
@@ -11,6 +10,7 @@ import re
 import sys
 if sys.version_info >= (3,0):
     long = int
+    xrange = range
 
 
 class BadMask(Exception):

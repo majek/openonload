@@ -1,21 +1,8 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: BSD-2-Clause */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /* trader_onload_ds_efvi
  *
- * Copyright 2015 Solarflare Communications Inc.
+ * Copyright 2015-2019 Solarflare Communications Inc.
  * Author: David Riddoch
  *
  * This is a sample application to demonstrate usage of Onload's "delegated
@@ -52,9 +39,13 @@
 #include <etherfabric/pio.h>
 #include <etherfabric/pd.h>
 #include <etherfabric/memreg.h>
+#include <etherfabric/capabilities.h>
+#include <etherfabric/checksum.h>
+#include <ci/net/ethernet.h>
 #include <onload/extensions.h>
 #include "utils.h"
 
+#include <stddef.h>
 #include <pthread.h>
 #include <arpa/inet.h>
 #include <net/if.h>
@@ -68,15 +59,24 @@
 #define MTU                   1500
 #define MAX_ETH_HEADERS       (14/*ETH*/ + 4/*802.1Q*/)
 #define MAX_IP_TCP_HEADERS    (20/*IP*/ + 20/*TCP*/ + 12/*TCP options*/)
-#define MAX_PACKET            (MTU + MAX_ETH_HEADERS)
-#define MAX_MESSAGE           (MTU - MAX_IP_TCP_HEADERS)
-
+#define N_TX_BUFS             1u
+#define FIRST_TX_BUF          0u
+#define PKT_BUF_SIZE          2048
 
 static bool        cfg_delegated;
 static int         cfg_rx_size = 300;
 static int         cfg_tx_size = 200;
 static const char* cfg_port = "8122";
 static const char* cfg_mcast_addr = "224.1.2.3";
+static bool        cfg_ctpio_no_poison = 0;
+static unsigned    cfg_ctpio_thresh = 64;
+static int         cfg_pio_only = 0;
+
+struct pkt_buf {
+  ef_addr           dma_addr;
+  int               id;
+  char              dma_start[1]  EF_VI_ALIGN(EF_VI_DMA_ALIGN);
+};
 
 
 struct client_state {
@@ -90,15 +90,19 @@ struct client_state {
   ef_vi                        vi;
   char*                        msg_buf;
   int                          msg_len;
+  unsigned                     tx_offset;
   /* pio_pkt_len: Non-zero means that we have a prepared send ready to go. */
   int                          pio_pkt_len;
   bool                         pio_in_use;
+  bool                         use_ctpio;
   bool                         send_is_delegated;
   struct onload_delegated_send ods;
-  char                         pkt_buf[MAX_PACKET];
+  struct pkt_buf*              pkt_bufs[N_TX_BUFS];
+  ef_memreg                    memreg;
   char                         recv_buf[MTU];
   unsigned                     n_normal_sends;
   unsigned                     n_delegated_sends;
+  unsigned                     n_ctpio_sends;
 };
 
 
@@ -112,14 +116,16 @@ static void evq_poll(struct client_state* cs)
 {
   ef_request_id ids[EF_VI_TRANSMIT_BATCH];
   ef_event      evs[EF_VI_EVENT_POLL_MIN_EVS];
-  int           n_ev, i;
+  int           n_ev, n_tx, i;
 
   n_ev = ef_eventq_poll(&(cs->vi), evs, sizeof(evs) / sizeof(evs[0]));
   for( i = 0; i < n_ev; ++i )
     switch( EF_EVENT_TYPE(evs[i]) ) {
     case EF_EVENT_TYPE_TX:
-      if( ef_vi_transmit_unbundle(&(cs->vi), &evs[i], ids) )
+      if( (n_tx = ef_vi_transmit_unbundle(&(cs->vi), &evs[i], ids)) )
         cs->pio_in_use = false;
+      if( EF_EVENT_TX_CTPIO(evs[i]) )
+        cs->n_ctpio_sends += n_tx;
       break;
     default:
       fprintf(stderr, "ERROR: unexpected event "EF_EVENT_FMT"\n",
@@ -184,7 +190,7 @@ static void delegated_prepare(struct client_state* s)
    * a larger value to onload_delegated_send_prepare() just to show that
    * this is possible.
    */
-  s->ods.headers = s->pkt_buf;
+  s->ods.headers = s->pkt_bufs[FIRST_TX_BUF]->dma_start;
   s->ods.headers_len = MAX_ETH_HEADERS + MAX_IP_TCP_HEADERS;
   TEST( onload_delegated_send_prepare(s->tcp_sock, s->msg_len * 2, 0, &(s->ods))
           == ONLOAD_DELEGATED_SEND_RC_OK );
@@ -196,7 +202,9 @@ static void delegated_prepare(struct client_state* s)
    * meets the start of the message.
    */
   s->ods.headers = s->msg_buf - s->ods.headers_len;
-  memmove(s->ods.headers, s->pkt_buf, s->ods.headers_len);
+  memmove(s->ods.headers, s->pkt_bufs[FIRST_TX_BUF]->dma_start,
+          s->ods.headers_len);
+  s->tx_offset = (char*) s->ods.headers - s->pkt_bufs[FIRST_TX_BUF]->dma_start;
 
   /* If we want to send more than MSS (maximum segment size), we will have
    * to segment the message into multiple packets.  We do not handle that
@@ -211,7 +219,22 @@ static void delegated_prepare(struct client_state* s)
   if( s->msg_len <= allowed_to_send ) {
     s->pio_pkt_len = s->ods.headers_len + s->msg_len;
     onload_delegated_send_tcp_update(&(s->ods), s->msg_len, 1);
-    TRY( ef_pio_memcpy(&(s->vi), s->ods.headers, 0, s->pio_pkt_len) );
+    if( s->use_ctpio ) {
+      /* for CPTIO we need to fill in the IP and TCP checksums */
+      struct ci_ether_hdr* eth = ((void*) s->ods.headers);
+      struct iphdr* ip4 = (void*) ((char*) eth + ETH_HLEN);
+      struct tcphdr* tcp = (void*) (ip4 + 1);
+
+      struct iovec local_iov;
+      local_iov.iov_base = s->msg_buf;
+      local_iov.iov_len = s->msg_len;
+
+      ip4->check = ef_ip_checksum(ip4);
+      tcp->check = ef_tcp_checksum(ip4, tcp, &local_iov, 1);
+    }
+    else {
+      TRY( ef_pio_memcpy(&(s->vi), s->ods.headers, 0, s->pio_pkt_len) );
+    }
   }
   else {
     /* We can't send at the moment, due to congestion window or receive
@@ -228,7 +251,16 @@ static void delegated_prepare(struct client_state* s)
 static void delegated_send(struct client_state* cs)
 {
   /* Fast path send: */
-  TRY( ef_vi_transmit_pio(&(cs->vi), 0, cs->pio_pkt_len, 0) );
+  if( cs->use_ctpio ) {
+    struct pkt_buf* pb = cs->pkt_bufs[FIRST_TX_BUF];
+    ef_vi_transmit_ctpio(&cs->vi, pb->dma_start + cs->tx_offset,
+                         cs->pio_pkt_len, cfg_ctpio_thresh);
+    TRY(ef_vi_transmit_ctpio_fallback(&cs->vi, pb->dma_addr + cs->tx_offset,
+                                      cs->pio_pkt_len, 0));
+  }
+  else {
+    TRY( ef_vi_transmit_pio(&(cs->vi), 0, cs->pio_pkt_len, 0) );
+  }
   cs->pio_pkt_len = 0;
   cs->pio_in_use = 1;
 
@@ -283,7 +315,8 @@ static void ev_loop_sock(struct client_state* cs)
   close(cs->tcp_sock);
 
   printf("n_normal_sends: %u\n", cs->n_normal_sends);
-  printf("n_delegated_sends: %u\n", cs->n_delegated_sends);
+  printf("n_delegated_sends: %u (ctpio=%u)\n", cs->n_delegated_sends,
+         cs->n_ctpio_sends);
 }
 
 
@@ -312,15 +345,43 @@ static void* alarm_thread(void* arg)
 
 static void ef_vi_init(struct client_state* cs)
 {
+  unsigned long capability_val;
   int ifindex;
+  int64_t ctpio_mode;
+  enum ef_vi_flags vi_flags = EF_VI_TX_CTPIO;
+  if( cfg_ctpio_no_poison )
+    vi_flags |= EF_VI_TX_CTPIO_NO_POISON;
 
   cs->pio_pkt_len = 0;
   cs->pio_in_use = ! cfg_delegated;
   TRY( sock_get_ifindex(cs->tcp_sock, &ifindex) );
   TRY( ef_driver_open(&(cs->dh)) );
   TRY( ef_pd_alloc(&(cs->pd), cs->dh, ifindex, EF_PD_DEFAULT) );
-  TRY( ef_vi_alloc_from_pd(&(cs->vi), cs->dh, &(cs->pd), cs->dh,
-                           -1, 0,-1, NULL, -1, EF_VI_FLAGS_DEFAULT) );
+
+  /* If NIC supports CTPIO use it */
+  if( ! cfg_pio_only &&
+      ef_vi_capabilities_get(cs->dh, ifindex, EF_VI_CAP_CTPIO,
+                             &capability_val) == 0 && capability_val ) {
+    if( ef_vi_alloc_from_pd(&(cs->vi), cs->dh, &(cs->pd), cs->dh,
+                            -1, 0, -1, NULL, -1, vi_flags) == 0 ) {
+      cs->use_ctpio = 1;
+      fprintf(stderr, "Using VI with CTPIO.\n");
+
+      TRY( onload_stack_opt_get_int("EF_CTPIO_MODE", &ctpio_mode) );
+      if( ctpio_mode == 1 )
+        fprintf(stderr, "Warning EF_CTPIO_MODE=sf-np, which will increase "
+                "latency\n");
+    }
+    else {
+      fprintf(stderr, "Failed to allocate VI with CTPIO.\n");
+      TEST(0);
+    }
+  }
+  else {
+    TRY( ef_vi_alloc_from_pd(&(cs->vi), cs->dh, &(cs->pd), cs->dh,
+                             -1, 0, -1, NULL, -1, EF_VI_FLAGS_DEFAULT) );
+    cs->use_ctpio = 0;
+  }
 #if EF_VI_CONFIG_PIO
   TRY( ef_pio_alloc(&(cs->pio), cs->dh, &(cs->pd), -1, cs->dh));
   TRY( ef_pio_link_vi(&(cs->pio), cs->dh, &(cs->vi), cs->dh));
@@ -328,6 +389,20 @@ static void ef_vi_init(struct client_state* cs)
   fprintf(stderr, "PIO not available on this CPU type\n");
   TEST( 0 );
 #endif
+
+  int bytes = N_TX_BUFS * PKT_BUF_SIZE;
+  void* p;
+  TEST( posix_memalign(&p, CI_PAGE_SIZE, bytes) == 0 );
+  TRY( ef_memreg_alloc(&cs->memreg, cs->dh,
+                       &cs->pd, cs->dh, p, bytes) );
+  int i;
+  for( i = 0; i < N_TX_BUFS; ++i ) {
+    cs->pkt_bufs[i] = (void*) ((char*) p + i * PKT_BUF_SIZE);
+    cs->pkt_bufs[i]->dma_addr =
+      ef_memreg_dma_addr(&cs->memreg, i * PKT_BUF_SIZE) +
+      offsetof(struct pkt_buf, dma_start);
+    cs->pkt_bufs[i]->id = i;
+  }
 }
 
 
@@ -336,8 +411,6 @@ static void init(struct client_state* cs, const char* mcast_intf,
 {
   cs->alarm = false;
   cs->alarm_usec = 20000;
-  cs->msg_len = cfg_tx_size;
-  cs->msg_buf = cs->pkt_buf + MAX_ETH_HEADERS + MAX_IP_TCP_HEADERS;
 
   /* Create TCP socket, connect to server, give it configuration. */
   TRY( cs->tcp_sock = mk_socket(0, SOCK_STREAM, connect, server, port) );
@@ -359,6 +432,9 @@ static void init(struct client_state* cs, const char* mcast_intf,
   }
 
   ef_vi_init(cs);
+  cs->msg_len = cfg_tx_size;
+  cs->msg_buf = cs->pkt_bufs[FIRST_TX_BUF]->dma_start + MAX_ETH_HEADERS +
+    MAX_IP_TCP_HEADERS;
 }
 
 
@@ -372,6 +448,9 @@ static void usage_msg(FILE* f)
   fprintf(f, "  -s <msg-size>     - TX (TCP) message size\n");
   fprintf(f, "  -r <msg-size>     - RX (UDP) message size\n");
   fprintf(f, "  -p <port>         - set TCP/UDP port number\n");
+  fprintf(f, "  -c <threshold>    - CTPIO cut-through threshold\n");
+  fprintf(f, "  -n                - CTPIO no-poison mode\n");
+  fprintf(f, "  -P                - use PIO (rather than CTPIO)\n");
   fprintf(f, "\n");
 }
 
@@ -387,7 +466,7 @@ int main(int argc, char* argv[])
 {
   int c;
 
-  while( (c = getopt(argc, argv, "hs:r:dp:")) != -1 )
+  while( (c = getopt(argc, argv, "hs:r:dp:c:nP")) != -1 )
     switch( c ) {
     case 'h':
       usage_msg(stdout);
@@ -404,6 +483,15 @@ int main(int argc, char* argv[])
       break;
     case 'p':
       cfg_port = optarg;
+      break;
+    case 'c':
+      cfg_ctpio_thresh = atoi(optarg);
+      break;
+    case 'n':
+      cfg_ctpio_no_poison = 1;
+      break;
+    case 'P':
+      cfg_pio_only = 1;
       break;
     case '?':
       usage_err();

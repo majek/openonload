@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file 
 ** <L5_PRIVATE L5_SOURCE>
@@ -35,7 +22,7 @@
 
 /*--------------------------------------------------------------------
  *
- * ci_shmbuf_t: A (potentially) large buffer that is page-wise contiguous
+ * ci_shmbuf_t: A (potentially) large buffer that is contiguous
  * in the kernel address space.  It may be mapped to userlevel, where it is
  * contiguous.  On some platforms, pages may be allocated on demand.
  *
@@ -44,27 +31,30 @@
  *--------------------------------------------------------------------*/
 
 typedef struct {
-  struct efhw_page*	pages;
-  unsigned		n_pages;
+  void*         base;
+  size_t        n_pages;
+  struct page** pages;
 } ci_shmbuf_t;
 
 
-extern int  ci_shmbuf_alloc(ci_shmbuf_t* b, unsigned n_pages);
+extern int
+ci_shmbuf_alloc(ci_shmbuf_t* b, unsigned n_pages, unsigned n_fault_pages);
 extern void ci_shmbuf_free(ci_shmbuf_t* b);
 
 ci_inline unsigned ci_shmbuf_size(ci_shmbuf_t* b)
 { return b->n_pages << CI_PAGE_SHIFT; }
 
-#define __ci_shmbuf_ptr(b, off)				\
-  (efhw_page_ptr(&(b)->pages[(off) >> CI_PAGE_SHIFT])	\
-   + ((off) & (CI_PAGE_SIZE - 1)))
+ci_inline void* __ci_shmbuf_ptr(ci_shmbuf_t* b, unsigned off) {
+  return (char*)b->base + off;
+}
 
-/* Returns true if accessing the shmbuf at the given offset (using
-** efab_shmbuf_ptr above) is safe.
+/* Asserts that accessing the shmbuf at the given offset (using
+** __ci_shmbuf_ptr above) is safe.
 */
-ci_inline int ci_shmbuf_access_okay(ci_shmbuf_t* b, unsigned off,
-				    unsigned size) {
-  unsigned end_off = off + size - 1;
+ci_inline void
+ci_shmbuf_assert_access_okay(ci_shmbuf_t* b, unsigned off, unsigned size)
+{
+  unsigned end_off __attribute__((unused)) = off + size - 1;
   /*
   ci_log("checking validity of %x", off >> CI_PAGE_SHIFT);
   ci_log("off %x size %x bufsize %x",
@@ -73,49 +63,31 @@ ci_inline int ci_shmbuf_access_okay(ci_shmbuf_t* b, unsigned off,
 	  efhw_page_is_valid(&b->pages[off >> CI_PAGE_SHIFT]),
 	  efhw_page_is_valid(&b->pages[end_off >> CI_PAGE_SHIFT])); 
   ci_log("eptr %p %p",__ci_shmbuf_ptr(b, off) + size - 1, __ci_shmbuf_ptr(b, end_off));
-  */  
-  return 1
-    /* The region lies within the shmbuf. */
-    && off + size <= (b->n_pages << CI_PAGE_SHIFT)
-    /* Pages have been allocated (assumes size <= CI_PAGE_SIZE). */
-    && efhw_page_is_valid(&b->pages[off >> CI_PAGE_SHIFT])
-    && efhw_page_is_valid(&b->pages[end_off >> CI_PAGE_SHIFT])
-    /* The object is contiguous in kernel address space. */
-    && __ci_shmbuf_ptr(b, off) + size - 1
-    == __ci_shmbuf_ptr(b, end_off);
+  */
+  /* The region lies within the shmbuf. */
+  ci_assert_le(off + size, b->n_pages << CI_PAGE_SHIFT);
+  /* Pages have been allocated (assumes size <= CI_PAGE_SIZE). */
+  ci_assert(b->pages[off >> CI_PAGE_SHIFT]);
+  ci_assert(b->pages[end_off >> CI_PAGE_SHIFT]);
 }
 
 ci_inline char* ci_shmbuf_ptr(ci_shmbuf_t* b, unsigned off) {
-  ci_assert(ci_shmbuf_access_okay(b, off, 1));
+  ci_shmbuf_assert_access_okay(b, off, 1);
   return __ci_shmbuf_ptr(b, off);
 }
 
 extern int ci_shmbuf_demand_page(ci_shmbuf_t* b, unsigned page_i,
 				 ci_irqlock_t* lock);
 
-
 ci_inline unsigned ci_shmbuf_nopage(ci_shmbuf_t* b, unsigned offset)
 {
   ci_assert(CI_OFFSET(offset, CI_PAGE_SIZE) == 0);
   offset >>= CI_PAGE_SHIFT;
   ci_assert(offset < b->n_pages);
-  if( efhw_page_is_valid(&b->pages[offset]) )
-    return efhw_page_pfn(&b->pages[offset]);
+  if( b->pages[offset] )
+    return page_to_pfn(b->pages[offset]);
   else 
     return (unsigned) -1;
-}
-
-ci_inline unsigned ci_shmbuf_demand_nopage(ci_shmbuf_t* b, unsigned offset,
-					   ci_irqlock_t* lock)
-{
-  unsigned page_i = offset >> CI_PAGE_SHIFT;
-  int rc = 0;
-  ci_assert(CI_OFFSET(offset, CI_PAGE_SIZE) == 0);
-  ci_assert(page_i < b->n_pages);
-  if( ! efhw_page_is_valid(&b->pages[page_i]) )
-    rc = ci_shmbuf_demand_page(b, page_i, lock);
-  if( rc == 0 )  return efhw_page_pfn(&b->pages[page_i]);
-  else           return (unsigned) -1;
 }
 
 ci_inline int ci_shmbuf_mmap(ci_shmbuf_t* b, unsigned offset,
@@ -129,7 +101,6 @@ ci_inline int ci_shmbuf_mmap(ci_shmbuf_t* b, unsigned offset,
   *p_offset += n;
   return 0;
 }
-
 
 #endif /* __CI_DRIVER_EFAB_SHMBUF_H__ */
 

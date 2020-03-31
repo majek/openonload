@@ -1,3 +1,6 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
+
 #ifdef __i386__
 /* Registers to use:
  *   eax - oldval_lo

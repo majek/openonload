@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-2.0 OR Solarflare-Binary
+# X-SPDX-Copyright-Text: (c) Solarflare Communications Inc
 GNU := 1
 
 #Following is how we optimised for PPC64 BE, which I doubt is optimal here,

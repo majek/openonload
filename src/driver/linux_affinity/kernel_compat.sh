@@ -1,4 +1,6 @@
 #!/bin/bash -eu
+# SPDX-License-Identifier: GPL-2.0
+# X-SPDX-Copyright-Text: (c) Solarflare Communications Inc
 ######################################################################
 
 me=$(basename "$0")
@@ -167,11 +169,56 @@ EFRM_HAVE_CONST_KERNEL_PARAM            symtype param_get_int include/linux/modu
 EFRM_HAVE_KERNEL_PARAM_OPS		symbol kernel_param_ops	include/linux/moduleparam.h
 
 EFRM_HAVE_TIMER_SETUP                   symbol timer_setup include/linux/timer.h
+EFRM_HAVE_READ_SEQCOUNT_LATCH           symbol raw_read_seqcount_latch include/linux/seqlock.h
+EFRM_HAVE_WRITE_SEQCOUNT_LATCH          symbol raw_write_seqcount_latch include/linux/seqlock.h
+EFRM_HAVE_RBTREE                        symbol rb_link_node_rcu include/linux/rbtree.h
+EFRM_HAVE_SKB_METADATA                  symbol skb_metadata_len include/linux/skbuff.h
+EFRM_HAVE_BIN2HEX                       symbol bin2hex include/linux/kernel.h
+EFRM_HAVE_CGROUP_STORAGE                symbol bpf_cgroup_storage_assign include/linux/bpf-cgroup.h
+EFRM_HAVE_ALLSYMS_SHOW_VALUE            symbol kallsyms_show_value include/linux/kallsyms.h
+EFRM_HAVE_PRANDOM_INIT_ONCE             symbol prandom_init_once include/linux/random.h
+EFRM_HAVE_PRANDOM_U32_STATE             symbol prandom_u32_state include/linux/random.h
+EFRM_PRANDOM_SEED_FULL_EXPORT           export prandom_seed_full_state include/linux/random.h lib/random32.c
+EFRM_HAVE_ARRAY_SIZE                    symbol array_size include/linux/overflow.h
+EFRM_HAVE_WRITE_ONCE                    symbol WRITE_ONCE include/linux/compiler.h
+EFRM_HAVE_INIT_LIST_HEAD_RCU            symbol INIT_LIST_HEAD_RCU include/linux/rculist.h
+EFRM_HAVE_S_MIN_MAX                     symbol S32_MIN include/linux/kernel.h include/linux/limits.h
 
 EFRM_DO_COREDUMP_BINFMTS_SIGNR          symtype	do_coredump	include/linux/binfmts.h	void(long, int, struct pt_regs*)
 EFRM_DO_COREDUMP_COREDUMP_SIGNR         symtype	do_coredump	include/linux/coredump.h	void(long, int, struct pt_regs*)
+EFRM_RTNL_LINK_OPS_HAS_GET_LINK_NET	member	struct_rtnl_link_ops	get_link_net	include/net/rtnetlink.h
 
 EFRM_ACCESS_OK_HAS_2_ARGS    custom
+
+EFRM_HAVE_DEVICE_DEVNODE_UMODE	memtype	struct_class devnode	include/linux/device.h char* (*)(struct device*, umode_t*)
+EFRM_MAP_VM_AREA_TAKES_PAGESTARSTAR	symtype map_vm_area	include/linux/vmalloc.h	int(struct vm_struct*, pgprot_t, struct page**)
+
+EFRM_BPF_MAP_OPS_HAS_GEN_LOOKUP			member	struct_bpf_map_ops	map_gen_lookup	include/linux/bpf.h
+EFRM_BPF_MAP_OPS_HAS_RELEASE			member	struct_bpf_map_ops	map_release	include/linux/bpf.h
+EFRM_BPF_MAP_HAS_NAME			member	struct_bpf_map	name	include/linux/bpf.h
+EFRM_BPF_MAP_HAS_ID			member	struct_bpf_map	id	include/linux/bpf.h
+EFRM_HAVE_REMAP_VMALLOC_RANGE_PARTIAL	symbol remap_vmalloc_range_partial include/linux/vmalloc.h
+EFRM_IP6_ROUTE_INPUT_LOOKUP_EXPORTED	export	ip6_route_input_lookup	include/net/ip6_route.h	net/ipv6/route.c
+
+EFRM_HAVE_DEV_GET_IF_LINK		symbol	dev_get_iflink	include/linux/netdevice.h
+
+EFRM_IP6_ROUTE_INPUT_LOOKUP_TAKES_SKB	symtype ip6_route_input_lookup	include/net/ip6_route.h	struct dst_entry* (struct net*, struct net_device*, struct flowi6*, const struct sk_buff*, int)
+
+EFRM_PERF_EVENT_GET_RETURNS_FILE	symtype perf_event_get include/linux/perf_event.h struct file*(unsigned int fd)
+EFRM_PERF_EVENT_GET_RETURNS_EVENT	symtype perf_event_get include/linux/perf_event.h struct perf_event*(unsigned int fd)
+
+EFRM_PERF_EVENT_READ_LOCAL_TAKES_ENABLED	symtype perf_event_read_local include/linux/perf_event.h int(struct perf_event*, u64*, u64*, u64*)
+EFRM_PERF_EVENT_READ_LOCAL_TAKES_VALUE	symtype perf_event_read_local include/linux/perf_event.h int(struct perf_event *event, u64 *value)
+EFRM_PERF_EVENT_READ_LOCAL_TAKES_EVENT	symtype perf_event_read_local include/linux/perf_event.h u64(struct perf_event*)
+
+EFRM_HAVE_BPF_PROG_PUT			export	bpf_prog_put include/linux/bpf.h	kernel/bpf/syscall.c
+
+EFRM_HAVE_BPF_PERF_EVENT		symbol	PERF_COUNT_SW_BPF_OUTPUT	include/linux/perf_event.h
+EFRM_HAVE_SW_DUMMY_PERF_EVENT		symbol	PERF_COUNT_SW_DUMMY	include/linux/perf_event.h
+
+EFRM_HAVE_PERF_RAW_FRAG			symbol	perf_raw_frag include/linux/perf_event.h
+
+EFRM_RTABLE_HAS_RT_GW4		memtype struct_rtable rt_gw4 include/net/route.h __be32
 
 # TODO move onload-related stuff from net kernel_compat
 " | egrep -v -e '^#' -e '^$' | sed 's/[ \t][ \t]*/:/g'

@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_SOURCE>
@@ -28,6 +15,7 @@
 
 #include "citools_internal.h"
 #include <ci/net/ipv4.h>
+#include <etherfabric/checksum.h>
 
 
 unsigned ci_icmp_checksum(const ci_ip4_hdr* ip, const ci_icmp_hdr* icmp)
@@ -49,6 +37,15 @@ unsigned ci_icmp_checksum(const ci_ip4_hdr* ip, const ci_icmp_hdr* icmp)
 					 - CI_IP4_IHL(ip)
 					 - sizeof(ci_icmp_hdr)));
   return ci_icmp_csum_finish(csum);
+}
+
+unsigned ci_icmpv6_checksum(const ci_ip6_hdr* ip6, const ci_icmp_hdr* icmp)
+{
+  const ci_iovec iov = {
+    .iov_base = (void*)(icmp + 1),
+    .iov_len = CI_BSWAP_BE16(ip6->payload_len) - sizeof(ci_icmp_hdr)
+  };
+  return ef_icmpv6_checksum(ip6, icmp, &iov, 1);
 }
 
 /*! \cidoxg_end */

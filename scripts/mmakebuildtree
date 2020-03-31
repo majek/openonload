@@ -1,11 +1,8 @@
 #!/usr/bin/env bash
-######################################################################
-# (c) 2002 Cambridge Internetworking Ltd.
-# (c) 2003-2004 Level 5 Networks Ltd.
-# Author: David Riddoch
-#
+# SPDX-License-Identifier: GPL-2.0
+# X-SPDX-Copyright-Text: (c) Solarflare Communications Inc
+
 # Creates a build tree.
-######################################################################
 
 . "$(dirname "$0")/sh/fns"
 . "$bin/sh/mmake-fns"
@@ -116,6 +113,23 @@ do_top_level () {
     REMOTEBUILDFLAG=0
   fi
 
+  have_libelf_line=
+  if [[ ! "$PLATFORM" == *"linux" ]]; then
+    HAVE_LIBELF=$(TOP="$TOP" make -s -f <(cat - <<HERE
+include $TOP/mk/platform/$PLATFORM.mk
+.PHONY: all
+all:
+	@CC="\${CC}" CFLAGS="\${CFLAGS} \${MMAKE_CFLAGS}" check_library_presence libelf.h elf 2>/dev/null
+HERE
+    ))
+    if [ ! -z $require_optional_targets ] && [ "$HAVE_LIBELF" -ne 1 ]; then
+      echo Failed to find libelf with header libelf.h
+      exit -1
+    fi
+    have_libelf_line="HAVE_LIBELF := $HAVE_LIBELF"
+  fi
+
+
   cat <<-EOF >config.mk
 	PLATFORM := $PLATFORM
 	BUILDPATH := $BUILDPATH
@@ -131,6 +145,7 @@ do_top_level () {
 	W_NO_STRING_TRUNCATION := $W_NO_STRING_TRUNCATION
 	W_IMPLICIT_FALLTHROUGH := $W_IMPLICIT_FALLTHROUGH
 	W_NO_IGNORED_ATTRIBUTES := $W_NO_IGNORED_ATTRIBUTES
+	$have_libelf_line
 	$nt
 	$kpath
 EOF

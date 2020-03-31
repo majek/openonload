@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file char_driver.c OS interface to driver
 ** <L5_PRIVATE L5_SOURCE>
@@ -46,6 +33,7 @@
 #include <ci/efhw/public.h>
 #include <ci/efrm/efrm_client.h>
 #include <ci/efch/op_types.h>
+#include <ci/driver/chrdev.h>
 #include "char_internal.h"
 #include <linux/init.h>
 
@@ -278,33 +266,22 @@ struct file_operations ci_char_fops = {
   .poll = ci_char_fop_poll,
 };
 
-static int ci_char_major = 0;
 
 
 /************************************************
  * Init/destroy module functions                *
  ************************************************/
 
+static struct ci_chrdev_registration* sfc_char_chrdev;
+
 static int init_etherfabric_char(void)
 {
-  int rc = 0;
-  int major = 0; /* specify default major number here */
-
   ci_set_log_prefix("[sfc_char] ");
 
   ci_mm_tbl_init();
 
-  if ((rc = register_chrdev(major, EFAB_CHAR_NAME, &ci_char_fops)) < 0) {
-    ci_log("%s: can't register char device %d", EFAB_CHAR_NAME, rc);
-    return rc;
-  }
-
-  if (major == 0)
-    major = rc;
-
-  ci_char_major = major;
-
-  return 0;
+  return create_one_chrdev_and_mknod(0, EFAB_CHAR_NAME, &ci_char_fops,
+                                     &sfc_char_chrdev);
 }
 
 /**************************************************************************** 
@@ -315,8 +292,7 @@ static int init_etherfabric_char(void)
 static void 
 cleanup_etherfabric_char(void) 
 { 
-  if (ci_char_major) 
-    unregister_chrdev(ci_char_major, EFAB_CHAR_NAME);
+  destroy_chrdev_and_mknod(sfc_char_chrdev);
 }
 
 module_init(init_etherfabric_char);

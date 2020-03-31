@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: BSD-2-Clause
+# X-SPDX-Copyright-Text: (c) Solarflare Communications Inc
 
 EFSEND_APPS := efsend efsend_pio efsend_timestamping efsend_pio_warm
 TEST_APPS	:= efforward efrss efsink \
@@ -11,8 +13,8 @@ endif
 TARGETS		:= $(TEST_APPS:%=$(AppPattern))
 
 
-MMAKE_LIBS	:= $(LINK_CIUL_LIB)
-MMAKE_LIB_DEPS	:= $(CIUL_LIB_DEPEND)
+MMAKE_LIBS	:= $(LINK_CIUL_LIB) $(LINK_CIAPP_LIB)
+MMAKE_LIB_DEPS	:= $(CIUL_LIB_DEPEND) $(CIAPP_LIB_DEPEND)
 
 
 all: $(TARGETS)
@@ -33,14 +35,14 @@ efsink_packed: efsink_packed.o utils.o
 
 efforward_packed: efforward_packed.o utils.o
 
-efpingpong: MMAKE_LIBS     += $(LINK_CITOOLS_LIB)
-efpingpong: MMAKE_LIB_DEPS += $(CITOOLS_LIB_DEPEND)
+efpingpong: MMAKE_LIBS     := $(LINK_CITOOLS_LIB) $(MMAKE_LIBS)
+efpingpong: MMAKE_LIB_DEPS := $(CITOOLS_LIB_DEPEND) $(MMAKE_LIB_DEPS)
 
-$(EFSEND_APPS): MMAKE_LIBS += $(LINK_CITOOLS_LIB)
-$(EFSEND_APPS): MMAKE_LIB_DEPS += $(CITOOLS_LIB_DEPEND)
+$(EFSEND_APPS): MMAKE_LIBS := $(LINK_CITOOLS_LIB) $(MMAKE_LIBS)
+$(EFSEND_APPS): MMAKE_LIB_DEPS := $(CITOOLS_LIB_DEPEND) $(MMAKE_LIB_DEPS)
 
-eflatency: MMAKE_LIBS     += $(LINK_CITOOLS_LIB)
-eflatency: MMAKE_LIB_DEPS += $(CITOOLS_LIB_DEPEND)
+eflatency: MMAKE_LIBS     := $(LINK_CITOOLS_LIB) $(MMAKE_LIBS)
+eflatency: MMAKE_LIB_DEPS := $(CITOOLS_LIB_DEPEND) $(MMAKE_LIB_DEPS)
 
 efrink_controller: efrink_controller.o utils.o
 

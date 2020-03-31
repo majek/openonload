@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_HEADER >
@@ -42,6 +29,8 @@
 #include <ci/net/ethernet.h>
 #include <onload/signals.h> /* for OO_SIGHANGLER_DFL_MAX */
 #include <cplane/cplane.h>
+#include <ci/net/ipvx.h>
+#include <onload/version.h>
 
 
 
@@ -65,25 +54,10 @@ enum oo_device_type {
   OO_MAX_DEV /* not a device type */
 };
 
-# define EFAB_DEV_NAME  "onload"  
+# define OO_DEV_NAME  "onload"  
 
 # define OO_EPOLL_DEV_NAME "onload_epoll"
 
-
-/* Max length of version string used for version skew checking. */
-enum { OO_VER_STR_LEN = 40 };
-
-/* We use an md5sum over certain headers to ensure that userland and kernel
- * drivers are built against a compatible interface.
- */
-enum { CI_CHSUM_STR_LEN = 32 };
-
-
-typedef struct oo_version_check_s {
-  char                    in_version[OO_VER_STR_LEN + 1];
-  char                    in_uk_intf_ver[CI_CHSUM_STR_LEN + 1];
-  int32_t                 debug;
-} oo_version_check_t;
 
 /*! This data structure contains the arguments required to create a new
  *  tcp helper resource and the results that the allocation operation
@@ -146,7 +120,7 @@ typedef struct {
   ci_int32  cluster_size;
   ci_uint32 cluster_restart_opt;
   ci_uint32 cluster_hot_restart_opt;
-  ci_uint32 addr_be32;
+  ci_addr_t addr;
   ci_uint16 port_be16;
 } oo_tcp_reuseport_bind_t;
 
@@ -215,6 +189,11 @@ typedef struct {
   oo_sp                 ep_id;
   ci_int32              type;
 } oo_tcp_accept_sock_attach_t;
+
+typedef struct {
+  ci_int32 attach_point;
+  ci_int32 intf_i;
+} oo_bpf_bind_t;
 
 #if CI_CFG_USERSPACE_PIPE
 typedef struct {
@@ -293,15 +272,6 @@ typedef struct {
 
 
 typedef struct {
-  oo_pkt_p	pkt;
-  ci_uint32	retrieve_rc;
-  ci_uerr_t	os_rc;
-  ci_uerr_t	rc;
-  ci_ifid_t     ifindex;
-  ci_uint32     next_hop;
-} cp_user_defer_send_t;
-
-typedef struct {
   ci_uint32	pkt;
   ci_ifid_t	ifindex;
 } cp_user_pkt_dest_ifid_t;
@@ -367,7 +337,7 @@ typedef struct {
 } oo_dshm_list_t;
 
 typedef struct {
-  ci_int32       laddr_be32;
+  ci_addr_t      laddr;
 } oo_alloc_active_wild_t;
 
 /*--------------------------------------------------------------------
@@ -414,7 +384,7 @@ struct oo_op_sigaction {
 };
 
 struct oo_op_loopback_connect {
-  ci_uint32 dst_addr;   /*!< destination address to connect to */
+  ci_addr_t dst_addr;   /*!< destination address to connect to */
   ci_uint16 dst_port;   /*!< destination port to connect to */
   ci_uint8 out_moved;   /*!< have we moved socket to another stack? */
   ci_int8  out_rc;      /*!< rc of connect() */

@@ -1,10 +1,8 @@
 #!/bin/sh
-######################################################################
-# Copyright 2010 Solarflare Communications Inc.
-# Description: Runs an application with sfcaffinity support.
-#      Author: David Riddoch
-#     Started: 2010/01/11
-######################################################################
+# SPDX-License-Identifier: BSD-2-Clause
+# X-SPDX-Copyright-Text: (c) Solarflare Communications Inc
+
+# Runs an application with sfcaffinity support.
 
 me=$(basename "$0")
 

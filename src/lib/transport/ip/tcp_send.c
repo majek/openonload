@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_SOURCE>
@@ -114,7 +101,8 @@ static void ci_tcp_tx_advance_nagle(ci_netif* ni, ci_tcp_state* ts)
   ** enqueue data.
   */
   pkt = PKT_CHK(ni, sendq->head);
-  ci_assert(!(TX_PKT_TCP(pkt)->tcp_flags & (CI_TCP_FLAG_SYN|CI_TCP_FLAG_FIN)));
+  ci_assert(!(TX_PKT_IPX_TCP(ipcache_af(&ts->s.pkt), pkt)->tcp_flags &
+            (CI_TCP_FLAG_SYN|CI_TCP_FLAG_FIN)));
 
   if( (PKT_TCP_TX_SEQ_SPACE(pkt) >= tcp_eff_mss(ts)) |
       (SEQ_LT(tcp_snd_una(ts), tcp_snd_up(ts))     ) )
@@ -189,6 +177,13 @@ int ci_tcp_sendmsg_fill_pkt(ci_netif* ni, ci_tcp_state* ts,
   ci_tcp_tx_pkt_init(pkt, hdrlen, maxlen);
   oo_pkt_filler_init(&sinf->pf, pkt,
                      (uint8_t*) oo_tx_l3_hdr(pkt) + hdrlen);
+
+#if CI_CFG_IPV6
+  if( ipcache_af(&ts->s.pkt) == AF_INET )
+    pkt->flags &=~ CI_PKT_FLAG_IS_IP6;
+  else
+    pkt->flags |= CI_PKT_FLAG_IS_IP6;
+#endif
 
 #ifndef NDEBUG
   ci_assert_equal(pkt->n_buffers, 1);
@@ -333,6 +328,11 @@ ci_inline void ci_tcp_sendmsg_prep_pkt(ci_netif* ni, ci_tcp_state* ts,
                                        ci_ip_pkt_fmt* pkt, unsigned seq)
 {
   int orig_hdrlen, extra_opts;
+#ifndef NDEBUG
+  int af = ipcache_af(&ts->s.pkt);
+#endif
+
+  ci_ipcache_update_flowlabel(ni, &ts->s);
 
   /* Copy in the headers */
   ci_pkt_init_from_ipcache(pkt, &ts->s.pkt);
@@ -372,8 +372,8 @@ ci_inline void ci_tcp_sendmsg_prep_pkt(ci_netif* ni, ci_tcp_state* ts,
 
   /* The sequence space consumed should match the bytes in the buffer. */
   ci_assert_equal(oo_tx_l3_len(pkt),
-                  sizeof(ci_ip4_hdr) + sizeof(ci_tcp_hdr)
-                  + CI_TCP_HDR_OPT_LEN(TX_PKT_TCP(pkt))
+                  CI_IPX_HDR_SIZE(af) + sizeof(ci_tcp_hdr)
+                  + CI_TCP_HDR_OPT_LEN(TX_PKT_IPX_TCP(af, pkt))
                   + SEQ_SUB(pkt->pf.tcp_tx.end_seq, pkt->pf.tcp_tx.start_seq));
 
   /* Correct offbuf end as might have been constructed with diff eff_mss */
@@ -526,7 +526,7 @@ static int __ci_tcp_tmpl_normal_send(ci_netif* ni, ci_tcp_state* ts,
 
   ci_assert(ci_netif_is_locked(ni));
 
-  iov[0].iov_base = CI_TCP_PAYLOAD(PKT_TCP_HDR(tmpl));
+  iov[0].iov_base = CI_TCP_PAYLOAD(PKT_IPX_TCP_HDR(ipcache_af(&ts->s.pkt), tmpl));
   iov[0].iov_len = sinf->total_unsent;
 
   if( ts->s.b.sb_aflags & (CI_SB_AFLAG_O_NONBLOCK | CI_SB_AFLAG_O_NDELAY) )
@@ -569,9 +569,9 @@ int ci_tcp_tmpl_alloc(ci_netif* ni, ci_tcp_state* ts,
   ci_netif_state_nic_t* nsn;
   ci_ip_pkt_fmt* pkt;
   ci_iovec_ptr piov;
-  ci_ip4_hdr* ip;
   struct oo_msg_template* omt;
   struct tcp_send_info* sinf;
+  int af = ipcache_af(&ts->s.pkt);
 
 #if defined(__powerpc64__)
   LOG_U(ci_log("%s: This API is not supported on PowerPC yet.", __FUNCTION__));
@@ -604,8 +604,7 @@ int ci_tcp_tmpl_alloc(ci_netif* ni, ci_tcp_state* ts,
 
   /* Check for valid cplane information.
    */
-  if(CI_UNLIKELY( ! oo_cp_verinfo_is_valid(ni->cplane,
-                                           &ipcache->mac_integrity) )) {
+  if(CI_UNLIKELY( ! oo_cp_ipcache_is_valid(ni, ipcache) )) {
     cicp_user_retrieve(ni, ipcache, &ts->s.cp);
     switch( ipcache->status ) {
     case retrrc_success:
@@ -709,6 +708,12 @@ int ci_tcp_tmpl_alloc(ci_netif* ni, ci_tcp_state* ts,
       goto out;
     }
   }
+#if CI_CFG_IPV6
+  if( af == AF_INET )
+    pkt->flags &=~ CI_PKT_FLAG_IS_IP6;
+  else
+    pkt->flags |= CI_PKT_FLAG_IS_IP6;
+#endif
 
   omt = ci_tcp_tmpl_pkt_to_omt(pkt);
   *omt_pp = omt;
@@ -729,7 +734,7 @@ int ci_tcp_tmpl_alloc(ci_netif* ni, ci_tcp_state* ts,
 #if CI_CFG_TIMESTAMPING
   /* This flag should not be set on a segment of length 0,
    * we assume this is never the case with templated sends */
-  if( ts->s.timestamping_flags & ONLOAD_SOF_TIMESTAMPING_TX_HARDWARE )
+  if( onload_timestamping_want_tx_nic(ts->s.timestamping_flags) )
     pkt->flags |= CI_PKT_FLAG_TX_TIMESTAMPED;
 #endif
 
@@ -744,14 +749,13 @@ int ci_tcp_tmpl_alloc(ci_netif* ni, ci_tcp_state* ts,
   sinf->fill_list = sinf->pf.pkt;
   ci_tcp_sendmsg_prep_pkt(ni, ts, pkt, tcp_enq_nxt(ts));
 
-  TX_PKT_TCP(sinf->fill_list)->tcp_flags =
+  TX_PKT_IPX_TCP(af, sinf->fill_list)->tcp_flags =
     CI_TCP_FLAG_PSH | CI_TCP_FLAG_ACK;
 
   /* Initialise the protocol headers.  We don't set those parts that will
    * always be rewritten when we do the actual send. */
-  ip = oo_tx_ip_hdr(pkt);
   ci_tcp_tx_finish(ni, ts, pkt);
-  ci_tcp_ip_hdr_init(ip, oo_tx_l3_len(pkt));
+  ci_tcp_ipx_hdr_init(af, oo_tx_ipx_hdr(af, pkt), oo_tx_l3_len(pkt));
 
   /* XXX: Do I need to ci_tcp_tx_set_urg_ptr(ts, ni, tcp);
    *
@@ -795,6 +799,7 @@ ci_tcp_tmpl_update(ci_netif* ni, ci_tcp_state* ts,
   ef_vi* vi;
   ci_uint8* tcp_opts;
   struct tcp_send_info* sinf;
+  int af = ipcache_af(&ts->s.pkt);
 
   /* This is needed to ensure that an app written to a later version of the
    * API gets an error if they try to use a flag we don't understand.
@@ -809,7 +814,7 @@ ci_tcp_tmpl_update(ci_netif* ni, ci_tcp_state* ts,
 
   ipcache = &ts->s.pkt;
   pkt = ci_tcp_tmpl_omt_to_pkt(omt);
-  tcp = TX_PKT_TCP(pkt);;
+  tcp = TX_PKT_IPX_TCP(af, pkt);;
   vi = &ni->nic_hw[pkt->intf_i].vi;
   tcp_opts = CI_TCP_HDR_OPTS(tcp);
   sinf = ci_tcp_tmpl_omt_to_sinf(omt);
@@ -860,18 +865,18 @@ ci_tcp_tmpl_update(ci_netif* ni, ci_tcp_state* ts,
       rc = -EINVAL;
       goto out;
     }
-    ci_assert((CI_TCP_PAYLOAD(PKT_TCP_HDR(pkt)) - PKT_START(pkt)) +
+    ci_assert((CI_TCP_PAYLOAD(PKT_IPX_TCP_HDR(af, pkt)) - PKT_START(pkt)) +
                  updates[i].otmu_offset >= 0);
 
     if(CI_UNLIKELY( pkt->pio_addr != -1 )) {
       rc = ef_pio_memcpy(vi, updates[i].otmu_base,
                          pkt->pio_addr + (ci_uint32)
-                         (CI_TCP_PAYLOAD(PKT_TCP_HDR(pkt)) - PKT_START(pkt)) +
+                         (CI_TCP_PAYLOAD(PKT_IPX_TCP_HDR(af, pkt)) - PKT_START(pkt)) +
                          updates[i].otmu_offset,
                          updates[i].otmu_len);
       ci_assert_equal(rc, 0);
     }
-    memcpy((char*)CI_TCP_PAYLOAD(PKT_TCP_HDR(pkt)) + updates[i].otmu_offset,
+    memcpy((char*)CI_TCP_PAYLOAD(PKT_IPX_TCP_HDR(af, pkt)) + updates[i].otmu_offset,
            updates[i].otmu_base, updates[i].otmu_len);
   }
 
@@ -885,7 +890,7 @@ ci_tcp_tmpl_update(ci_netif* ni, ci_tcp_state* ts,
     goto out;
   }
 
-  cplane_is_valid = oo_cp_verinfo_is_valid(ni->cplane, &ipcache->mac_integrity);
+  cplane_is_valid = oo_cp_ipcache_is_valid(ni, ipcache);
   if( cplane_is_valid &&
       ! memcmp(oo_tx_ether_hdr(pkt), ci_ip_cache_ether_hdr(ipcache),
                oo_tx_ether_hdr_size(pkt)) &&
@@ -913,10 +918,10 @@ ci_tcp_tmpl_update(ci_netif* ni, ci_tcp_state* ts,
     ci_assert_ge(pkt->pio_addr, 0);
     ci_ip_set_mac_and_port(ni, ipcache, pkt);
     if( oo_tx_ether_hdr_size(pkt) == 
-        (char*)&ipcache->ip - (char*)ci_ip_cache_ether_hdr(ipcache) )
+        (char*)&ipcache->ipx.ip4 - (char*)ci_ip_cache_ether_hdr(ipcache) )
       /* TODO: we need to copy just the ethernet header here. */
       rc = ef_pio_memcpy(vi, PKT_START(pkt), pkt->pio_addr,
-                         (char*)PKT_TCP_HDR(pkt) - PKT_START(pkt));
+                         (char*)PKT_IPX_TCP_HDR(af, pkt) - PKT_START(pkt));
     else
       rc = ef_pio_memcpy(vi, PKT_START(pkt), pkt->pio_addr, pkt->buf_len);
     ci_assert_equal(rc, 0);
@@ -948,7 +953,7 @@ ci_tcp_tmpl_update(ci_netif* ni, ci_tcp_state* ts,
     /* Update ack and window on the pkt */
     tcp->tcp_ack_be32 = CI_BSWAP_BE32(tcp_rcv_nxt(ts));
     ci_tcp_calc_rcv_wnd(ts, "tmpl_update");
-    tcp->tcp_window_be16 = TS_TCP(ts)->tcp_window_be16;
+    tcp->tcp_window_be16 = TS_IPX_TCP(ts)->tcp_window_be16;
 
     /* Update TCP timestamp */
     if( ts->tcpflags & CI_TCPT_FLAG_TSO ) {
@@ -962,10 +967,10 @@ ci_tcp_tmpl_update(ci_netif* ni, ci_tcp_state* ts,
     /* Update the PIO region */
     /* XXX: Currently, updating the entire TCP header.  Should only
      * update the affected portion and only if necessary */
-    rc = ef_pio_memcpy(vi, TX_PKT_TCP(pkt),
-                       pkt->pio_addr + (char*) TX_PKT_TCP(pkt) -
-                       PKT_START(pkt), CI_TCP_PAYLOAD(PKT_TCP_HDR(pkt)) -
-                       (char*)TX_PKT_TCP(pkt));
+    rc = ef_pio_memcpy(vi, TX_PKT_IPX_TCP(af, pkt),
+                       pkt->pio_addr + (char*) TX_PKT_IPX_TCP(af, pkt) -
+                       PKT_START(pkt), CI_TCP_PAYLOAD(PKT_IPX_TCP_HDR(af, pkt)) -
+                       (char*)TX_PKT_IPX_TCP(af, pkt));
     ci_assert_equal(rc, 0);
 
     /* This cannot fail as we already checked that there is space in
@@ -1142,7 +1147,7 @@ void ci_tcp_sendmsg_enqueue_prequeue(ci_netif* ni, ci_tcp_state* ts,
     bytes = pkt->pf.tcp_tx.end_seq;
     ci_tcp_sendmsg_prep_pkt(ni, ts, pkt, tcp_enq_nxt(ts));
     if( pkt->flags & CI_PKT_FLAG_TX_PSH )
-      TX_PKT_TCP(pkt)->tcp_flags |= CI_TCP_FLAG_PSH;
+      TX_PKT_IPX_TCP(ipcache_af(&ts->s.pkt), pkt)->tcp_flags |= CI_TCP_FLAG_PSH;
     tcp_enq_nxt(ts) += bytes;
 
     if( OO_PP_IS_NULL(pkt->next) )  break;
@@ -1884,6 +1889,7 @@ int ci_tcp_sendmsg(ci_netif* ni, ci_tcp_state* ts,
   ci_iovec_ptr piov;
   int m;
   struct tcp_send_info sinf;
+  int af = ipcache_af(&ts->s.pkt);
 
   ci_assert(iov != NULL);
   ci_assert_gt(iovlen, 0);
@@ -1974,7 +1980,7 @@ int ci_tcp_sendmsg(ci_netif* ni, ci_tcp_state* ts,
     }
     else {
       pkt->flags &= ~CI_PKT_FLAG_TX_MORE;
-      TX_PKT_TCP(pkt)->tcp_flags |= CI_TCP_FLAG_PSH;
+      TX_PKT_IPX_TCP(af, pkt)->tcp_flags |= CI_TCP_FLAG_PSH;
     }
     
     /* We should somehow push the packet.  However, it was not pushed
@@ -2058,10 +2064,10 @@ int ci_tcp_sendmsg(ci_netif* ni, ci_tcp_state* ts,
        */
       if( sinf.total_unsent == 0 ) {
         if( (sinf.fill_list->flags & CI_PKT_FLAG_TX_MORE) )
-          TX_PKT_TCP(sinf.fill_list)->tcp_flags = CI_TCP_FLAG_ACK;
+          TX_PKT_IPX_TCP(af, sinf.fill_list)->tcp_flags = CI_TCP_FLAG_ACK;
         else
-          TX_PKT_TCP(sinf.fill_list)->tcp_flags = 
-            CI_TCP_FLAG_PSH | CI_TCP_FLAG_ACK;
+          TX_PKT_IPX_TCP(af, sinf.fill_list)->tcp_flags =
+              CI_TCP_FLAG_PSH | CI_TCP_FLAG_ACK;
 #ifdef MSG_SENDPAGE_NOTLAST
         if( ~flags & MSG_SENDPAGE_NOTLAST ||
             ci_tcp_tx_send_space(ni, ts) <= 0 )
@@ -2267,6 +2273,7 @@ int ci_tcp_zc_send(ci_netif* ni, ci_tcp_state* ts, struct onload_zc_mmsg* msg,
   ci_ip_pkt_fmt* pkt;
   int j;
   unsigned eff_mss;
+  int af = ipcache_af(&ts->s.pkt);
 
   ci_assert(msg != NULL);
   ci_assert(ts);
@@ -2393,9 +2400,9 @@ int ci_tcp_zc_send(ci_netif* ni, ci_tcp_state* ts, struct onload_zc_mmsg* msg,
     sinf.total_sent += sinf.fill_list_bytes;
 
     if( (sinf.fill_list->flags & CI_PKT_FLAG_TX_MORE) )
-      TX_PKT_TCP(sinf.fill_list)->tcp_flags = CI_TCP_FLAG_ACK;
+      TX_PKT_IPX_TCP(af, sinf.fill_list)->tcp_flags = CI_TCP_FLAG_ACK;
     else
-      TX_PKT_TCP(sinf.fill_list)->tcp_flags = CI_TCP_FLAG_PSH|CI_TCP_FLAG_ACK;
+      TX_PKT_IPX_TCP(af, sinf.fill_list)->tcp_flags = CI_TCP_FLAG_PSH|CI_TCP_FLAG_ACK;
     ci_tcp_tx_advance_nagle(ni, ts);
     if(CI_UNLIKELY( flags & ONLOAD_MSG_WARM )) {
       unroll_msg_warm(ni, ts, &sinf, 1);
@@ -2585,7 +2592,7 @@ ci_tcp_ds_fill_headers(ci_netif* ni, ci_tcp_state* ts, unsigned flags,
   ci_assert(ci_netif_is_locked(ni));
 
   /* Try to get valid cache */
-  if( ! oo_cp_verinfo_is_valid(ni->cplane, &ts->s.pkt.mac_integrity) &&
+  if( ! oo_cp_ipcache_is_valid(ni, &ts->s.pkt) &&
       (~flags & ONLOAD_DELEGATED_SEND_FLAG_IGNORE_ARP ) &&
       ! ci_tcp_ds_get_arp(ni, ts) ) {
     return ONLOAD_DELEGATED_SEND_RC_NOARP;
@@ -2614,7 +2621,7 @@ ci_tcp_ds_fill_headers(ci_netif* ni, ci_tcp_state* ts, unsigned flags,
   tcp->tcp_flags = CI_TCP_FLAG_ACK;
   tcp->tcp_ack_be32 = CI_BSWAP_BE32(tcp_rcv_nxt(ts));
   ci_tcp_calc_rcv_wnd(ts, "ds_fill_headers");
-  tcp->tcp_window_be16 = TS_TCP(ts)->tcp_window_be16;
+  tcp->tcp_window_be16 = TS_IPX_TCP(ts)->tcp_window_be16;
   if( ts->tcpflags & CI_TCPT_FLAG_TSO ) {
     ci_uint8* opt = CI_TCP_HDR_OPTS(tcp);
     ci_tcp_tx_opt_tso(&opt, ci_tcp_time_now(ni), ts->tsrecent);

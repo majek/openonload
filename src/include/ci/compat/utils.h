@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /****************************************************************************
  * Copyright 2002-2005: Level 5 Networks Inc.
  * Copyright 2005-2008: Solarflare Communications Inc,
@@ -123,58 +110,6 @@
  * CI_MY_BYTE_ORDER. */
 #define CI_BIG_ENDIAN          1
 #define CI_LITTLE_ENDIAN       0
-
-/* CI_BSWAPC_xx() -- Byte-swap in a form that can be evaluated at
- *                   compile-time if the argument is a constant.  Likely to
- *                   be less efficient than CI_BSWAP_xx() (see ci/tools) if
- *                   computed at runtime.  Argument must be in appropriate
- *                   domain.
- */
-#define CI_BSWAPC_16(v)   ((((v) & 0x00ff) << 8u) |     \
-                           (((v) & 0xff00) >> 8u))
-#define CI_BSWAPC_32(v)   ((((v) & 0xff000000) >> 24u) |        \
-                           (((v) & 0x00ff0000) >> 8u)  |        \
-                           (((v) & 0x0000ff00) << 8u)  |        \
-                           (((v) & 0x000000ff) << 24u))
-#if defined(__powerpc64__)
-#define CI_BSWAPC_64(v)   ((((v) & 0xff00000000000000) >> 56u) |        \
-                           (((v) & 0x00ff000000000000) >> 40u) |        \
-                           (((v) & 0x0000ff0000000000) >> 24u) |        \
-                           (((v) & 0x000000ff00000000) >> 8u)  |        \
-                           (((v) & 0x00000000ff000000) << 8u)  |        \
-                           (((v) & 0x0000000000ff0000) << 24u) |        \
-                           (((v) & 0x000000000000ff00) << 40u) |        \
-                           (((v) & 0x00000000000000ff) << 56u))
-#else
-/* Need to be a bit more cunning to avoid constant overflow */
-#define CI_BSWAPC_64(v)   ((((v) & 0xff00000000000000LL) >> 56u) |        \
-                           (((v) & 0x00ff000000000000LL) >> 40u) |      \
-                           (((v) & 0x0000ff0000000000LL) >> 24u) |        \
-                           (((v) & 0x000000ff00000000LL) >> 8u)  |        \
-                           (((v) & 0x00000000ff000000LL) << 8u)  |        \
-                           (((v) & 0x0000000000ff0000LL) << 24u) |        \
-                           (((v) & 0x000000000000ff00LL) << 40u) |        \
-                           (((v) & 0x00000000000000ffLL) << 56u))
-#endif
-
-
-#if (CI_MY_BYTE_ORDER == CI_LITTLE_ENDIAN)
-# define CI_BSWAPC_BE16(v)   CI_BSWAPC_16(v)
-# define CI_BSWAPC_BE32(v)   CI_BSWAPC_32(v)
-# define CI_BSWAPC_BE64(v)   CI_BSWAPC_64(v)
-# define CI_BSWAPC_LE16(v)   (v)
-# define CI_BSWAPC_LE32(v)   (v)
-# define CI_BSWAPC_LE64(v)   (v)
-#elif (CI_MY_BYTE_ORDER == CI_BIG_ENDIAN)
-# define CI_BSWAPC_BE16(v)   (v)
-# define CI_BSWAPC_BE32(v)   (v)
-# define CI_BSWAPC_BE64(v)   (v)
-# define CI_BSWAPC_LE16(v)   CI_BSWAPC_16(v)
-# define CI_BSWAPC_LE32(v)   CI_BSWAPC_32(v)
-# define CI_BSWAPC_LE64(v)   CI_BSWAPC_64(v)
-#else
-# error Bad endian.
-#endif
 
 
 /**********************************************************************

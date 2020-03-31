@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_SOURCE>
@@ -47,10 +34,13 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <stddef.h>
 #include <string.h>
 #include <ctype.h>
+#include <limits.h>
 
-#include "more_stats.h"
+#include "../ip/sockbuf_filter.h"
+#include <ci/internal/more_stats.h>
 
 #define TRY(x)                                                  \
   do {                                                          \
@@ -131,18 +121,24 @@
 
 
 static char* cfg_stackname = NULL;
+static char* cfg_filter = NULL;
 static int cfg_sum = 0;
 static int cfg_meta = 0;
 static int cfg_flat = 0;
+static int cfg_double_buffer = 0;
 static ci_cfg_desc cfg_opts[] = {
   { 'h', "help", CI_CFG_USAGE, 0, "this message" },
   { 0, "name",  CI_CFG_STR,  &cfg_stackname, "select a single stack name" },
+  { 0, "filter",  CI_CFG_STR,  &cfg_filter,
+                                  "dump only sockets matching pcap filter" },
   { 0, "sum-all",  CI_CFG_FLAG,  &cfg_sum,
                                   "present sum of all the stacks's stats" },
   { 0, "metadata", CI_CFG_FLAG, &cfg_meta,
                                     "dump metadata describing statistics" },
   { 0, "flat", CI_CFG_FLAG,     &cfg_flat,
                                     "dump flatter json structure" },
+  { 0, "dblbuf",  CI_CFG_FLAG,  &cfg_double_buffer,
+                                  "guarantee no output in case of error" },
 };
 #define N_CFG_OPTS (sizeof(cfg_opts) / sizeof(cfg_opts[0]))
 
@@ -222,44 +218,84 @@ static int orm_map_stacks(void)
 /* dump_buf mgmt */
 /**********************************************************/
 
-#define DUMP_BUF_INC 1024
-
 struct dump_buf {
-  char* db_buf;
-  int   db_len;
-  int   db_used;
+  FILE* f;
+  int   pending_comma;
+  char  buf[1024];
+  size_t buflev;
 };
 
 static struct dump_buf db = {
-  .db_buf  = NULL,
-  .db_len  = 0,
-  .db_used = 0,
+  .f = NULL,
+  .pending_comma = 0,
+  .buflev = 0,
 };
 
 
-/* Append to dump_buf, ensuring that there is a
-   trailing NUL character, which is not included in
-   the content length count. */
-static void __dump_buf_cat0(const char* buf, int len)
+static void __dump_buf_flush_buf(void)
 {
-  while( db.db_used + len + 1 > db.db_len ) {
-    db.db_buf = realloc(db.db_buf, db.db_len + DUMP_BUF_INC);
-    TEST(db.db_buf);
-    db.db_len += DUMP_BUF_INC;
+  if( db.buflev ) {
+    fwrite_unlocked(db.buf, 1, db.buflev, db.f);
+    db.buflev = 0;
   }
-  memcpy(db.db_buf + db.db_used, buf, len);
-  db.db_used += len;
-  db.db_buf[db.db_used] = '\0';
+}
+
+
+static inline void __dump_buf_cat0(const char* buf, int len)
+{
+  if( db.buflev + len > sizeof(db.buf) )
+    __dump_buf_flush_buf();
+  if( len >= sizeof(db.buf) )
+    fwrite_unlocked(buf, 1, len, db.f);
+  else {
+    if( len == 1 )    /* getting in and out of memcpy takes a long time */
+      db.buf[db.buflev] = *buf;
+    else
+      memcpy(db.buf + db.buflev, buf, len);
+    db.buflev += len;
+  }
+}
+
+
+/* force inline because the string is almost always a compile-time constant
+ * and hence the strlen can be elided */
+__attribute__((always_inline))
+static inline void dump_buf_literal(const char* str)
+{
+  if( db.pending_comma ) {
+    db.pending_comma = 0;
+    __dump_buf_cat0(",", 1);
+  }
+  __dump_buf_cat0(str, strlen(str));
+}
+
+
+__attribute__((always_inline))
+static inline void dump_buf_literal_comma(const char* str)
+{
+  dump_buf_literal(str);
+  db.pending_comma = 1;
+}
+
+
+__attribute__((always_inline))
+static inline void dump_buf_label(const char* prefix, const char* label,
+                                    const char* suffix)
+{
+  dump_buf_literal(prefix);
+  dump_buf_literal(label);
+  dump_buf_literal(suffix);
 }
 
 
 static void dump_buf_catv(const char* fmt, va_list va)
 {
-  int len;
-  char* buf;
-  TRY(len = vasprintf(&buf, fmt, va));
-  __dump_buf_cat0(buf, len);
-  free(buf);
+  if( db.pending_comma ) {
+    db.pending_comma = 0;
+    __dump_buf_cat0(",", 1);
+  }
+  __dump_buf_flush_buf();
+  TRY(vfprintf(db.f, fmt, va));
 }
 
 
@@ -269,6 +305,15 @@ static void dump_buf_cat(const char* fmt, ...)
   va_start(va, fmt);
   dump_buf_catv(fmt, va);
   va_end(va);
+}
+
+static void dump_buf_cat_comma(const char* fmt, ...)
+{
+  va_list va;
+  va_start(va, fmt);
+  dump_buf_catv(fmt, va);
+  va_end(va);
+  db.pending_comma = 1;
 }
 
 static const char hex_digits[] = "0123456789ABCDEF";
@@ -313,22 +358,7 @@ static void dump_buf_str(const char *str)
 
 static void dump_buf_cleanup(void)
 {
-  /* Remove any extraneous characters at end of string for json
-   * format */
-  while( db.db_buf[db.db_used - 1] == ',' ||
-         db.db_buf[db.db_used - 1] == ' ' ) {
-    db.db_buf[db.db_used - 1] = '\0';
-    --db.db_used;
-  }
-}
-
-
-/* Return a NUL-terminated string from the dump_buf. */
-static const char* dump_buf_get(void)
-{
-  assert(db.db_used + 1 <= db.db_len);
-  assert(db.db_buf[db.db_used] == '\0');
-  return db.db_buf;
+  db.pending_comma = 0;
 }
 
 
@@ -339,12 +369,12 @@ static const char* dump_buf_get(void)
 static int orm_oo_opts_dump(ci_netif* ni)
 {
   ci_netif_config_opts* opts = &ni->state->opts;
-  dump_buf_cat("\"opts\": {");
+  dump_buf_literal("\"opts\":{");
 
 #ifdef NDEBUG
-  dump_buf_cat("\"NDEBUG\": 1, ");
+  dump_buf_literal_comma("\"NDEBUG\":1");
 #else
-  dump_buf_cat("\"NDEBUG\": 0, ");
+  dump_buf_literal_comma("\"NDEBUG\":0");
 #endif
 
 
@@ -357,14 +387,14 @@ static int orm_oo_opts_dump(ci_netif* ni)
 #define CI_CFG_OPTGROUP(group, category, expertise)
 #define CI_CFG_OPT(env, name, type, doc, bits, group, default, min, max, presentation) \
   if( strlen(env) != 0 ) {                                              \
-    dump_buf_cat("\"%s\": " type##_fmt ", ", env, opts->name);          \
+    dump_buf_cat_comma("\"%s\":" type##_fmt, env, opts->name);          \
   }
 #define CI_CFG_STR_OPT CI_CFG_OPT
 
 #include <ci/internal/opts_netif_def.h>
 
   dump_buf_cleanup();
-  dump_buf_cat("}");
+  dump_buf_literal_comma("}");
   return 0;
 }
 
@@ -373,14 +403,14 @@ static int orm_oo_opts_dump(ci_netif* ni)
 /**********************************************************/
 
 #define OO_STAT(desc, type, name, kind)                                 \
-  dump_buf_cat("\"%s\": " type##_fmt ", ", #name, stats->name);
+  dump_buf_cat_comma("\"%s\":" type##_fmt, #name, stats->name);
 
 static int orm_oo_stats_dump(const char* label, const ci_netif_stats* stats)
 {
-  dump_buf_cat("\"%s\": {", label);
+  dump_buf_label("\"", label, "\":{");
 #include <ci/internal/stats_def.h>
   dump_buf_cleanup();
-  dump_buf_cat("}");
+  dump_buf_literal_comma("}");
   return 0;
 }
 
@@ -390,26 +420,25 @@ static void orm_dump_struct_ci_netif_stats(char* label, const ci_netif_stats* st
   if( ~flags & ORM_OUTPUT_STACK )
     return;
   orm_oo_stats_dump(label, stats);
-  dump_buf_cat(",");
 }
 
 
 static int orm_oo_more_stats_dump(const char* label, const more_stats_t* stats)
 {
-  dump_buf_cat("\"%s\": {", label);
-#include "more_stats_def.h"
+  dump_buf_label("\"", label, "\":{");
+#include <ci/internal/more_stats_def.h>
   dump_buf_cleanup();
-  dump_buf_cat("}");
+  dump_buf_literal_comma("}");
   return 0;
 }
 
 
 static int orm_oo_tcp_stats_count_dump(const char* label, const ci_tcp_stats_count* stats)
 {
-  dump_buf_cat("\"%s\": {", label);
+  dump_buf_label("\"", label, "\":{");
 #include <ci/internal/tcp_stats_count_def.h>
   dump_buf_cleanup();
-  dump_buf_cat("}");
+  dump_buf_literal_comma("}");
   return 0;
 }
 
@@ -419,16 +448,15 @@ static void orm_dump_struct_ci_tcp_stats_count(char* label, const ci_tcp_stats_c
   if( ~flags & ORM_OUTPUT_STACK )
     return;
   orm_oo_tcp_stats_count_dump(label, stats);
-  dump_buf_cat(",");
 }
 
 
 static int orm_oo_tcp_ext_stats_count_dump(const char* label, const ci_tcp_ext_stats_count* stats)
 {
-  dump_buf_cat("\"%s\": {", label);
+  dump_buf_label("\"", label, "\":{");
 #include <ci/internal/tcp_ext_stats_count_def.h>
   dump_buf_cleanup();
-  dump_buf_cat("}");
+  dump_buf_literal_comma("}");
   return 0;
 }
 
@@ -438,7 +466,6 @@ static void orm_dump_struct_ci_tcp_ext_stats_count(char* label, const ci_tcp_ext
   if( ~flags & ORM_OUTPUT_STACK )
     return;
   orm_oo_tcp_ext_stats_count_dump(label, stats);
-  dump_buf_cat(",");
 }
 
 
@@ -456,7 +483,7 @@ static void orm_oo_stats_sum(ci_netif_stats* stats_sum, ci_netif_stats* stats)
 
 static void orm_oo_more_stats_sum(more_stats_t* stats_sum, more_stats_t* stats)
 {
-#include "more_stats_def.h"
+#include <ci/internal/more_stats_def.h>
 }
 
 #undef OO_STAT
@@ -469,29 +496,29 @@ static void orm_oo_more_stats_sum(more_stats_t* stats_sum, more_stats_t* stats)
   OO_STAT_##kind(name, (desc))
 #define OO_STAT_count_zero(name, desc) /* ignore always 0 counters */
 #define OO_STAT_count(name, desc)  \
-  dump_buf_cat( " { "              \
-"\"name\": \"%s%s%s\", "           \
-"\"pointer\": \"%s/%s/%s\", "      \
-"\"type\": \"integer\", "          \
-"\"units\": \"count\", "           \
-"\"semantics\": \"counter\", "     \
-"\"description\": ",               \
+  dump_buf_cat( "{"                \
+"\"name\":\"%s%s%s\","             \
+"\"pointer\":\"%s/%s/%s\","        \
+"\"type\":\"integer\","            \
+"\"units\":\"count\","             \
+"\"semantics\":\"counter\","       \
+"\"description\":",                \
   (cfg_flat ? "" : OO_STAT_key), (cfg_flat ? "": "."), #name, xpath, \
    OO_STAT_key, #name);            \
   dump_buf_str(desc);              \
-  __dump_buf_cat0(" }, ", 4);
+  dump_buf_literal_comma("}");
 
 #define OO_STAT_val(name, desc)    \
-  dump_buf_cat( " { "              \
-"\"name\": \"%s%s%s\", "           \
-"\"pointer\": \"%s/%s/%s\", "      \
-"\"type\": \"integer\", "          \
-"\"semantics\": \"instant\", "     \
-"\"description\": ",               \
+  dump_buf_cat( "{"                \
+"\"name\":\"%s%s%s\","             \
+"\"pointer\":\"%s/%s/%s\","        \
+"\"type\":\"integer\","            \
+"\"semantics\":\"instant\","       \
+"\"description\":",                \
   (cfg_flat ? "" : OO_STAT_key), (cfg_flat ? "": "."), #name, xpath, \
    OO_STAT_key, #name);      \
   dump_buf_str(desc);              \
-  __dump_buf_cat0(" }, ", 4);
+  dump_buf_literal_comma("}");
 
 static int orm_oo_stats_meta_dump(const char* xpath)
 {
@@ -505,7 +532,7 @@ static int orm_oo_stats_meta_dump(const char* xpath)
 static int orm_oo_more_stats_meta_dump(const char* xpath)
 {
 #define OO_STAT_key "more_stats"
-#include "more_stats_def.h"
+#include <ci/internal/more_stats_def.h>
 #undef OO_STAT_key
   return 0;
 }
@@ -539,6 +566,74 @@ static int orm_oo_tcp_ext_stats_count_meta_dump(const char* xpath)
 /* Dump most structs using ftl definitions */
 /*********************************************************/
 
+static void dump_buf_uint_comma(uint64_t value)
+{
+  char buf[21];
+  int pos = sizeof(buf);
+  do {
+    buf[--pos] = '0' + value % 10;
+    value /= 10;
+  } while( value );
+  __dump_buf_cat0(buf + pos, sizeof(buf) - pos);
+  db.pending_comma = 1;
+}
+
+static void dump_buf_int_comma(int64_t value)
+{
+  if( value >= 0 )
+    dump_buf_uint_comma(value);
+  else {
+    dump_buf_literal("-");
+    dump_buf_uint_comma(-value);
+  }
+}
+
+static void dump_buf_quoted_uint_comma(uint64_t value)
+{
+  __dump_buf_cat0("\"", 1);
+  dump_buf_uint_comma(value);
+  __dump_buf_cat0("\"", 1);
+}
+
+static void dump_buf_int_comma_oo_sp(oo_sp value)
+{
+  dump_buf_cat_comma("\"%p\"", value);
+}
+
+#define REDISPATCH_INT_DUMP(from, to, member) \
+  static void dump_buf_int_comma_##from(from value)         \
+  {                                                         \
+    dump_buf_##to##_comma(value member);               \
+  }
+
+REDISPATCH_INT_DUMP(ci_uint64, quoted_uint, )
+REDISPATCH_INT_DUMP(uint64_t, quoted_uint, )
+REDISPATCH_INT_DUMP(ci_uint32, uint, )
+REDISPATCH_INT_DUMP(ef_eventq_ptr, uint, )
+REDISPATCH_INT_DUMP(ci_iptime_t, uint, )
+REDISPATCH_INT_DUMP(unsigned, uint, )
+REDISPATCH_INT_DUMP(oo_atomic_t, uint, .n)
+REDISPATCH_INT_DUMP(ci_pkt_priority_t, uint, )
+REDISPATCH_INT_DUMP(ci_hwport_id_t, uint, )
+REDISPATCH_INT_DUMP(cicp_hwport_mask_t, uint, )
+REDISPATCH_INT_DUMP(cicp_encap_t, uint, .type)  /* NB: misdeclared as int */
+REDISPATCH_INT_DUMP(oo_waitable_lock, uint, .wl_val)
+REDISPATCH_INT_DUMP(CI_IP_STATS_TYPE, uint, )
+REDISPATCH_INT_DUMP(__TIME_TYPE__, uint, )
+REDISPATCH_INT_DUMP(uid_t, uint, )
+REDISPATCH_INT_DUMP(ci_mtu_t, uint, )
+REDISPATCH_INT_DUMP(ci_ifid_t, uint, )
+REDISPATCH_INT_DUMP(ci_iptime_callback_fn_t, uint, )
+REDISPATCH_INT_DUMP(ci_uint16, uint, )
+REDISPATCH_INT_DUMP(ci_uint8, uint, )
+
+REDISPATCH_INT_DUMP(ci_int32, int, )
+REDISPATCH_INT_DUMP(int, int, )
+REDISPATCH_INT_DUMP(oo_p, int, )
+REDISPATCH_INT_DUMP(oo_pkt_p, int, )
+REDISPATCH_INT_DUMP(ci_int16, int, )
+REDISPATCH_INT_DUMP(ci_int8, int, )
+
 /* manually create as config opts are defined separately
    TODO consider reordering */
 static void orm_dump_struct_ci_netif_config_opts(char* label, ci_netif_config_opts* ignore, int flags)
@@ -567,12 +662,14 @@ static void orm_dump_struct_ci_netif_config_opts(char* label, ci_netif_config_op
   static void __attribute__((unused))                                   \
   orm_dump_struct_##name(const char* label, name* stats, int output_flags) \
   {                                                                     \
-    dump_buf_cat("\"%s\": ", label);                                    \
+    dump_buf_literal("\"");                                             \
+    dump_buf_literal(label);                                            \
+    dump_buf_literal("\":");                                            \
     orm_dump_struct_body_##name(stats, output_flags);                   \
   }                                                                     \
   static void orm_dump_struct_body_##name(name* stats, int output_flags) \
   {                                                                     \
-    dump_buf_cat("{");                                                  \
+    dump_buf_literal("{");                                              \
   /* don't close block here as rest of function is defined by macros
      below. FTL_TSTRUCT_END generates the corresponding closing brace */
 
@@ -581,8 +678,8 @@ static void orm_dump_struct_ci_netif_config_opts(char* label, ci_netif_config_op
 
 #define FTL_TFIELD_INT(ctx, type, field_name, display_flags) \
   if (output_flags & display_flags) {                                   \
-    dump_buf_cat("\"%s\": ", #field_name);                              \
-    dump_buf_cat(type##_fmt ", ", stats->field_name);                   \
+    dump_buf_literal("\"" #field_name "\":");                           \
+    dump_buf_int_comma_##type(stats->field_name);                       \
   }
 
 #define FTL_TFIELD_CONSTINT(ctx, type, field_name, display_flags) \
@@ -595,7 +692,7 @@ static void orm_dump_struct_ci_netif_config_opts(char* label, ci_netif_config_op
     FTL_TFIELD_INTBE(ctx, ci_uint32, uname, "\"" OOF_IP4 "\"", OOFA_IP4, flags)
 
 #define FTL_TFIELD_IPXADDR(ctx, uname, flags) \
-    FTL_TFIELD_INT2(ctx, ci_addr_t, uname, "\"" OOF_IPX "\"", OOFA_IPX, flags)
+    FTL_TFIELD_INT2(ctx, ci_addr_t, uname, "\"" OOF_IPX "\"", OOFA_IPX_L3, flags)
 
 #define FTL_TFIELD_PORT(ctx, name, flags) \
     FTL_TFIELD_INTBE(ctx, ci_uint16, name, OOF_PORT, OOFA_PORT, flags) \
@@ -610,15 +707,15 @@ static void orm_dump_struct_ci_netif_config_opts(char* label, ci_netif_config_op
    stored in one format, but need converting to another format for output */
 #define FTL_TFIELD_INT2(ctx, type, field_name, format_string, conversion_function, display_flags) \
   if (output_flags & display_flags) {                                   \
-    dump_buf_cat("\"%s\": ", #field_name);                              \
-    dump_buf_cat(format_string ", ", conversion_function(stats->field_name)); \
+    dump_buf_literal("\"" #field_name "\":");                           \
+    dump_buf_cat_comma(format_string, conversion_function(stats->field_name)); \
   }
 
 /* the _INT3 comparing to _INT2 allows to truncate display name e.g. to remove suffix */
 #define FTL_TFIELD_INT3(ctx, type, field_name, name_display_len, format_string, conversion_function, display_flags) \
   if (output_flags & display_flags) {                                   \
-    dump_buf_cat("\"%.*s\": ", name_display_len, #field_name);                              \
-    dump_buf_cat(format_string ", ", conversion_function(stats->field_name)); \
+    dump_buf_cat("\"%.*s\":", name_display_len, #field_name);                              \
+    dump_buf_cat_comma(format_string, conversion_function(stats->field_name)); \
   }
 
 /* function that truncates _bexx suffixes automatically from the display field name */
@@ -641,19 +738,20 @@ static void orm_dump_struct_ci_netif_config_opts(char* label, ci_netif_config_op
   if (output_flags & display_flags) {                                   \
     {                                                                   \
       int i;                                                            \
-      dump_buf_cat("\"%s\": [", #field_name);                           \
+      dump_buf_literal("\"" #field_name "\":");                         \
+      dump_buf_literal("[");                                            \
       for( i = 0; i < (len); ++i ) {                                    \
-        dump_buf_cat(type##_fmt ", ", stats->field_name[i]);            \
+        dump_buf_cat_comma(type##_fmt, stats->field_name[i]);           \
       }                                                                 \
       dump_buf_cleanup();                                               \
-      dump_buf_cat("], ");                                              \
+      dump_buf_literal_comma("]");                                      \
     }                                                                   \
   }
 
 #define FTL_TFIELD_SSTR(ctx, field_name, display_flags)    \
   if (output_flags & display_flags) {                                   \
-    dump_buf_cat("\"%s\": ", #field_name);                              \
-    dump_buf_cat("\"%.*s\", ", sizeof(stats->field_name),               \
+    dump_buf_literal("\"" #field_name "\":");                           \
+    dump_buf_cat_comma("\"%.*s\"", sizeof(stats->field_name),           \
                                stats->field_name);                      \
   }
 
@@ -661,29 +759,29 @@ static void orm_dump_struct_ci_netif_config_opts(char* label, ci_netif_config_op
   if (output_flags & display_flags) {                                   \
     {                                                                   \
       int i;                                                            \
-      dump_buf_cat("\"%s\": [", #field_name);                           \
+      dump_buf_literal("\"" #field_name "\":[");                        \
       for( i = 0; i < (len); ++i ) {                                    \
         if( field_cond ) \
           orm_dump_struct_body_##type(&stats->field_name[i], output_flags); \
        else \
-          dump_buf_cat("{ },");                                         \
+          dump_buf_literal_comma("{}");                                 \
        } \
       dump_buf_cleanup();                                               \
-      dump_buf_cat("], ");                                              \
+      dump_buf_literal_comma("]");                                      \
     }                                                                   \
   }
 
 #define FTL_TFIELD_ANON_STRUCT_BEGIN(ctx, field_name, display_flags) \
      if (output_flags & display_flags) {                                \
-      dump_buf_cat("\"%s\": {", #field_name);
+      dump_buf_literal("\"" #field_name "\":{");
 
 #define FTL_TFIELD_ANON_STRUCT(ctx, type, field_name, child) \
-      dump_buf_cat("\"%s\": ", #child);                                 \
-      dump_buf_cat(type##_fmt ", ", stats->field_name.child);
+      dump_buf_literal("\"" #child "\":");                              \
+      dump_buf_cat_comma(type##_fmt, stats->field_name.child);
 
 #define FTL_TFIELD_ANON_STRUCT_END(ctx, field_name)        \
       dump_buf_cleanup();                                               \
-      dump_buf_cat("}, ");                                              \
+      dump_buf_literal_comma("}");                                      \
     }
 
 /* anon union not yet implemented (only used for TCP/UDP headers) */
@@ -694,25 +792,25 @@ static void orm_dump_struct_ci_netif_config_opts(char* label, ci_netif_config_op
 #define FTL_TFIELD_ANON_ARRAYOFSTRUCT_BEGIN(ctx, field_name, len, display_flags) \
     if (output_flags & display_flags) {                                 \
       int i;                                                            \
-      dump_buf_cat("\"%s\": [", #field_name);                           \
+      dump_buf_literal("\"" #field_name "\":[");                        \
       for( i = 0; i < (len); ++i ) {                                    \
-        dump_buf_cat("{");
+        dump_buf_literal("{");
 
 #define FTL_TFIELD_ANON_ARRAYOFSTRUCT(ctx, type, field_name, child, len) \
-        dump_buf_cat("\"%s\": ", #child);                               \
-        dump_buf_cat(type##_fmt ", ", stats->field_name[i].child);
+        dump_buf_literal("\"" #child "\":");                             \
+        dump_buf_cat_comma(type##_fmt, stats->field_name[i].child);
 
 #define FTL_TFIELD_ANON_ARRAYOFSTRUCT_END(ctx, field_name, len) \
         dump_buf_cleanup();                                             \
-        dump_buf_cat("}, ");                                            \
+        dump_buf_literal_comma("}");                                    \
       }                                                                 \
       dump_buf_cleanup();                                               \
-      dump_buf_cat("], ");                                              \
+      dump_buf_literal_comma("]");                                      \
     }
 
 #define FTL_TSTRUCT_END(ctx)                                            \
     dump_buf_cleanup();                                                 \
-    dump_buf_cat("}, ");                                                \
+    dump_buf_literal_comma("}");                                        \
   }
 
 #define FTL_TUNION_END(ctx)                                             \
@@ -722,54 +820,58 @@ static void orm_dump_struct_ci_netif_config_opts(char* label, ci_netif_config_op
 
 #include "ftl_decls.h"
 
+
 static void orm_waitable_dump(ci_netif* ni, const char* sock_type, int output_flags)
 {
   ci_netif_state* ns = ni->state;
   unsigned id;
 
-  dump_buf_cat("\"%s\": {", sock_type);
+  dump_buf_label("\"", sock_type, "\":{");
   for( id = 0; id < ns->n_ep_bufs; ++id ) {
     citp_waitable_obj* wo = ID_TO_WAITABLE_OBJ(ni, id);
     if( wo->waitable.state != CI_TCP_STATE_FREE ) {
       citp_waitable* w = &wo->waitable;
 
       if( (strcmp(sock_type, "tcp_listen") == 0) &&
-          (w->state == CI_TCP_LISTEN) ) {
-        dump_buf_cat("\"%d\": {", W_FMT(w));
+          (w->state == CI_TCP_LISTEN) &&
+          sockbuf_filter_matches(wo) ) {
+        dump_buf_cat("\"%d\":{", W_FMT(w));
         orm_dump_struct_ci_tcp_socket_listen("tcp_listen_sockets", &wo->tcp_listen, output_flags);
         dump_buf_cleanup();
-        dump_buf_cat("}, ");
+        dump_buf_literal_comma("}");
       }
       else if( (strcmp(sock_type, "tcp") == 0) &&
-               (w->state & CI_TCP_STATE_TCP) ) {
-        dump_buf_cat("\"%d\": {", W_FMT(w));
+               (w->state & CI_TCP_STATE_TCP) &&
+               sockbuf_filter_matches(wo) ) {
+        dump_buf_cat("\"%d\":{", W_FMT(w));
         orm_dump_struct_ci_tcp_state("tcp_state", &wo->tcp, output_flags);
         dump_buf_cleanup();
-        dump_buf_cat("}, ");
+        dump_buf_literal_comma("}");
       }
 #if CI_CFG_UDP
       else if( (strcmp(sock_type, "udp") == 0) &&
-               (w->state == CI_TCP_STATE_UDP) ) {
-        dump_buf_cat("\"%d\": {", W_FMT(w));
+               (w->state == CI_TCP_STATE_UDP) &&
+               sockbuf_filter_matches(wo) ) {
+        dump_buf_cat("\"%d\":{", W_FMT(w));
         orm_dump_struct_ci_udp_state("udp_state", &wo->udp, output_flags);
         dump_buf_cleanup();
-        dump_buf_cat("}, ");
+        dump_buf_literal_comma("}");
       }
 #endif
 
 #if CI_CFG_USERSPACE_PIPE
       else if( (strcmp(sock_type, "pipe") == 0) &&
                (w->state == CI_TCP_STATE_PIPE) ) {
-        dump_buf_cat("\"%d\": {", W_FMT(w));
+        dump_buf_cat("\"%d\":{", W_FMT(w));
         orm_dump_struct_oo_pipe("oo_pipe", &wo->pipe, output_flags);
         dump_buf_cleanup();
-        dump_buf_cat("}, ");
+        dump_buf_literal_comma("}");
       }
 #endif
     }
   }
   dump_buf_cleanup();
-  dump_buf_cat("}, ");
+  dump_buf_literal_comma("}");
 }
 
 
@@ -777,7 +879,7 @@ static int orm_shared_state_dump(ci_netif* ni, int output_flags)
 {
   ci_netif_state* ns = ni->state;
 
-  dump_buf_cat("\"stack\": {");
+  dump_buf_literal("\"stack\":{");
   if( output_flags & ORM_OUTPUT_STACK )
     orm_dump_struct_ci_netif_state("stack_state", ns, output_flags);
   if( output_flags & ORM_OUTPUT_SOCKETS ) {
@@ -787,7 +889,7 @@ static int orm_shared_state_dump(ci_netif* ni, int output_flags)
     orm_waitable_dump(ni, "pipe", output_flags);
   }
   dump_buf_cleanup();
-  dump_buf_cat("}");
+  dump_buf_literal_comma("}");
 
   return 0;
 }
@@ -797,9 +899,9 @@ static int orm_vis_dump(ci_netif* ni, int output_flags)
 {
   int intf_i;
 
-  dump_buf_cat("\"vis\": [");
+  dump_buf_literal("\"vis\":[");
   OO_STACK_FOR_EACH_INTF_I(ni, intf_i) {
-    dump_buf_cat("{");
+    dump_buf_literal("{");
     orm_dump_struct_ef_vi_rxq_state("rxq",
                                     &ni->nic_hw[intf_i].vi.ep_state->rxq,
                                     output_flags);
@@ -810,10 +912,10 @@ static int orm_vis_dump(ci_netif* ni, int output_flags)
                                     &ni->nic_hw[intf_i].vi.ep_state->evq,
                                     output_flags);
     dump_buf_cleanup();
-    dump_buf_cat("}, ");
+    dump_buf_literal_comma("}");
   }
   dump_buf_cleanup();
-  dump_buf_cat("]");
+  dump_buf_literal_comma("]");
 
   return 0;
 }
@@ -834,29 +936,29 @@ static int orm_netif_dump(ci_netif* ni, int id, int output_flags,
 
   if( ! cfg_flat ) {
     if (stackname != NULL)
-      dump_buf_cat("{\"%s\": {", stackname);
+      dump_buf_label("{\"", stackname, "\":{");
     else
-      dump_buf_cat("{\"%d\": {", id);
+      dump_buf_cat("{\"%d\":{", id);
   }
   else {
     const char* pname = ni->state->pretty_name;
     const char* name = ni->state->name;
     char index[CI_CFG_STACK_NAME_LEN + 1];
-    dump_buf_cat("{");
-    dump_buf_cat("\"id\": %d,", id);
+    dump_buf_literal("{");
+    dump_buf_cat("\"id\":%d,", id);
     if( name && name[0] ) {
       const char* s = name;
       char* d = index;
       for( ; *s; ++s, ++d )
         *d = isalnum(*s) ? *s : '_';
       *d = 0;
-      dump_buf_cat("\"index\": \"%s\",", index);
+      dump_buf_cat("\"index\":\"%s\",", index);
     }
     else {
-      dump_buf_cat("\"index\": \"%d\",", id);
+      dump_buf_cat("\"index\":\"%d\",", id);
     }
-    dump_buf_cat("\"name\": \"%s\",", name ? name : "");
-    dump_buf_cat("\"pretty_name\": \"%s\",", pname);
+    dump_buf_cat("\"name\":\"%s\",", name ? name : "");
+    dump_buf_cat_comma("\"pretty_name\":\"%s\"", pname);
   }
 
   if (output_flags & ORM_OUTPUT_VIS) {
@@ -864,24 +966,18 @@ static int orm_netif_dump(ci_netif* ni, int id, int output_flags,
       fprintf(stderr, "VIs error code %d\n",rc);
       return rc;
     }
-    dump_buf_cleanup();
-    dump_buf_cat(", ");
   }
   if (output_flags & (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS)) {
     if( (rc = orm_shared_state_dump(ni, output_flags)) != 0 ) {
       fprintf(stderr,"stack error code %d\n",rc);
       return rc;
     }
-    dump_buf_cleanup();
-    dump_buf_cat(", ");
   }
   if (output_flags & ORM_OUTPUT_STATS) {
     if( (rc = orm_oo_stats_dump("stats", &ni->state->stats)) != 0 ) {
       fprintf(stderr,"stats error code %d\n",rc);
       return rc;
     }
-    dump_buf_cleanup();
-    dump_buf_cat(", ");
   }
   if (output_flags & ORM_OUTPUT_MORE_STATS) {
     more_stats_t more_stats;
@@ -890,8 +986,6 @@ static int orm_netif_dump(ci_netif* ni, int id, int output_flags,
       fprintf(stderr,"more stats error code %d\n",rc);
       return rc;
     }
-    dump_buf_cleanup();
-    dump_buf_cat(", ");
   }
   if (output_flags & ORM_OUTPUT_TCP_STATS_COUNT) {
     ci_tcp_stats_count* tcp = &ni->state->stats_snapshot.tcp;
@@ -899,8 +993,6 @@ static int orm_netif_dump(ci_netif* ni, int id, int output_flags,
       fprintf(stderr,"tcp stats error code %d\n",rc);
       return rc;
     }
-    dump_buf_cleanup();
-    dump_buf_cat(", ");
   }
   if (output_flags & ORM_OUTPUT_TCP_EXT_STATS_COUNT) {
     ci_tcp_ext_stats_count* tcp_ext = &ni->state->stats_snapshot.tcp_ext;
@@ -908,23 +1000,19 @@ static int orm_netif_dump(ci_netif* ni, int id, int output_flags,
       fprintf(stderr,"tcp ext stats error code %d\n",rc);
       return rc;
     }
-    dump_buf_cleanup();
-    dump_buf_cat(", ");
   }
   if (output_flags & ORM_OUTPUT_OPTS) {
     if( (rc = orm_oo_opts_dump(ni)) != 0 ) {
       fprintf(stderr,"opts error code %d\n",rc);
       return rc;
     }
-    dump_buf_cleanup();
-    dump_buf_cat(", ");
   }
   dump_buf_cleanup();
   if( ! cfg_flat )
-    dump_buf_cat("}}");
+    dump_buf_literal("}}");
   else
-    dump_buf_cat("}");
-  dump_buf_cat(", ");
+    dump_buf_literal("}");
+  dump_buf_literal_comma("");
 
   return 0;
 }
@@ -944,7 +1032,8 @@ static void orm_oo_stats_meta_all(int output_flags, const char* xpath)
 int main(int argc, char* argv[])
 {
   int i;
-  const char* buf;
+  char* buf = NULL;
+  size_t buflen = 0;
   int output_flags = ORM_OUTPUT_NONE;
 
   ci_app_standard_opts = 0;
@@ -983,39 +1072,46 @@ int main(int argc, char* argv[])
       output_flags |= ORM_OUTPUT_LOTS | ORM_OUTPUT_EXTRA;
   }
 
+  if( cfg_filter )
+    if( ! sockbuf_filter_prepare(cfg_filter) )
+      exit(EXIT_FAILURE);
+
+  if( cfg_double_buffer )
+    db.f = open_memstream(&buf, &buflen);
+  else
+    db.f = stdout;
+
   if( cfg_meta ) {
     const char* xpath = cfg_flat ? "/all" : "/json/0/all";
-    dump_buf_cat("{");
-    dump_buf_cat("\"metrics\": [");
+    dump_buf_literal("{");
+    dump_buf_literal("\"metrics\":[");
     orm_oo_stats_meta_all(output_flags, xpath);
     if( cfg_flat ) {
       xpath = "";
-      dump_buf_cat( "{"
-        "\"name\": \"stacks\", "
-        "\"pointer\": \"/stacks\", "
-        "\"type\": \"array\", "
-        "\"description\": \"List of stacks and their stats\","
-        "\"index\": \"/index\","
-        "\"metrics\": [");
+      dump_buf_literal( "{"
+        "\"name\":\"stacks\","
+        "\"pointer\":\"/stacks\","
+        "\"type\":\"array\","
+        "\"description\":\"List of stacks and their stats\","
+        "\"index\":\"/index\","
+        "\"metrics\":[");
 
       /* include per stack stats */
       orm_oo_stats_meta_all(output_flags, xpath);
       dump_buf_cleanup();
-      dump_buf_cat("]},");
+      dump_buf_literal_comma("]}");
     }
     dump_buf_cleanup();
-    dump_buf_cat("]}");
+    dump_buf_literal("]}");
     goto done;
   }
 
   if( orm_map_stacks() != 0 )
     exit(EXIT_FAILURE);
-  if( n_orm_stacks == 0 )
-    return 0;
 
-  dump_buf_cat("{\"onload_version\": \"%s\", ", ONLOAD_VERSION);
+  dump_buf_cat_comma("{\"onload_version\":\"%s\"", ONLOAD_VERSION);
   if( ! cfg_flat )
-    dump_buf_cat("\"json\": [");
+    dump_buf_literal("\"json\":[");
 
   if( cfg_sum && (output_flags & ORM_OUTPUT_SUM) ) {
     ci_netif_stats stats_sum = {};
@@ -1044,50 +1140,42 @@ int main(int argc, char* argv[])
       }
     }
     if( ! cfg_flat )
-      dump_buf_cat("{\"%s\": {", "all");
+      dump_buf_literal("{\"all\":{");
     else
-      dump_buf_cat("\"all\": {");
+      dump_buf_literal("\"all\":{");
     if( output_flags & ORM_OUTPUT_STATS ) {
       if( (rc = orm_oo_stats_dump("stats", &stats_sum)) != 0 ) {
         fprintf(stderr,"stats error code %d\n",rc);
         exit(EXIT_FAILURE);
       }
-      dump_buf_cleanup();
-      dump_buf_cat(", ");
     }
     if( output_flags & ORM_OUTPUT_MORE_STATS ) {
       if( (rc = orm_oo_more_stats_dump("more_stats", &more_stats_sum)) != 0 ) {
         fprintf(stderr,"more_stats error code %d\n",rc);
         exit(EXIT_FAILURE);
       }
-      dump_buf_cleanup();
-      dump_buf_cat(", ");
     }
     if( output_flags & ORM_OUTPUT_TCP_STATS_COUNT ) {
       if( (rc = orm_oo_tcp_stats_count_dump("tcp_stats", &tcp_stats_sum)) != 0 ) {
         fprintf(stderr,"tcp stats error code %d\n",rc);
         exit(EXIT_FAILURE);
       }
-      dump_buf_cleanup();
-      dump_buf_cat(", ");
     }
     if( output_flags & ORM_OUTPUT_TCP_EXT_STATS_COUNT ) {
       if( (rc = orm_oo_tcp_ext_stats_count_dump("tcp_ext_stats", &tcp_ext_stats_sum)) != 0 ) {
         fprintf(stderr,"tcp ext stats error code %d\n",rc);
         exit(EXIT_FAILURE);
       }
-      dump_buf_cleanup();
-      dump_buf_cat(", ");
     }
     dump_buf_cleanup();
     if( ! cfg_flat )
-      dump_buf_cat("}}");
+      dump_buf_literal("}}");
     else
-      dump_buf_cat("}");
-    dump_buf_cat(", ");
+      dump_buf_literal("}");
+    dump_buf_literal_comma("");
   }
   if( cfg_flat )
-    dump_buf_cat("\"stacks\": [");
+    dump_buf_literal("\"stacks\":[");
   for( i = 0; i < n_orm_stacks; ++i ) {
     ci_netif* ni = &orm_stacks[i]->os_ni;
     int id       = orm_stacks[i]->os_id;
@@ -1097,12 +1185,16 @@ int main(int argc, char* argv[])
   }
 
   dump_buf_cleanup();
-  dump_buf_cat("]}");
+  dump_buf_literal("]}");
 
 done:
 
-  buf = dump_buf_get();
-  printf("%s\n", buf);
+  __dump_buf_flush_buf();
+  if( cfg_double_buffer ) {
+    fclose(db.f);
+    fwrite(buf, 1, buflen, stdout);
+  }
+  sockbuf_filter_free();
 
   return 0;
 }

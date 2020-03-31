@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_SOURCE>
@@ -25,7 +12,10 @@
 \**************************************************************************/
 
 /*! \cidoxg_tests_ef */
+#define _GNU_SOURCE
 #include <stdlib.h>
+#include <stddef.h>
+#include <limits.h>
 #include <ci/internal/ip.h>
 #include <onload/ul.h>
 #include <onload/cplane_ops.h>
@@ -41,7 +31,9 @@
 #include <ci/internal/ip_signal.h>
 #include <dirent.h>
 #include <ctype.h>
-#include "more_stats.h"
+#include <ci/internal/more_stats.h>
+#include <ci/internal/stats_dump.h>
+#include "sockbuf_filter.h"
 
 #undef DO
 #undef IGNORE
@@ -52,122 +44,12 @@
 
 #define MAX_PATHNAME 300
 
-typedef struct {
-  unsigned        rx_evs_per_poll;
-  unsigned        tx_evs_per_poll;
-} dstats_t;
-
-
-
 
 typedef struct {
   int		stack;
   int		id;
   void*		s;	/* misc state */
 } socket_t;
-
-
-typedef struct {
-  unsigned	offset;
-  unsigned	size;
-  const char*	name;
-  const char*   description;
-# define STAT_COUNT     0x1
-# define STAT_TCP       0x2
-# define STAT_UDP       0x4
-  unsigned	flags;
-} stat_desc_t;
-
-
-#define stat_initialiser(type_t, field, name_, desc_, flags_)   \
-  { .offset = CI_MEMBER_OFFSET(type_t, field),                  \
-    .size = CI_MEMBER_SIZE(type_t, field),                      \
-    .name = (name_),                                            \
-    .description = (desc_),                                     \
-    .flags = (flags_)                                           \
-  }
-
-#define stat_desc_nm(type_t, field, nm, flags)          \
-  stat_initialiser(type_t, field, (nm), NULL, (flags))
-
-#define stat_desc(type_t, field, flags)             \
-  stat_desc_nm(type_t, field, (#field), (flags))
-
-#undef  OO_STAT
-#define OO_STAT(desc, datatype, name, kind)     \
-  OO_STAT_##kind(name, (desc)),
-/* FIXME: Do we need to print (or store in the first place) always 0 stats */
-#define OO_STAT_count_zero OO_STAT_count
-#define OO_STAT_count(name, desc)                                       \
-  stat_initialiser(OO_STAT_type, name, (#name), (desc), STAT_COUNT)
-#define OO_STAT_val(name, desc)                                 \
-  stat_initialiser(OO_STAT_type, name, (#name), (desc), 0)
-
-static stat_desc_t netif_stats_fields[] = {
-#define OO_STAT_type ci_netif_stats
-#include <ci/internal/stats_def.h>
-#undef OO_STAT_type
-};
-#define N_NETIF_STATS_FIELDS                                    \
-  (sizeof(netif_stats_fields) / sizeof(netif_stats_fields[0]))
-
-static stat_desc_t netif_dstats_fields[] = {
-#define ns(x)  stat_desc_nm(dstats_t, x, (#x), 0)
-  ns(rx_evs_per_poll),
-  ns(tx_evs_per_poll),
-#undef ns
-};
-#define N_NETIF_DSTATS_FIELDS                                    \
-  (sizeof(netif_dstats_fields) / sizeof(netif_dstats_fields[0]))
-
-
-static stat_desc_t more_stats_fields[] = {
-#define OO_STAT_type more_stats_t
-#include "more_stats_def.h"
-#undef OO_STAT_type
-};
-#define N_MORE_STATS_FIELDS                                     \
-  (sizeof(more_stats_fields) / sizeof(more_stats_fields[0]))
-
-
-#if CI_CFG_SUPPORT_STATS_COLLECTION
-
-static stat_desc_t ip_stats_fields[] = {
-#define OO_STAT_type ci_ipv4_stats_count
-#include <ci/internal/ipv4_stats_count_def.h>
-#undef OO_STAT_type
-};
-#define N_IP_STATS_FIELDS                                       \
-  (sizeof(ip_stats_fields) / sizeof(ip_stats_fields[0]))
-
-
-static stat_desc_t tcp_stats_fields[] = {
-#define OO_STAT_type ci_tcp_stats_count
-#include <ci/internal/tcp_stats_count_def.h>
-#undef OO_STAT_type
-};
-#define N_TCP_STATS_FIELDS                                      \
-  (sizeof(tcp_stats_fields) / sizeof(tcp_stats_fields[0]))
-
-
-static stat_desc_t udp_stats_fields[] = {
-#define OO_STAT_type ci_udp_stats_count
-#include <ci/internal/udp_stats_count_def.h>
-#undef OO_STAT_type
-};
-#define N_UDP_STATS_FIELDS                                      \
-  (sizeof(udp_stats_fields) / sizeof(udp_stats_fields[0]))
-
-
-static stat_desc_t tcp_ext_stats_fields[] = {
-#define OO_STAT_type ci_tcp_ext_stats_count
-#include <ci/internal/tcp_ext_stats_count_def.h>
-#undef OO_STAT_type
-};
-#define N_TCP_EXT_STATS_FIELDS                                          \
-  (sizeof(tcp_ext_stats_fields) / sizeof(tcp_ext_stats_fields[0]))
-
-#endif  /* CI_CFG_SUPPORT_STATS_COLLECTION */
 
 
 struct pid_mapping {
@@ -209,6 +91,7 @@ unsigned	cfg_samples = 1000;
 int             cfg_notable;
 int             cfg_zombie = 0;
 int             cfg_nopids = 0;
+const char*     cfg_filter = NULL;
 
 
 ci_inline void libstack_defer_signals(citp_signal_info* si)
@@ -309,14 +192,22 @@ static int is_onloaded(pid_t pid, int** ret_stacks_ids)
   int n_stacks = 0;
   int* stack_ids = NULL;
   struct dirent* ent;
+#ifndef O_PATH
+/* RHEL6 case */
+#define O_PATH 0
+#endif
+  int dirfd = open(fd_dir_path, O_PATH | O_CLOEXEC | O_DIRECTORY);
+  if( dirfd < 0 ) {
+    closedir(fd_dir);
+    return -1;
+  }
   while( (ent = readdir(fd_dir)) ) {
     if( ent->d_name[0] == '.' )
       continue;
-    char fd_path[MAX_PATHNAME];
-    snprintf(fd_path, MAX_PATHNAME, "%s/%s", fd_dir_path, ent->d_name);
     char sym_buf[MAX_PATHNAME];
-    ssize_t rc = readlink(fd_path, sym_buf, MAX_PATHNAME);
+    ssize_t rc = readlinkat(dirfd, ent->d_name, sym_buf, MAX_PATHNAME);
     if( rc == -1 ) {
+      close(dirfd);
       closedir(fd_dir);
       return rc;
     }
@@ -338,6 +229,7 @@ static int is_onloaded(pid_t pid, int** ret_stacks_ids)
       }
     }
   }
+  close(dirfd);
   closedir(fd_dir);
   *ret_stacks_ids = stack_ids;
   return n_stacks;
@@ -410,10 +302,10 @@ static int libstack_mappings_init(void)
   ci_netif_info_t info;
   oo_fd fd;
   rc = oo_fd_open_versioned(&fd);
-  if( rc == -ENOENT ) {
+  if( rc == -ENOENT || rc == -ENXIO ) {
     fprintf(stderr, "Could not open /dev/onload (rc=%d) - "
                     "check Onload drivers are loaded\n", rc);
-    errno = ENOENT;
+    errno = -rc;
     return -1;
   }
   else if( rc == -ELIBACC || rc == -EINVAL ) {
@@ -430,6 +322,7 @@ static int libstack_mappings_init(void)
   i = 0;
   while( i >= 0 ) {
     info.ni_index = i;
+    STACK_LOG_DUMP(ci_log(" [%s %d] idx = %d", __func__, __LINE__, i));
     info.ni_orphan = cfg_zombie;
     info.ni_subop = CI_DBG_NETIF_INFO_GET_NEXT_NETIF;
     CI_TRY(oo_ioctl(fd, OO_IOC_DBG_GET_STACK_INFO, &info));
@@ -438,11 +331,6 @@ static int libstack_mappings_init(void)
       stack_id = info.ni_index;
     else if( info.ni_no_perms_exists ) {
       stack_id = info.ni_no_perms_id;
-      fprintf(stderr, "User %d:%d cannot access full details of stack %d(%s) "
-             "owned by %d:%d share_with=%d\n", (int) getuid(), (int) geteuid(),
-             info.ni_no_perms_id, info.ni_no_perms_name,
-             (int) info.ni_no_perms_uid, (int) info.ni_no_perms_euid,
-             info.ni_no_perms_share_with);
     }
 
     if( stack_id != -1 ) {
@@ -753,9 +641,7 @@ int libstack_env_print(void)
 {
   int i, cnt;
 
-#define STR_(s) #s
-#define STR(s) STR_(s)
-  ci_log("transport opt hdr: " STR(TRANSPORT_CONFIG_OPT_HDR));
+  ci_log("transport opt hdr: " OO_STRINGIFY(TRANSPORT_CONFIG_OPT_HDR));
 
   if( ! pid_mappings ) {
     if( cfg_nopids )
@@ -875,34 +761,6 @@ void stack_detach(netif_t* n, int locked)
 }
 
 
-void list_all_stacks(int attach)
-{
-  ci_netif_info_t info;
-  int i = 0;
-  oo_fd fd;
-
-  CI_TRY(oo_fd_open(&fd));
-  info.mmap_bytes = 0;
-  info.ni_exists = 0;
-
-  while( i >= 0 ) {
-    info.ni_index = i;
-    info.ni_orphan = cfg_zombie;
-    info.ni_subop = CI_DBG_NETIF_INFO_GET_NEXT_NETIF;
-    CI_TRY(oo_ioctl(fd, OO_IOC_DBG_GET_STACK_INFO, &info));
-    if( info.ni_exists && (!cfg_zombie || info.ni_orphan) ) {
-      if( attach )
-	stack_attach(i);
-      else
-	ci_log("%3d: %u", info.ni_index, i);
-    }
-    i = info.u.ni_next_ni.index;
-  }
-
-  CI_TRY(oo_fd_close(fd));
-}
-
-
 void list_all_stacks2(stackfilter_t *filter,
                       stack_ni_fn_t *post_attach, stack_ni_fn_t *pre_detach,
                       oo_fd *p_fd)
@@ -924,7 +782,7 @@ void list_all_stacks2(stackfilter_t *filter,
 
   while( i >= 0 ) {
     info.ni_index = i;
-    info.ni_orphan = 0;
+    info.ni_orphan = cfg_zombie;
     info.ni_subop = CI_DBG_NETIF_INFO_GET_NEXT_NETIF;
     CI_TRY(oo_ioctl(fd, OO_IOC_DBG_GET_STACK_INFO, &info));
 
@@ -947,12 +805,15 @@ void list_all_stacks2(stackfilter_t *filter,
         if( stack_attach(i) && post_attach )
           post_attach(&stacks[i]->ni);
       }
-    } else if( info.ni_no_perms_exists )
-      ci_log("User %d:%d can't share stack %d(%s) owned by %d:%d "
-             "share_with=%d", (int) getuid(), (int) geteuid(),
-             info.ni_no_perms_id, info.ni_no_perms_name,
-             (int) info.ni_no_perms_uid, (int) info.ni_no_perms_euid,
-             info.ni_no_perms_share_with);
+    } else if( info.ni_no_perms_exists ) {
+      if( filter == NULL || filter(&info) ) {
+        ci_log("User %d:%d cannot access full details of stack %d(%s) owned by "
+              "%d:%d share_with=%d", (int) getuid(), (int) geteuid(),
+              info.ni_no_perms_id, info.ni_no_perms_name,
+              (int) info.ni_no_perms_uid, (int) info.ni_no_perms_euid,
+              info.ni_no_perms_share_with);
+      }
+    }
     i = info.u.ni_next_ni.index;
   }
 
@@ -1024,7 +885,8 @@ static void do_socket_op(const socket_op_t* op, socket_t* s)
       ok = 0;
 
     if( ok )
-      op->fn(&n->ni, &wo->tcp);
+      if( sockbuf_filter_matches(wo) )
+        op->fn(&n->ni, &wo->tcp);
 
     if( s_unlock )
       ci_sock_unlock(&n->ni, &wo->waitable);
@@ -1043,53 +905,11 @@ void for_each_socket(const socket_op_t* op)
 }
 
 
-static void* get_dstats(void* to, const void* from, size_t len)
-{
-  ci_netif_stats s = * (const ci_netif_stats*) from;
-  dstats_t* d = (dstats_t*) to;
-  int polls;
-
-  ci_assert_equal(len, sizeof(dstats_t));
-
-  polls = s.k_polls + s.u_polls;
-  d->rx_evs_per_poll = s.rx_evs / polls;
-  d->tx_evs_per_poll = s.tx_evs / polls;
-  return NULL;
-}
-
-
-
-
 static void* more_stats_getter(void* to, const void* from, size_t len)
 {
   ci_assert_equal(len, sizeof(more_stats_t));
   get_more_stats((ci_netif*) from, (more_stats_t*) to);
   return to;
-}
-
-
-static void dump_stats(const stat_desc_t* stats_fields, int n_stats_fields,
-                       const void* stats, int with_description)
-{
-  const stat_desc_t* s;
-  for( s = stats_fields; s < stats_fields + n_stats_fields; ++s ) {
-    switch( s->size ) {
-    case sizeof(ci_uint32):
-      ci_log("%s: %u", s->name,
-             *(const ci_uint32*) ((const char*) stats + s->offset));
-      break;
-    case sizeof(ci_uint64):
-      ci_log("%s: %llu", s->name,
-             (unsigned long long)(*(const ci_uint64*)
-                                  ((const char*) stats + s->offset)));
-      break;
-    default:
-      ci_log("%s: unknown",  s->name);
-      ci_assert(0);
-    }
-    if( with_description && s->description )
-      ci_log("  %s\n", s->description);
-  }
 }
 
 
@@ -1298,7 +1118,8 @@ static void for_each_tcp_socket(ci_netif* ni,
     if( wo->waitable.state == CI_TCP_LISTEN ||
         ! (wo->waitable.state & CI_TCP_STATE_TCP) )
       continue;
-    fn(ni, &wo->tcp);
+    if( sockbuf_filter_matches(wo) )
+      fn(ni, &wo->tcp);
   }
 }
 
@@ -1311,18 +1132,13 @@ uint64_t arg_u[1];
 const char* arg_s[2];
 
 
-void zombie_stack_dump(int id, void *arg)
+void dump_kernel_stats_via_buffer(int id, dump_stack_args *args)
 {
   int rc;
-  dump_stack_args args;
 
-  args.stack_id = id;
-  args.orphan_only = 1;
-  args.op = __CI_DEBUG_OP_DUMP_STACK__;
-
-  CI_TRY(oo_fd_open(&args.fp));
-  rc = dump_via_buffers(oo_debug_dump_stack, &args, 0);
-  CI_TRY(oo_fd_close(args.fp));
+  CI_TRY(oo_fd_open(&args->fp));
+  rc = dump_via_buffers(oo_debug_dump_stack, args, 0);
+  CI_TRY(oo_fd_close(args->fp));
 
   switch( -rc ) {
   case 0:
@@ -1340,32 +1156,27 @@ void zombie_stack_dump(int id, void *arg)
 }
 
 
+void zombie_stack_dump(int id, void *arg)
+{
+  dump_stack_args args;
+
+  args.stack_id = id;
+  args.orphan_only = 1;
+  args.op = __CI_DEBUG_OP_DUMP_STACK__;
+
+  dump_kernel_stats_via_buffer(id, &args);
+}
+
+
 void zombie_stack_netstat(int id, void *arg)
 {
-  int rc;
   dump_stack_args args;
 
   args.stack_id = id;
   args.orphan_only = 1;
   args.op = __CI_DEBUG_OP_NETSTAT_STACK__;
 
-  CI_TRY(oo_fd_open(&args.fp));
-  rc = dump_via_buffers(oo_debug_dump_stack, &args, 0);
-  CI_TRY(oo_fd_close(args.fp));
-
-  switch( -rc ) {
-  case 0:
-    /* Success. */
-    break;
-  case EPERM:
-    ci_log("Permission denied - please run as root to access orphan stacks");
-    break;
-  case ENOMEM:
-    ci_log("Out of memory.");
-    break;
-  default:
-    ci_log("No such orphan stack %d (error %d).", id, -rc);
-  }
+  dump_kernel_stats_via_buffer(id, &args);
 }
 
 
@@ -1392,18 +1203,82 @@ void zombie_stack_kill(int id, void *arg)
 }
 
 
+void zombie_stack_lots(int id, void *arg)
+{
+  int i = 0;
+  dump_stack_args args;
+  args.stack_id = id;
+  args.orphan_only = 1;
+
+  int ops[] = { __CI_DEBUG_OP_NETIF_DUMP__,  __CI_DEBUG_OP_NETIF_DUMP_EXTRA__,
+                __CI_DEBUG_OP_DUMP_SOCKETS__, __CI_DEBUG_OP_STACK_STATS__,
+                __CI_DEBUG_OP_STACK_MORE_STATS__, __CI_DEBUG_OP_IP_STATS__,
+                __CI_DEBUG_OP_TCP_STATS__, __CI_DEBUG_OP_TCP_EXT_STATS__,
+                __CI_DEBUG_OP_UDP_STATS__,
+                __CI_DEBUG_OP_NETIF_CONFIG_OPTS_DUMP__,
+                __CI_DEBUG_OP_STACK_TIME__ };
+
+  for( i = 0; i < sizeof(ops) / sizeof(ops[0]); ++i ) {
+    args.op = ops[i];
+    dump_kernel_stats_via_buffer(id, &args);
+  }
+}
+
+
 static void stack_dump(ci_netif* ni)
 {
+  ci_netif_state* ns = ni->state;
+  unsigned id;
+
   ci_log("============================================================");
   ci_netif_dump(ni);
   ci_log("--------------------- sockets ------------------------------");
-  ci_netif_dump_sockets(ni);
+
+  for( id = 0; id < ns->n_ep_bufs; ++id ) {
+    citp_waitable_obj* wo = ID_TO_WAITABLE_OBJ(ni, id);
+    if( wo->waitable.state != CI_TCP_STATE_FREE &&
+        sockbuf_filter_matches(wo) ) {
+      citp_waitable_dump_to_logger(ni, &wo->waitable, "",
+                                   ci_log_dump_fn, NULL);
+      ci_log_dump_fn(NULL,
+              "------------------------------------------------------------");
+    }
+  }
 }
 
 static void stack_netif(ci_netif* ni)
 {
   ci_netif_dump(ni);
 }
+
+
+static void stack_vi_info(ci_netif* ni)
+{
+  int rc;
+  dump_stack_args args;
+  args.stack_id = NI_ID(ni);
+  args.orphan_only = 0;
+  args.op = __CI_DEBUG_OP_VI_INFO__;
+
+  CI_TRY(oo_fd_open(&args.fp));
+  rc = dump_via_buffers(oo_debug_dump_stack, (void *)&args, 0);
+  CI_TRY(oo_fd_close(args.fp));
+
+  switch( -rc ) {
+  case 0:
+    /* Success. */
+    break;
+  case EPERM:
+    ci_log("Permission denied - please run as root to access stacks");
+    break;
+  case ENOMEM:
+    ci_log("Out of memory.");
+    break;
+  default:
+    ci_log("No such stack %d (error %d).", args.stack_id, -rc);
+  }
+}
+
 
 static void stack_netif_extra(ci_netif* ni)
 {
@@ -1429,7 +1304,7 @@ static void stack_timeoutq(ci_netif* ni)
 static void stack_opts(ci_netif* ni)
 {
   ci_log("ci_netif_config_opts_dump: %d", NI_ID(ni));
-  ci_netif_config_opts_dump(&NI_OPTS(ni));
+  ci_netif_config_opts_dump(&NI_OPTS(ni), NULL, NULL);
 }
 
 static void stack_stats(ci_netif* ni)
@@ -1437,7 +1312,8 @@ static void stack_stats(ci_netif* ni)
   ci_netif_stats stats = ni->state->stats;
   ci_log("-------------------- ci_netif_stats: %d ---------------------",
          NI_ID(ni));
-  dump_stats(netif_stats_fields, N_NETIF_STATS_FIELDS, &stats, 0);
+  ci_dump_stats(netif_stats_fields, N_NETIF_STATS_FIELDS, &stats, 0, NULL,
+                NULL);
 }
 
 static void stack_stats_describe(ci_netif* ni)
@@ -1445,7 +1321,8 @@ static void stack_stats_describe(ci_netif* ni)
   ci_netif_stats stats = ni->state->stats;
   ci_log("-------------------- ci_netif_stats: %d ---------------------",
          NI_ID(ni));
-  dump_stats(netif_stats_fields, N_NETIF_STATS_FIELDS, &stats, 1);
+  ci_dump_stats(netif_stats_fields, N_NETIF_STATS_FIELDS, &stats, 1, NULL,
+                NULL);
 }
 
 static void stack_clear_stats(ci_netif* ni)
@@ -1459,7 +1336,8 @@ static void stack_dstats(ci_netif* ni)
   get_dstats(&stats, &ni->state->stats, sizeof(stats));
   ci_log("-------------------- ci_netif_stats: %d ---------------------",
          NI_ID(ni));
-  dump_stats(netif_dstats_fields, N_NETIF_DSTATS_FIELDS, &stats, 0);
+  ci_dump_stats(netif_dstats_fields, N_NETIF_DSTATS_FIELDS, &stats, 0, NULL,
+                NULL);
 }
 
 static void stack_more_stats(ci_netif* ni)
@@ -1468,7 +1346,7 @@ static void stack_more_stats(ci_netif* ni)
   get_more_stats(ni, &stats);
   ci_log("-------------------- more_stats: %d -------------------------",
          NI_ID(ni));
-  dump_stats(more_stats_fields, N_MORE_STATS_FIELDS, &stats, 0);
+  ci_dump_stats(more_stats_fields, N_MORE_STATS_FIELDS, &stats, 0, NULL, NULL);
 }
 
 static void stack_more_stats_describe(ci_netif* ni)
@@ -1477,25 +1355,25 @@ static void stack_more_stats_describe(ci_netif* ni)
   get_more_stats(ni, &stats);
   ci_log("-------------------- more_stats: %d -------------------------",
          NI_ID(ni));
-  dump_stats(more_stats_fields, N_MORE_STATS_FIELDS, &stats, 1);
+  ci_dump_stats(more_stats_fields, N_MORE_STATS_FIELDS, &stats, 1, NULL, NULL);
 }
 
 #if CI_CFG_SUPPORT_STATS_COLLECTION
 
 static void stack_ip_stats(ci_netif* ni)
 {
-  ci_ipv4_stats_count stats = ni->state->stats_snapshot.ipv4;
-  ci_log("-------------------- ci_ipv4_stats: %d ----------------------",
+  ci_ip_stats_count stats = ni->state->stats_snapshot.ip;
+  ci_log("--------------------- ci_ip_stats: %d -----------------------",
          NI_ID(ni));
-  dump_stats(ip_stats_fields, N_IP_STATS_FIELDS, &stats, 0);
+  ci_dump_stats(ip_stats_fields, N_IP_STATS_FIELDS, &stats, 0, NULL, NULL);
 }
 
 static void stack_ip_stats_describe(ci_netif* ni)
 {
-  ci_ipv4_stats_count stats = ni->state->stats_snapshot.ipv4;
-  ci_log("-------------------- ci_ipv4_stats: %d ----------------------",
+  ci_ip_stats_count stats = ni->state->stats_snapshot.ip;
+  ci_log("--------------------- ci_ip_stats: %d -----------------------",
          NI_ID(ni));
-  dump_stats(ip_stats_fields, N_IP_STATS_FIELDS, &stats, 1);
+  ci_dump_stats(ip_stats_fields, N_IP_STATS_FIELDS, &stats, 1, NULL, NULL);
 }
 
 static void stack_tcp_stats(ci_netif* ni)
@@ -1503,7 +1381,7 @@ static void stack_tcp_stats(ci_netif* ni)
   ci_tcp_stats_count stats = ni->state->stats_snapshot.tcp;
   ci_log("-------------------- ci_tcp_stats: %d -----------------------",
          NI_ID(ni));
-  dump_stats(tcp_stats_fields, N_TCP_STATS_FIELDS, &stats, 0);
+  ci_dump_stats(tcp_stats_fields, N_TCP_STATS_FIELDS, &stats, 0, NULL, NULL);
 }
 
 static void stack_tcp_stats_describe(ci_netif* ni)
@@ -1511,7 +1389,7 @@ static void stack_tcp_stats_describe(ci_netif* ni)
   ci_tcp_stats_count stats = ni->state->stats_snapshot.tcp;
   ci_log("-------------------- ci_tcp_stats: %d -----------------------",
          NI_ID(ni));
-  dump_stats(tcp_stats_fields, N_TCP_STATS_FIELDS, &stats, 1);
+  ci_dump_stats(tcp_stats_fields, N_TCP_STATS_FIELDS, &stats, 1, NULL, NULL);
 }
 
 static void stack_tcp_ext_stats(ci_netif* ni)
@@ -1519,7 +1397,8 @@ static void stack_tcp_ext_stats(ci_netif* ni)
   ci_tcp_ext_stats_count stats = ni->state->stats_snapshot.tcp_ext;
   ci_log("-------------------- ci_tcp_ext_stats: %d -------------------",
          NI_ID(ni));
-  dump_stats(tcp_ext_stats_fields, N_TCP_EXT_STATS_FIELDS, &stats, 0);
+  ci_dump_stats(tcp_ext_stats_fields, N_TCP_EXT_STATS_FIELDS, &stats, 0, NULL,
+                NULL);
 }
 
 static void stack_tcp_ext_stats_describe(ci_netif* ni)
@@ -1527,7 +1406,8 @@ static void stack_tcp_ext_stats_describe(ci_netif* ni)
   ci_tcp_ext_stats_count stats = ni->state->stats_snapshot.tcp_ext;
   ci_log("-------------------- ci_tcp_ext_stats: %d -------------------",
          NI_ID(ni));
-  dump_stats(tcp_ext_stats_fields, N_TCP_EXT_STATS_FIELDS, &stats, 1);
+  ci_dump_stats(tcp_ext_stats_fields, N_TCP_EXT_STATS_FIELDS, &stats, 1, NULL,
+                NULL);
 }
 
 static void stack_udp_stats(ci_netif* ni)
@@ -1535,7 +1415,7 @@ static void stack_udp_stats(ci_netif* ni)
   ci_udp_stats_count stats = ni->state->stats_snapshot.udp;
   ci_log("-------------------- ci_udp_stats: %d -----------------------",
          NI_ID(ni));
-  dump_stats(udp_stats_fields, N_UDP_STATS_FIELDS, &stats, 0);
+  ci_dump_stats(udp_stats_fields, N_UDP_STATS_FIELDS, &stats, 0, NULL, NULL);
 }
 
 static void stack_udp_stats_describe(ci_netif* ni)
@@ -1543,13 +1423,13 @@ static void stack_udp_stats_describe(ci_netif* ni)
   ci_udp_stats_count stats = ni->state->stats_snapshot.udp;
   ci_log("-------------------- ci_udp_stats: %d -----------------------",
          NI_ID(ni));
-  dump_stats(udp_stats_fields, N_UDP_STATS_FIELDS, &stats, 1);
+  ci_dump_stats(udp_stats_fields, N_UDP_STATS_FIELDS, &stats, 1, NULL, NULL);
 }
 
 static void stack_watch_ip_stats(ci_netif* ni)
 {
-  watch_stats(ip_stats_fields, N_IP_STATS_FIELDS, sizeof(ci_ipv4_stats_count),
-              &ni->state->stats_snapshot.ipv4, memcpy);
+  watch_stats(ip_stats_fields, N_IP_STATS_FIELDS, sizeof(ci_ip_stats_count),
+              &ni->state->stats_snapshot.ip, memcpy);
 }
 
 static void stack_watch_tcp_stats(ci_netif* ni)
@@ -1614,17 +1494,7 @@ static void stack_packets(ci_netif* ni)
 
 static void stack_time(ci_netif* ni)
 {
-  ci_ip_timer_state* its = IPTIMER_STATE(ni);
-  ci_log("          sched_ticks: %x", its->sched_ticks);
-  ci_log("ci_ip_time_real_ticks: %x", its->ci_ip_time_real_ticks);
-  ci_log("                  frc: %"CI_PRIx64, its->frc);
-  ci_log("  ci_ip_time_frc2tick: %u", (unsigned) its->ci_ip_time_frc2tick);
-  ci_log("    ci_ip_time_frc2us: %u", (unsigned) its->ci_ip_time_frc2us);
-  ci_log("   ci_ip_time_frc2isn: %u", (unsigned) its->ci_ip_time_frc2isn);
-  ci_log("   ci_ip_time_tick2ms: %f", (1. * (1ull<<32)) / its->ci_ip_time_ms2tick_fxp);
-  ci_log("   ci_ip_time_ms2tick: %f (%" PRIx64 ")", its->ci_ip_time_ms2tick_fxp/(1. * (1ull<<32)),
-                                            its->ci_ip_time_ms2tick_fxp);
-  ci_log("                  khz: %u", (unsigned) its->khz);
+  ci_stack_time_dump(ni, NULL, NULL);
 }
 
 static void stack_time_init(ci_netif* ni)
@@ -2227,7 +2097,7 @@ static void stack_lots(ci_netif* ni)
 #endif
 
   ci_log("--------------------- config opts --------------------------");
-  ci_netif_config_opts_dump(&NI_OPTS(ni));
+  ci_netif_config_opts_dump(&NI_OPTS(ni), NULL, NULL);
   ci_log("--------------------- stack time ---------------------------");
   stack_time(ni);
 }
@@ -2347,6 +2217,7 @@ static const stack_op_t zombie_stack_ops[] = {
   ZOMBIE_STACK_OP(dump, "[requires -z] show core state stack and sockets"),
   ZOMBIE_STACK_OP(kill, "[requires -z] terminate orphan/zombie stack"),
   ZOMBIE_STACK_OP(netstat, "[requires -z] show netstat like output for sockets"),
+  ZOMBIE_STACK_OP(lots, "[requires -z] dump state, opts, stats orphan stacks"),
 };
 
 #define N_ZOMBIE_STACK_OPS                                     \
@@ -2355,6 +2226,7 @@ static const stack_op_t zombie_stack_ops[] = {
 static const stack_op_t stack_ops[] = {
   STACK_OP(dump,               "show core state of stack and sockets"),
   STACK_OP(netif,              "show core per-stack state"),
+  STACK_OP(vi_info,            "show vi information per-stack state"),
   STACK_OP(netif_extra,        "show extra per-stack state"),
   STACK_OP(netstat,            "show netstat like output for sockets"),
   STACK_OP(dmaq,               "show state of DMA queue"),
@@ -2544,12 +2416,6 @@ static void socket_set_mss(ci_netif* ni, ci_tcp_state* ts)
   ci_tcp_tx_change_mss(ni, ts); 
 }
 
-static void socket_set_pmtu(ci_netif* ni, ci_tcp_state* ts)
-{
-  ts->pmtus.pmtu = arg_u[0];
-  ci_tcp_tx_change_mss(ni, ts); 
-}
-
 static void socket_set_sndbuf(ci_netif* ni, ci_tcp_state* ts)
 {
   ts->s.so.sndbuf = arg_u[0];
@@ -2607,7 +2473,7 @@ static void socket_ppl_corrupt_loop(ci_netif* ni, ci_tcp_state* ts)
    * a loop.
    */
   ci_netif_put_on_post_poll(ni, &ts->s.b);
-  ts->s.b.post_poll_link.next = ts->s.b.post_poll_link.addr;
+  ts->s.b.post_poll_link.next = oo_ptr_to_statep(ni, &ts->s.b.post_poll_link);
 }
 
 /**********************************************************************/
@@ -2821,8 +2687,6 @@ static const socket_op_t socket_ops[] = {
   TCPC_OP   (rst,	 "send RST"),
   TCPC_OP_AU(set_mss,
              "set TCP socket maximum segment size", "<mss>"),
-  TCPC_OP_AU(set_pmtu,
-             "set TCP path MTU state", "<pmtu>"),
   TCPC_OP_AU(set_sndbuf,
              "set socket SO_SNDBUF", "<sndbuf>"),
   TCPC_OP_AU(set_rcvbuf,
@@ -2869,6 +2733,9 @@ static void signal_handler(int signum)
 
 int libstack_init(sa_sigaction_t* signal_handlers)
 {
+  if( cfg_filter )
+    if( ! sockbuf_filter_prepare(cfg_filter) )
+      return -1;
   ci_set_log_prefix("");
   ci_dllist_init(&stacks_list);
   if( libstack_mappings_init() )
@@ -2884,6 +2751,7 @@ int libstack_init(sa_sigaction_t* signal_handlers)
 void libstack_end(void)
 {
   stacks_detach_all();
+  sockbuf_filter_free();
 }
 
 int libstack_netif_lock(ci_netif* ni)

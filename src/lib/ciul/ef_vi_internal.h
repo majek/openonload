@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This library is free software; you can redistribute it and/or
-** modify it under the terms of version 2.1 of the GNU Lesser General Public
-** License as published by the Free Software Foundation.
-**
-** This library is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-** Lesser General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: LGPL-2.1 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /****************************************************************************
  * Copyright 2002-2005: Level 5 Networks Inc.
  * Copyright 2005-2008: Solarflare Communications Inc,
@@ -270,6 +257,10 @@ extern void ef_vi_packed_stream_update_credit(ef_vi* vi);
 extern void ef_vi_set_intf_ver(char* intf_ver, size_t len);
 
 enum ef_vi_capability;
+extern int
+__ef_vi_capabilities_get(ef_driver_handle handle, int ifindex, int pd_id,
+                         ef_driver_handle pd_dh, enum ef_vi_capability cap,
+                         unsigned long* value);
 extern int
 ef_pd_capabilities_get(ef_driver_handle handle, ef_pd* pd,
                        ef_driver_handle pd_dh, enum ef_vi_capability cap,

@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file unix_intf.h
 ** <L5_PRIVATE L5_HEADER >
@@ -106,8 +93,6 @@ oo_resource_mmap(ci_fd_t fp, ci_uint8 map_type, unsigned long map_id,
   int mmap_flags = MAP_SHARED;
   int saved_errno = errno;
 
-  off_t offset = map_id << OO_MMAP_ID_SHIFT;
-  offset |= ((off_t) map_type) << OO_MMAP_TYPE_SHIFT;
 #ifndef OO_MMAP_TYPE_DSHM
   ci_assert_equal(map_type, OO_MMAP_TYPE_NETIF);
 #endif
@@ -119,7 +104,8 @@ oo_resource_mmap(ci_fd_t fp, ci_uint8 map_type, unsigned long map_id,
   if( flags & OO_MMAP_FLAG_POPULATE )
     mmap_flags |= MAP_POPULATE;
   *p_out = mmap((flags & OO_MMAP_FLAG_FIXED) ? *p_out : (void*) 0, bytes,
-                mmap_prot, mmap_flags, fp, offset);
+                mmap_prot, mmap_flags, fp,
+                OO_MMAP_MAKE_OFFSET(map_type, map_id));
   if( *p_out == MAP_FAILED ) {
     int rc = -errno;
     errno = saved_errno;

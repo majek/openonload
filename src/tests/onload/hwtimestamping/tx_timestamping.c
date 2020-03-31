@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: BSD-2-Clause */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_SOURCE>
@@ -132,6 +119,7 @@ struct configuration {
   unsigned short cfg_port;      /* listen port */
   unsigned int   cfg_max_packets; /* Stop after this many (0=forever) */
   int            cfg_templated; /* use templated send */
+  int            cfg_ext;       /* Use extension API? */
 };
 
 /* Commandline options, configuration etc. */
@@ -150,6 +138,7 @@ void print_help(void)
          "\t--mcast\t<group>\tSubscribe to multicast group.\n"
 #ifdef ONLOADEXT_AVAILABLE
          "\t--templated\tUse templated sends.\n"
+         "\t--ext\t\tUse extensions API rather than SO_TIMESTAMPING.\n"
 #endif
         );
   exit(-1);
@@ -180,6 +169,7 @@ static void parse_options( int argc, char** argv, struct configuration* cfg )
     { "mcast", required_argument, 0, 'c' },
     { "max", required_argument, 0, 'n' },
     { "templated", no_argument, 0, 'T' },
+    { "ext", no_argument, 0, 'e' },
     { "help", no_argument, 0, 'h' },
     { 0, no_argument, 0, 0 }
   };
@@ -214,6 +204,9 @@ static void parse_options( int argc, char** argv, struct configuration* cfg )
 #ifdef ONLOADEXT_AVAILABLE
       case 'T':
         cfg->cfg_templated = 1;
+        break;
+      case 'e':
+        cfg->cfg_ext = 1;
         break;
 #endif
       case 'h':
@@ -331,19 +324,27 @@ static void do_ioctl(struct configuration* cfg, int sock)
  */
 static void do_ts_sockopt(struct configuration* cfg, int sock)
 {
-  int enable = 1;
-  int ok = 0;
-
   printf("Selecting hardware timestamping mode.\n");
-  enable = SOF_TIMESTAMPING_TX_HARDWARE | SOF_TIMESTAMPING_SYS_HARDWARE |
-    SOF_TIMESTAMPING_RAW_HARDWARE;
-  if (cfg->cfg_protocol == IPPROTO_TCP)
-    enable |= ONLOAD_SOF_TIMESTAMPING_STREAM;
-  ok = setsockopt(sock, SOL_SOCKET, SO_TIMESTAMPING, &enable, sizeof(int));
-  if (ok < 0) {
-    printf("Timestamp socket option failed.  %d (%d - %s)\n",
-            ok, errno, strerror(errno));
-    exit(ok);
+ 
+#ifdef ONLOADEXT_AVAILABLE 
+  if( cfg->cfg_ext )
+    TRY(onload_timestamping_request(sock, ONLOAD_TIMESTAMPING_FLAG_TX_NIC));
+  else
+#endif
+  {
+    int enable = 1;
+    int ok = 0;
+
+    enable = SOF_TIMESTAMPING_TX_HARDWARE | SOF_TIMESTAMPING_SYS_HARDWARE |
+      SOF_TIMESTAMPING_RAW_HARDWARE;
+    if (cfg->cfg_protocol == IPPROTO_TCP)
+      enable |= ONLOAD_SOF_TIMESTAMPING_STREAM;
+    ok = setsockopt(sock, SOL_SOCKET, SO_TIMESTAMPING, &enable, sizeof(int));
+    if (ok < 0) {
+      printf("Timestamp socket option failed.  %d (%d - %s)\n",
+              ok, errno, strerror(errno));
+      exit(ok);
+    }
   }
 }
 
@@ -408,15 +409,15 @@ static int add_socket(struct configuration* cfg)
 
 /* Processing */
 #define TIME_FMT "%" PRIu64 ".%.9" PRIu64 " "
+#define OTIME_FMT "%" PRIu64 ".%.9" PRIu32 " "
 static void print_time(char *s, struct timespec* ts)
 {
    printf("%s timestamp " TIME_FMT "\n", s, 
           (uint64_t)ts->tv_sec, (uint64_t)ts->tv_nsec);
 }
 
-
 /* Given a packet, extract the timestamp(s) */
-static void handle_time(struct msghdr* msg)
+static void handle_time(struct msghdr* msg, struct configuration* cfg)
 {
   struct onload_scm_timestamping_stream* tcp_tx_stamps;
   struct timespec* udp_tx_stamp;
@@ -433,6 +434,13 @@ static void handle_time(struct msghdr* msg)
       print_time("Last sent", &tcp_tx_stamps->last_sent);
       break;
     case SO_TIMESTAMPING:
+#ifdef ONLOADEXT_AVAILABLE
+      if( cfg->cfg_ext ) {
+        struct onload_timestamp* ts = (struct onload_timestamp*) CMSG_DATA(cmsg);
+        printf("NIC timestamp " OTIME_FMT "\n", ts[0].sec, ts[0].nsec);
+        break;
+      }
+#endif
       udp_tx_stamp = (struct timespec*) CMSG_DATA(cmsg);
       print_time("System", &(udp_tx_stamp[0]));
       print_time("Transformed", &(udp_tx_stamp[1]));
@@ -471,7 +479,7 @@ int templated_send(int handle, struct iovec* iov)
 #endif
 
 /* Receive a packet, and print out the timestamps from it */
-int do_echo(int sock, unsigned int pkt_num, int cfg_templated)
+int do_echo(int sock, unsigned int pkt_num, struct configuration* cfg)
 {
   struct msghdr msg;
   struct iovec iov;
@@ -503,7 +511,7 @@ int do_echo(int sock, unsigned int pkt_num, int cfg_templated)
   msg.msg_controllen = 0;
   iov.iov_len = got;
 #ifdef ONLOADEXT_AVAILABLE
-  if ( cfg_templated )
+  if ( cfg->cfg_templated )
     TRY(templated_send(sock, &iov) );
   else
 #endif
@@ -525,7 +533,7 @@ int do_echo(int sock, unsigned int pkt_num, int cfg_templated)
   }
   TEST(got >= 0);
 
-  handle_time(&msg);
+  handle_time(&msg, cfg);
   return 0;
 };
 
@@ -546,7 +554,7 @@ int main(int argc, char** argv)
 
   /* Run until we've got enough packets, or an error occurs */
   while( (pkt_num++ < cfg.cfg_max_packets) || (cfg.cfg_max_packets == 0) )
-    TRY( do_echo(sock, pkt_num, cfg.cfg_templated) );
+    TRY( do_echo(sock, pkt_num, &cfg) );
 
   close(sock);
   return 0;

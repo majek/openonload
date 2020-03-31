@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: BSD-2-Clause
+# X-SPDX-Copyright-Text: (c) Solarflare Communications Inc
+
 # OpenOnload profile for applications using zeromq.
 
 # Zeromq uses unix sockets for inter-thread communication, and blocks using

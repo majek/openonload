@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /* TODO:
  *
  * - When reconfigure cpu_to_q map, redirect existing filters...?  (Only
@@ -28,6 +15,7 @@
 #include <ci/efhw/efhw_types.h>
 #include <ci/driver/efab/hardware.h>
 #include <ci/driver/driverlink_api.h>
+#include <ci/driver/chrdev.h>
 
 #include "kernel_compat.h"
 
@@ -790,7 +778,7 @@ static struct efx_dl_driver dl_driver = {
 };
 
 
-static int dev_major;
+static struct ci_chrdev_registration* sfc_affinity_chrdev;
 
 
 static int __init init_sfc_affinity(void)
@@ -807,13 +795,10 @@ static int __init init_sfc_affinity(void)
 	if (rc < 0)
 		goto fail2;
 
-	rc = register_chrdev(0, "sfc_affinity", &fops);
-	if (rc < 0) {
-		E(printk("sfc_affinity: ERROR: register_chrdev failed (%d)\n",
-			 rc));
+	rc = create_one_chrdev_and_mknod(0, "sfc_affinity", &fops,
+	                                 &sfc_affinity_chrdev);
+	if (rc < 0)
 		goto fail3;
-	}
-	dev_major = rc;
 
 	return 0;
 
@@ -830,7 +815,7 @@ static void cleanup_sfc_affinity(void)
 {
 	/* TODO shouldn't this take [lock]? */
 	T(printk("sfc_affinity: cleaning up\n"));
-	unregister_chrdev(dev_major, "sfc_affinity");
+	destroy_chrdev_and_mknod(sfc_affinity_chrdev);
 	efx_dl_unregister_driver(&dl_driver);
 	while (! list_empty(&all_interfaces)) {
 		struct aff_interface *intf;

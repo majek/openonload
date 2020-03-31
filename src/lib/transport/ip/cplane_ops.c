@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_HEADER >
@@ -81,6 +68,7 @@
 
 
 
+
 #ifndef TRUE
 #define TRUE  1
 #define FALSE 0
@@ -127,12 +115,12 @@ ci_ip_cache_is_onloadable(ci_netif* ni, ci_ip_cached_hdrs* ipcache)
     (ipcache->intf_i = __ci_hwport_to_intf_i(ni, hwport)) >= 0;
 }
 
-
 #if CI_CFG_TEAMING
 static int
 cicp_user_bond_hash_get_hwport(ci_netif* ni, ci_ip_cached_hdrs* ipcache,
                                cicp_hwport_mask_t hwports,
-                               ci_uint16 src_port_be16, uint32_t daddr_be32)
+                               ci_uint16 src_port_be16,
+                               ci_addr_t daddr)
 {
   /* For an active-active bond that uses hashing, choose the appropriate
    * interface to send out of.
@@ -146,8 +134,8 @@ cicp_user_bond_hash_get_hwport(ci_netif* ni, ci_ip_cached_hdrs* ipcache,
     hs.flags = CICP_HASH_STATE_FLAGS_IS_IP;
   memcpy(&hs.dst_mac, ci_ip_cache_ether_dhost(ipcache), ETH_ALEN);
   memcpy(&hs.src_mac, ci_ip_cache_ether_shost(ipcache), ETH_ALEN);
-  hs.src_addr_be32 = ipcache->ip_saddr.ip4;
-  hs.dst_addr_be32 = daddr_be32;
+  hs.src_addr_be32 = onload_addr_xor(ipcache_laddr(ipcache));
+  hs.dst_addr_be32 = onload_addr_xor(daddr);
   hs.src_port_be16 = src_port_be16;
   hs.dst_port_be16 = ipcache->dport_be16;
   ipcache->hwport = oo_cp_hwport_bond_get(ipcache->encap.type, hwports, &hs);
@@ -155,105 +143,20 @@ cicp_user_bond_hash_get_hwport(ci_netif* ni, ci_ip_cached_hdrs* ipcache,
 }
 #endif
 
-#ifdef __KERNEL__
-#include <net/flow.h>
-#include <net/route.h>
-#include <net/arp.h>
 
-static void
-cicp_kernel_resolve(ci_netif* ni, struct cp_fwd_key* key,
-                    struct cp_fwd_data* data)
+static int cicp_user_resolve(ci_netif* ni, struct oo_cplane_handle* cp,
+                             cicp_verinfo_t* verinfo,
+                             struct cp_fwd_key* key,
+                             struct cp_fwd_data* data)
 {
-  int rc;
-  struct rtable *rt = NULL;
-  cicp_hwport_mask_t rx_hwports = 0;
-#if LINUX_VERSION_CODE <= KERNEL_VERSION(2,6,38)
-  /* rhel6 case */
-  struct flowi fl;
+  /* Note that, for the fwd-table ID, we always pass the ID of the _local_
+   * control plane.  This is exactly what we want: if we're speaking to our
+   * own control plane, then we want to store the result of the lookup in the
+   * local table, and if we're speaking to init_net's control plane, we want
+   * the result to go in the table that _we_ have mapped. */
+  int rc = __oo_cp_route_resolve(cp, verinfo, key, 1/*ask_server*/, data,
+                                 ci_ni_fwd_table_id(ni));
 
-  memset(&fl, 0, sizeof(fl));
-  fl.fl4_dst = key->dst;
-  fl.fl4_src = key->src;
-  fl.fl4_tos = key->tos;
-  fl.oif = key->ifindex;
-
-  rc = ip_route_output_key(ni->cplane->cp_netns, &rt, &fl);
-  if( rc < 0 ) {
-    data->ifindex = CI_IFID_BAD;
-    return;
-  }
-  data->src = fl.fl4_src;
-#define DST_DEV(rt) rt->u.dst.dev
-#else /* linux-2.6.39 and newer */
-  struct flowi4 fl4;
-
-  memset(&fl4, 0, sizeof(fl4));
-  fl4.daddr = key->dst;
-  fl4.saddr = key->src;
-  fl4.flowi4_tos = key->tos;
-  fl4.flowi4_oif = key->ifindex;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,10,0)
-  fl4.flowi4_uid = make_kuid(current_user_ns(), ni->state->uuid);
-#endif
-
-  rt = ip_route_output_key(ni->cplane->cp_netns, &fl4);
-  if( IS_ERR(rt) ) {
-    data->ifindex = CI_IFID_BAD;
-    return;
-  }
-  data->src = fl4.saddr;
-#define DST_DEV(rt) rt->dst.dev
-#endif /* 2.6.39 */
-
-  data->ifindex = DST_DEV(rt)->ifindex;
-  data->next_hop = rt->rt_gateway;
-  if( data->next_hop == 0 )
-    data->next_hop = key->dst;
-
-#if LINUX_VERSION_CODE < KERNEL_VERSION(3,6,0)
-  data->mtu = 0;
-  /* We'll use interface MTU and ignore the route MTU even if it has one
-   * for the older kernels.  This code is mostly used for SYN-ACK replies,
-   * so MTU value is not too important. */
-#else
-  data->mtu = rt->rt_pmtu;
-#endif
-
-  data->arp_valid = 0;
-  if( data->ifindex != 1 ) {
-    /* In theory the rt->dst structure has a reference to the neigh,
-     * but in practice it is not easy to dig the neigh out. */
-    struct neighbour *neigh = neigh_lookup(&arp_tbl, &rt->rt_gateway,
-                                           DST_DEV(rt));
-    if( neigh != NULL && (neigh->nud_state & NUD_VALID) ) {
-      data->arp_valid = 1;
-      memcpy(data->dst_mac, neigh->ha, ETH_ALEN);
-    }
-    if( neigh != NULL )
-      neigh_release(neigh);
-  }
-
-  ip_rt_put(rt);
-
-  if( data->ifindex == CI_IFID_LOOP )
-    return;
-
-  /* We've got the route.  Let's look into llap table to find out the
-   * network interface details. */
-  rc = oo_cp_find_llap(ni->cplane, data->ifindex,
-                       data->mtu == 0 ? &data->mtu : NULL,
-                       &data->hwports, &rx_hwports, &data->src_mac, &data->encap);
-
-  if( rc < 0 || rx_hwports == 0 )
-    data->ifindex = CI_IFID_BAD;
-}
-#endif
-
-static int cicp_user_resolve(ci_netif* ni, cicp_verinfo_t* verinfo,
-                             struct cp_fwd_key* key, struct cp_fwd_data* data)
-{
-  int rc=  __oo_cp_route_resolve(ni->cplane, verinfo, key,
-                                 1/*ask_server*/, data);
 #ifdef __KERNEL__
   ci_assert_impl(ni->flags & CI_NETIF_FLAG_IN_DL_CONTEXT,
                  ! (key->flag & CP_FWD_KEY_REQ_WAIT));
@@ -261,7 +164,7 @@ static int cicp_user_resolve(ci_netif* ni, cicp_verinfo_t* verinfo,
     /* We've scheduled an addition of this route to the route cache, but we
      * can't sleep for the time when it really happens.  Let's use more
      * direct way to resolve a route. */
-    cicp_kernel_resolve(ni, key, data);
+    cicp_kernel_resolve(ni, cp, key, data);
     return 0;
   }
 #else
@@ -269,10 +172,36 @@ static int cicp_user_resolve(ci_netif* ni, cicp_verinfo_t* verinfo,
   ci_assert(key->flag & CP_FWD_KEY_REQ_WAIT);
 #endif
   if( rc < 0 )
-    data->ifindex = CI_IFID_BAD;
+    data->base.ifindex = CI_IFID_BAD;
   return rc;
 }
 
+static int cicp_user_resolve_src(ci_netif* ni, struct oo_cplane_handle* cp,
+                                 cicp_verinfo_t* verinfo,
+                                 ci_uint8 sock_cp_flags,
+                                 struct cp_fwd_key* key,
+                                 struct cp_fwd_data* data)
+{
+  int rc;
+
+  rc = cicp_user_resolve(ni, cp, verinfo, key, data);
+  if( rc != 0 )
+    return rc;
+
+  /* Find out the real source address. */
+  if( !CI_IPX_ADDR_IS_ANY(key->src) ) {
+    /* We MUST use the source address we've asked for.
+     * data.base.src and key.src MAY differ if the route cache has
+     * the source like 127.0.0.8/29. */
+    data->base.src = key->src;
+  }
+  else if( ! (key->flag & CP_FWD_KEY_SOURCELESS) ) {
+    key->src = data->base.src;
+    rc = cicp_user_resolve(ni, cp, verinfo, key, data);
+    data->base.src = key->src;
+  }
+  return rc;
+}
 
 void
 cicp_user_retrieve(ci_netif*                    ni,
@@ -281,71 +210,123 @@ cicp_user_retrieve(ci_netif*                    ni,
 {
   struct cp_fwd_key key;
   struct cp_fwd_data data;
-  uint32_t daddr_be32 = ipcache->ip.ip_daddr_be32;
+  ci_addr_t daddr = ipcache_raddr(ipcache);
+#if CI_CFG_IPV6
+  int af;
+#endif
 
   /* This function must be called when "the route is unusable".  I.e. when
    * the route is invalid or if there is no ARP.  In the second case, we
    * can expedite ARP resolution by explicit request just now. */
-  if( oo_cp_verinfo_is_valid(ni->cplane, &ipcache->mac_integrity) ) {
+  if( oo_cp_ipcache_is_valid(ni, ipcache) ) {
     ci_assert_equal(ipcache->status, retrrc_nomac);
-    oo_cp_arp_resolve(ni->cplane, &ipcache->mac_integrity);
+    oo_cp_arp_resolve(ni->cplane, &ipcache->fwd_ver, ci_ni_fwd_table_id(ni));
 
     /* Re-check the version of the fwd entry after ARP resolution.
      * Return if nothing changed; otherwise handle the case when ARP has
      * already been resolved. */
-    if( oo_cp_verinfo_is_valid(ni->cplane, &ipcache->mac_integrity) )
+    if( oo_cp_ipcache_is_valid(ni, ipcache) )
       return;
   }
 
+#if CI_CFG_IPV6
+  af = CI_IS_ADDR_IP6(daddr) ? AF_INET6 : AF_INET;
+#endif
 
-  key.dst = daddr_be32;
-  key.tos = sock_cp->ip_tos;
+  key.dst = CI_ADDR_SH_FROM_ADDR(daddr);
+  key.iif_ifindex = CI_IFID_BAD;
+  /* Pass 0 IPv6 tclass value into cp_fwd_key tos field because Linux policy
+   * based routing doesn't consider tclass when performing route lookup
+   * for TCP and UDP connected send. Though, tclass is considered for UDP
+   * unconnected send. As a result, there would be a single fwd entry for all
+   * IPv6 tclass values. */
+  key.tos = IS_AF_INET6(af) ? 0 : sock_cp->ip_tos;
   key.flag = 0;
 
-  if( ipcache->ip.ip_protocol == IPPROTO_UDP )
+  if( ipcache_protocol(ipcache) == IPPROTO_UDP )
     key.flag |= CP_FWD_KEY_UDP;
 
   key.ifindex = sock_cp->so_bindtodevice;
-  if( CI_IP_IS_MULTICAST(daddr_be32) ) {
-    if( sock_cp->sock_cp_flags & OO_SCP_NO_MULTICAST )
+  if( CI_IPX_IS_MULTICAST(daddr) ) {
+    if( IS_AF_INET6(af) || sock_cp->sock_cp_flags & OO_SCP_NO_MULTICAST )
       goto alien_route;
 
     /* In linux, SO_BINDTODEVICE has the priority over IP_MULTICAST_IF */
     if( key.ifindex == 0 )
       key.ifindex = sock_cp->ip_multicast_if;
-    key.src = sock_cp->ip_multicast_if_laddr_be32;
-    if( key.src == 0 && sock_cp->ip_laddr_be32 != 0 )
-      key.src = sock_cp->ip_laddr_be32;
+    key.src = CI_ADDR_SH_FROM_IP4(sock_cp->ip_multicast_if_laddr_be32);
+    if( CI_IPX_ADDR_IS_ANY(key.src) && !CI_IPX_ADDR_IS_ANY(sock_cp->laddr) )
+      key.src = CI_ADDR_SH_FROM_ADDR(sock_cp->laddr);
   }
   else {
-    key.src = sock_cp->ip_laddr_be32;
+    key.src = CI_ADDR_SH_FROM_ADDR(sock_cp->laddr);
+#if CI_CFG_IPV6
+    if( ! IS_AF_INET6(af) && CI_IPX_ADDR_EQ(key.src, addr_sh_any) )
+      key.src = ip4_addr_sh_any;
+#endif
     if( sock_cp->sock_cp_flags & OO_SCP_TPROXY )
       key.flag |= CP_FWD_KEY_TRANSPARENT;
   }
 
-  if( key.src == 0 && sock_cp->sock_cp_flags & OO_SCP_UDP_WILD )
+  /* Source policy routing works differently for IPv6 and IPv4.
+   * In IPv4, the source address is used unless OO_SCP_UDP_WILD.
+   * In IPv6, the source address is used if OO_SCP_BOUND_ADDR. */
+  if( IS_AF_INET6(af) && ! (sock_cp->sock_cp_flags & OO_SCP_BOUND_ADDR) ) {
+    key.src = addr_sh_any;
     key.flag |= CP_FWD_KEY_SOURCELESS;
+  }
+  else if( CI_IPX_ADDR_IS_ANY(key.src) &&
+           (sock_cp->sock_cp_flags & OO_SCP_UDP_WILD) ) {
+    key.flag |= CP_FWD_KEY_SOURCELESS;
+  }
+
 
 #ifdef __KERNEL__
   if( ! (ni->flags & CI_NETIF_FLAG_IN_DL_CONTEXT) )
 #endif
     key.flag |= CP_FWD_KEY_REQ_WAIT;
 
-  if( cicp_user_resolve(ni, &ipcache->mac_integrity, &key, &data) != 0 )
+  if( cicp_user_resolve_src(ni, ni->cplane, &ipcache->fwd_ver,
+                            sock_cp->sock_cp_flags, &key, &data) != 0 )
     goto alien_route;
 
-  if( key.src == 0 &&
-      ! (sock_cp->sock_cp_flags & OO_SCP_UDP_WILD) ) {
-    key.src = data.src;
-    cicp_user_resolve(ni, &ipcache->mac_integrity, &key, &data);
+  /* Look at main namespace if this route is across veth. */
+  if( data.encap.type & CICP_LLAP_TYPE_ROUTE_ACROSS_NS ) {
+    if( ni->cplane_init_net == NULL )
+      goto alien_route;
+    /* Use the source address from the local namespace data (i.e.
+     * data.base.src) in the routing request in the main namespace.  This in
+     * turn requires setting RTA_IIF to the incoming veth interface. */
+    key.src = data.base.src;
+    key.iif_ifindex = data.encap.link_ifindex;
+    ipcache->iif_ifindex = key.iif_ifindex;
+    /* Note that we do want BAD here, rather than UNUSED.  In the typical case
+     * cicp_user_resolve_src() will set the id field to the row in init_net's
+     * fwd table, but if we look up the route by querying the kernel rather
+     * than the cplane server, then the field will not be touched. */
+    ipcache->fwd_ver_init_net.id = CICP_MAC_ROWID_BAD;
+    if( cicp_user_resolve_src(ni, ni->cplane_init_net,
+                              &ipcache->fwd_ver_init_net,
+                              sock_cp->sock_cp_flags, &key, &data) != 0 )
+      goto alien_route;
+  }
+  else {
+    ipcache->fwd_ver_init_net.id = CICP_MAC_ROWID_UNUSED;
+    ipcache->iif_ifindex = CI_IFID_BAD;
   }
 
-  switch( data.ifindex ) {
+  /* IPv6 + !OO_SCP_BOUND_ADDR: set the source address back */
+  if( IS_AF_INET6(af) && ! (sock_cp->sock_cp_flags & OO_SCP_BOUND_ADDR) &&
+      ! CI_IPX_ADDR_IS_ANY(sock_cp->laddr) )
+    data.base.src = CI_ADDR_SH_FROM_ADDR(sock_cp->laddr);
+
+  switch( data.base.ifindex ) {
     case CI_IFID_LOOP:
       ipcache->status = retrrc_localroute;
       ipcache->encap.type = CICP_LLAP_TYPE_NONE;
       ipcache->ether_offset = 4;
       ipcache->intf_i = OO_INTF_I_LOOPBACK;
+      ci_ipcache_set_saddr(ipcache, CI_ADDR_FROM_ADDR_SH(data.base.src));
       return;
     case CI_IFID_BAD:
       goto alien_route;
@@ -357,7 +338,7 @@ cicp_user_retrieve(ci_netif*                    ni,
           (data.hwports & ~(ci_netif_get_hwport_mask(ni))) == 0 )
         break;
       /* Check bond */
-      if( oo_cp_find_llap(ni->cplane, data.ifindex, NULL/*mtu*/,
+      if( oo_cp_find_llap(ni->cplane, data.base.ifindex, NULL/*mtu*/,
                            NULL /*tx_hwports*/, &hwports /*rx_hwports*/,
                            NULL/*mac*/, NULL /*encap*/) != 0 ||
           (hwports & ~(ci_netif_get_hwport_mask(ni))) )
@@ -370,33 +351,32 @@ cicp_user_retrieve(ci_netif*                    ni,
 #if CI_CFG_TEAMING
   if( ipcache->encap.type & CICP_LLAP_TYPE_USES_HASH ) {
     if( cicp_user_bond_hash_get_hwport(ni, ipcache, data.hwports,
-                                       sock_cp->lport_be16, daddr_be32) != 0 )
+                                       sock_cp->lport_be16, daddr) != 0 )
       goto alien_route;
   }
   else
 #endif
     ipcache->hwport = cp_hwport_mask_first(data.hwports);
 
-  ipcache->mtu = data.mtu;
-  ipcache->ip_saddr.ip4 = key.src == INADDR_ANY ? data.src : key.src;
-  ipcache->ifindex = data.ifindex;
-  ipcache->nexthop.ip4 = data.next_hop;
+  ipcache->mtu = data.base.mtu;
+  ci_ipcache_set_saddr(ipcache, CI_ADDR_FROM_ADDR_SH(data.base.src));
+  ipcache->ifindex = data.base.ifindex;
+  ipcache->nexthop = CI_ADDR_FROM_ADDR_SH(data.base.next_hop);
   if( ! ci_ip_cache_is_onloadable(ni, ipcache))
     goto alien_route;
 
   /* Layout the Ethernet header, and set the source mac.
    * Route resolution already issues ARP request, so there is no need to
    * call oo_cp_arp_resolve() explicitly in case of retrrc_nomac. */
-  ipcache->status = data.arp_valid ? retrrc_success : retrrc_nomac;
+  ipcache->status = (data.flags & CICP_FWD_DATA_FLAG_ARP_VALID) ?
+                                        retrrc_success : retrrc_nomac;
   cicp_ipcache_vlan_set(ipcache);
   memcpy(ci_ip_cache_ether_shost(ipcache), &data.src_mac, ETH_ALEN);
-  if( data.arp_valid )
+  if( data.flags & CICP_FWD_DATA_FLAG_ARP_VALID )
     memcpy(ci_ip_cache_ether_dhost(ipcache), &data.dst_mac, ETH_ALEN);
 
-  if( CI_IP_IS_MULTICAST(daddr_be32) )
-    ipcache->ip.ip_ttl = sock_cp->ip_mcast_ttl;
-  else
-    ipcache->ip.ip_ttl = sock_cp->ip_ttl;
+  ipcache_ttl(ipcache) = CI_IPX_IS_MULTICAST(daddr) ?
+                         sock_cp->ip_mcast_ttl : sock_cp->ip_ttl;
   return;
 
  alien_route:
@@ -414,18 +394,22 @@ cicp_ip_cache_update_from(ci_netif* ni, ci_ip_cached_hdrs* ipcache,
   /* We can't check the inputs that come from oo_sock_cplane, but this at
    * least gives us a little checking...
    */
-  ci_assert_equal(ipcache->ip.ip_daddr_be32, from_ipcache->ip.ip_daddr_be32);
   ci_assert_equal(ipcache->dport_be16, from_ipcache->dport_be16);
-
-  ipcache->mac_integrity = from_ipcache->mac_integrity;
-  ipcache->ip_saddr = from_ipcache->ip_saddr;
-  ipcache->ip.ip_ttl = from_ipcache->ip.ip_ttl;
+  ci_assert_addrs_equal(ipcache_raddr(ipcache), ipcache_raddr(from_ipcache));
+  ci_assert_addrs_equal(ipcache_laddr(ipcache), ipcache_laddr(from_ipcache));
+  ci_assert_equal(ipcache->dport_be16, from_ipcache->dport_be16);
+  ci_assert_equal(ipcache_af(ipcache), ipcache_af(from_ipcache));
+ 
+  ipcache_ttl(ipcache) = ipcache_ttl(from_ipcache);
+  ipcache->fwd_ver = from_ipcache->fwd_ver;
+  ipcache->fwd_ver_init_net = from_ipcache->fwd_ver_init_net;
   ipcache->status = from_ipcache->status;
   ipcache->flags = from_ipcache->flags;
   ipcache->nexthop = from_ipcache->nexthop;
   /* ipcache->pmtus = something; */
   ipcache->mtu = from_ipcache->mtu;
   ipcache->ifindex = from_ipcache->ifindex;
+  ipcache->iif_ifindex = from_ipcache->iif_ifindex;
   ipcache->encap = from_ipcache->encap;
   ipcache->intf_i = from_ipcache->intf_i;
   ipcache->hwport = from_ipcache->hwport;
@@ -437,18 +421,198 @@ cicp_ip_cache_update_from(ci_netif* ni, ci_ip_cached_hdrs* ipcache,
 
 int
 cicp_ipif_check_ok(struct oo_cplane_handle* cp,
-                   cicp_ipif_row_t* ipif, void* data)
+                   ci_ifid_t ifindex, void* data)
 {
   return 1;
 }
 
 int
-cicp_llap_ipif_check_onloaded(struct oo_cplane_handle* cp,
-                              cicp_llap_row_t* llap, cicp_ipif_row_t* ipif,
-                              void* data)
+cicp_llap_check_onloaded(struct oo_cplane_handle* cp,
+                         cicp_llap_row_t* llap, void* data)
 {
   ci_netif* ni = data;
   return llap->rx_hwports != 0 &&
          (llap->rx_hwports & ~ci_netif_get_hwport_mask(ni)) == 0;
 }
 
+/* Call this when ARP resolution failed */
+static void
+oo_deferred_arp_failed(ci_netif *ni, int af, ci_ip_pkt_fmt* pkt)
+{
+  CITP_STATS_NETIF_INC(ni, tx_defer_pkt_drop_arp_failed);
+
+  /* For TCP SYN_SENT, we drop the connection */
+  if( ! (pkt->flags & CI_PKT_FLAG_UDP) &&
+      (TX_PKT_IPX_TCP(af, pkt)->tcp_flags & CI_TCP_FLAG_SYN) &&
+      OO_SP_NOT_NULL(pkt->pf.tcp_tx.sock_id) ) {
+    citp_waitable_obj* wo = SP_TO_WAITABLE_OBJ(ni, pkt->pf.tcp_tx.sock_id);
+    if( wo->waitable.state == CI_TCP_SYN_SENT )
+      ci_tcp_drop(ni, &wo->tcp, EHOSTUNREACH);
+    /* Is it necessary to send a sort of ICMP in UDP case? */
+  }
+
+  cicp_pkt_complete_fake(ni, pkt);
+}
+
+/* Try to send one deferrred packet.  Returns TRUE if sent. */
+int oo_deferred_send_one(ci_netif *ni, struct oo_deferred_pkt* dpkt)
+{
+  struct oo_cplane_handle *cp =
+    dpkt->iif_ifindex == CI_IFID_BAD ? ni->cplane : ni->cplane_init_net;
+  struct cp_fwd_data data;
+  ci_ip_pkt_fmt* pkt = PKT_CHK(ni, dpkt->pkt_id);
+  int rc;
+
+  /* Has anything changed? */
+  if( ! (dpkt->flag & OO_DEFERRED_FLAG_FIRST) &&
+      oo_cp_verinfo_is_valid(cp, &dpkt->ver, ci_ni_fwd_table_id(ni)) )
+    return 0;
+
+  /* For every packet, we have to go through the next code once and detect
+   * CICP_FWD_DATA_FLAG_ARP_FAILED flag if it is present outright. */
+  dpkt->flag &=~ OO_DEFERRED_FLAG_FIRST;
+
+  if( ! CICP_MAC_ROWID_IS_VALID(dpkt->ver.id) ) {
+    /* The only way to get here is when sending TCP reply from in-kernel
+     * code (in the most cases it is about sending SYN-ACK for incoming
+     * SYN).  In all the other cases we have a valid verinfo, with policy
+     * routing properly applied.
+     *
+     * In the TCP case and complicated source routing we can do the wrong
+     * thing here - but TCP is resistant to packet loss. */
+    struct cp_fwd_key key;
+
+    key.dst = CI_ADDR_SH_FROM_ADDR(dpkt->nexthop);
+    key.src = CI_ADDR_SH_FROM_ADDR(dpkt->src);
+    key.ifindex = dpkt->ifindex;
+    /* We just need the MAC address for the nexthop via the ifindex.
+     * In case of IPv6, Linux also wants us to provide the source address.
+     * Everything else is not meaningful for our purpose: resolve the
+     * destination MAC for this next hop. */
+    key.iif_ifindex = dpkt->iif_ifindex;
+    key.tos = 0;
+    key.flag = CP_FWD_KEY_SOURCELESS;
+#ifdef __KERNEL__
+    if( ! (ni->flags & CI_NETIF_FLAG_IN_DL_CONTEXT) )
+#endif
+      key.flag |= CP_FWD_KEY_REQ_WAIT;
+
+    rc = __oo_cp_route_resolve(cp, &dpkt->ver, &key, 1/*ask_server*/,
+                               &data, ci_ni_fwd_table_id(ni));
+    if( rc != 0 ) {
+      if( key.flag & CP_FWD_KEY_REQ_WAIT ) {
+        /* cplane failed to resolve - drop the packet. */
+        CITP_STATS_NETIF_INC(ni, tx_defer_pkt_drop_failed);
+        cicp_pkt_complete_fake(ni, pkt);
+        return 1;
+      }
+      return 0;
+    }
+  }
+  else {
+    /* Update the route data.
+     * Unlike the previous branch, nobody is calling `oo_cp_arp_resolve()`
+     * again.  We rely on ARP resolution initiated when
+     * __oo_cp_route_resolve() was called for the first time. */
+    struct cp_fwd_row* fwd = cp_get_fwd_by_id(
+                                oo_cp_get_fwd_table(cp, ci_ni_fwd_table_id(ni)),
+                                dpkt->ver.id);
+    do {
+      dpkt->ver.version = OO_ACCESS_ONCE(*cp_fwd_version(fwd));
+      data = *cp_get_fwd_data_current(fwd);
+      if( !(fwd->flags & CICP_FWD_FLAG_OCCUPIED) ) {
+        /* Mark data as invalid and break out */
+        data.base.ifindex = 0;
+        break;
+      }
+    } while( dpkt->ver.version != OO_ACCESS_ONCE(*cp_fwd_version(fwd)) );
+  }
+
+  /* Check next hop and ifindex, drop dpkt if they have changed.
+   * We do not check the source address because we do not really care;
+   * we need it to for correct key.src above only. */
+  if( data.base.ifindex != dpkt->ifindex || data.hwports == 0 ||
+      ! CI_IPX_ADDR_EQ(dpkt->nexthop,
+                       CI_ADDR_FROM_ADDR_SH(data.base.next_hop)) ) {
+    CITP_STATS_NETIF_INC(ni, tx_defer_pkt_drop_failed);
+    cicp_pkt_complete_fake(ni, pkt);
+    return 1;
+  }
+
+  if( data.flags & CICP_FWD_DATA_FLAG_ARP_FAILED ) {
+    oo_deferred_arp_failed(ni,
+                           dpkt->flag & OO_DEFERRED_FLAG_IS_IPV6 ?
+                                                        AF_INET6 : AF_INET,
+                           pkt);
+    return 1;
+  }
+  if( ! (data.flags & CICP_FWD_DATA_FLAG_ARP_VALID) )
+    return 0;
+
+  /* Move all that header to the packet */
+  memcpy(oo_tx_ether_hdr(pkt)->ether_dhost, data.dst_mac, ETH_ALEN);
+  memcpy(oo_tx_ether_hdr(pkt)->ether_shost, data.src_mac, ETH_ALEN);
+  /* And send! */
+  __ci_netif_send(ni, pkt);
+  CITP_STATS_NETIF_INC(ni, tx_defer_pkt_sent);
+  return 1;
+}
+
+/* Try to send all deferrred packets.  Returns TRUE if all sent. */
+int oo_deferred_send(ci_netif *ni)
+{
+  int ret = 1;
+  ci_ni_dllist_link* l = ci_ni_dllist_start(ni, &ni->state->deferred_list);
+
+  ci_assert(ci_netif_is_locked(ni));
+
+  while( l != ci_ni_dllist_end(ni, &ni->state->deferred_list) ) {
+    struct oo_deferred_pkt* dpkt = CI_CONTAINER(struct oo_deferred_pkt,
+                                                link, l);
+    int handled = oo_deferred_send_one(ni, dpkt);
+    ci_ni_dllist_iter(ni, l);
+
+    if( handled ||
+        TIME_GT(ci_ip_time_now(ni),
+                dpkt->ts + NI_CONF(ni).tconst_defer_arp) ) {
+      if( ! handled ) {
+        /* Not handled, but timed out.  Call TX complete callback. */
+        CITP_STATS_NETIF_INC(ni, tx_defer_pkt_drop_timeout);
+        cicp_pkt_complete_fake(ni, PKT_CHK(ni, dpkt->pkt_id));
+      }
+      ci_ni_dllist_remove(ni, &dpkt->link);
+      ci_ni_dllist_put(ni, &ni->state->deferred_list_free, &dpkt->link);
+    }
+    else {
+      ret = 0;
+    }
+  }
+
+  return ret;
+}
+
+#ifdef __KERNEL__
+/* Release all the deferred packets */
+void oo_deferred_free(ci_netif *ni)
+{
+  CI_DEBUG(int n = 0;)
+  ci_ni_dllist_link* l = ci_ni_dllist_start(ni, &ni->state->deferred_list);
+
+  while( l != ci_ni_dllist_end(ni, &ni->state->deferred_list) ) {
+    struct oo_deferred_pkt* dpkt = CI_CONTAINER(struct oo_deferred_pkt,
+                                                link, l);
+    ci_ni_dllist_iter(ni, l);
+
+    cicp_pkt_complete_fake(ni, PKT_CHK(ni, dpkt->pkt_id));
+    CI_DEBUG(n++;)
+  }
+
+  /* Every deferred packet was handled somehow: */
+  ci_assert_equal(ni->state->stats.tx_defer_pkt +
+                  ni->state->stats.tx_defer_pkt_fast,
+                  ni->state->stats.tx_defer_pkt_sent +
+                  ni->state->stats.tx_defer_pkt_drop_timeout +
+                  ni->state->stats.tx_defer_pkt_drop_arp_failed +
+                  ni->state->stats.tx_defer_pkt_drop_failed + n);
+}
+#endif

@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 #ifndef __NETIF_TX_H__
 #define __NETIF_TX_H__
 
@@ -171,17 +158,22 @@ ci_inline void ci_netif_dmaq_and_vi_for_pkt(ci_netif* ni, ci_ip_pkt_fmt* pkt,
   *vi = &ni->nic_hw[pkt->intf_i].vi;
 }
 
-
-#define __ci_netif_dmaq_insert_prep_pkt(ni, pkt)                        \
+/* for use from __ci_netif_send() only */
+#define ___ci_netif_dmaq_insert_prep_pkt(ni, pkt)                        \
   do {                                                                  \
-    ci_assert( ! ((pkt)->flags & CI_PKT_FLAG_TX_PENDING) );             \
-    (pkt)->flags |= CI_PKT_FLAG_TX_PENDING;                             \
     ++(ni)->state->nic[(pkt)->intf_i].tx_dmaq_insert_seq;               \
     (ni)->state->nic[(pkt)->intf_i].tx_bytes_added+=TX_PKT_LEN(pkt);    \
     if( oo_tcpdump_check(ni, pkt, (pkt)->intf_i) ) {                    \
       ci_frc64(&((pkt)->tstamp_frc));                                   \
       oo_tcpdump_dump_pkt(ni, pkt);                                     \
     }                                                                   \
+  } while(0)
+
+#define __ci_netif_dmaq_insert_prep_pkt(ni, pkt)                        \
+  do {                                                                  \
+    ci_assert( ! ((pkt)->flags & CI_PKT_FLAG_TX_PENDING) );             \
+    (pkt)->flags |= CI_PKT_FLAG_TX_PENDING;                             \
+    ___ci_netif_dmaq_insert_prep_pkt(ni, pkt);                          \
   } while(0)
 
 

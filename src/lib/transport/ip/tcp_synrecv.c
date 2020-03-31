@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_SOURCE>
@@ -32,11 +19,11 @@
 
 #define LPF "TCP SYNRECV "
 
-#define TSR_FMT "ptr:%x next:%x hash:%x l:%s r:%s:%d"
+#define TSR_FMT "ptr:%x next:%x hash:%x l:"IPX_FMT" r:"IPX_FMT":%d"
 #define TSR_ARGS(tsr)                                               \
   ci_tcp_synrecv2p(ni, tsr), tsr->bucket_link, tsr->hash,           \
-  ip_addr_str(tsr->l_addr),                                         \
-  ip_addr_str(tsr->r_addr), CI_BSWAP_BE16(tsr->r_port)
+  IPX_ARG(AF_IP(tsr->l_addr)),                                         \
+  IPX_ARG(AF_IP(tsr->r_addr)), CI_BSWAP_BE16(tsr->r_port)
 
 #ifdef __KERNEL__
 /* We do not expect per-bucket list to be longer than a few members.
@@ -65,38 +52,71 @@ ci_inline int ci_tcp_listenq_hash2idx(ci_uint32 hash, int level)
 }
 
 
+/* Iterate through all the syn-recv states in this bucket.
+ *
+ * fn_tsr() callback function is called for each syn-recv state.
+ *
+ * If fn_bucket() callback function is not NULL, then it is called for each
+ * (sub-)bucket, including the top one.  fn_bucket() is called after all
+ * the syn-recv states have been handled via fn_tsr() callback.
+ */
 static int
-ci_tcp_listenq_bucket_drop(ci_netif* ni, ci_tcp_listen_bucket* bucket)
+ci_tcp_listenq_bucket_iter(ci_netif* ni, ci_tcp_listen_bucket* bucket,
+                           void (fn_tsr)(ci_netif* ni,
+                                         ci_tcp_state_synrecv* tsr,
+                                         void* arg),
+                           void (fn_bucket)(ci_netif* ni,
+                                            ci_tcp_listen_bucket* bucket,
+                                            void* arg),
+                           void* arg)
 {
   ci_ni_aux_mem* aux;
   int idx;
-  oo_p tsr_p;
-  ci_tcp_state_synrecv* tsr;
   int ret = 0;
 
   for( idx = 0; idx < CI_TCP_LISTEN_BUCKET_SIZE; idx++ ) {
     if( OO_P_IS_NULL(bucket->bucket[idx]) )
       continue;
     aux = ci_ni_aux_p2aux(ni, bucket->bucket[idx]);
-    if( aux->type == CI_TCP_AUX_TYPE_BUCKET )
-      ret += ci_tcp_listenq_bucket_drop(ni, &aux->u.bucket);
+    if( aux->type == CI_TCP_AUX_TYPE_BUCKET ) {
+      ci_tcp_listenq_bucket_iter(ni, &aux->u.bucket,
+                                 fn_tsr, fn_bucket, arg);
+    }
     else {
-      tsr_p = bucket->bucket[idx];
+      oo_p tsr_p = tsr_p = bucket->bucket[idx];
       do {
-        tsr = &ci_ni_aux_p2aux(ni, tsr_p)->u.synrecv;
+        ci_tcp_state_synrecv* tsr = &ci_ni_aux_p2aux(ni, tsr_p)->u.synrecv;
         tsr_p = tsr->bucket_link;
-        if( OO_SP_IS_NULL(tsr->local_peer) )
-          ci_ni_dllist_remove(ni, ci_tcp_synrecv2link(tsr));
-        /* RFC 793 tells us to send FIN and move to FIN-WAIT1 state.
-         * However, Linux (and probably everybody else) does not do it. */
-        ci_tcp_synrecv_free(ni, tsr);
-        ret++;
+        fn_tsr(ni, tsr, arg);
       } while( OO_P_NOT_NULL(tsr_p) );
     }
   }
-  ci_ni_aux_free(ni, CI_CONTAINER(ci_ni_aux_mem, u.bucket, bucket));
+  if( fn_bucket != NULL )
+    fn_bucket(ni, bucket, arg);
 
   return ret;
+}
+
+
+static void
+ci_tcp_listenq_synrecv_drop(ci_netif* ni, ci_tcp_state_synrecv* tsr,
+                            void* arg)
+{
+  int* ret = arg;
+
+  if( OO_SP_IS_NULL(tsr->local_peer) )
+    ci_ni_dllist_remove(ni, ci_tcp_synrecv2link(tsr));
+  /* RFC 793 tells us to send FIN and move to FIN-WAIT1 state.
+   * However, Linux (and probably everybody else) does not do it. */
+  ci_tcp_synrecv_free(ni, tsr);
+  (*ret)++;
+}
+
+static void
+ci_tcp_listenq_bucket_drop(ci_netif* ni, ci_tcp_listen_bucket* bucket,
+                              void* arg)
+{
+  ci_ni_aux_free(ni, CI_CONTAINER(ci_ni_aux_mem, u.bucket, bucket));
 }
 
 
@@ -244,7 +264,8 @@ ci_tcp_listenq_bucket_lookup(ci_netif* ni, ci_tcp_listen_bucket* bucket,
   ci_ni_aux_mem* aux;
   int idx = ci_tcp_listenq_hash2idx(rxp->hash, level);
   ci_tcp_state_synrecv* tsr;
-  unsigned saddr, daddr, sport;
+  ci_addr_t saddr, daddr;
+  ci_uint16 sport;
 #ifdef __KERNEL__
   int i = 0;
 
@@ -255,11 +276,14 @@ ci_tcp_listenq_bucket_lookup(ci_netif* ni, ci_tcp_listen_bucket* bucket,
   }
 #endif
 
-  LOG_TV(ci_log("%s([%d] level=%d hash:%x l:%s r:%s:%d)", __func__,
+  saddr = RX_PKT_SADDR(rxp->pkt);
+  daddr = RX_PKT_DADDR(rxp->pkt);
+  sport = rxp->tcp->tcp_source_be16;
+
+  LOG_TV(ci_log("%s([%d] level=%d hash:%x l:"IPX_FMT" r:"IPX_FMT":%d)", __func__,
                 NI_ID(ni), level, rxp->hash,
-                ip_addr_str(oo_ip_hdr(rxp->pkt)->ip_daddr_be32),
-                ip_addr_str(oo_ip_hdr(rxp->pkt)->ip_saddr_be32),
-                CI_BSWAP_BE16(rxp->tcp->tcp_source_be16)));
+                IPX_ARG(AF_IP(daddr)), IPX_ARG(AF_IP(saddr)),
+                CI_BSWAP_BE16(sport)));
   if( OO_P_IS_NULL(bucket->bucket[idx]) )
     return NULL;
 
@@ -268,14 +292,12 @@ ci_tcp_listenq_bucket_lookup(ci_netif* ni, ci_tcp_listen_bucket* bucket,
   if( aux->type == CI_TCP_AUX_TYPE_BUCKET )
     return ci_tcp_listenq_bucket_lookup(ni, &aux->u.bucket, rxp, level);
 
-  saddr = oo_ip_hdr(rxp->pkt)->ip_saddr_be32;
-  daddr = oo_ip_hdr(rxp->pkt)->ip_daddr_be32;
-  sport = rxp->tcp->tcp_source_be16;
 
   tsr = &aux->u.synrecv;
   do {
-    if( ! ((saddr - tsr->r_addr) | (daddr - tsr->l_addr) |
-           (sport - tsr->r_port)) )
+    if( sport == tsr->r_port &&
+        CI_IPX_ADDR_EQ(saddr, tsr->r_addr) &&
+        CI_IPX_ADDR_EQ(daddr, tsr->l_addr) )
       return tsr;
     if( OO_P_IS_NULL(tsr->bucket_link) )
       return NULL;
@@ -293,6 +315,37 @@ ci_tcp_listenq_bucket_lookup(ci_netif* ni, ci_tcp_listen_bucket* bucket,
   /* unreachable */
   return NULL;
 }
+
+
+struct oo_dump_synrecv {
+  oo_dump_log_fn_t logger;
+  void *arg;
+  ci_tcp_socket_listen* tls;
+};
+
+static void
+ci_tcp_listenq_synrecv_print(ci_netif* ni, ci_tcp_state_synrecv* tsr,
+                             void* arg)
+{
+  struct oo_dump_synrecv* l = arg;
+  l->logger(l->arg, "TCP 0 0 "OOF_IPXPORT" "OOF_IPXPORT" SYN_RECV",
+            OOFA_IPXPORT(tsr->l_addr, sock_lport_be16(&l->tls->s)),
+            OOFA_IPXPORT(tsr->r_addr, tsr->r_port));
+}
+
+void
+ci_tcp_listenq_print_to_logger(ci_netif* ni, ci_tcp_socket_listen* tls,
+                               oo_dump_log_fn_t logger, void* log_arg)
+{
+  struct oo_dump_synrecv l = {
+    .logger = logger,
+    .arg = log_arg,
+    .tls = tls,
+  };
+  ci_tcp_listenq_bucket_iter(ni, ci_ni_aux_p2bucket(ni, tls->bucket),
+                             ci_tcp_listenq_synrecv_print, NULL, &l);
+}
+
 
 static void
 ci_tcp_listen_timer_set(ci_netif* ni, ci_tcp_socket_listen* tls,
@@ -317,9 +370,12 @@ ci_tcp_listen_timer_set(ci_netif* ni, ci_tcp_socket_listen* tls,
 
 int ci_tcp_listenq_drop_all(ci_netif* ni, ci_tcp_socket_listen* tls)
 {
-  return
-      ci_tcp_listenq_bucket_drop(ni,
-                                 ci_ni_aux_p2bucket(ni, tls->bucket));
+  int ret = 0;
+
+  ci_tcp_listenq_bucket_iter(ni, ci_ni_aux_p2bucket(ni, tls->bucket),
+                             ci_tcp_listenq_synrecv_drop,
+                             ci_tcp_listenq_bucket_drop, &ret);
+  return ret;
 }
 
 void ci_tcp_listenq_insert(ci_netif* ni, ci_tcp_socket_listen* tls,
@@ -413,10 +469,20 @@ void ci_tcp_listenq_drop_oldest(ci_netif* ni, ci_tcp_socket_listen* tls)
   ci_tcp_state_synrecv* tsr;
   int i;
 
+  ci_assert_gt(tls->n_listenq, 0);
+
   for( i = CI_CFG_TCP_SYNACK_RETRANS_MAX; i >= 0; --i ) {
     if( ci_ni_dllist_not_empty(ni, &tls->listenq[i]) )
       break;
   }
+
+  /* The listenq was non-empty, so we should never have hit the loop's
+   * termination condition... */
+  ci_assert_ge(i, 0);
+  /* ...but check that condition and return to appease old compilers. */
+  if( i < 0 )
+    return;
+
   ci_assert(ci_ni_dllist_not_empty(ni, &tls->listenq[i]));
   tsr = ci_tcp_link2synrecv(ci_ni_dllist_head(ni, &tls->listenq[i]));
   ci_tcp_listenq_drop(ni, tls, tsr);
@@ -449,7 +515,7 @@ get_ts_from_cache(ci_netif *netif,
     LOG_EP(ci_log("Taking cached fd %d off cached list, (onto acceptq)",
            ts->cached_on_fd));
 
-    if( tcp_laddr_be32(ts) == tsr->l_addr ||
+    if( CI_IPX_ADDR_EQ(ts->s.laddr, tsr->l_addr) ||
         ((tls->s.s_flags & ts->s.s_flags & CI_SOCK_FLAGS_SCALABLE) != 0 ) ) {
       ci_tcp_state_init(netif, ts, 1);
       /* Shouldn't have touched these bits of state */
@@ -494,9 +560,17 @@ static void ci_tcp_inherit_options(ci_netif* ni, ci_sock_cmn* s,
   ci_assert(ts);
 
   ts->s.so = s->so;
-  ts->s.cp.so_bindtodevice = s->cp.so_bindtodevice;
+#if CI_CFG_IPV6
+  /* IPv6 link-local address requires an interface. Don't overwrite it. */
+  if( !CI_IPX_IS_LINKLOCAL(ts->s.cp.laddr) ||
+      ts->s.cp.so_bindtodevice == CI_IFID_BAD )
+#endif
+    ts->s.cp.so_bindtodevice = s->cp.so_bindtodevice;
   ts->s.cp.ip_ttl = s->cp.ip_ttl;
   ts->s.cp.ip_tos = s->cp.ip_tos;
+#if CI_CFG_IPV6
+  ts->s.tclass = s->tclass;
+#endif
   ts->s.rx_bind2dev_ifindex = s->rx_bind2dev_ifindex;
   ts->s.rx_bind2dev_hwports = s->rx_bind2dev_hwports;
   ts->s.rx_bind2dev_vlan = s->rx_bind2dev_vlan;
@@ -527,6 +601,12 @@ static void ci_tcp_inherit_options(ci_netif* ni, ci_sock_cmn* s,
     ci_assert_equal(ts->s.b.sb_aflags & inherited_sbflags, 0);
     ci_atomic32_or(&ts->s.b.sb_aflags, s->b.sb_aflags & inherited_sbflags);
 
+#if CI_CFG_IPV6
+    /* Drop IPV6_AUTOFLOWLABEL flags set in ci_sock_cmn_init() */
+    ts->s.s_flags &= ~(CI_SOCK_FLAG_AUTOFLOWLABEL_REQ |
+                       CI_SOCK_FLAG_AUTOFLOWLABEL_OPT);
+#endif
+
     ci_assert_equal((ts->s.s_flags & CI_SOCK_FLAG_TCP_INHERITED),
                     CI_SOCK_FLAG_PMTU_DO);
     ts->s.s_flags &= ~CI_SOCK_FLAG_PMTU_DO;
@@ -541,9 +621,12 @@ static void ci_tcp_inherit_options(ci_netif* ni, ci_sock_cmn* s,
   ts->c.t_ka_intvl         = c->t_ka_intvl;
   ts->c.t_ka_intvl_in_secs = c->t_ka_intvl_in_secs;
   ts->c.ka_probe_th        = c->ka_probe_th;
-  ci_ip_hdr_init_fixed(&ts->s.pkt.ip, IPPROTO_TCP,
-                        s->pkt.ip.ip_ttl,
-                        s->pkt.ip.ip_tos);
+  {
+    int af = ipcache_af(&ts->s.pkt);
+    ci_ipx_hdr_init_fixed(&ts->s.pkt.ipx, af, IPPROTO_TCP, ipcache_ttl(&s->pkt),
+                          sock_tos_tclass(af, s));
+  }
+
   ts->s.cmsg_flags = s->cmsg_flags;
 #if CI_CFG_TIMESTAMPING
   ts->s.timestamping_flags = s->timestamping_flags;
@@ -570,9 +653,12 @@ ci_inline void ci_tcp_set_addr_on_promote(ci_netif* netif, ci_tcp_state* ts,
                                           ci_tcp_socket_listen* tls)
 {
   /* copy and initialise state */
-  ts->s.pkt.ip.ip_saddr_be32 = tsr->l_addr;
-  TS_TCP(ts)->tcp_source_be16 = sock_lport_be16(&tls->s);
-  ts->s.cp.ip_laddr_be32 = tsr->l_addr;
+  ts->s.pkt.ether_type = CI_IS_ADDR_IP6(tsr->l_addr) ?
+      CI_ETHERTYPE_IP6 : CI_ETHERTYPE_IP;
+  ci_ipcache_set_saddr(&ts->s.pkt, tsr->l_addr);
+  ts->s.laddr = tsr->l_addr;
+  TS_IPX_TCP(ts)->tcp_source_be16 = sock_lport_be16(&tls->s);
+  ts->s.cp.laddr = tsr->l_addr;
   ts->s.cp.lport_be16 = sock_lport_be16(&tls->s);
   ci_tcp_set_peer(ts, tsr->r_addr, tsr->r_port);
 
@@ -596,7 +682,7 @@ ci_inline void ci_tcp_set_addr_on_promote(ci_netif* netif, ci_tcp_state* ts,
 */
 int ci_tcp_listenq_try_promote(ci_netif* netif, ci_tcp_socket_listen* tls,
                                ci_tcp_state_synrecv* tsr,
-                               ci_ip_cached_hdrs* ipcache,
+                               ci_ip_cached_hdrs* ipcache, ci_ip_pkt_fmt* pkt,
                                ci_tcp_state** ts_out)
 {
   int rc = 0;
@@ -671,14 +757,38 @@ int ci_tcp_listenq_try_promote(ci_netif* netif, ci_tcp_socket_listen* tls,
     ts->s.ofe_code_start = tls->ofe_promote;
 #endif
 
+    /* Need to initialise address information for use when setting filters */
+    ci_tcp_set_addr_on_promote(netif, ts, tsr, tls);
+
+    /* Set up socket domain before installing sw filters. */
+    ci_assert(IS_VALID_SOCK_P(netif, S_SP(ts)));
+    ci_assert(ts->s.b.state == CI_TCP_CLOSED);
+    ts->s.domain = tls->s.domain;
+    cicp_ip_cache_update_from(netif, &ts->s.pkt, ipcache);
+#if CI_CFG_IPV6
+    /* These values are set in ci_tcp_state_tcb_init_fixed() for IPv4 case */
+    ipcache_protocol(&ts->s.pkt) = IPPROTO_TCP;
+    TS_IPX_TCP(ts)->tcp_check_be16 = 0;
+
+    if( CI_IPX_IS_LINKLOCAL(ts->s.cp.laddr) &&
+        (ts->s.cp.so_bindtodevice = ci_rx_pkt_ifindex(netif, pkt)) == 0 ) {
+#if CI_CFG_FD_CACHING
+      if( ci_tcp_is_cached(ts) )
+        ci_ni_dllist_push(netif, &cache->cache, &ts->epcache_link);
+      else
+#endif
+        ci_tcp_state_free(netif, ts);
+      LOG_U(ci_log("%s: no interface matching link-local address " IPX_FMT
+                   " found", __FUNCTION__, IPX_ARG(AF_IP_L3(ts->s.cp.laddr))));
+      return -ENODEV;
+    }
+#endif
+
     if( scalable ) {
       /* scalable sockets will not get filters installed trough oof */
       ts->s.s_flags |= CI_SOCK_FLAG_SCALPASSIVE;
     }
     if( ! ci_tcp_is_cached(ts) ) {
-      /* Need to initialise address information for use when setting filters */
-      ci_tcp_set_addr_on_promote(netif, ts, tsr, tls);
-
       /* "borrow" filter from listening socket.  For loopback socket, we
        * do not need filters, but we have to take a reference of the OS
        * socket. */
@@ -694,23 +804,19 @@ int ci_tcp_listenq_try_promote(ci_netif* netif, ci_tcp_socket_listen* tls,
 #if CI_CFG_FD_CACHING
     else {
       if( scalable ) {
-        ci_tcp_set_addr_on_promote(netif, ts, tsr, tls);
         rc = ci_tcp_ep_set_filters(netif, S_SP(ts), ts->s.cp.so_bindtodevice,
                                    S_SP(tls));
       }
       else if( OO_SP_IS_NULL(tsr->local_peer) ) {
-        ci_addr_t laddr, raddr;
-
         /* Now set the s/w filter.  We leave the hw filter in place for cached
          * EPS. This will probably not have the correct raddr and rport, but as
          * it's sharing the listening socket's filter that's not a problem.  It
          * will be updated if this is still around when the listener is closed.
          */
-        laddr = CI_ADDR_FROM_IP4(tsr->l_addr);
-        raddr = CI_ADDR_FROM_IP4(tsr->r_addr);
-        rc = ci_netif_filter_insert(netif, S_SP(ts), AF_SPACE_FLAG_IP4, laddr,
-                                    sock_lport_be16(&tls->s), raddr,
-                                    tsr->r_port, tcp_protocol(ts));
+        rc = ci_netif_filter_insert(netif, S_SP(ts), sock_af_space(&ts->s),
+                                    tsr->l_addr, sock_lport_be16(&tls->s),
+                                    tsr->r_addr, tsr->r_port,
+                                    tcp_protocol(ts));
       }
       if (rc < 0) {
         /* Bung it back on the cache list */
@@ -718,14 +824,6 @@ int ci_tcp_listenq_try_promote(ci_netif* netif, ci_tcp_socket_listen* tls,
         ci_ni_dllist_push(netif, &cache->cache, &ts->epcache_link);
         return rc;
       }
-
-      /* Need to initialise address information.  We do this after trying to
-       * insert the sw filter, so we can push the tcp state back onto the
-       * cache queue with as few changes as possible if we fail to add the
-       * sw filter.
-       */
-      if( ! scalable )
-        ci_tcp_set_addr_on_promote(netif, ts, tsr, tls);
 
       /* Remove fd from global fd_states list and push it to listen-socket's
        * fd_states list in scalable case.
@@ -746,18 +844,6 @@ int ci_tcp_listenq_try_promote(ci_netif* netif, ci_tcp_socket_listen* tls,
     }
 #endif
 
-    ci_assert(IS_VALID_SOCK_P(netif, S_SP(ts)));
-    ci_assert(ts->s.b.state == CI_TCP_CLOSED);
-    ts->s.domain = tls->s.domain;
-
-    cicp_ip_cache_update_from(netif, &ts->s.pkt, ipcache);
-    ci_pmtu_state_init(netif, &ts->s, &ts->pmtus,
-                       CI_IP_TIMER_PMTU_DISCOVER);
-    ci_pmtu_set(netif, &ts->pmtus,
-                CI_MIN(ts->s.pkt.mtu,
-                       tsr->tcpopts.smss + sizeof(ci_tcp_hdr)
-                         + sizeof(ci_ip4_hdr)));
-
     /* If we've got SYN via local route, we can handle it */
     ci_assert_equiv(ts->s.pkt.status == retrrc_localroute,
                     OO_SP_NOT_NULL(tsr->local_peer));
@@ -770,7 +856,8 @@ int ci_tcp_listenq_try_promote(ci_netif* netif, ci_tcp_socket_listen* tls,
     ts->tcpflags = 0;
     ts->tcpflags |= tsr->tcpopts.flags;
     ts->tcpflags |= CI_TCPT_FLAG_PASSIVE_OPENED;
-    ts->outgoing_hdrs_len = sizeof(ci_ip4_hdr) + sizeof(ci_tcp_hdr);
+    ts->outgoing_hdrs_len = CI_IPX_HDR_SIZE(ipcache_af(&ts->s.pkt)) +
+                            sizeof(ci_tcp_hdr);
     if( ts->tcpflags & CI_TCPT_FLAG_WSCL ) {
       ts->snd_wscl = tsr->tcpopts.wscl_shft;
       ts->rcv_wscl = tsr->rcv_wscl;
@@ -803,7 +890,9 @@ int ci_tcp_listenq_try_promote(ci_netif* netif, ci_tcp_socket_listen* tls,
     /* SACK has nothing to be done. */
 
     /* ?? ECN */
-    ci_tcp_set_hdr_len(ts, (ts->outgoing_hdrs_len - sizeof(ci_ip4_hdr)));
+    ci_tcp_set_hdr_len(ts,
+                       ts->outgoing_hdrs_len -
+                       CI_IPX_HDR_SIZE(ipcache_af(&ts->s.pkt)));
 
     ts->smss = tsr->tcpopts.smss;
     ts->c.user_mss = tls->c.user_mss;
@@ -816,19 +905,13 @@ int ci_tcp_listenq_try_promote(ci_netif* netif, ci_tcp_socket_listen* tls,
     ci_tcp_set_eff_mss(netif, ts);
     ci_tcp_set_initialcwnd(netif, ts);
 
-    /* Copy socket options & related fields that should be inherited. 
-     * Note: Windows does not inherit rcvbuf until the call to accept 
-     * completes. The assumption here is that all options can be
-     * inherited at the same time (most won't have an effect until there
-     * is a socket available for use by the app.).
-     */
+    /* Copy socket options & related fields that should be inherited. */
     ci_tcp_inherit_accept_options(netif, tls, ts, "SYN RECV (LISTENQ PROMOTE)");
+    ts->s.cp.sock_cp_flags = tls->s.cp.sock_cp_flags | OO_SCP_BOUND_ADDR;
 
     /* NB. Must have already set peer (which we have). */
     ci_tcp_set_established_state(netif, ts);
     CITP_STATS_NETIF(++netif->state->stats.synrecv2established);
-
-    ci_tcp_metrics_on_promote(netif, ts, tsr);
 
     ci_assert(ts->ka_probes == 0);
     ci_tcp_kalive_restart(netif, ts, ci_tcp_kalive_idle_get(ts));

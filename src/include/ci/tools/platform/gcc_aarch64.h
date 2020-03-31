@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \Fileque
 ** <L5_PRIVATE L5_HEADER >
@@ -172,6 +159,11 @@ ci_inline void ci_atomic_and(ci_atomic_t* a, int v)
 ci_inline void ci_atomic_or(ci_atomic_t* a, int v)
 {
    __sync_fetch_and_or(&a->n, v);
+}
+
+ci_inline int ci_atomic_xadd(ci_atomic_t* a, int v)
+{
+  return __sync_fetch_and_add(&a->n, v);
 }
 
 ci_inline void ci_atomic32_or(volatile ci_uint32* p, ci_uint32 mask)
@@ -334,19 +326,6 @@ ci_inline void ci_atomic32_merge(volatile ci_uint32* p,
     temp=(((ci_uint64)(sum))+((ci_uint32) (v)));        \
     sum=(unsigned int)(temp+(temp>>32));                \
   } while(0)
-
-
-/* TODO */
-ci_inline ci_uint16 ci_bswap16(ci_uint16 v)
-{ return CI_BSWAPC_16(v); }
-
-/* TODO */
-ci_inline ci_uint32 ci_bswap32(ci_uint32 v)
-{ return CI_BSWAPC_32(v); }
-
-/* TODO */
-ci_inline ci_uint64 ci_bswap64(ci_uint64 v)
-{ return CI_BSWAPC_64(v); }
 
 
 /* TODO */

@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 #include <ci/efrm/efrm_client.h>
 #include <ci/efrm/vf_resource.h>
 #include "efch.h"
@@ -48,24 +35,13 @@ pd_rm_alloc(ci_resource_alloc_t* alloc_, ci_resource_table_t* priv_opt,
     goto out;
   }
 
-#ifdef CONFIG_SFC_RESOURCE_VF
-  if (alloc->in_flags & (EFCH_PD_FLAG_VF | EFCH_PD_FLAG_VF_OPTIONAL)) {
-    if ((rc = efrm_vf_resource_alloc(client,
-                                     NULL /* do not share iommu domain */,
-                                     1 /* iommu on */,
-                                     &vf)) < 0 &&
-        !(alloc->in_flags & EFCH_PD_FLAG_VF_OPTIONAL)) {
-      EFCH_NOTICE("%s: could not allocate VF (%d)", __FUNCTION__, rc);
-      goto out;
-    }
-  }
-#else
+  /* Support for SRIOV VF was removed (see bug 84927). */
   if (alloc->in_flags & EFCH_PD_FLAG_VF) {
-    EFCH_NOTICE("%s: VF requested, but support not compiled in", __FUNCTION__);
+    EFCH_NOTICE("%s: VF requested, but there is no support for this", __FUNCTION__);
     rc = -ENODEV;
     goto out;
   }
-#endif
+
   phys_mode = (alloc->in_flags & EFCH_PD_FLAG_PHYS_ADDR) != 0;
   if (phys_mode && vf == NULL &&
       (phys_mode_gid == -2 || (phys_mode_gid != -1 &&
@@ -94,10 +70,6 @@ pd_rm_alloc(ci_resource_alloc_t* alloc_, ci_resource_table_t* priv_opt,
  out:
   if (client != NULL)
     efrm_client_put(client);
-#ifdef CONFIG_SFC_RESOURCE_VF
-  if (vf != NULL)
-    efrm_vf_resource_release(vf);
-#endif
   if (rc == 0) {
     if ((alloc->in_flags & EFCH_PD_FLAG_RX_PACKED_STREAM) != 0)
       efrm_pd_set_min_align(pd_rs, EFRM_PD_RX_PACKED_STREAM_MEMORY_ALIGNMENT);

@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /****************************************************************************
  * Driver for Solarflare network controllers -
  *          resource management for Xen backend, OpenOnload, etc
@@ -62,6 +49,7 @@
 #include <ci/efrm/efrm_filter.h>
 #include <ci/efhw/nic.h>
 #include <ci/tools/sysdep.h>
+#include <ci/internal/transport_config_opt.h>
 
 /* The DL driver and associated calls */
 static int efrm_dl_probe(struct efx_dl_device *efrm_dev,
@@ -484,7 +472,7 @@ static int efrm_netdev_event(struct notifier_block *this,
 			efrm_filter_rename(nic, net_dev);
 		}
 	}
-	
+
 	return NOTIFY_DONE;
 }
 

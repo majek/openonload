@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_HEADER >
@@ -44,6 +31,8 @@ extern int phys_mode_gid;
 extern struct rw_semaphore handover_rwlock;
 
 extern int inject_kernel_gid;
+
+extern bool oo_accelerate_veth;
 
 /*--------------------------------------------------------------------
  *
@@ -87,8 +76,6 @@ linux_tcp_helper_fop_sendpage(struct file*, struct page*, int offset,
 extern ssize_t
 linux_tcp_helper_fop_sendpage_udp(struct file*, struct page*, int offset,
                                   size_t size, loff_t* ppos, int more);
-
-extern int efab_fds_dump(unsigned pid);
 
 /* Decide whether a file descriptor is ours or not */
 /* Check if file is our endpoint */

@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_SOURCE>
@@ -35,6 +22,7 @@
 #include <ci/internal/transport_config_opt.h>
 #include <ci/internal/transport_common.h>
 #include <ci/internal/ip.h>
+#include <ci/internal/ip_timestamp.h>
 #include <onload/ul.h>
 #include <onload/tcp_poll.h>
 #include <onload/ul/tcp_helper.h>
@@ -189,6 +177,7 @@ static ci_fd_t citp_tcp_ep_acquire_fd(ci_netif* netif, ci_tcp_state* ts,
     * requested - if so we need to sort that out.
     */
     citp_tcp_cached_fixup_flags(netif, ts, fd, flags);
+    ts->s.domain = domain;
 
    /* We're reusing a cached socket.  We don't attach, but need to set the
     * flags that would be set on attach.  We also clear the cached_on_fd
@@ -224,7 +213,9 @@ ci_fd_t ci_tcp_ep_ctor(citp_socket* ep, ci_netif* netif, int domain, int type)
 
   ci_netif_lock(netif);
 #if CI_CFG_FD_CACHING
+#if ! CI_CFG_IPV6
   if( domain == AF_INET )
+#endif
     ts = ci_tcp_get_state_buf_from_cache(netif, citp_getpid());
 #endif
   if( ts == NULL )
@@ -260,6 +251,11 @@ ci_fd_t ci_tcp_ep_ctor(citp_socket* ep, ci_netif* netif, int domain, int type)
    ** defaults. */
   ts->s.so.sndbuf = NI_OPTS(netif).tcp_sndbuf_def;
   ts->s.so.rcvbuf = NI_OPTS(netif).tcp_rcvbuf_def;
+#if CI_CFG_IPV6
+  ci_assert(CI_IPX_ADDR_EQ(ts->s.laddr, ip4_addr_any));
+  if( domain == AF_INET6 )
+    ts->s.laddr = addr_any;
+#endif
   ep->netif = netif;
   ep->s = &ts->s;
 
@@ -542,10 +538,10 @@ static int citp_tcp_listen(citp_fdinfo* fdinfo, int backlog)
   if( rc == CI_SOCKET_HANDOVER ||
       ( (rc < 0) && CITP_OPTS.no_fail &&
         (errno == ENOMEM || errno == EBUSY || errno == ENOBUFS ||
-         errno == EACCES) ) ) {
+         errno == ERFKILL) ) ) {
     /* ENOMEM or EBUSY means we are out of some sort of resource, so hand
      * this socket over to the OS.
-     * EACCES means that we couldn't insert filters on any interface due to
+     * ERFKILL means that we couldn't insert filters on any interface due to
      * Onload iptables so traffic should go via the OS.  The case of Onload
      * iptables preventing filter insertion on only some interfaces is already
      * handled correctly in ci_tcp_listen().
@@ -590,15 +586,14 @@ static int citp_tcp_accept_complete(ci_netif* ni,
 {
   CITP_STATS_NETIF(++ni->state->stats.ul_accepts);
 
-  if( sa ) {
-    ci_addr_to_user(sa, p_sa_len, AF_INET, ts->s.domain, 
-                    TS_TCP(ts)->tcp_dest_be16, &ts->s.pkt.ip.ip_daddr_be32);
-  }
+  if( sa )
+    ci_tcp_get_peer_addr(ts, sa, p_sa_len);
 
-  Log_VSS(ci_log(LPF "%d ACCEPTING %d %s:%u rcv=%08x-%08x snd=%08x-%08x-%08x "
+  Log_VSS(ci_log(LPF "%d ACCEPTING %d " IPX_FMT
+             ":%u rcv=%08x-%08x snd=%08x-%08x-%08x "
              "enq=%08x", S_FMT(listener), S_FMT(ts),
-             ip_addr_str(ts->s.pkt.ip.ip_daddr_be32),
-             (unsigned) CI_BSWAP_BE16(TS_TCP(ts)->tcp_dest_be16),
+             IPX_ARG(AF_IP(tcp_ipx_raddr(ts))),
+             (unsigned) CI_BSWAP_BE16(TS_IPX_TCP(ts)->tcp_dest_be16),
              tcp_rcv_nxt(ts), tcp_rcv_wnd_right_edge_sent(ts),
              tcp_snd_una(ts), tcp_snd_nxt(ts), ts->snd_max,
              tcp_enq_nxt(ts)));
@@ -1112,7 +1107,7 @@ static int citp_tcp_connect(citp_fdinfo* fdinfo,
   if (rc == CI_SOCKET_HANDOVER
       || ((rc < 0) && CITP_OPTS.no_fail &&
           (errno == ENOMEM || errno == EBUSY || errno == ENOBUFS ||
-           errno == EACCES))) {
+           errno == ERFKILL))) {
     /* We try to connect the OS socket if we have one, or it's valid to create
      * one.  That means non-tproxy sockets, or tproxy sockets that have not
      * been bound (ie they wouldn't have an os socket even if they weren't
@@ -1393,18 +1388,13 @@ static int citp_tcp_cache(citp_fdinfo* fdinfo)
     return 0;
   }
 
-  if( ts->tcpflags & CI_TCPT_FLAG_ACTIVE_WILD &&
-      ! ci_tcp_active_wild_sharer_is_cacheable(ts) ) {
-    Log_EP(ci_log("FD %d not cached - sharing local port", fdinfo->fd));
-    goto unlock_out;
-  }
-
   /* We need to decide whether this socket should go on the passive- or
    * active-open cache, as the remaining work is different in each case. */
   if( ts->tcpflags & CI_TCPT_FLAG_PASSIVE_OPENED ) {
-    rc = ci_netif_listener_lookup(netif, sock_laddr_be32(s),
-                                  sock_lport_be16(s));
-    if( rc < 0 ) {
+    oo_sp sock = ci_netif_listener_lookup(netif, sock_af_space(s),
+                                          sock_ipx_laddr(s),
+                                          sock_lport_be16(s));
+    if( OO_SP_IS_NULL(sock) ) {
       /* If the listener has been closed, we can't cache this socket. */
       rc = 0;
       goto unlock_out;
@@ -1437,7 +1427,7 @@ static int citp_tcp_cache(citp_fdinfo* fdinfo)
       goto unlock_out;
     }
 
-    tls = SP_TO_TCP_LISTEN(netif, CI_NETIF_FILTER_ID_TO_SOCK_ID(netif, rc));
+    tls = SP_TO_TCP_LISTEN(netif, sock);
 
     if( tls->cache_avail_sock == 0 ) {
       Log_EP(ci_log("FD %d not cached - per-socket limit reached", fdinfo->fd));
@@ -1450,25 +1440,18 @@ static int citp_tcp_cache(citp_fdinfo* fdinfo)
     Log_EP(ci_log("FD %d cached on passive-open cache", fdinfo->fd));
   }
   else {
-    /* This socket goes on the active-open cache, so we're good to go.  We
-     * checked earlier that the socket doesn't have an OS backing socket.  This
-     * can happen in a few different ways, which we assert here. */
-    ci_assert(
-      /* Scalable sockets are always OK. */
-      s->s_flags & CI_SOCK_FLAGS_SCALABLE || (
-        /* Closed sockets are OK to cache if... */
-        s->b.state == CI_TCP_CLOSED && (
-          /* ...they are unbound, or... */
-          ! (s->s_flags & CI_SOCK_FLAG_BOUND) || (
-            /* ...scalable filters and shared local ports are enabled. */
-            NI_OPTS(netif).scalable_filter_enable ==
-              CITP_SCALABLE_FILTERS_ENABLE &&
-            NI_OPTS(netif).tcp_shared_local_ports != 0
-          )
-        )
-      )
-    );
+    /* Non-scalable non-closed sockets might carry some other state that
+       prevails our partial cache-based reinitialisation.
+       Lack of hw filter and lack of backing socket are not enough
+       to make this sockets cacheable */
+    if( (s->s_flags & CI_SOCK_FLAGS_SCALABLE) == 0 &&
+        !(s->b.state == CI_TCP_CLOSED &&
+        (s->s_flags & CI_SOCK_FLAG_BOUND) == 0) ) {
+      Log_EP(ci_log("FD %d not cached - active nonscalable socket", fdinfo->fd));
+      goto unlock_out;
+    }
 
+#if ! CI_CFG_IPV6
     /* Don't cache IPv6 sockets */
     if( s->domain != AF_INET ) {
       Log_EP(ci_log("FD %d not cached - non-IPv4 domain %d",
@@ -1476,6 +1459,7 @@ static int citp_tcp_cache(citp_fdinfo* fdinfo)
       CITP_STATS_NETIF(++netif->state->stats.active_sockcache_non_ip4);
       goto unlock_out;
     }
+#endif
 
     /* We limit the maximum number of sockets cached in a stack. */
     if( netif->state->active_cache_avail_stack == 0 ) {
@@ -1826,7 +1810,7 @@ static int citp_tcp_select(citp_fdinfo* fdi, int* n, int rd, int wr, int ex,
     ci_tcp_state* ts = SOCK_TO_TCP(s);
     if( rd && ( ci_tcp_recv_not_blocked(ts)
 #if CI_CFG_TIMESTAMPING
-                || ci_udp_recv_q_not_empty(&ts->timestamp_q)
+                || ci_tcp_poll_timestamp_q_nonempty(ni, ts)
 #endif
                 ) ) {
         FD_SET(fdi->fd, ss->rdu);
@@ -1834,7 +1818,7 @@ static int citp_tcp_select(citp_fdinfo* fdi, int* n, int rd, int wr, int ex,
     }
     if( wr && ( ci_tcp_tx_advertise_space(ni, ts)
 #if CI_CFG_TIMESTAMPING
-                || ci_udp_recv_q_not_empty(&ts->timestamp_q)
+                || ci_tcp_poll_timestamp_q_nonempty(ni, ts)
 #endif
                 ) ) {
         FD_SET(fdi->fd, ss->wru);
@@ -2102,12 +2086,15 @@ citp_tcp_ordered_data(citp_fdinfo* fdi, struct timespec* limit,
     }
 
     do {
-      if( citp_oo_timespec_compare(&pkt->pf.tcp_rx.rx_hw_stamp, limit) < 1 ) {
+      struct timespec stamp;
+      ci_rx_pkt_timespec(pkt, &stamp,
+                         NI_OPTS(epi->sock.netif).rx_timestamping_ordering);
+
+      if( citp_timespec_compare(&stamp, limit) < 1 ) {
         *bytes_out += oo_offbuf_left(&pkt->buf);
       }
       else {
-        next_out->tv_sec = pkt->pf.tcp_rx.rx_hw_stamp.tv_sec;
-        next_out->tv_nsec = pkt->pf.tcp_rx.rx_hw_stamp.tv_nsec;
+        *next_out = stamp;
         break;
       }
       if( ! OO_PP_IS_NULL(pkt->next) )

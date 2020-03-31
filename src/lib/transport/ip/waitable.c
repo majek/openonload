@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_SOURCE>
@@ -45,11 +32,7 @@ void citp_waitable_init(ci_netif* ni, citp_waitable* w, int id)
 
   oo_p sp;
 
-#if CI_CFG_SOCKP_IS_PTR
-  w->bufid = id;
-#else
   w->bufid = OO_SP_FROM_INT(ni, id);
-#endif
   w->sb_flags = 0;
   w->sb_aflags = CI_SB_AFLAG_ORPHAN | CI_SB_AFLAG_NOT_READY;
   w->epoll = OO_PP_NULL;
@@ -351,10 +334,10 @@ static void citp_waitable_dump2(ci_netif* ni, citp_waitable* w, const char* pf,
   if( CI_TCP_STATE_IS_SOCKET(w->state) ||
       w->state == CI_TCP_STATE_ACTIVE_WILD) {
     s = CI_CONTAINER(ci_sock_cmn, b, w);
-    logger(log_arg, "%s%s "NT_FMT"lcl="OOF_IP4PORT" rmt="OOF_IP4PORT" %s",
+    logger(log_arg, "%s%s "NT_FMT"lcl="OOF_IPXPORT" rmt="OOF_IPXPORT" %s",
            pf, citp_waitable_type_str(w), NI_ID(ni), W_FMT(w),
-           OOFA_IP4PORT(sock_laddr_be32(s), sock_lport_be16(s)),
-           OOFA_IP4PORT(sock_raddr_be32(s), sock_rport_be16(s)),
+           OOFA_IPXPORT(sock_ipx_laddr(s), sock_lport_be16(s)),
+           OOFA_IPXPORT(sock_ipx_raddr(s), sock_rport_be16(s)),
            ci_tcp_state_str(w->state));
   }
   else
@@ -419,8 +402,8 @@ void citp_waitable_dump_to_logger(ci_netif* ni, citp_waitable* w,
 }
 
 
-void citp_waitable_print_to_logger(citp_waitable* w, oo_dump_log_fn_t logger,
-                                   void *log_arg)
+void citp_waitable_print_to_logger(ci_netif* ni, citp_waitable* w,
+                                   oo_dump_log_fn_t logger, void *log_arg)
 {
   /* Output socket using netstat style output:
    *   TCP 2 0 0.0.0.0:12865 0.0.0.0:0 LISTEN
@@ -431,7 +414,9 @@ void citp_waitable_print_to_logger(citp_waitable* w, oo_dump_log_fn_t logger,
     citp_waitable_obj* wo = CI_CONTAINER(citp_waitable_obj, waitable, w);
     int tq = 0;
     int rq = 0;
-    
+    ci_addr_t raddr;
+    ci_uint16 rport;
+
     if( (w->state & CI_TCP_STATE_TCP) &&
        !(w->state & CI_TCP_STATE_NOT_CONNECTED) ) {
       tq = ci_tcp_sendq_n_pkts(&wo->tcp);
@@ -441,11 +426,27 @@ void citp_waitable_print_to_logger(citp_waitable* w, oo_dump_log_fn_t logger,
       tq = wo->udp.tx_count + oo_atomic_read(&wo->udp.tx_async_q_level);
       rq = ci_udp_recv_q_pkts(&wo->udp.recv_q);
     }
-    logger(log_arg, "%s %d %d "OOF_IP4PORT" "OOF_IP4PORT" %s",
+
+    /* For compatibility with netstat, we report pre-DNAT addresses. */
+    if( w->state & CI_TCP_STATE_TCP && s->s_flags & CI_SOCK_FLAG_DNAT ) {
+      raddr = wo->tcp.pre_nat.daddr_be32;
+      rport = wo->tcp.pre_nat.dport_be16;
+    }
+    else {
+      raddr = sock_ipx_raddr(s);
+      rport = sock_rport_be16(s);
+    }
+
+    logger(log_arg, "%s %d %d "OOF_IPXPORT" "OOF_IPXPORT" %s",
            citp_waitable_type_str(w), rq, tq,
-           OOFA_IP4PORT(sock_laddr_be32(s), sock_lport_be16(s)),
-           OOFA_IP4PORT(sock_raddr_be32(s), sock_rport_be16(s)),
-           ci_tcp_state_str(w->state));
+           OOFA_IPXPORT(sock_ipx_laddr(s), sock_lport_be16(s)),
+           OOFA_IPXPORT(raddr, rport), ci_tcp_state_str(w->state));
+
+    /* netstat prints all SYN-RECV states */
+    if( w->state == CI_TCP_LISTEN )
+      ci_tcp_listenq_print_to_logger(
+                        ni, CI_CONTAINER(ci_tcp_socket_listen, s.b, w),
+                        logger, log_arg);
   }
 }
 

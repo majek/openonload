@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_HEADER >
@@ -28,6 +15,10 @@
 
 #ifndef __CI_INTERNAL_IP_TYPES_H__
 #define __CI_INTERNAL_IP_TYPES_H__
+#if ! defined __KERNEL__ && CI_CFG_BPF
+# include <onload/oobpf.h>
+# include <onload/bpf_jitintf.h>
+#endif
 
 /*
 ** READ ME FIRST please.
@@ -43,7 +34,7 @@
 ** NO CODE IN THIS FILE PLEASE.
 */
 
-
+struct oo_bpf_prog;
 
 /*!
 ** ci_netif_nic_t
@@ -61,6 +52,18 @@ typedef struct ci_netif_nic_s {
 #endif // CI_CFG_PIO
 #ifdef __KERNEL__
   struct oo_iobufset** pkt_rs;
+#endif
+#ifndef __KERNEL__
+  ci_uint8              poll_in_kernel;
+#endif
+  /* Sequence number of the currently-used XDP eBPF program config. c.f.
+   * ci_netif_state_nic_t::xdp_current_gen */
+  ci_uint32             xdp_active_gen;
+#ifdef __KERNEL__
+  struct oo_bpf_prog*   xdp_prog;
+#elif CI_CFG_BPF
+  struct oo_bpf_jitted_prog xdp_jitted;
+  int                   xdp_prog_fd;
 #endif
 } ci_netif_nic_t;
 
@@ -108,6 +111,7 @@ struct ci_netif_s {
   ci_netif_state*      state;
 
 #ifndef __KERNEL__
+  unsigned             future_intf_mask;
   /* Use ci_netif_get_driver_handle() rather than this directly. */
   ef_driver_handle     driver_handle;
   unsigned             mmap_bytes;
@@ -135,6 +139,7 @@ struct ci_netif_s {
 
 
   struct oo_cplane_handle *cplane;
+  struct oo_cplane_handle *cplane_init_net;
 
 #ifndef __KERNEL__
   /* Currently, we do not use timesync from the common code (i.e. from the
@@ -158,9 +163,9 @@ struct ci_netif_s {
   ci_ni_dllist_t*      active_wild_table;
   ci_tcp_prev_seq_t*   seq_table;
 
+  struct oo_deferred_pkt* deferred_pkts;
 
 #ifdef __ci_driver__
-  ci_contig_shmbuf_t   state_buf;
   unsigned             pkt_sets_n;
   unsigned             pkt_sets_max;
   ci_uint32            ep_ofs;           /**< Copy from ci_netif_state_s */
@@ -251,7 +256,6 @@ struct ci_netif_s {
 
   /* Used from ci_netif_poll_evq() only.  Moved here to avoid stack
    * overflow. */
-  ef_event      events[16];
   ef_request_id tx_events[EF_VI_TRANSMIT_BATCH];
   ef_request_id rx_events[EF_VI_RECEIVE_BATCH];
   /* See also copy in ci_netif_state. */

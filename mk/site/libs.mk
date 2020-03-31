@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-2.0 OR Solarflare-Binary
+# X-SPDX-Copyright-Text: (c) Solarflare Communications Inc
 lib_name := onload_zf
 lib_ver  := 0
 lib_where := lib/zf
@@ -55,3 +57,35 @@ SPEKTOR_LIB		:= $(MMakeGenerateLibTarget)
 SPEKTOR_LIB_DEPEND	:= $(MMakeGenerateLibDepend)
 LINK_SPEKTOR_LIB	:= $(MMakeGenerateLibLink)
 
+# Userspace library for accessing Onload BPF features
+lib_ver   := 0
+lib_name  := bpfintf
+lib_where := lib/bpf/bpfintf
+BPFINTF_LIB		:= $(MMakeGenerateLibTarget)
+BPFINTF_LIB_DEPEND	:= $(MMakeGenerateLibDepend)
+LINK_BPFINTF_LIB	:= $(MMakeGenerateLibLink)
+
+# Build of the BPF kernel stuff in userspace
+lib_ver   := 0
+lib_name  := bpfimpl
+lib_where := lib/bpf/bpfimpl
+BPFIMPL_LIB		:= $(MMakeGenerateLibTarget)
+BPFIMPL_LIB_DEPEND	:= $(MMakeGenerateLibDepend)
+LINK_BPFIMPL_LIB	:= $(MMakeGenerateLibLink)
+
+# Minimal emulations of kernel functions, to make bpfimpl work in userspace
+lib_ver   := 0
+lib_name  := kcompat
+lib_where := lib/kcompat
+KCOMPAT_LIB		:= $(MMakeGenerateLibTarget)
+KCOMPAT_LIB_DEPEND	:= $(MMakeGenerateLibDepend)
+LINK_KCOMPAT_LIB	:= $(MMakeGenerateLibLink)
+
+LIBRESSL_PATH := /opt/libressl/libressl-2.9.2
+
+lib_ver   := 0
+lib_name  := activation
+lib_where := lib/activation
+ACTIVATION_LIB		:= $(MMakeGenerateLibTarget)
+ACTIVATION_LIB_DEPEND	:= $(MMakeGenerateLibDepend)
+LINK_ACTIVATION_LIB	:= $(MMakeGenerateLibLink)

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-2.0 OR Solarflare-Binary
+# X-SPDX-Copyright-Text: (c) Solarflare Communications Inc
 include $(BUILD)/config.mk
 ifeq ($(DESTFLAG),1)
 include $(DESTPATH)/options_config.mk
@@ -14,11 +16,10 @@ include $(TOP)/mk/site/ciip.mk
 include $(TOP)/mk/site/cplane.mk
 include $(TOP)/mk/site/citpcommon.mk
 include $(TOP)/mk/site/efrm.mk
-include $(TOP)/mk/site/efhwdef.mk
 include $(TOP)/mk/site/efthrm.mk
 include $(TOP)/mk/site/libs.mk
-include $(TOP)/mk/site/driverlib.mk
 include $(TOP)/mk/site/sfgpxe.mk
 include $(TOP)/mk/site/efhw.mk
+include $(TOP)/mk/site/tests.mk
 endif
 include $(TOP)/mk/middle.mk

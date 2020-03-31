@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 	.file	"trampoline_asm.S"
 
 	/* This code just sorts out the stack for the trampoline receiving
@@ -47,7 +49,18 @@ ci_trampoline_handler_entry:
         push    %rdx
         push    %r8
         push    %r9
+        /* Modern x86_64 ABI requires that stack pointer be 16-byte aligned
+         * on function entry. Not doing so may result in SSE-related memory
+         * traps (see bug 84269).
+         *
+         * For gcc 6+ onwards this code may be replaced by force_align_arg_pointer
+         * attribute for ci_trampoline_handler.
+         */
+        push    %rbp
+        movq    %rsp, %rbp
+        and     $~0x0f, %rsp
 	call	ci_trampoline_handler@PLT
+        leave
         pop     %r9
         pop     %r8
         pop     %rdx

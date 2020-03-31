@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_SOURCE>
@@ -202,11 +189,11 @@ void ci_tcp_state_verify_no_timers(ci_netif *ni, ci_tcp_state *ts)
   chk(zwin_tid);
   chk(kalive_tid);
   chk(cork_tid);
-  chk(pmtus.tid);
 #if CI_CFG_TCP_SOCK_STATS
   chk(stats_tid);
 #endif
 #undef chk
+  ci_assert(OO_PP_IS_NULL(ts->pmtus));
 }
 #endif
 
@@ -270,7 +257,6 @@ static void __ci_tcp_state_free(ci_netif *ni, ci_tcp_state *ts)
 
 static void ci_tcp_set_state(ci_netif* ni, ci_tcp_state* ts, int new_state)
 {
-  ci_tcp_metrics_on_state(ni, ts, new_state);
   ci_tcp_rx_buf_account_begin(ni, ts);
   ts->s.b.state = new_state;
   ci_tcp_rx_buf_account_end(ni, ts);
@@ -399,19 +385,8 @@ void ci_tcp_set_slow_state(ci_netif *ni, ci_tcp_state* ts, int state)
       ci_assert(ci_tcp_sendq_is_empty(ts));
       ci_assert(ci_ip_queue_is_empty(&ts->retrans));
     }
-    if(state & CI_TCP_STATE_NO_TIMERS){
-# define chk_timer(x)   ci_assert(!ci_ip_timer_pending(ni, &ts->x))
-      chk_timer(rto_tid);
-      chk_timer(delack_tid);
-      chk_timer(zwin_tid);
-      chk_timer(kalive_tid);
-      chk_timer(cork_tid);
-      chk_timer(pmtus.tid);
-#if CI_CFG_TCP_SOCK_STATS
-      chk_timer(stats_tid);
-#endif
-#undef chk_timer
-    }
+    if( state & CI_TCP_STATE_NO_TIMERS )
+      ci_tcp_state_verify_no_timers(ni, ts);
   }
 
   /* to try and track down Bug 1427 and similar we check that errno
@@ -451,7 +426,7 @@ int ci_tcp_parse_options(ci_netif* ni, ciip_tcp_rx_pkt* rxp,
   ci_assert(rxp);
   ci_assert(rxp->pkt);
   ci_assert(rxp->tcp);
-  ci_assert(rxp->tcp == PKT_TCP_HDR(rxp->pkt));
+  ci_assert(rxp->tcp == PKT_IPX_TCP_HDR(oo_pkt_af(rxp->pkt), rxp->pkt));
 
   tcp = rxp->tcp;
   opt = CI_TCP_HDR_OPTS(tcp);
@@ -596,7 +571,12 @@ void ci_tcp_stop_timers(ci_netif* netif, ci_tcp_state* ts)
   ci_ip_timer_clear_ool(netif, &ts->zwin_tid);
   ci_ip_timer_clear_ool(netif, &ts->kalive_tid);
   ci_ip_timer_clear_ool(netif, &ts->cork_tid);
-  ci_ip_timer_clear_ool(netif, &ts->pmtus.tid);
+  if( OO_PP_NOT_NULL(ts->pmtus) ) {
+    ci_pmtu_state_t* pmtus = ci_ni_aux_p2pmtus(netif, ts->pmtus);
+    ci_ip_timer_clear_ool(netif, &pmtus->tid);
+    ci_pmtu_state_free(netif, pmtus);
+    ts->pmtus = OO_PP_NULL;
+  }
 #if CI_CFG_TCP_SOCK_STATS
   ci_ip_timer_clear_ool(netif, &ts->stats_tid);
 #endif
@@ -632,7 +612,6 @@ void ci_ip_queue_drop(ci_netif* netif, ci_ip_pkt_queue *qu)
   qu->num = 0;
 }
 
-
 static void ci_tcp_tx_drop_queues(ci_netif* ni, ci_tcp_state* ts)
 {
   ci_tcp_retrans_drop(ni, ts);
@@ -656,7 +635,7 @@ static void ci_tcp_tx_drop_queues(ci_netif* ni, ci_tcp_state* ts)
  */
 void ci_tcp_state_free_to_cache(ci_netif* netif, ci_tcp_state* ts)
 {
-  int rc;
+  oo_sp sock;
   ci_tcp_socket_listen* tls;
   ci_socket_cache_t* cache;
 
@@ -671,9 +650,11 @@ void ci_tcp_state_free_to_cache(ci_netif* netif, ci_tcp_state* ts)
      */
     ci_assert_nequal(tcp_laddr_be32(ts), 0);
     ci_assert_nequal(tcp_lport_be16(ts), 0);
-    rc = ci_netif_listener_lookup(netif, tcp_laddr_be32(ts), tcp_lport_be16(ts));
-    if( rc >= 0 ) {
-      tls = ID_TO_TCP_LISTEN(netif, CI_NETIF_FILTER_ID_TO_SOCK_ID(netif, rc));
+    sock = ci_netif_listener_lookup(netif, sock_af_space(&ts->s),
+                                    sock_ipx_laddr(&ts->s),
+                                    tcp_lport_be16(ts));
+    if( OO_SP_NOT_NULL(sock) ) {
+      tls = ID_TO_TCP_LISTEN(netif, sock);
 
       ci_assert_equal(tls->s.b.state, CI_TCP_LISTEN);
       ci_assert_nflags(tls->s.s_flags, CI_SOCK_FLAG_SCALPASSIVE);
@@ -817,6 +798,9 @@ void ci_tcp_drop(ci_netif* netif, ci_tcp_state* ts, int so_error)
 #if CI_CFG_FD_CACHING
   if( ts->s.s_flags & CI_SOCK_FLAGS_SCALABLE ) {
     rc = ci_tcp_ep_clear_filters(netif, S_SP(ts), 0);
+    /* no clearing of SCALPASSIVE flag as it
+     * is needed by ci_tcp_state_free_to_cache() below */
+    ts->s.s_flags &= ~CI_SOCK_FLAG_SCALACTIVE;
   }
   else if( !ci_tcp_is_cached(ts) ) {
     if( !ci_ni_dllist_is_self_linked(netif, &ts->epcache_link) ) {
@@ -828,15 +812,12 @@ void ci_tcp_drop(ci_netif* netif, ci_tcp_state* ts, int so_error)
     }
   }
   else {
-    ci_addr_t laddr, raddr;
-
-    laddr = CI_ADDR_FROM_IP4(tcp_laddr_be32(ts));
-    raddr = CI_ADDR_FROM_IP4(tcp_raddr_be32(ts));
     /* Remove sw filters only for cached endpoint. */
-    ci_netif_filter_remove(netif, S_ID(ts), AF_SPACE_FLAG_IP4, laddr,
-                           tcp_lport_be16(ts), raddr,
-                           tcp_rport_be16(ts), tcp_protocol(ts));
-    ts->s.s_flags &= ~(CI_SOCK_FLAG_FILTER | CI_SOCK_FLAG_MAC_FILTER);
+    ci_netif_filter_remove(netif, S_ID(ts), sock_af_space(&ts->s),
+                           tcp_ipx_laddr(ts), tcp_lport_be16(ts),
+                           tcp_ipx_raddr(ts), tcp_rport_be16(ts),
+                           tcp_protocol(ts));
+    ts->s.s_flags &= ~(CI_SOCK_FLAG_FILTER | CI_SOCK_FLAG_STACK_FILTER);
   }
 #else
   rc = ci_tcp_ep_clear_filters(netif, S_SP(ts), 0);
@@ -1052,7 +1033,7 @@ static int ci_tcp_rx_pkt_coalesce(ci_netif* ni, ci_ip_pkt_queue* q,
   **
   ** Returns true if there is further space available in [pkt].
   */
-  ci_tcp_hdr* pkt_tcp = PKT_TCP_HDR(pkt);
+  ci_tcp_hdr* pkt_tcp = PKT_IPX_TCP_HDR(ipcache_af(&ts->s.pkt), pkt);
   char* pkt_payload = CI_TCP_PAYLOAD(pkt_tcp);
   oo_offbuf* pkt_buf = &pkt->buf;
   char* pkt_buf_end = (char*) pkt + CI_CFG_PKT_BUF_SIZE;
@@ -1290,9 +1271,10 @@ ci_uint16 ci_tcp_limit_mss(ci_uint16 mss, ci_netif* ni, const char* caller)
 
 
 unsigned ci_tcp_amss(ci_netif* ni, const ci_tcp_socket_cmn* c,
-                     unsigned mtu, const char* caller)
+                     ci_ip_cached_hdrs* ipcache, const char* caller)
 {
-  unsigned amss = mtu - sizeof(ci_tcp_hdr) - sizeof(ci_ip4_hdr);
+  unsigned amss = ipcache->mtu - sizeof(ci_tcp_hdr) -
+                  CI_IPX_HDR_SIZE(ipcache_af(ipcache));
   if( c->user_mss && c->user_mss < amss )
     amss = c->user_mss;
 #if CI_CFG_LIMIT_AMSS
@@ -1573,6 +1555,31 @@ static int ci_tcp_sync_ip_sockopts(ci_netif* ni, ci_tcp_state* ts,
   return err;
 }
 
+#if CI_CFG_IPV6
+static int ci_tcp_sync_ip6_sockopts(ci_netif* ni, ci_tcp_state* ts,
+                                    struct socket* sock)
+{
+  unsigned optval;
+  int err = 0;
+
+  if( ts->s.s_flags & CI_SOCK_FLAG_V6ONLY )
+    ci_tcp_sync_opt_flag(sock, &err, SOL_IPV6, IPV6_V6ONLY);
+
+  if( ts->s.cmsg_flags & CI_IPV6_CMSG_PKTINFO )
+    ci_tcp_sync_opt_flag(sock, &err, SOL_IPV6, IPV6_RECVPKTINFO);
+
+  if( ts->s.tclass != 0 ) {
+    optval = ts->s.tclass;
+    ci_tcp_sync_opt_unsigned(sock, &err, SOL_IPV6, IPV6_TCLASS, &optval);
+  }
+
+  if( ts->s.so.so_debug & CI_SOCKOPT_FLAG_IPV6_RECVERR )
+    ci_tcp_sync_opt_flag(sock, &err, SOL_IPV6, IPV6_RECVERR);
+
+  return err;
+}
+#endif
+
 static int ci_tcp_sync_tcp_sockopts(ci_netif* ni, ci_tcp_state* ts,
                                     struct socket* sock)
 {
@@ -1673,6 +1680,12 @@ int ci_tcp_sync_sockopts_to_os_sock(ci_netif* ni, oo_sp sock_id,
   if( rc < 0 )
     return rc;
 
+#if CI_CFG_IPV6
+  rc = ci_tcp_sync_ip6_sockopts(ni, ts, sock);
+  if( rc < 0 )
+    return rc;
+#endif
+
   rc = ci_tcp_sync_tcp_sockopts(ni, ts, sock);
   return rc;
 }
@@ -1764,20 +1777,6 @@ ci_int32 ci_tcp_max_rcvbuf(ci_netif* ni, ci_uint16 amss)
 
 
 #if CI_CFG_FD_CACHING
-int /*bool*/ ci_tcp_active_wild_sharer_is_cacheable(ci_tcp_state* ts)
-{
-  ci_assert_flags(ts->tcpflags, CI_TCPT_FLAG_ACTIVE_WILD);
-
-  /* Normally, active-open sockets sharing a local port are not eligible to be
-   * cached, as they have a port-keeper reference to the OS socket associated
-   * with the underlying active-wild object.  However, if the active-open
-   * socket is also scalable, then it has no port-keeper reference, and so it
-   * can be cached, and caching is likely to be beneficial in precisely the
-   * scenarios for which scalable-active sockets are intended. */
-  return (ts->s.s_flags & CI_SOCK_FLAG_SCALACTIVE) != 0;
-}
-
-
 int /*bool*/ ci_tcp_is_cacheable_active_wild_sharer(ci_sock_cmn* s)
 {
   ci_tcp_state* ts;
@@ -1789,7 +1788,7 @@ int /*bool*/ ci_tcp_is_cacheable_active_wild_sharer(ci_sock_cmn* s)
   if( ! (ts->tcpflags & CI_TCPT_FLAG_ACTIVE_WILD) )
     return 0;
 
-  return ci_tcp_active_wild_sharer_is_cacheable(ts);
+  return 1;
 }
 #endif
 

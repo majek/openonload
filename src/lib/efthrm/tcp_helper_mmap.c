@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 ** <L5_PRIVATE L5_SOURCE>
 **   Copyright: (c) Level 5 Networks Limited.
@@ -45,16 +32,6 @@ static int tcp_helper_rm_mmap_mem(tcp_helper_resource_t* trs,
 
   OO_DEBUG_VM(ci_log("%s: %u bytes=0x%lx", __func__, trs->id, bytes));
 
-  /* map contiguous shared state */
-  rc = ci_contig_shmbuf_mmap(&trs->netif.state_buf, 0, &bytes, opaque,
-                             &map_num, &offset);
-  if( rc < 0 )  goto out;
-
-  OO_DEBUG_MEMSIZE(ci_log("%s: taken %d bytes for contig shmbuf leaving %lu",
-                          __FUNCTION__,
-                          (int) ci_contig_shmbuf_size(&trs->netif.state_buf),
-                          bytes));
-
   rc = ci_shmbuf_mmap(&trs->netif.pages_buf, 0, &bytes, opaque,
                            &map_num, &offset);
   if( rc < 0 )  goto out;
@@ -80,8 +57,8 @@ static int tcp_helper_rm_mmap_timesync(tcp_helper_resource_t* trs,
   if( is_writable )
     return -EPERM;
 
-  rc = ci_contig_shmbuf_mmap(&efab_tcp_driver.shmbuf, offset,
-                             &bytes, opaque, &map_num, &offset);
+  rc = ci_shmbuf_mmap(&efab_tcp_driver.shmbuf, offset, &bytes, opaque,
+                      &map_num, &offset);
   if( rc < 0 )  return rc;
   ci_assert_equal(bytes, 0);
 

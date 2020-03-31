@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /****************************************************************************
  * Copyright 2002-2005: Level 5 Networks Inc.
  * Copyright 2005-2008: Solarflare Communications Inc,
@@ -131,7 +118,7 @@ typedef ci_uint64                       ci_fixed_descriptor_t;
 
 /* At what version was this introduced? */
 #if __GNUC__ >= 3 || (__GNUC__ == 2 && __GNUC_MINOR__ > 91)
-# define CI_LIKELY(t)    __builtin_expect((t), 1)
+# define CI_LIKELY(t)    __builtin_expect(!!(t), 1)
 # define CI_UNLIKELY(t)  __builtin_expect((t), 0)
 #endif
 
@@ -165,6 +152,28 @@ typedef ci_uint64                       ci_fixed_descriptor_t;
 #define CI_PRINTF_LIKE(a,b) __attribute__((format(printf,a,b)))
 #define CI_UNUSED __attribute__((__unused__))
 
+#if __GNUC__ * 100 + __GNUC_MINOR__ >= 408
+/* bswap32 and bswap64 were added in gcc 4.3, but weirdly they didn't get
+ * around to bswap16 until 4.8. RHEL6 is the only distro currently supported
+ * with such an old gcc. */
+# define ci_bswapc16  __builtin_bswap16
+# define ci_bswap16   ci_bswapc16
+#else
+# define ci_bswapc16(v)  ((((v) & 0x00ff) << 8u) |     \
+                         (((v) & 0xff00) >> 8u))
+# if defined(__i386__) || defined(__x86_64__)
+static inline unsigned short ci_bswap16(unsigned short v) {
+  __asm__("xchgb %h0, %b0" : "+Q" (v));
+  return v;
+}
+# else
+#  define ci_bswap16  ci_bswapc16
+# endif
+#endif
+/* Explicit cast is necessary on older versions of gcc to satisfy printf
+ * argument checking warning */
+#define ci_bswap32(v)  ((unsigned)__builtin_bswap32(v))
+#define ci_bswap64  __builtin_bswap64
 
 /* Compiler barrier: prevent compiler from reordering.  (Does nothing to
  * prevent the processor or platform from reordering).

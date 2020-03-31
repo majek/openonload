@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_SOURCE>
@@ -60,9 +47,6 @@ extern void ci_netif_stats_action(__NI_STRUCT__ *ni,
 
 #endif
 
-/* Update global statistics */
-extern void ci_ip_stats_update_global(ci_ip_stats *stats);
-
 /* Clear ci_ip_stats structure */
 ci_inline void
 ci_ip_stats_clear(ci_ip_stats *stats)
@@ -105,17 +89,10 @@ ci_ip_stats_update(ci_ip_stats *dest_stats, ci_ip_stats *src_stats) {
     dest_stats->now = src_stats->now;
   
   /* Update ipv4 counters */
-  src = (CI_IP_STATS_TYPE*)&src_stats->ipv4;
-  dest = (CI_IP_STATS_TYPE*)&dest_stats->ipv4;
+  src = (CI_IP_STATS_TYPE*)&src_stats->ip;
+  dest = (CI_IP_STATS_TYPE*)&dest_stats->ip;
   for( ctr = 0; ctr < CI_IPV4_STATS_COUNT_LEN; ctr++ )
     dest[ctr] += src[ctr];
-
-  /* Update icmp counters */
-  src = (CI_IP_STATS_TYPE*)&src_stats->icmp;
-  dest = (CI_IP_STATS_TYPE*)&dest_stats->icmp;
-  for( ctr = 0; ctr < CI_ICMP_STATS_COUNT_LEN; ctr++ ) {
-    dest[ctr] += src[ctr];
-  }
 
   ci_tcp_stats_count_update(&dest_stats->tcp, &src_stats->tcp);
 
@@ -186,10 +163,10 @@ ci_ip_stats_update(ci_ip_stats *dest_stats, ci_ip_stats *src_stats) {
 
 
 #define __CI_IPV4_STATS_INC( netif, Fld ) \
-  __CI_NETIF_STATS_INC((netif), ipv4, Fld)
+  __CI_NETIF_STATS_INC((netif), ip, Fld)
 
-#define __CI_ICMP_STATS_INC( netif, Fld ) \
-  __CI_NETIF_STATS_INC((netif), icmp, Fld)
+#define __CI_IP_STATS_INC( netif, Fld ) \
+  __CI_NETIF_STATS_INC((netif), ip, Fld)
 
 #define __CI_TCP_COUNT_STATS_INC( netif, Fld ) \
   __CI_NETIF_STATS_INC((netif), tcp, Fld)
@@ -266,107 +243,28 @@ ci_ip_stats_update(ci_ip_stats *dest_stats, ci_ip_stats *src_stats) {
  * where the GROUP is the name of the group this counter belongs to, and
  * XXX is usually the name of the counter in upper register */
 /* macros to update ipv4 statistics */
-#define CI_IPV4_STATS_INC_FORWARDING( netif ) \
-      __CI_IPV4_STATS_INC( (netif), forwarding)
-#define CI_IPV4_STATS_INC_DEFAULTT_TLL( netif ) \
-      __CI_IPV4_STATS_INC( (netif), default_ttl)
 #define CI_IPV4_STATS_INC_IN_RECVS( netif ) \
       __CI_IPV4_STATS_INC( (netif), in_recvs)
 #define CI_IPV4_STATS_INC_IN_HDR_ERRS( netif ) \
       __CI_IPV4_STATS_INC( (netif), in_hdr_errs)
-#define CI_IPV4_STATS_INC_IN_ADDR_ERRS( netif ) \
-      __CI_IPV4_STATS_INC( (netif), in_addr_errs)
-#define CI_IPV4_STATS_INC_FORW_DGRAMS( netif ) \
-      __CI_IPV4_STATS_INC( (netif), forw_dgrams)
-#define CI_IPV4_STATS_INC_IN_UNKNOWN_PROTOS( netif ) \
-      __CI_IPV4_STATS_INC( (netif), in_unknown_protos)
 #define CI_IPV4_STATS_INC_IN_DISCARDS( netif ) \
       __CI_IPV4_STATS_INC( (netif), in_discards)
 #define CI_IPV4_STATS_INC_IN_DELIVERS( netif ) \
       __CI_IPV4_STATS_INC( (netif), in_delivers)
-#define CI_IPV4_STATS_INC_OUT_REQUESTS( netif ) \
-      __CI_IPV4_STATS_INC( (netif), out_requests)
-#define CI_IPV4_STATS_INC_OUT_DISCARDS( netif ) \
-      __CI_IPV4_STATS_INC( (netif), out_discards)
-#define CI_IPV4_STATS_INC_OUT_NO_ROUTES( netif ) \
-      __CI_IPV4_STATS_INC( (netif), out_no_routes)
-#define CI_IPV4_STATS_INC_REASM_TIMEOUT( netif ) \
-      __CI_IPV4_STATS_INC( (netif), reasm_timeout)
-#define CI_IPV4_STATS_INC_REASM_REQDS( netif ) \
-      __CI_IPV4_STATS_INC( (netif), reasm_reqds)
-#define CI_IPV4_STATS_INC_REASM_OKS( netif ) \
-      __CI_IPV4_STATS_INC( (netif), reasm_oks)
-#define CI_IPV4_STATS_INC_REASM_FAILS( netif ) \
-      __CI_IPV4_STATS_INC( (netif), reasm_fails)
-#define CI_IPV4_STATS_INC_FRAG_OKS( netif ) \
-      __CI_IPV4_STATS_INC( (netif), frag_oks)
-#define CI_IPV4_STATS_INC_FRAG_FAILS( netif ) \
-      __CI_IPV4_STATS_INC( (netif), frag_fails)
-#define CI_IPV4_STATS_INC_FRAG_CREATES( netif ) \
-      __CI_IPV4_STATS_INC( (netif), frag_creates)
-
-/* macros to update icmp statistics */
-#define CI_ICMP_STATS_INC_IN_MSGS( netif ) \
-      __CI_ICMP_STATS_INC( (netif), icmp_in_msgs)
-#define CI_ICMP_STATS_INC_IN_ERRS( netif ) \
-      __CI_ICMP_STATS_INC( (netif), icmp_in_errs)
-#define CI_ICMP_STATS_INC_IN_DEST_UNREACHS( netif ) \
-      __CI_ICMP_STATS_INC( (netif), icmp_in_dest_unreachs)
-#define CI_ICMP_STATS_INC_IN_TIME_EXCDS( netif ) \
-      __CI_ICMP_STATS_INC( (netif), icmp_in_time_excds)
-#define CI_ICMP_STATS_INC_IN_PARM_PROBS( netif ) \
-      __CI_ICMP_STATS_INC( (netif), icmp_in_parm_probs)
-#define CI_ICMP_STATS_INC_IN_SRC_QUENCHS( netif ) \
-      __CI_ICMP_STATS_INC( (netif), icmp_in_src_quenchs)
-#define CI_ICMP_STATS_INC_IN_REDIRECTS( netif ) \
-      __CI_ICMP_STATS_INC( (netif), icmp_in_redirects)
-#define CI_ICMP_STATS_INC_IN_ECHOS( netif ) \
-      __CI_ICMP_STATS_INC( (netif), icmp_in_echos)
-#define CI_ICMP_STATS_INC_IN_ECHO_REPS( netif ) \
-      __CI_ICMP_STATS_INC( (netif), icmp_in_echo_reps)
-#define CI_ICMP_STATS_INC_IN_TIMESTAMPS( netif ) \
-      __CI_ICMP_STATS_INC( (netif), icmp_in_timestamps)
-#define CI_ICMP_STATS_INC_IN_TIMESTAMPS_REPS( netif ) \
-      __CI_ICMP_STATS_INC( (netif), icmp_in_timestamp_reps)
-#define CI_ICMP_STATS_INC_IN_ADDR_MASKS( netif ) \
-      __CI_ICMP_STATS_INC( (netif), icmp_in_addr_masks)
-#define CI_ICMP_STATS_INC_IN_ADDR_MASK_REPS( netif ) \
-      __CI_ICMP_STATS_INC( (netif), icmp_in_addr_mask_reps)
-
-#define CI_ICMP_STATS_INC_OUT_MSGS( netif ) \
-      __CI_ICMP_STATS_INC( (netif), icmp_out_msgs)
-#define CI_ICMP_STATS_INC_OUT_ERRS( netif ) \
-      __CI_ICMP_STATS_INC( (netif), icmp_out_errs)
-#define CI_ICMP_STATS_INC_OUT_DEST_UNREACHS( netif ) \
-      __CI_ICMP_STATS_INC( (netif), icmp_out_dest_unreachs)
-#define CI_ICMP_STATS_INC_OUT_TIME_EXCDS( netif ) \
-      __CI_ICMP_STATS_INC( (netif), icmp_out_time_excds)
-#define CI_ICMP_STATS_INC_OUT_PARM_PROBS( netif ) \
-      __CI_ICMP_STATS_INC( (netif),icmp_out_parm_probs )
-#define CI_ICMP_STATS_INC_OUT_SRC_QUENCHS( netif ) \
-      __CI_ICMP_STATS_INC( (netif), icmp_out_src_quenchs)
-#define CI_ICMP_STATS_INC_OUT_REDIRECTS( netif ) \
-      __CI_ICMP_STATS_INC( (netif), icmp_out_redirects)
-#define CI_ICMP_STATS_INC_OUT_ECHOS( netif ) \
-      __CI_ICMP_STATS_INC( (netif), icmp_out_echos)
-#define CI_ICMP_STATS_INC_OUT_ECHO_REPS( netif ) \
-      __CI_ICMP_STATS_INC( (netif), icmp_out_echo_reps)
-#define CI_ICMP_STATS_INC_OUT_TIMESTAMPS( netif ) \
-      __CI_ICMP_STATS_INC( (netif), icmp_out_timestamps)
-#define CI_ICMP_STATS_INC_OUT_TIMESTAMPS_REPS( netif ) \
-      __CI_ICMP_STATS_INC( (netif), icmp_out_timestamp_reps)
-#define CI_ICMP_STATS_INC_OUT_ADDR_MASKS( netif ) \
-      __CI_ICMP_STATS_INC( (netif), icmp_out_addr_masks)
-#define CI_ICMP_STATS_INC_OUT_ADDR_MASK_REPS( netif ) \
-      __CI_ICMP_STATS_INC( (netif), icmp_out_addr_mask_reps)
+#define CI_IP_STATS_INC_IN6_RECVS( netif ) \
+      __CI_IP_STATS_INC( (netif), in6_recvs)
+#define CI_IP_STATS_INC_IN6_HDR_ERRS( netif ) \
+      __CI_IP_STATS_INC( (netif), in6_hdr_errs)
+#define CI_IP_STATS_INC_IN6_DELIVERS( netif ) \
+      __CI_IP_STATS_INC( (netif), in6_delivers)
+#define CI_IP_STATS_INC_IN6_DISCARDS( netif ) \
+      __CI_IP_STATS_INC( (netif), in6_discards)
 
 /* macros to update tcp statistics */
 #define CI_TCP_STATS_INC_ACTIVE_OPENS( netif ) \
       __CI_TCP_COUNT_STATS_INC( (netif), tcp_active_opens)
 #define CI_TCP_STATS_INC_PASSIVE_OPENS( netif ) \
       __CI_TCP_COUNT_STATS_INC( (netif), tcp_passive_opens)
-#define CI_TCP_STATS_INC_ATTEMPT_FAILS( netif ) \
-      __CI_TCP_COUNT_STATS_INC( (netif), tcp_attempt_fails)
 #define CI_TCP_STATS_INC_ESTAB_RESETS( netif ) \
       __CI_TCP_COUNT_STATS_INC( (netif), tcp_estab_resets)
 #define CI_TCP_STATS_INC_CURR_ESTAB( netif ) \
@@ -381,10 +279,6 @@ ci_ip_stats_update(ci_ip_stats *dest_stats, ci_ip_stats *src_stats) {
       __CI_TCP_COUNT_STATS_DEC( (netif), tcp_out_segs)
 #define CI_TCP_STATS_INC_RETRAN_SEGS( netif ) \
       __CI_TCP_COUNT_STATS_INC( (netif), tcp_retran_segs)
-#define CI_TCP_STATS_INC_IN_ERRS( netif ) \
-      __CI_TCP_COUNT_STATS_INC( (netif), tcp_in_errs)
-#define CI_TCP_STATS_INC_OUT_ERRS( netif ) \
-      __CI_TCP_COUNT_STATS_INC( (netif), tcp_out_errs)
 #define CI_TCP_STATS_INC_OUT_RSTS( netif ) \
       __CI_TCP_COUNT_STATS_INC( (netif), tcp_out_rsts)
 
@@ -561,104 +455,6 @@ ci_ip_stats_update(ci_ip_stats *dest_stats, ci_ip_stats *src_stats) {
 
 #define CI_TCP_EXT_STATS_INC_TCP_MEMORY_PRESSURES( netif ) \
       __CI_TCP_EXT_STATS_INC( (netif), tcp_memory_pressures )
-
-
-
-/* macros to gather ICMP statistics in efab_ipp_icmp_validate function if
- * the driver 
- * /param netif NETIF
- * /param icmp  ICMP message
- * */
-#if CI_CFG_SUPPORT_STATS_COLLECTION
-#define CI_ICMP_IN_STATS_COLLECT( netif , icmp) do { \
-    switch ((icmp)->type) {                                         \
-      case CI_ICMP_DEST_UNREACH:                                  \
-          CI_ICMP_STATS_INC_IN_DEST_UNREACHS( netif );            \
-          break;                                                  \
-      case CI_ICMP_TIME_EXCEEDED:                                 \
-          CI_ICMP_STATS_INC_IN_TIME_EXCDS( netif );               \
-          break;                                                  \
-      case CI_ICMP_PARAMETERPROB:                                 \
-          CI_ICMP_STATS_INC_IN_PARM_PROBS( netif );               \
-          break;                                                  \
-      case CI_ICMP_SOURCE_QUENCH:                                 \
-          CI_ICMP_STATS_INC_IN_SRC_QUENCHS( netif );              \
-          break;                                                  \
-      case CI_ICMP_REDIRECT:                                      \
-          CI_ICMP_STATS_INC_IN_REDIRECTS( netif );                \
-          break;                                                  \
-      case CI_ICMP_ECHO:                                          \
-          CI_ICMP_STATS_INC_IN_ECHOS( netif );                    \
-          break;                                                  \
-      case CI_ICMP_ECHOREPLY:                                     \
-          CI_ICMP_STATS_INC_IN_ECHO_REPS( netif );                \
-          break;                                                  \
-      case CI_ICMP_TIMESTAMP:                                     \
-          CI_ICMP_STATS_INC_IN_TIMESTAMPS( netif );               \
-          break;                                                  \
-      case CI_ICMP_TIMESTAMPREPLY:                                \
-          CI_ICMP_STATS_INC_IN_TIMESTAMPS_REPS( netif );          \
-          break;                                                  \
-      case CI_ICMP_ADDRESS:                                       \
-          CI_ICMP_STATS_INC_IN_ADDR_MASKS( netif );               \
-          break;                                                  \
-      case CI_ICMP_ADDRESSREPLY:                                  \
-          CI_ICMP_STATS_INC_IN_ADDR_MASK_REPS( netif );           \
-          break;                                                  \
-      default:                                                    \
-          break;                                                  \
-    }                                                             \
-  }while (0)
-
-/** Macros for gathering statistics in ci_icmp_send_error() function.
- * /param netif NETIF
- * /param icmp  ICMP message
- */
-#define CI_ICMP_OUT_STATS_COLLECT( netif , icmp) do {             \
-  switch ((icmp)->type) {                                                 \
-    case CI_ICMP_ECHOREPLY:                                       \
-      CI_ICMP_STATS_INC_OUT_ECHO_REPS( ni );                      \
-      break;                                                      \
-    case CI_ICMP_DEST_UNREACH:                                    \
-      CI_ICMP_STATS_INC_OUT_DEST_UNREACHS( ni );                  \
-      break;                                                      \
-    case CI_ICMP_SOURCE_QUENCH:                                   \
-      CI_ICMP_STATS_INC_OUT_SRC_QUENCHS( ni );                    \
-      break;                                                      \
-    case CI_ICMP_REDIRECT:                                        \
-      CI_ICMP_STATS_INC_OUT_REDIRECTS( ni );                      \
-      break;                                                      \
-    case CI_ICMP_ECHO:                                            \
-      CI_ICMP_STATS_INC_OUT_ECHOS( ni);                           \
-      break;                                                      \
-    case CI_ICMP_TIME_EXCEEDED:                                   \
-      CI_ICMP_STATS_INC_OUT_TIME_EXCDS( ni );                     \
-      break;                                                      \
-    case CI_ICMP_PARAMETERPROB:                                   \
-      CI_ICMP_STATS_INC_OUT_PARM_PROBS( ni );                     \
-      break;                                                      \
-    case CI_ICMP_TIMESTAMP:                                       \
-      CI_ICMP_STATS_INC_OUT_TIMESTAMPS( ni );                     \
-      break;                                                      \
-    case CI_ICMP_TIMESTAMPREPLY:                                  \
-      CI_ICMP_STATS_INC_OUT_TIMESTAMPS_REPS( ni );                \
-      break;                                                      \
-    case CI_ICMP_ADDRESS:                                         \
-      CI_ICMP_STATS_INC_OUT_ADDR_MASKS( ni );                     \
-      break;                                                      \
-    case CI_ICMP_ADDRESSREPLY:                                    \
-       CI_ICMP_STATS_INC_OUT_ADDR_MASK_REPS( ni );                \
-       break;                                                     \
-    default:                                                      \
-       break;                                                     \
-  }                                                               \
-}while (0)
-
-
-#else
-#define CI_ICMP_OUT_STATS_COLLECT( netif , icmp )
-#define CI_ICMP_IN_STATS_COLLECT( netif, icmp )
-#endif
 
 
 #endif  /* __CI_INTERNAL_IP_STATS_OPS_H__ */

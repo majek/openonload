@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 
 /**************************************************************************\
 *//*! \file
@@ -83,7 +70,7 @@ static int ci_tcp_validate_sa( sa_family_t domain,
     RET_WITH_ERRNO(EAFNOSUPPORT);
   }
 
-#if CI_CFG_FAKE_IPV6
+#if CI_CFG_FAKE_IPV6 && !CI_CFG_IPV6
   if (sa->sa_family == AF_INET6 && !ci_tcp_ipv6_is_ipv4(sa)) {
     LOG_TC(ci_log(LPF "Pure IPv6 address is not supported"));
     RET_WITH_ERRNO(EAFNOSUPPORT);
@@ -114,7 +101,7 @@ ci_inline void ci_tcp_bind_flags_assert_valid(ci_sock_cmn* s)
  * \param ni       Stack
  * \param s        Socket to be bound
  * \param fd       File descriptor (unused in kernel)
- * \param ip_addr_be32  Local address to which to bind
+ * \param ci_addr_t     Local address to which to bind
  * \param port_be16     [in] requested port [out] assigned port
  * \param may_defer Whether OS socket bind can be deferred
  * \return         0 - success & [port_be16] updated
@@ -122,7 +109,7 @@ ci_inline void ci_tcp_bind_flags_assert_valid(ci_sock_cmn* s)
  *                 CI_SOCKET_ERROR & errno set
  */
 int __ci_tcp_bind(ci_netif *ni, ci_sock_cmn *s, ci_fd_t fd,
-                  ci_uint32 ip_addr_be32, ci_uint16* port_be16, int may_defer)
+                  ci_addr_t addr, ci_uint16* port_be16, int may_defer)
 {
   int rc = 0;
   ci_uint16 user_port; /* Port number specified by user, not by OS.
@@ -143,12 +130,19 @@ int __ci_tcp_bind(ci_netif *ni, ci_sock_cmn *s, ci_fd_t fd,
 #if CI_CFG_FAKE_IPV6
       ci_assert(s->domain == AF_INET || s->domain == AF_INET6);
       if( s->domain == AF_INET )
-        ci_make_sockaddr_from_ip4(&sa_u.sin, user_port, ip_addr_be32);
-      else
-        ci_make_sockaddr_in6_from_ip4(&sa_u.sin6, user_port, ip_addr_be32);
+        ci_make_sockaddr_from_ip4(&sa_u.sin, user_port, addr.ip4);
+      else if( !CI_IS_ADDR_IP6(addr) )
+        ci_make_sockaddr_in6_from_ip4(&sa_u.sin6, user_port, addr.ip4);
+#if CI_CFG_IPV6
+      else {
+        ci_make_sockaddr_in6_from_ip6(&sa_u.sin6, user_port, (ci_uint32*)addr.ip6);
+        /* Bind to link-local address requires an interface */
+        sa_u.sin6.sin6_scope_id = s->cp.so_bindtodevice;
+      }
+#endif
 #else
       ci_assert(s->domain == AF_INET);
-      ci_make_sockaddr_from_ip4(&sa_u.sin, user_port, ip_addr_be32);
+      ci_make_sockaddr_from_ip4(&sa_u.sin, user_port, addr.ip4);
 #endif
 
 #ifdef __ci_driver__
@@ -199,13 +193,13 @@ int __ci_tcp_bind(ci_netif *ni, ci_sock_cmn *s, ci_fd_t fd,
     return rc;
   if( user_port != 0 )
     s->s_flags |= CI_SOCK_FLAG_PORT_BOUND;
-  if( ip_addr_be32 != INADDR_ANY )
-    s->s_flags |= CI_SOCK_FLAG_ADDR_BOUND;
+  if( !CI_IPX_ADDR_IS_ANY(addr) )
+    s->cp.sock_cp_flags |= OO_SCP_BOUND_ADDR;
 
 #ifndef __ci_driver__
   /* We do not call bind() to alien address from in-kernel code */
-  if( ! (s->s_flags & CI_SOCK_FLAG_TPROXY) && ip_addr_be32 != INADDR_ANY &&
-      ! cicp_user_addr_is_local_efab(ni, ip_addr_be32) )
+  if( ! (s->s_flags & CI_SOCK_FLAG_TPROXY) && !CI_IPX_ADDR_IS_ANY(addr) &&
+      ! cicp_user_addr_is_local_efab(ni, addr) )
     s->s_flags |= CI_SOCK_FLAG_BOUND_ALIEN;
 #endif
   
@@ -214,22 +208,45 @@ int __ci_tcp_bind(ci_netif *ni, ci_sock_cmn *s, ci_fd_t fd,
 }
 
 
+static int /*bool*/
+ci_tcp_connect_check_local_dst_addr(ci_tcp_socket_listen* tls,
+                                    ci_addr_t dst_addr)
+{
+  if( !CI_IPX_ADDR_IS_ANY(tls->s.laddr) )
+    return CI_IPX_ADDR_EQ(tls->s.laddr, dst_addr);
+#if CI_CFG_IPV6
+  else {
+    if( CI_IS_ADDR_IP6(dst_addr) )
+      return CI_IS_ADDR_IP6(tls->s.laddr);
+    else
+      return !(tls->s.s_flags & CI_SOCK_FLAG_V6ONLY);
+  }
+#endif
+
+  return 1;
+}
+
+
 oo_sp ci_tcp_connect_find_local_peer(ci_netif *ni, int locked,
-                                     ci_ip_addr_t dst_be32, int dport_be16)
+                                     ci_addr_t dst_addr, int dport_be16)
 {
   ci_tcp_socket_listen* tls;
-  int i = -1;
+  int i;
+  oo_sp sock = OO_SP_NULL;
 
   if( locked ) {
     /* SW filter table look-up does not find socket in scenarios where client
      * attempts to connect with non-SF IP address to INADDR_ANY bound listening
      * socket */
     /* FIXME: make ci_netif_listener_lookup() work for unlocked stacks */
-    i = ci_netif_listener_lookup(ni, dst_be32, dport_be16);
+    /* FIXME: enable IPv6, bug 84048 */
+    sock = ci_netif_listener_lookup(ni, CI_IS_ADDR_IP6(dst_addr) ?
+                                        AF_SPACE_FLAG_IP6 : AF_SPACE_FLAG_IP4,
+                                    dst_addr, dport_be16);
   }
 
-  if( i >= 0 ) {
-    tls = ID_TO_TCP_LISTEN(ni, CI_NETIF_FILTER_ID_TO_SOCK_ID(ni, i));
+  if( OO_SP_NOT_NULL(sock) ) {
+    tls = ID_TO_TCP_LISTEN(ni, sock);
     if( ( ~tls->s.b.sb_aflags & CI_SB_AFLAG_ORPHAN ) &&
         ( tls->s.cp.so_bindtodevice == CI_IFID_BAD ) )
       goto found;
@@ -245,8 +262,7 @@ oo_sp ci_tcp_connect_find_local_peer(ci_netif *ni, int locked,
     if( wo->waitable.sb_aflags & CI_SB_AFLAG_ORPHAN ) continue;
     tls = SOCK_TO_TCP_LISTEN(&wo->sock);
     if( tls->s.cp.lport_be16 != dport_be16 ) continue;
-    if( tls->s.cp.ip_laddr_be32 != INADDR_ANY &&
-        tls->s.cp.ip_laddr_be32 != dst_be32) continue;
+    if( !ci_tcp_connect_check_local_dst_addr(tls, dst_addr) ) continue;
     if( tls->s.cp.so_bindtodevice != CI_IFID_BAD ) continue;
     goto found;
   }
@@ -261,17 +277,86 @@ found:
 }
 
 
+#if CI_CFG_IPV6
+static void ci_tcp_init_ipcache_ip4_hdr(ci_tcp_state* ts)
+{
+  ci_init_ipcache_ip4_hdr(&ts->s);
+  memmove(&ts->s.pkt.ipx.ip4 + 1, &ts->s.pkt.ipx.ip6 + 1, sizeof(ci_tcp_hdr));
+  ts->outgoing_hdrs_len -= CI_IPX_HDR_SIZE(AF_INET6) - CI_IPX_HDR_SIZE(AF_INET);
+
+  if( CI_IS_ADDR_IP6(ts->s.cp.laddr) ) {
+    ci_assert(CI_IPX_ADDR_IS_ANY(ts->s.cp.laddr));
+    ts->s.cp.laddr = ip4_addr_any;
+  }
+}
+
+static void ci_tcp_init_ipcache_ip6_hdr(ci_tcp_state* ts)
+{
+  memmove(&ts->s.pkt.ipx.ip6 + 1, &ts->s.pkt.ipx.ip4 + 1, sizeof(ci_tcp_hdr));
+  ci_init_ipcache_ip6_hdr(&ts->s);
+  ts->outgoing_hdrs_len += CI_IPX_HDR_SIZE(AF_INET6) - CI_IPX_HDR_SIZE(AF_INET);
+
+  if( ! CI_IS_ADDR_IP6(ts->s.cp.laddr) ) {
+    ci_assert(CI_IPX_ADDR_IS_ANY(ts->s.cp.laddr));
+    ts->s.cp.laddr = addr_any;
+  }
+}
+
+/*
+ * Convert ipcache from IPv4 to IPv6 and backwards. We always start with IPv4,
+ * but in result of socket reuse (listen+shutdown, failed connect, * etc) we
+ * can get a socket in any state.
+ */
+void ci_tcp_ipcache_convert(int af, ci_tcp_state* ts)
+{
+  if( IS_AF_INET6(af) ) {
+    if( !ipcache_is_ipv6(&ts->s.pkt) )
+      ci_tcp_init_ipcache_ip6_hdr(ts);
+  }
+  else if( ipcache_is_ipv6(&ts->s.pkt) ) {
+    ci_tcp_init_ipcache_ip4_hdr(ts);
+  }
+}
+#endif
+
+
 #ifndef __KERNEL__
 /* check that we can handle this destination */
-static int ci_tcp_connect_check_dest(citp_socket* ep, ci_ip_addr_t dst_be32,
+static int ci_tcp_connect_check_dest(citp_socket* ep, ci_addr_t dst,
                                      int dport_be16)
 {
   ci_ip_cached_hdrs* ipcache = &ep->s->pkt;
+  ci_addr_t src = sock_ipx_laddr(ep->s);
 
-  ipcache->ip.ip_daddr_be32 = dst_be32;
-  ipcache->dport_be16 = dport_be16;
-  oo_cp_verinfo_init(&ipcache->mac_integrity);
+#if CI_CFG_IPV6
+  /*
+   * Socket was bound to IPv4 and connecting to IPv6 or vice versa - hand it over.
+   */
+  if( (ep->s->cp.sock_cp_flags & OO_SCP_BOUND_ADDR) &&
+      CI_ADDR_AF(dst) != CI_ADDR_AF(ep->s->laddr) ) {
+    CITP_STATS_NETIF(++ep->netif->state->stats.tcp_connect_af_mismatch);
+    return CI_SOCKET_HANDOVER;
+  }
+  /* IPV6_V6ONLY prevents from connecting to IPv4 address */
+  if( CI_ADDR_AF(dst) == AF_INET && (ep->s->s_flags & CI_SOCK_FLAG_V6ONLY) ) {
+    CITP_STATS_NETIF(++ep->netif->state->stats.tcp_connect_af_mismatch);
+    return CI_SOCKET_HANDOVER;
+  }
+
+  ci_tcp_ipcache_convert(CI_ADDR_AF(dst), SOCK_TO_TCP(ep->s));
+#endif
+
+  ci_sock_set_raddr_port(ep->s, dst, dport_be16);
+  ci_ip_cache_invalidate(ipcache);
   cicp_user_retrieve(ep->netif, ipcache, &ep->s->cp);
+
+  /* Control plane has selected a source address for us -- remember it. */
+  if( ipcache->status != retrrc_noroute &&
+      ipcache->status != retrrc_alienroute &&
+      CI_IPX_ADDR_IS_ANY(src) ) {
+    ci_sock_set_laddr(ep->s, ipcache_laddr(ipcache));
+    ep->s->cp.laddr = ep->s->laddr;
+  }
 
   if(CI_LIKELY( ipcache->status == retrrc_success ||
                 ipcache->status == retrrc_nomac   ||
@@ -282,11 +367,6 @@ static int ci_tcp_connect_check_dest(citp_socket* ep, ci_ip_addr_t dst_be32,
        * lookup may be wrong.
        */
       ci_ip_cache_invalidate(ipcache);
-    if( ipcache->ip.ip_saddr_be32 == 0 ) {
-      /* Control plane has selected a source address for us -- remember it. */
-      ipcache->ip.ip_saddr_be32 = ipcache->ip_saddr.ip4;
-      ep->s->cp.ip_laddr_be32 = ipcache->ip_saddr.ip4;
-    }
     return 0;
   }
   else if( ipcache->status == retrrc_localroute ) {
@@ -298,7 +378,7 @@ static int ci_tcp_connect_check_dest(citp_socket* ep, ci_ip_addr_t dst_be32,
     ep->s->s_flags |= CI_SOCK_FLAG_BOUND_ALIEN;
     if( NI_OPTS(ep->netif).tcp_server_loopback != CITP_TCP_LOOPBACK_OFF )
       ts->local_peer = ci_tcp_connect_find_local_peer(ep->netif, 1 /* locked */,
-                                                      dst_be32, dport_be16);
+                                                      dst, dport_be16);
     else
       ts->local_peer = OO_SP_NULL;
 
@@ -306,12 +386,7 @@ static int ci_tcp_connect_check_dest(citp_socket* ep, ci_ip_addr_t dst_be32,
         NI_OPTS(ep->netif).tcp_client_loopback !=
         CITP_TCP_LOOPBACK_SAMESTACK ) {
       ipcache->flags |= CI_IP_CACHE_IS_LOCALROUTE;
-      if( ipcache->ip.ip_saddr_be32 == 0 ) {
-        ipcache->ip.ip_saddr_be32 = dst_be32;
-        ep->s->cp.ip_laddr_be32 = dst_be32;
-      }
       ipcache->ether_offset = 4; /* lo is non-VLAN */
-      ipcache->ip_saddr.ip4 = dst_be32;
       ipcache->dport_be16 = dport_be16;
       return 0;
     }
@@ -325,9 +400,9 @@ static int ci_tcp_connect_check_dest(citp_socket* ep, ci_ip_addr_t dst_be32,
 
 static int/*bool*/
 cicp_check_ipif_ifindex(struct oo_cplane_handle* cp,
-                        cicp_ipif_row_t* ipif, void* data)
+                        ci_ifid_t ifindex, void* data)
 {
-  return ipif->ifindex == *(ci_ifid_t*)data;
+  return ifindex == *(ci_ifid_t*)data;
 }
 
 
@@ -359,8 +434,8 @@ ci_tcp_use_mac_filter_listen(ci_netif* ni, ci_sock_cmn* s, ci_ifid_t ifindex)
     if( ifindex <= 0 ) {
       /* Determine which ifindex the IP address being bound to is on. */
         ifindex = NI_OPTS(ni).scalable_filter_ifindex_passive;
-        return oo_cp_find_ipif_by_ip(ni->cplane, sock_laddr_be32(s),
-                                     cicp_check_ipif_ifindex, &ifindex);
+        return cicp_find_ifindex_by_ip(ni->cplane, sock_laddr(s),
+                                       cicp_check_ipif_ifindex, &ifindex);
     }
     return (NI_OPTS(ni).scalable_filter_ifindex_passive == ifindex);
   }
@@ -391,7 +466,7 @@ ci_tcp_use_mac_filter(ci_netif* ni, ci_sock_cmn* s, ci_ifid_t ifindex,
      * also use the MAC filter.
      */
     use_mac_filter |= OO_SP_NOT_NULL(from_tcp_id) &&
-             (SP_TO_SOCK(ni, from_tcp_id)->s_flags & CI_SOCK_FLAG_MAC_FILTER);
+             (SP_TO_SOCK(ni, from_tcp_id)->s_flags & CI_SOCK_FLAG_STACK_FILTER);
 
     if( (use_mac_filter == 0) && (s->b.state == CI_TCP_LISTEN) &&
         ci_tcp_use_mac_filter_listen(ni, s, ifindex) )
@@ -423,53 +498,50 @@ int ci_tcp_can_set_filter_in_ul(ci_netif *ni, ci_sock_cmn* s)
   ci_assert_nflags(s->s_flags, CI_SOCK_FLAG_FILTER);
   ci_assert_flags(s->b.state, CI_TCP_STATE_TCP);
   ci_assert_nequal(s->b.state, CI_TCP_LISTEN);
-  ci_assert_nequal(sock_laddr_be32(s), 0);
+  ci_assert(!CI_IPX_ADDR_IS_ANY(sock_ipx_laddr(s)));
   ci_assert_nequal(sock_lport_be16(s), 0);
   return 1;
 }
 #endif
 
 
-int ci_tcp_sock_set_scalable_filter(ci_netif *ni, ci_sock_cmn* s)
+int ci_tcp_sock_set_stack_filter(ci_netif *ni, ci_sock_cmn* s)
 {
   int rc;
-  ci_addr_t laddr, raddr;
+  oo_sp sock;
 
   LOG_TC(log( NSS_FMT " %s", NSS_PRI_ARGS(ni, s), __FUNCTION__));
-  ci_assert((s->s_flags & CI_SOCK_FLAG_MAC_FILTER) == 0);
+  ci_assert((s->s_flags & CI_SOCK_FLAG_STACK_FILTER) == 0);
 
-  rc = ci_netif_filter_lookup(ni, sock_laddr_be32(s),
-                              sock_lport_be16(s), sock_raddr_be32(s),
-                              sock_rport_be16(s), sock_protocol(s));
+  sock = ci_netif_filter_lookup(ni, sock_af_space(s),
+                                sock_ipx_laddr(s), sock_lport_be16(s),
+                                sock_ipx_raddr(s), sock_rport_be16(s),
+                                sock_protocol(s));
 
-  if( rc >= 0 )
+  if( OO_SP_NOT_NULL(sock) )
     return -EADDRINUSE;
 
-  laddr = CI_ADDR_FROM_IP4(sock_laddr_be32(s));
-  raddr = CI_ADDR_FROM_IP4(sock_raddr_be32(s));
-  rc = ci_netif_filter_insert(ni, SC_ID(s), AF_SPACE_FLAG_IP4, laddr,
-                              sock_lport_be16(s), raddr,
-                              sock_rport_be16(s), sock_protocol(s));
+  rc = ci_netif_filter_insert(ni, SC_ID(s), sock_af_space(s),
+                              sock_ipx_laddr(s), sock_lport_be16(s),
+                              sock_ipx_raddr(s), sock_rport_be16(s),
+                              sock_protocol(s));
   if( rc == 0 ) {
-    s->s_flags |= CI_SOCK_FLAG_MAC_FILTER;
-    CITP_STATS_NETIF_INC(ni, mac_filter_shares);
+    s->s_flags |= CI_SOCK_FLAG_STACK_FILTER;
+    if( (s->s_flags & CI_SOCK_FLAGS_SCALABLE) != 0 )
+      CITP_STATS_NETIF_INC(ni, mac_filter_shares);
   }
   return rc;
 }
 
 
-void ci_tcp_sock_clear_scalable_filter(ci_netif *ni, ci_tcp_state* ts)
+void ci_tcp_sock_clear_stack_filter(ci_netif *ni, ci_tcp_state* ts)
 {
-  ci_addr_t laddr, raddr;
-
   LOG_TC(log( LNT_FMT " %s", LNT_PRI_ARGS(ni, ts), __FUNCTION__));
-  ci_assert((ts->s.s_flags & CI_SOCK_FLAG_MAC_FILTER) != 0);
-  laddr = CI_ADDR_FROM_IP4(tcp_laddr_be32(ts));
-  raddr = CI_ADDR_FROM_IP4(tcp_raddr_be32(ts));
-  ci_netif_filter_remove(ni, S_ID(ts), AF_SPACE_FLAG_IP4, laddr,
-                         tcp_lport_be16(ts), raddr,
+  ci_assert((ts->s.s_flags & CI_SOCK_FLAG_STACK_FILTER) != 0);
+  ci_netif_filter_remove(ni, S_ID(ts), sock_af_space(&ts->s), tcp_ipx_laddr(ts),
+                         tcp_lport_be16(ts), tcp_ipx_raddr(ts),
                          tcp_rport_be16(ts), tcp_protocol(ts));
-  ts->s.s_flags &= ~CI_SOCK_FLAG_MAC_FILTER;
+  ts->s.s_flags &= ~CI_SOCK_FLAG_STACK_FILTER;
 }
 
 
@@ -501,19 +573,19 @@ ci_tcp_prev_seq_future_isn(ci_netif* ni, const ci_tcp_prev_seq_t* prev_seq,
 ci_inline ci_uint32
 ci_tcp_prev_seq_hash1(ci_netif* ni, const ci_tcp_prev_seq_t* prev_seq)
 {
-  return
-    onload_hash1(AF_INET, ni->state->seq_table_entries_n - 1,
-                 &prev_seq->laddr, prev_seq->lport,
-                 &prev_seq->raddr, prev_seq->rport, IPPROTO_TCP);
+  return onload_hash1(ni->state->seq_table_entries_n - 1,
+                      prev_seq->laddr, prev_seq->lport,
+                      prev_seq->raddr, prev_seq->rport,
+                      IPPROTO_TCP);
 }
 
 
 ci_inline ci_uint32
 ci_tcp_prev_seq_hash2(ci_netif* ni, const ci_tcp_prev_seq_t* prev_seq)
 {
-  return
-    onload_hash2(AF_INET, &prev_seq->laddr, prev_seq->lport,
-                 &prev_seq->raddr, prev_seq->rport, IPPROTO_TCP);
+  return onload_hash2(prev_seq->laddr, prev_seq->lport,
+                      prev_seq->raddr, prev_seq->rport,
+                      IPPROTO_TCP);
 }
 
 
@@ -538,8 +610,8 @@ ci_tcp_clock_isn_safe(ci_netif* ni, const ci_tcp_prev_seq_t* prev_seq)
 ci_inline void ci_tcp_prev_seq_from_ts(ci_netif* ni, const ci_tcp_state* ts,
                                        ci_tcp_prev_seq_t* prev_seq /* out */)
 {
-  prev_seq->laddr = tcp_laddr_be32(ts);
-  prev_seq->raddr = tcp_raddr_be32(ts);
+  prev_seq->laddr = tcp_ipx_laddr(ts);
+  prev_seq->raddr = tcp_ipx_raddr(ts);
   prev_seq->lport = tcp_lport_be16(ts);
   prev_seq->rport = tcp_rport_be16(ts);
   prev_seq->seq_no = tcp_enq_nxt(ts) + NI_OPTS(ni).tcp_isn_offset;
@@ -590,7 +662,8 @@ ci_inline void ci_tcp_prev_seq_remember_at(ci_netif* ni,
                                  prev_seq->raddr, prev_seq->rport);
   if( SEQ_GT(prev_seq->seq_no, isn_now) ) {
     ci_uint32 isn_after_2msl = ci_tcp_future_isn
-      (ni, prev_seq->laddr, prev_seq->lport, prev_seq->raddr, prev_seq->rport,
+      (ni, prev_seq->laddr, prev_seq->lport,
+       prev_seq->raddr, prev_seq->rport,
        NI_CONF(ni).tconst_peer2msl_time);
     if( SEQ_GT(isn_after_2msl, prev_seq->seq_no) ) {
       /* The clock based ISN will catch up with entry between 0 and 2msl.
@@ -651,7 +724,7 @@ __ci_tcp_prev_seq_free(ci_netif* ni, const ci_tcp_prev_seq_t* prev_seq_val,
 static void
 ci_tcp_prev_seq_free(ci_netif* ni, ci_tcp_prev_seq_t* prev_seq) {
   __ci_tcp_prev_seq_free(ni, prev_seq, prev_seq);
-  prev_seq->laddr = 0;
+  prev_seq->laddr = addr_any;
 }
 
 
@@ -745,9 +818,9 @@ __ci_tcp_prev_seq_lookup(ci_netif* ni, const ci_tcp_prev_seq_t* ts_prev_seq)
     if( CI_TCP_PREV_SEQ_IS_TERMINAL(*prev_seq) ) {
       return NULL;
     }
-    if( prev_seq->laddr == ts_prev_seq->laddr &&
+    if( CI_IPX_ADDR_EQ(prev_seq->laddr, ts_prev_seq->laddr) &&
         prev_seq->lport == ts_prev_seq->lport &&
-        prev_seq->raddr == ts_prev_seq->raddr &&
+        CI_IPX_ADDR_EQ(prev_seq->raddr, ts_prev_seq->raddr) &&
         prev_seq->rport == ts_prev_seq->rport )
       return prev_seq;
 
@@ -801,6 +874,20 @@ void ci_tcp_prev_seq_remember(ci_netif* ni, ci_tcp_state* ts)
 }
 
 
+/* Linux clears implicit address on connect failure */
+ci_inline void ci_tcp_connect_drop_implicit_address(ci_tcp_state *ts)
+{
+    if( ! (ts->s.cp.sock_cp_flags & OO_SCP_BOUND_ADDR) ) {
+#if CI_CFG_IPV6
+      if( ts->s.domain == AF_INET6 )
+        ts->s.cp.laddr = ts->s.laddr = addr_any;
+      else
+#endif
+        ts->s.cp.laddr = ts->s.laddr = ip4_addr_any;
+    }
+}
+
+
 /* Return codes from ci_tcp_connect_ul_start(). */
 #define CI_CONNECT_UL_OK                0
 #define CI_CONNECT_UL_FAIL              -1
@@ -810,7 +897,7 @@ void ci_tcp_prev_seq_remember(ci_netif* ni, ci_tcp_state* ts)
 
 /* The fd parameter is ignored when this is called in the kernel */
 static int ci_tcp_connect_ul_start(ci_netif *ni, ci_tcp_state* ts, ci_fd_t fd,
-				   ci_uint32 dst_be32, unsigned dport_be16,
+                                   ci_addr_t dst, unsigned dport_be16,
                                    int* fail_rc)
 {
   ci_ip_pkt_fmt* pkt;
@@ -818,6 +905,7 @@ static int ci_tcp_connect_ul_start(ci_netif *ni, ci_tcp_state* ts, ci_fd_t fd,
   oo_sp active_wild = OO_SP_NULL;
   ci_uint32 prev_seq = 0;
   int added_scalable = 0;
+  ci_addr_t saddr;
 
   ci_assert(ts->s.pkt.mtu);
 
@@ -827,13 +915,12 @@ static int ci_tcp_connect_ul_start(ci_netif *ni, ci_tcp_state* ts, ci_fd_t fd,
    * Note, even these values are speculative since the real MTU
    * could change between now and passing the packet to the lower layers
    */
-  ts->amss = ci_tcp_amss(ni, &ts->c, ts->s.pkt.mtu, __func__);
+  ts->amss = ci_tcp_amss(ni, &ts->c, &ts->s.pkt, __func__);
 
   /* Default smss until discovered by MSS option in SYN - RFC1122 4.2.2.6 */
   ts->smss = CI_CFG_TCP_DEFAULT_MSS;
 
   /* set pmtu, eff_mss, snd_buf and adjust windows */
-  ci_pmtu_set(ni, &ts->pmtus, ts->s.pkt.mtu);
   ci_tcp_set_eff_mss(ni, ts);
   ci_tcp_set_initialcwnd(ni, ts);
 
@@ -850,7 +937,7 @@ static int ci_tcp_connect_ul_start(ci_netif *ni, ci_tcp_state* ts, ci_fd_t fd,
    * 3. State and address are OK. It's address routed through our NIC.
    *    Do connect().
    */
-  ci_assert_nequal(ts->s.pkt.ip.ip_saddr_be32, INADDR_ANY);
+  ci_assert(!CI_IPX_ADDR_IS_ANY(ipcache_laddr(&ts->s.pkt)));
 
   /* socket can only could have gotten scalative on prior
    * implicit bind */
@@ -861,9 +948,11 @@ static int ci_tcp_connect_ul_start(ci_netif *ni, ci_tcp_state* ts, ci_fd_t fd,
     ci_uint16 source_be16 = 0;
     ci_sock_cmn* s = &ts->s;
 
+    saddr = sock_ipx_laddr(&ts->s);
+
 #ifndef __KERNEL__
-    active_wild = ci_netif_active_wild_get(ni, sock_laddr_be32(&ts->s),
-                                           sock_raddr_be32(&ts->s),
+    active_wild = ci_netif_active_wild_get(ni, sock_ipx_laddr(&ts->s),
+                                           sock_ipx_raddr(&ts->s),
                                            dport_be16, &source_be16, &prev_seq);
 #endif
 
@@ -873,11 +962,10 @@ static int ci_tcp_connect_ul_start(ci_netif *ni, ci_tcp_state* ts, ci_fd_t fd,
       if( NI_OPTS(ni).tcp_shared_local_no_fallback )
         /* error matching exhaustion of ephemeral ports */
         CI_SET_ERROR(rc, EADDRNOTAVAIL);
-      else if( s->s_flags & CI_SOCK_FLAG_ADDR_BOUND )
-        rc = __ci_tcp_bind(ni, &ts->s, fd, ts->s.pkt.ip.ip_saddr_be32,
-                           &source_be16, 0);
+      else if( s->cp.sock_cp_flags & OO_SCP_BOUND_ADDR )
+        rc = __ci_tcp_bind(ni, &ts->s, fd, saddr, &source_be16, 0);
       else
-        rc = __ci_tcp_bind(ni, &ts->s, fd, INADDR_ANY, &source_be16, 0);
+        rc = __ci_tcp_bind(ni, &ts->s, fd, addr_any, &source_be16, 0);
 
       if(CI_UNLIKELY( rc != 0 )) {
         LOG_U(ci_log("__ci_tcp_bind returned %d at %s:%d", rc,
@@ -885,7 +973,7 @@ static int ci_tcp_connect_ul_start(ci_netif *ni, ci_tcp_state* ts, ci_fd_t fd,
         *fail_rc = rc;
         return CI_CONNECT_UL_FAIL;
       }
-      if(CI_UNLIKELY( ts->s.pkt.ip.ip_saddr_be32 == 0 )) {
+      if(CI_UNLIKELY( CI_IPX_ADDR_IS_ANY(saddr) )) {
         /* FIXME is this an impossible branch? */
         CI_SET_ERROR(*fail_rc, EINVAL);
         return CI_CONNECT_UL_FAIL;
@@ -893,12 +981,11 @@ static int ci_tcp_connect_ul_start(ci_netif *ni, ci_tcp_state* ts, ci_fd_t fd,
     }
     /* Commit source port now.  In case of failure down the lane, an implicit port
      * might be overwritten by following attempt */
-    TS_TCP(ts)->tcp_source_be16 = source_be16;
+    TS_IPX_TCP(ts)->tcp_source_be16 = source_be16;
     ts->s.cp.lport_be16 = source_be16;
-    LOG_TC(log(LNT_FMT "connect: our bind returned %s:%u",
-               LNT_PRI_ARGS(ni, ts),
-               ip_addr_str(ts->s.pkt.ip.ip_saddr_be32),
-               (unsigned) CI_BSWAP_BE16(TS_TCP(ts)->tcp_source_be16)));
+    LOG_TC(log(LNT_FMT "connect: our bind returned " IPX_PORT_FMT,
+               LNT_PRI_ARGS(ni, ts), IPX_ARG(AF_IP(saddr)),
+               (unsigned) CI_BSWAP_BE16(TS_IPX_TCP(ts)->tcp_source_be16)));
   }
 
   /* In the normal case, we only install filters for IP addresses configured on
@@ -913,7 +1000,7 @@ static int ci_tcp_connect_ul_start(ci_netif *ni, ci_tcp_state* ts, ci_fd_t fd,
   }
 
   /* Commit peer now - these are OK to be overwritten by following attempt */
-  ci_tcp_set_peer(ts, dst_be32, dport_be16);
+  ci_tcp_set_peer(ts, dst, dport_be16);
 
   /* Make sure we can get a buffer before we change state. */
   pkt = ci_netif_pkt_tx_tcp_alloc(ni, ts);
@@ -952,17 +1039,10 @@ static int ci_tcp_connect_ul_start(ci_netif *ni, ci_tcp_state* ts, ci_fd_t fd,
 #endif
 
   if( active_wild != OO_SP_NULL &&
-    /* If we're in scalable-active mode, then sharing an active-wild gives us
-     * the last ingredient that allows the socket to be scalable. */
-     ~ts->s.s_flags & CI_SOCK_FLAG_TPROXY &&
-      NI_OPTS(ni).scalable_filter_enable == CITP_SCALABLE_FILTERS_ENABLE &&
-      NI_OPTS(ni).scalable_filter_mode & CITP_SCALABLE_MODE_ACTIVE &&
-      (NI_OPTS(ni).scalable_filter_ifindex_active == ts->s.pkt.ifindex ||
-       NI_OPTS(ni).scalable_filter_ifindex_active == CITP_SCALABLE_FILTERS_ALL)
-      && (~ts->s.s_flags & CI_SOCK_FLAG_SCALACTIVE) ) {
-    /* Need to set the flag now for consumption by ci_tcp_ep_set_filters */
-    added_scalable = 1;
-    ts->s.s_flags |= CI_SOCK_FLAG_SCALACTIVE;
+      (ts->s.s_flags & CI_SOCK_FLAG_TPROXY) == 0 ) {
+      /* Need to set the flag now for consumption by ci_tcp_ep_set_filters */
+      ts->s.s_flags |= CI_SOCK_FLAG_SCALACTIVE;
+      added_scalable = 1;
   }
 
   rc = ci_tcp_ep_set_filters(ni, S_SP(ts), ts->s.cp.so_bindtodevice,
@@ -998,11 +1078,12 @@ static int ci_tcp_connect_ul_start(ci_netif *ni, ci_tcp_state* ts, ci_fd_t fd,
                        CI_SOCK_FLAG_CONNECT_MUST_BIND);
   }
 
-  LOG_TC(log(LNT_FMT "CONNECT %s:%u->%s:%u", LNT_PRI_ARGS(ni, ts),
-	     ip_addr_str(ts->s.pkt.ip.ip_saddr_be32),
-	     (unsigned) CI_BSWAP_BE16(TS_TCP(ts)->tcp_source_be16),
-	     ip_addr_str(ts->s.pkt.ip.ip_daddr_be32),
-	     (unsigned) CI_BSWAP_BE16(TS_TCP(ts)->tcp_dest_be16)));
+  LOG_TC(log(LNT_FMT "CONNECT " IPX_PORT_FMT "->" IPX_PORT_FMT,
+            LNT_PRI_ARGS(ni, ts),
+            IPX_ARG(AF_IP(ipcache_laddr(&ts->s.pkt))),
+            (unsigned) CI_BSWAP_BE16(TS_IPX_TCP(ts)->tcp_source_be16),
+            IPX_ARG(AF_IP(ipcache_raddr(&ts->s.pkt))),
+            (unsigned) CI_BSWAP_BE16(TS_IPX_TCP(ts)->tcp_dest_be16)));
 
   /* We are going to send the SYN - set states appropriately */
 
@@ -1032,10 +1113,11 @@ static int ci_tcp_connect_ul_start(ci_netif *ni, ci_tcp_state* ts, ci_fd_t fd,
      */
     tcp_snd_nxt(ts) = prev_seq;
   else
-    tcp_snd_nxt(ts) = ci_tcp_initial_seqno(ni, ts->s.pkt.ip.ip_saddr_be32,
-                                           TS_TCP(ts)->tcp_source_be16,
-                                           ts->s.pkt.ip.ip_daddr_be32,
-                                           TS_TCP(ts)->tcp_dest_be16);
+    tcp_snd_nxt(ts) = ci_tcp_initial_seqno(ni,
+                                           tcp_ipx_laddr(ts),
+                                           TS_IPX_TCP(ts)->tcp_source_be16,
+                                           tcp_ipx_laddr(ts),
+                                           TS_IPX_TCP(ts)->tcp_dest_be16);
   tcp_snd_una(ts) = tcp_enq_nxt(ts) = tcp_snd_up(ts) = tcp_snd_nxt(ts);
   ts->snd_max = tcp_snd_nxt(ts) + 1;
 
@@ -1059,19 +1141,21 @@ static int ci_tcp_connect_ul_start(ci_netif *ni, ci_tcp_state* ts, ci_fd_t fd,
     CI_IP_SOCK_STATS_VAL_RXWSCL(ts, 0);
   }
   ci_tcp_set_rcvbuf(ni, ts);
-  TS_TCP(ts)->tcp_window_be16 = ci_tcp_calc_rcv_wnd_syn(ts->s.so.rcvbuf,
+  TS_IPX_TCP(ts)->tcp_window_be16 = ci_tcp_calc_rcv_wnd_syn(ts->s.so.rcvbuf,
                                                         ts->amss,
                                                         ts->rcv_wscl);
-  tcp_rcv_wnd_right_edge_sent(ts) = tcp_rcv_nxt(ts) + TS_TCP(ts)->tcp_window_be16;
-  ts->rcv_wnd_advertised = TS_TCP(ts)->tcp_window_be16;
-  TS_TCP(ts)->tcp_window_be16 = CI_BSWAP_BE16(TS_TCP(ts)->tcp_window_be16);
-
+  tcp_rcv_wnd_right_edge_sent(ts) = tcp_rcv_nxt(ts) +
+      TS_IPX_TCP(ts)->tcp_window_be16;
+  ts->rcv_wnd_advertised = TS_IPX_TCP(ts)->tcp_window_be16;
+  TS_IPX_TCP(ts)->tcp_window_be16 =
+      CI_BSWAP_BE16(TS_IPX_TCP(ts)->tcp_window_be16);
 
   /* outgoing_hdrs_len is initialised to include timestamp option. */
   if( ! (ts->tcpflags & CI_TCPT_FLAG_TSO) )
-    ts->outgoing_hdrs_len = sizeof(ci_ip4_hdr)+sizeof(ci_tcp_hdr);
-  if( ci_tcp_can_stripe(ni, ts->s.pkt.ip.ip_saddr_be32,
-			ts->s.pkt.ip.ip_daddr_be32) )
+    ts->outgoing_hdrs_len = CI_IPX_HDR_SIZE(ipcache_af(&ts->s.pkt)) +
+                            sizeof(ci_tcp_hdr);
+  if( ci_tcp_can_stripe(ni, ts->s.pkt.ipx.ip4.ip_saddr_be32,
+			ts->s.pkt.ipx.ip4.ip_daddr_be32) )
     ts->tcpflags |= CI_TCPT_FLAG_STRIPE;
   ci_tcp_set_slow_state(ni, ts, CI_TCP_SYN_SENT);
 
@@ -1089,6 +1173,9 @@ static int ci_tcp_connect_ul_start(ci_netif *ni, ci_tcp_state* ts, ci_fd_t fd,
   ci_assert(ts->snd_max == tcp_snd_nxt(ts) + 1);
   ts->s.rx_errno = 0;
   ts->s.tx_errno = 0; 
+  /* If ARP resolution fails, we have to drop the connection, so we store
+   * the socket id in the SYN packet. */
+  pkt->pf.tcp_tx.sock_id = ts->s.b.bufid;
   ci_tcp_enqueue_no_data(ts, ni, pkt);
   ci_tcp_set_flags(ts, CI_TCP_FLAG_ACK);  
 
@@ -1106,11 +1193,7 @@ static int ci_tcp_connect_ul_start(ci_netif *ni, ci_tcp_state* ts, ci_fd_t fd,
   return CI_CONNECT_UL_OK;
 
  fail:
-  /* Linux clears implicit address on connect failure */
-  if( ! (ts->s.s_flags & CI_SOCK_FLAG_ADDR_BOUND) ) {
-    ts->s.pkt.ip.ip_saddr_be32 = 0;
-    ts->s.cp.ip_laddr_be32 = 0;
-  }
+  ci_tcp_connect_drop_implicit_address(ts);
   return rc;
 }
 
@@ -1271,10 +1354,7 @@ static int ci_tcp_connect_ul_syn_sent(ci_netif *ni, ci_tcp_state *ts)
         rc = TCP_RX_ERRNO(ts) ? TCP_RX_ERRNO(ts) : ECONNABORTED;
     CI_SET_ERROR(rc, rc);
 
-    if( ! (ts->s.s_flags & CI_SOCK_FLAG_ADDR_BOUND) ) {
-      ts->s.pkt.ip.ip_saddr_be32 = 0;
-      ts->s.cp.ip_laddr_be32 = 0;
-    }
+    ci_tcp_connect_drop_implicit_address(ts);
     return rc;
   }
 
@@ -1291,24 +1371,43 @@ complete_deferred_bind(ci_netif* netif, ci_sock_cmn* s, ci_fd_t fd)
 
   ci_assert_flags(s->s_flags, CI_SOCK_FLAG_DEFERRED_BIND);
 
-  if( s->s_flags & CI_SOCK_FLAG_ADDR_BOUND )
-    rc = __ci_tcp_bind(netif, s, fd, s->pkt.ip.ip_saddr_be32,
-                       &source_be16, 0);
+  if( s->cp.sock_cp_flags & OO_SCP_BOUND_ADDR )
+    rc = __ci_tcp_bind(netif, s, fd, s->laddr, &source_be16, 0);
   else
-    rc = __ci_tcp_bind(netif, s, fd, INADDR_ANY, &source_be16, 0);
+    rc = __ci_tcp_bind(netif, s, fd, addr_any, &source_be16, 0);
 
   if(CI_LIKELY( rc == 0 )) {
     s->s_flags &= ~(CI_SOCK_FLAG_DEFERRED_BIND |
                     CI_SOCK_FLAG_CONNECT_MUST_BIND);
     sock_lport_be16(s) = source_be16;
     s->cp.lport_be16 = source_be16;
-    LOG_TC(log(NSS_FMT "Deferred bind returned %s:%u",
+    LOG_TC(log(NSS_FMT "Deferred bind returned " IPX_FMT " :%u",
                NSS_PRI_ARGS(netif, s),
-               ip_addr_str(INADDR_ANY), ntohs(sock_lport_be16(s))));
+               IPX_ARG(AF_IP(addr_any)), ntohs(sock_lport_be16(s))));
   }
   else {
     LOG_U(ci_log("__ci_tcp_bind returned %d at %s:%d", CI_GET_ERROR(rc),
                  __FILE__, __LINE__));
+  }
+  return rc;
+}
+
+
+static int
+ci_tcp_retrieve_addr(ci_netif* netif, const struct sockaddr* serv_addr,
+                     ci_addr_t* dst_addr, ci_uint16* dst_port)
+{
+  /* Address family is validated to be AF_INET or AF_INET6 earlier. */
+  const struct sockaddr_in* inaddr = (struct sockaddr_in*) serv_addr;
+  *dst_addr = ci_get_addr(serv_addr);
+  *dst_port = inaddr->sin_port;
+  int rc = 0;
+
+  /* Only perform DNAT off of init_net */
+  if( netif->cplane_init_net != NULL ) {
+    ci_addr_sh_t dnat_addr = CI_ADDR_SH_FROM_ADDR(*dst_addr);
+    rc = cp_svc_check_dnat(netif->cplane_init_net, &dnat_addr, dst_port);
+    *dst_addr = CI_ADDR_FROM_ADDR_SH(dnat_addr);
   }
   return rc;
 }
@@ -1327,12 +1426,12 @@ complete_deferred_bind(ci_netif* netif, ci_sock_cmn* s, ci_fd_t fd)
 int ci_tcp_connect(citp_socket* ep, const struct sockaddr* serv_addr,
 		   socklen_t addrlen, ci_fd_t fd, int *p_moved)
 {
-  /* Address family is validated earlier. */
-  struct sockaddr_in* inaddr = (struct sockaddr_in*) serv_addr;
   ci_sock_cmn* s = ep->s;
   ci_tcp_state* ts = &SOCK_TO_WAITABLE_OBJ(s)->tcp;
   int rc = 0, crc;
-  ci_uint32 dst_be32;
+  ci_addr_t dst_addr;
+  ci_uint16 dst_port;
+  int /*bool*/ dnat;
 
   if( NI_OPTS(ep->netif).tcp_connect_handover )
     return CI_SOCKET_HANDOVER;
@@ -1414,26 +1513,37 @@ int ci_tcp_connect(citp_socket* ep, const struct sockaddr* serv_addr,
   if (
     /* Af first, check that address family and length is OK. */
     ci_tcp_validate_sa(s->domain, serv_addr, addrlen)
+    /* Check for NAT. */
+    || (dnat = ci_tcp_retrieve_addr(ep->netif, serv_addr, &dst_addr,
+                                    &dst_port)) < 0
     /* rfc793 p54 if the foreign socket is unspecified return          */
     /* "error: foreign socket unspecified" (EINVAL), but keep it to OS */
-    || (dst_be32 = ci_get_ip4_addr(inaddr->sin_family, serv_addr)) == 0
+    || CI_IPX_ADDR_IS_ANY(dst_addr)
     /* Zero destination port is tricky as well, keep it to OS */
-    || inaddr->sin_port == 0 )
+    || dst_port == 0 )
   {
     rc = CI_SOCKET_HANDOVER;
     goto unlock_out;
   }
-  
+
+#if CI_CFG_IPV6
+  if( CI_IPX_IS_LINKLOCAL(dst_addr) &&
+      ci_sock_set_ip6_scope_id(ep->netif, s, serv_addr, addrlen, 1) ) {
+    rc = CI_SOCKET_HANDOVER;
+    goto unlock_out;
+  }
+#endif
+
   /* is this a socket that we can handle? */
-  rc = ci_tcp_connect_check_dest(ep, dst_be32, inaddr->sin_port);
+  rc = ci_tcp_connect_check_dest(ep, dst_addr, dst_port);
   if( rc )  goto unlock_out;
 
   if( (ts->s.pkt.flags & CI_IP_CACHE_IS_LOCALROUTE) &&
       OO_SP_IS_NULL(ts->local_peer) ) {
     /* Try to connect to another stack; handover if can't */
     struct oo_op_loopback_connect op;
-    op.dst_port = inaddr->sin_port;
-    op.dst_addr = dst_be32;
+    op.dst_port = dst_port;
+    op.dst_addr = dst_addr;
     /* this operation unlocks netif */
     rc = oo_resource_op(fd, OO_IOC_TCP_LOOPBACK_CONNECT, &op);
     if( rc < 0)
@@ -1449,8 +1559,14 @@ int ci_tcp_connect(citp_socket* ep, const struct sockaddr* serv_addr,
     return 0;
   }
 
+  if( dnat ) {
+    ts->s.s_flags |= CI_SOCK_FLAG_DNAT;
+    ts->pre_nat.daddr_be32 = ci_get_addr(serv_addr);
+    ts->pre_nat.dport_be16 = ((struct sockaddr_in*) serv_addr)->sin_port;
+  }
 
-  crc = ci_tcp_connect_ul_start(ep->netif, ts, fd, dst_be32, inaddr->sin_port,
+
+  crc = ci_tcp_connect_ul_start(ep->netif, ts, fd, dst_addr, dst_port,
                                 &rc);
   if( crc != CI_CONNECT_UL_OK ) {
     switch( crc ) {
@@ -1553,7 +1669,7 @@ int ci_tcp_connect_lo_samestack(ci_netif *ni, ci_tcp_state *ts, oo_sp tls_id,
   *stack_locked = 1;
 
   ts->local_peer = tls_id;
-  crc = ci_tcp_connect_ul_start(ni, ts, CI_FD_BAD, ts->s.pkt.ip_saddr.ip4,
+  crc = ci_tcp_connect_ul_start(ni, ts, CI_FD_BAD, sock_ipx_raddr(&ts->s),
                                 ts->s.pkt.dport_be16, &rc);
 
   /* The connect is really finished, but we should return EINPROGRESS
@@ -1567,7 +1683,7 @@ int ci_tcp_connect_lo_samestack(ci_netif *ni, ci_tcp_state *ts, oo_sp tls_id,
 
 /* c_ni is assumed to be locked on enterance and is always unlocked on
  * exit. */
-int ci_tcp_connect_lo_toconn(ci_netif *c_ni, oo_sp c_id, ci_uint32 dst,
+int ci_tcp_connect_lo_toconn(ci_netif *c_ni, oo_sp c_id, ci_addr_t dst,
                              ci_netif *l_ni, oo_sp l_id)
 {
   ci_tcp_state *ts;
@@ -1602,8 +1718,8 @@ int ci_tcp_connect_lo_toconn(ci_netif *c_ni, oo_sp c_id, ci_uint32 dst,
   /* init common tcp fields */
   ts->s.so = alien_tls->s.so;
   ts->s.cp.ip_ttl = alien_tls->s.cp.ip_ttl;
-  S_TCP_HDR(&ts->s)->tcp_source_be16 =
-      S_TCP_HDR(&alien_tls->s)->tcp_source_be16;
+  S_IPX_TCP_HDR(&ts->s)->tcp_source_be16 =
+      S_IPX_TCP_HDR(&alien_tls->s)->tcp_source_be16;
   ts->s.domain = alien_tls->s.domain;
   ts->c = alien_tls->c;
   ts->c.tcp_defer_accept = OO_TCP_DEFER_ACCEPT_OFF;
@@ -1705,9 +1821,10 @@ int ci_tcp_connect_lo_toconn(ci_netif *c_ni, oo_sp c_id, ci_uint32 dst,
     goto cleanup;
   if( alien_tls->s.b.state != CI_TCP_LISTEN ||
       (alien_tls->s.b.sb_aflags & CI_SB_AFLAG_ORPHAN) ||
-      S_TCP_HDR(&alien_tls->s)->tcp_source_be16 != TS_TCP(ts)->tcp_dest_be16 ||
-      (alien_tls->s.pkt.ip.ip_saddr_be32 != INADDR_ANY &&
-       alien_tls->s.pkt.ip.ip_saddr_be32 != ts->s.pkt.ip.ip_daddr_be32) ) {
+      S_IPX_TCP_HDR(&alien_tls->s)->tcp_source_be16 !=
+      TS_IPX_TCP(ts)->tcp_dest_be16 ||
+      (!CI_IPX_ADDR_IS_ANY(alien_tls->s.laddr) &&
+       !CI_IPX_ADDR_EQ(alien_tls->s.laddr, sock_ipx_raddr(&ts->s))) ) {
     ci_netif_unlock(l_ni);
     goto cleanup;
   }
@@ -1765,7 +1882,7 @@ int ci_tcp_reuseport_bind(ci_sock_cmn* sock, ci_fd_t fd)
                                       CITP_OPTS.cluster_size,
                                       CITP_OPTS.cluster_restart_opt,
                                       CITP_OPTS.cluster_hot_restart_opt,
-                                      sock_laddr_be32(sock), 
+                                      sock_ipx_laddr(sock), 
                                       sock_lport_be16(sock))) != 0 ) {
     errno = -rc;
     return -1;
@@ -1775,22 +1892,18 @@ int ci_tcp_reuseport_bind(ci_sock_cmn* sock, ci_fd_t fd)
 
 /* In this bind handler we just check that the address to which
  * are binding is either "any" or one of ours. 
- * In the Linux kernel version [fd] is unused.
  */
 int ci_tcp_bind(citp_socket* ep, const struct sockaddr* my_addr,
                 socklen_t addrlen, ci_fd_t fd )
 {
-  struct sockaddr_in* my_addr_in;
   ci_uint16 new_port;
-  ci_uint32 addr_be32;
+  ci_addr_t addr;
   ci_sock_cmn* s = ep->s;
   ci_tcp_state* c = &SOCK_TO_WAITABLE_OBJ(s)->tcp;
   int rc = 0;
 
   CHECK_TEP(ep);
   ci_assert(ci_netif_is_locked(ep->netif));
-
-  my_addr_in = (struct sockaddr_in*) my_addr;
 
   /* Check if state of the socket is OK for bind operation. */
   /* \todo Earlier (TS_TCP( epi->tcpep.state )->tcp_source_be16) is used.
@@ -1804,8 +1917,16 @@ int ci_tcp_bind(citp_socket* ep, const struct sockaddr* my_addr,
   if (c->tcpflags & CI_TCPT_FLAG_WAS_ESTAB)
     RET_WITH_ERRNO( EINVAL );
 
+  /* There should be address length check before address family validation to
+   * match Linux errno value set in inet6_bind(). */
+  if (s->domain == PF_INET6 && addrlen < SIN6_LEN_RFC2133)
+    RET_WITH_ERRNO( EINVAL );
+
   if( my_addr->sa_family != s->domain )
-    RET_WITH_ERRNO( s->domain == PF_INET ? EAFNOSUPPORT : EINVAL );
+    RET_WITH_ERRNO( EAFNOSUPPORT );
+
+  /* sin_port and sin6_port share tha same place in the sockaddr */
+  new_port = ((struct sockaddr_in*)my_addr)->sin_port;
 
   /* Bug 4884: Windows regularly uses addrlen > sizeof(struct sockaddr_in) 
    * Linux is also relaxed about overlength data areas. */
@@ -1813,42 +1934,44 @@ int ci_tcp_bind(citp_socket* ep, const struct sockaddr* my_addr,
     RET_WITH_ERRNO( EINVAL );
 
 #if CI_CFG_FAKE_IPV6
-  if (s->domain == PF_INET6 && addrlen < SIN6_LEN_RFC2133)
-    RET_WITH_ERRNO( EINVAL );
-
+#if ! CI_CFG_IPV6
   if( s->domain == PF_INET6 && !ci_tcp_ipv6_is_ipv4(my_addr) )
     goto handover;
+#else
+  if( s->domain == PF_INET6 && (s->s_flags & CI_SOCK_FLAG_V6ONLY) &&
+      CI_IP6_IS_V4MAPPED(&CI_SIN6(my_addr)->sin6_addr) )
+    goto handover;
+#endif
 #endif
 
   if( ((s->s_flags & CI_SOCK_FLAG_TPROXY) != 0) &&
-      (my_addr_in->sin_port == 0) ) {
+      (new_port == 0) ) {
     NI_LOG(ep->netif, USAGE_WARNINGS, "Sockets with IP_TRANSPARENT set must "
            "be explicitly bound to a port to be accelerated");
     goto handover;
   }
 
-  addr_be32 = ci_get_ip4_addr(s->domain, my_addr);
+  addr = ci_get_addr(my_addr);
 
   /* In scalable RSS mode accelerated 127.* sockets cause issues:
    *  * with SO_REUSEPORT they would fail at listen
    *  * without SO_REUSEPORT they would end up in non-rss stack degrading performance
    *    with lock contention, epoll3 and accelerated loopback */
-  if( CI_IP_IS_LOOPBACK(addr_be32) &&
+  if( CI_IPX_IS_LOOPBACK(addr) &&
       NI_OPTS(ep->netif).scalable_filter_enable != CITP_SCALABLE_FILTERS_DISABLE &&
       ((NI_OPTS(ep->netif).scalable_filter_mode &
                        (CITP_SCALABLE_MODE_PASSIVE | CITP_SCALABLE_MODE_RSS)) ==
                        (CITP_SCALABLE_MODE_PASSIVE | CITP_SCALABLE_MODE_RSS)) )
     goto handover;
 
-  if( ((s->s_flags & CI_SOCK_FLAG_TPROXY) != 0) && (addr_be32 == 0) ) {
+  if( ((s->s_flags & CI_SOCK_FLAG_TPROXY) != 0) &&
+      CI_IPX_ADDR_IS_ANY(addr) ) {
     NI_LOG(ep->netif, USAGE_WARNINGS, "Sockets with IP_TRANSPARENT set must "
            "be explicitly bound to an address to be accelerated");
     goto handover;
   }
 
   /* Using the port number provided, see if we can do this bind */
-  new_port = my_addr_in->sin_port;
-
   if( CITP_OPTS.tcp_reuseports != 0 && new_port != 0 ) {
     struct ci_port_list *force_reuseport;
     CI_DLLIST_FOR_EACH2(struct ci_port_list, force_reuseport, link,
@@ -1879,21 +2002,24 @@ int ci_tcp_bind(citp_socket* ep, const struct sockaddr* my_addr,
     }
   }
 
+#if CI_CFG_IPV6
+  if( CI_IPX_IS_LINKLOCAL(addr) &&
+      ci_sock_set_ip6_scope_id(ep->netif, s, my_addr, addrlen, 0) )
+    goto handover;
+#endif
+
   CI_LOGLEVEL_TRY_RET(LOG_TV,
-		      __ci_tcp_bind(ep->netif, ep->s, fd, addr_be32,
+		      __ci_tcp_bind(ep->netif, ep->s, fd, addr,
                                     &new_port, 1));
   ep->s->s_flags |= CI_SOCK_FLAG_BOUND;
-  sock_lport_be16(s) = new_port; 
-  sock_laddr_be32(s) = addr_be32;
-  if( CI_IP_IS_MULTICAST(addr_be32) )
-    s->cp.ip_laddr_be32 = 0;
-  else
-    s->cp.ip_laddr_be32 = addr_be32;
-  s->cp.lport_be16 = new_port;
-  sock_rport_be16(s) = sock_raddr_be32(s) = 0;
+#if CI_CFG_IPV6
+  ci_tcp_ipcache_convert(CI_ADDR_AF(addr), c);
+#endif
+  ci_sock_cmn_set_laddr(ep->s, addr, new_port);
+  ci_sock_set_raddr_port(s, addr_any, 0);
 
-  LOG_TC(log(LPF "bind to %s:%u n_p:%u lp:%u", ip_addr_str(addr_be32),
-	     (unsigned) CI_BSWAP_BE16(my_addr_in->sin_port),
+  LOG_TC(log(LPF "bind to "IPX_FMT":%u n_p:%u lp:%u", IPX_ARG(AF_IP(addr)),
+	     CI_BSWAP_BE16(((struct sockaddr_in*)my_addr)->sin_port),
 	     CI_BSWAP_BE16(new_port), CI_BSWAP_BE16(sock_lport_be16(s)))); 
 
   return 0;
@@ -1997,15 +2123,13 @@ int ci_tcp_listen(citp_socket* ep, ci_fd_t fd, int backlog)
      * a port.  As we haven't been given a hint we let the OS choose. */
 
     source_be16 = 0;
-    rc = __ci_tcp_bind(ep->netif, ep->s, fd, ts->s.pkt.ip.ip_saddr_be32,
-                       &source_be16, 0);
+    rc = __ci_tcp_bind(ep->netif, ep->s, fd, ts->s.laddr, &source_be16, 0);
     if (CI_LIKELY( rc==0 )) {
-      TS_TCP(ts)->tcp_source_be16 = source_be16;
+      TS_IPX_TCP(ts)->tcp_source_be16 = source_be16;
       ts->s.cp.lport_be16 = source_be16;
-      LOG_TC(log(LNT_FMT "listen: our bind returned %s:%u", 
-                 LNT_PRI_ARGS(ep->netif, ts),
-                 ip_addr_str(ts->s.pkt.ip.ip_saddr_be32),
-                 (unsigned) CI_BSWAP_BE16(TS_TCP(ts)->tcp_source_be16)));
+      LOG_TC(log(LNT_FMT "listen: our bind returned "IPX_FMT":%u",
+                 LNT_PRI_ARGS(ep->netif, ts), IPX_ARG(AF_IP(ts->s.laddr)),
+                 (unsigned) CI_BSWAP_BE16(TS_IPX_TCP(ts)->tcp_source_be16)));
 
     } else {
       LOG_U(ci_log("__ci_tcp_bind returned %d at %s:%d", CI_GET_ERROR(rc),
@@ -2019,7 +2143,7 @@ int ci_tcp_listen(citp_socket* ep, ci_fd_t fd, int backlog)
   ci_tcp_set_slow_state(netif, ts, CI_TCP_LISTEN);
   tls = SOCK_TO_TCP_LISTEN(&ts->s);
 
-  tcp_raddr_be32(tls) = 0u;
+  ipx_hdr_set_daddr(ipcache_af(&tls->s.pkt), &tls->s.pkt.ipx, addr_any);
   tcp_rport_be16(tls) = 0u;
 
   ci_assert_equal(tls->s.tx_errno, EPIPE);
@@ -2208,6 +2332,20 @@ int ci_tcp_shutdown(citp_socket* ep, int how, ci_fd_t fd)
 }
 
 
+void ci_tcp_get_peer_addr(ci_tcp_state* ts, struct sockaddr* name,
+                          socklen_t* namelen)
+{
+  int af = ipcache_af(&ts->s.pkt);
+  {
+    int /*bool*/ dnat = ts->s.s_flags & CI_SOCK_FLAG_DNAT;
+    ci_addr_t raddr = dnat ? ts->pre_nat.daddr_be32 : tcp_ipx_raddr(ts);
+    ci_uint16 port = dnat ? ts->pre_nat.dport_be16 :
+                            TS_IPX_TCP(ts)->tcp_dest_be16;
+    ci_addr_to_user(name, namelen, af, ts->s.domain, port,
+                    CI_IPX_ADDR_PTR(af, raddr), ts->s.cp.so_bindtodevice);
+  }
+}
+
 int ci_tcp_getpeername(citp_socket* ep, struct sockaddr* name,
 		       socklen_t* namelen)
 {
@@ -2224,10 +2362,8 @@ int ci_tcp_getpeername(citp_socket* ep, struct sockaddr* name,
     CI_SET_ERROR(rc, EFAULT);
   else {
     rc = 0;
-    if( s->b.state != CI_TCP_LISTEN ) {
-      ci_addr_to_user(name, namelen, AF_INET, s->domain, 
-                      S_TCP_HDR(s)->tcp_dest_be16, &s->pkt.ip.ip_daddr_be32);
-    }
+    if( s->b.state != CI_TCP_LISTEN )
+      ci_tcp_get_peer_addr(SOCK_TO_TCP(s), name, namelen);
   }
 
   return rc;

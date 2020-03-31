@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_SOURCE>
@@ -25,8 +12,9 @@
 \**************************************************************************/
   
 /*! \cidoxg_lib_transport_ip */
-  
+
 #include "ip_internal.h"
+#include <ci/internal/ip_timestamp.h>
 
 
 #define LPF "IP CMSG "
@@ -105,18 +93,18 @@ void ci_put_cmsg(struct cmsg_state *cmsg_state,
 #ifndef __KERNEL__
 
 /**
- * Put an IP_PKTINFO control message into msg ancillary data buffer.
+ * Put an IP_PKTINFO or IPV6_PKTINFO control message into msg ancillary data buffer.
  */
 static void ip_cmsg_recv_pktinfo(ci_netif* netif, ci_udp_state* us,
-                                 const ci_ip_pkt_fmt* pkt,
+                                 const ci_ip_pkt_fmt* pkt, int af_info,
                                  struct cmsg_state *cmsg_state)
 {
-  struct in_pktinfo info;
-  ci_uint32 addr;
+  ci_addr_t addr;
   ci_hwport_id_t hwport;
   const uint8_t* dst_mac;
+  int ifindex;
 
-  addr = oo_ip_hdr_const(pkt)->ip_daddr_be32;
+  addr = RX_PKT_DADDR(pkt);
 
   /* Set the ifindex the pkt was received at. */
   dst_mac = oo_ether_hdr_const(pkt)->ether_dhost;
@@ -124,52 +112,76 @@ static void ip_cmsg_recv_pktinfo(ci_netif* netif, ci_udp_state* us,
   /* If the last packet was the same, then we can use the caches info */
   if( pkt->intf_i == us->ip_pktinfo_cache.intf_i &&
       pkt->vlan == us->ip_pktinfo_cache.vlan &&
-      addr == us->ip_pktinfo_cache.daddr &&
+      af_info == CI_ADDR_AF(us->ip_pktinfo_cache.daddr) &&
+      CI_IPX_ADDR_EQ(addr, us->ip_pktinfo_cache.daddr) &&
       memcmp(dst_mac, us->ip_pktinfo_cache.dmac, ETH_ALEN) == 0) {
-    ci_put_cmsg(cmsg_state, IPPROTO_IP, IP_PKTINFO, sizeof(struct in_pktinfo),
-                &us->ip_pktinfo_cache.ipi);
+    if( af_info == AF_INET )
+      ci_put_cmsg(cmsg_state, IPPROTO_IP, IP_PKTINFO, sizeof(struct in_pktinfo),
+                  &us->ip_pktinfo_cache.ipx_pktinfo.ipi);
+#if CI_CFG_IPV6
+    else
+      ci_put_cmsg(cmsg_state, IPPROTO_IPV6, IPV6_PKTINFO,
+                  sizeof(struct ci_in6_pktinfo),
+                  &us->ip_pktinfo_cache.ipx_pktinfo.ipi6);
+#endif
     return;
   }
 
   if( dst_mac[0] == 1 && dst_mac[1] == 0 && dst_mac[2] == 0x5e )
     dst_mac = NULL;
   hwport = netif->state->intf_i_to_hwport[pkt->intf_i];
-  info.ipi_ifindex = oo_cp_hwport_vlan_to_ifindex(netif->cplane,
-                                                  hwport, pkt->vlan,
-                                                  dst_mac);
-  info.ipi_addr.s_addr = addr;
-  if( info.ipi_ifindex <= 0 ) {
+  ifindex = oo_cp_hwport_vlan_to_ifindex(netif->cplane,
+                                         hwport, pkt->vlan,
+                                         dst_mac);
+  if( ifindex <= 0 ) {
     LOG_E(ci_log("%s: oo_cp_hwport_vlan_to_ifindex(intf_i=%d => hwport=%d, "
                  "vlan_id=%d mac="CI_MAC_PRINTF_FORMAT" ) failed",
                  __FUNCTION__, pkt->intf_i, hwport, pkt->vlan,
                  CI_MAC_PRINTF_ARGS(oo_ether_hdr_const(pkt)->ether_dhost)));
   }
 
-  /* RFC1122: The specific-destination address is defined to be the
-   * destination address in the IP header unless the header contains a
-   * broadcast or multicast address, in which case the specific-destination
-   * is an IP address assigned to the physical interface on which the
-   * datagram arrived.
-   *
-   * Onload does not work with broadcast (?), so we check for multicast
-   * only.
-   */
-  if( CI_IP_IS_MULTICAST(oo_ip_hdr_const(pkt)->ip_daddr_be32) ) {
-    info.ipi_spec_dst.s_addr = oo_cp_ifindex_to_ip(netif->cplane,
-                                                   info.ipi_ifindex);
-  }
-  else
-    info.ipi_spec_dst.s_addr = oo_ip_hdr_const(pkt)->ip_daddr_be32;
+  if( af_info == AF_INET ) {
+    struct in_pktinfo info;
 
-  ci_put_cmsg(cmsg_state, IPPROTO_IP, IP_PKTINFO, sizeof(info), &info);
+    info.ipi_addr.s_addr = addr.ip4;
+    info.ipi_ifindex = ifindex;
+
+    /* RFC1122: The specific-destination address is defined to be the
+    * destination address in the IP header unless the header contains a
+    * broadcast or multicast address, in which case the specific-destination
+    * is an IP address assigned to the physical interface on which the
+    * datagram arrived.
+    *
+    * Onload does not work with broadcast (?), so we check for multicast
+    * only.
+    */
+    if( CI_IP_IS_MULTICAST(oo_ip_hdr_const(pkt)->ip_daddr_be32) ) {
+      info.ipi_spec_dst.s_addr = oo_cp_ifindex_to_ip(netif->cplane,
+                                                    info.ipi_ifindex);
+    }
+    else
+      info.ipi_spec_dst.s_addr = oo_ip_hdr_const(pkt)->ip_daddr_be32;
+
+    ci_put_cmsg(cmsg_state, IPPROTO_IP, IP_PKTINFO, sizeof(info), &info);
+    memcpy(&us->ip_pktinfo_cache.ipx_pktinfo.ipi, &info, sizeof(info));
+  }
+#if CI_CFG_IPV6
+  else {
+    struct ci_in6_pktinfo info;
+
+    memcpy(info.ipi6_addr.s6_addr, &addr, sizeof(info.ipi6_addr.s6_addr));
+    info.ipi6_ifindex = ifindex;
+    ci_put_cmsg(cmsg_state, IPPROTO_IPV6, IPV6_PKTINFO, sizeof(info), &info);
+    memcpy(&us->ip_pktinfo_cache.ipx_pktinfo.ipi6, &info, sizeof(info));
+  }
+#endif
 
   /* Cache the info: */
   us->ip_pktinfo_cache.intf_i = pkt->intf_i;
   us->ip_pktinfo_cache.vlan = pkt->vlan;
-  us->ip_pktinfo_cache.daddr = oo_ip_hdr_const(pkt)->ip_daddr_be32;
+  us->ip_pktinfo_cache.daddr = addr;
   memcpy(&us->ip_pktinfo_cache.dmac, oo_ether_hdr_const(pkt)->ether_dhost,
          ETH_ALEN);
-  memcpy(&us->ip_pktinfo_cache.ipi, &info, sizeof(info));
 }
 
 /**
@@ -228,33 +240,52 @@ void ip_cmsg_recv_timestampns(ci_netif *ni, ci_uint64 timestamp,
 /**
  * Put a SO_TIMESTAMPING control message into msg ancillary data buffer.
  */
-void ip_cmsg_recv_timestamping(ci_netif *ni,
-      ci_uint64 sys_timestamp, struct timespec* hw_timestamp,
-      int flags, struct cmsg_state *cmsg_state)
+void ip_cmsg_recv_timestamping(ci_netif *ni, const ci_ip_pkt_fmt *pkt,
+                               int flags, struct cmsg_state *cmsg_state)
 {
-  struct {
-    struct timespec systime;
-    struct timespec hwtimetrans;
-    struct timespec hwtimeraw;
-  } ts;
+  if( flags & ONLOAD_SOF_TIMESTAMPING_ONLOAD ) {
+    struct onload_timestamp ts[ONLOAD_TIMESTAMPING_FLAG_RX_COUNT];
+    int n = 0;
 
-  int c_flags = 0;
+    if( flags & ONLOAD_TIMESTAMPING_FLAG_RX_NIC ) {
+      ci_assert_lt(n, ONLOAD_TIMESTAMPING_FLAG_RX_COUNT);
+      ci_rx_pkt_timestamp_nic(pkt, &ts[n++]);
+    }
+    if( flags & ONLOAD_TIMESTAMPING_FLAG_RX_CPACKET ) {
+      ci_assert_lt(n, ONLOAD_TIMESTAMPING_FLAG_RX_COUNT);
+      ci_rx_pkt_timestamp_cpacket(pkt, &ts[n++]);
+    }
 
-  if( hw_timestamp->tv_sec != 0 )
-    c_flags = flags & (ONLOAD_SOF_TIMESTAMPING_RAW_HARDWARE
-                      | ONLOAD_SOF_TIMESTAMPING_SYS_HARDWARE);
-  if( sys_timestamp != 0 )
-    c_flags |= flags & ONLOAD_SOF_TIMESTAMPING_SOFTWARE;
+    ci_put_cmsg(cmsg_state, SOL_SOCKET, ONLOAD_SO_TIMESTAMPING,
+                n * sizeof(ts[0]), &ts);
+  }
+  else if( (flags & (ONLOAD_SOF_TIMESTAMPING_RAW_HARDWARE |
+                     ONLOAD_SOF_TIMESTAMPING_SYS_HARDWARE |
+                     ONLOAD_SOF_TIMESTAMPING_SOFTWARE)) ) {
+    struct {
+      struct timespec swtime;
+      struct timespec hwtimesys;
+      struct timespec hwtimeraw;
+    } ts;
 
-  memset(&ts, 0, sizeof(ts));
-  if( c_flags & ONLOAD_SOF_TIMESTAMPING_SOFTWARE )
-    ci_udp_compute_stamp(ni, sys_timestamp, &ts.systime);
-  if( c_flags & ONLOAD_SOF_TIMESTAMPING_RAW_HARDWARE )
-    ts.hwtimeraw = *hw_timestamp;
-  if( c_flags & ONLOAD_SOF_TIMESTAMPING_SYS_HARDWARE )
-    ts.hwtimetrans = *hw_timestamp;
+    memset(&ts, 0, sizeof(ts));
+    if( flags & ONLOAD_SOF_TIMESTAMPING_SOFTWARE && pkt->tstamp_frc != 0 )
+      ci_udp_compute_stamp(ni, pkt->tstamp_frc, &ts.swtime);
 
-  ci_put_cmsg(cmsg_state, SOL_SOCKET, ONLOAD_SO_TIMESTAMPING, sizeof(ts), &ts);
+    struct onload_timestamp ots;
+    struct timespec nic;
+    ci_rx_pkt_timestamp_nic(pkt, &ots);
+    onload_timestamp_to_timespec(&ots, &nic);
+
+    if( flags & ONLOAD_SOF_TIMESTAMPING_SYS_HARDWARE &&
+        nic.tv_nsec & CI_IP_PKT_HW_STAMP_FLAG_IN_SYNC )
+      ts.hwtimesys = nic;
+
+    if( flags & ONLOAD_SOF_TIMESTAMPING_RAW_HARDWARE )
+      ts.hwtimeraw = nic;
+
+    ci_put_cmsg(cmsg_state, SOL_SOCKET, ONLOAD_SO_TIMESTAMPING, sizeof(ts), &ts);
+  }
 }
 #endif
 
@@ -283,6 +314,7 @@ void ci_ip_cmsg_recv(ci_netif* ni, ci_udp_state* us, const ci_ip_pkt_fmt *pkt,
 {
   unsigned flags = us->s.cmsg_flags;
   struct cmsg_state cmsg_state;
+  int af = oo_pkt_af(pkt);
 
   cmsg_state.msg = msg;
   cmsg_state.cmsg_bytes_used = 0;
@@ -292,10 +324,20 @@ void ci_ip_cmsg_recv(ci_netif* ni, ci_udp_state* us, const ci_ip_pkt_fmt *pkt,
   if( pkt->flags & CI_PKT_FLAG_RX_INDIRECT )
     pkt = PKT_CHK_NML(ni, pkt->frag_next, netif_locked);
 
-  if (flags & CI_IP_CMSG_PKTINFO) {
+  if( (af == AF_INET) && (flags & CI_IP_CMSG_PKTINFO) ) {
     ++us->stats.n_rx_pktinfo;
-    ip_cmsg_recv_pktinfo(ni, us, pkt, &cmsg_state);
+    ip_cmsg_recv_pktinfo(ni, us, pkt, af, &cmsg_state);
   }
+#if CI_CFG_IPV6
+  /* If IPv6 socket with both enabled IP_PKTINFO and IPV6_RECVPKTINFO options
+   * receives IPv4 packet, it returns both control messages. The in6_pktinfo
+   * message contains IPv4-mapped IPv6 address.
+   */
+  if( flags & CI_IPV6_CMSG_PKTINFO ) {
+    ++us->stats.n_rx_pktinfo;
+    ip_cmsg_recv_pktinfo(ni, us, pkt, AF_INET6, &cmsg_state);
+  }
+#endif
 
   if (flags & CI_IP_CMSG_TTL)
     ip_cmsg_recv_ttl(pkt, &cmsg_state);
@@ -310,20 +352,8 @@ void ci_ip_cmsg_recv(ci_netif* ni, ci_udp_state* us, const ci_ip_pkt_fmt *pkt,
       ip_cmsg_recv_timestamp(ni, pkt->tstamp_frc, &cmsg_state);
 
 #if CI_CFG_TIMESTAMPING
-  if( flags & CI_IP_CMSG_TIMESTAMPING ) {
-    int flags = us->s.timestamping_flags;
-    if( flags & (ONLOAD_SOF_TIMESTAMPING_RAW_HARDWARE
-                | ONLOAD_SOF_TIMESTAMPING_SYS_HARDWARE
-                | ONLOAD_SOF_TIMESTAMPING_SOFTWARE) ) {
-      struct timespec rx_hw_stamp;
-      rx_hw_stamp.tv_sec = pkt->pf.udp.rx_hw_stamp.tv_sec;
-      rx_hw_stamp.tv_nsec = pkt->pf.udp.rx_hw_stamp.tv_nsec;
-      if( ! (rx_hw_stamp.tv_nsec & CI_IP_PKT_HW_STAMP_FLAG_IN_SYNC) )
-          flags &= ~ONLOAD_SOF_TIMESTAMPING_SYS_HARDWARE;
-      ip_cmsg_recv_timestamping(ni, pkt->tstamp_frc, &rx_hw_stamp,
-                                flags, &cmsg_state);
-    }
-  }
+  if( flags & CI_IP_CMSG_TIMESTAMPING )
+    ip_cmsg_recv_timestamping(ni, pkt, us->s.timestamping_flags, &cmsg_state);
 #endif
 
   ci_ip_cmsg_finish(&cmsg_state);

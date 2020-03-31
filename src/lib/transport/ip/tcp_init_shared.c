@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /************************************************************************** \
 *//*! \file
 ** <L5_PRIVATE L5_SOURCE>
@@ -115,11 +102,13 @@ static void ci_tcp_state_tcb_init_fixed(ci_netif* netif, ci_tcp_state* ts,
   ts->c.t_ka_intvl_in_secs = NI_OPTS(netif).keepalive_intvl / 1000;
 
   /* Initialise packet header and flow control state. */
-  ci_ip_hdr_init_fixed(&ts->s.pkt.ip, IPPROTO_TCP,
+  ci_ipx_hdr_init_fixed(&ts->s.pkt.ipx, AF_INET, IPPROTO_TCP,
                        CI_IP_DFLT_TTL, CI_IP_DFLT_TOS);
 
-  sock_laddr_be32(&(ts->s)) = 0;
-  TS_TCP(ts)->tcp_source_be16 = 0;
+  ts->pmtus = OO_PP_NULL;
+
+  ts->s.laddr = ip4_addr_any;
+  TS_IPX_TCP(ts)->tcp_source_be16 = 0;
 #if CI_CFG_FD_CACHING
   /* If this is being initialised from the cache we need to preserve the cache
    * details.
@@ -135,11 +124,11 @@ static void ci_tcp_state_tcb_init_fixed(ci_netif* netif, ci_tcp_state* ts,
    * since it's used to determine TCP or UDP file operations should be
    * attached to the file descriptor in kernel.
    */
-  ts->s.pkt.ip.ip_ihl_version = CI_IP4_IHL_VERSION(sizeof(ci_ip4_hdr));
-  ts->s.pkt.ip.ip_protocol = IPPROTO_TCP;
-  ts->s.pkt.ip.ip_check_be16 = 0;
-  ts->s.pkt.ip.ip_id_be16 = 0;
-  TS_TCP(ts)->tcp_check_be16 = 0;
+  ts->s.pkt.ipx.ip4.ip_ihl_version = CI_IP4_IHL_VERSION(sizeof(ci_ip4_hdr));
+  ts->s.pkt.ipx.ip4.ip_protocol = IPPROTO_TCP;
+  ts->s.pkt.ipx.ip4.ip_check_be16 = 0;
+  ts->s.pkt.ipx.ip4.ip_id_be16 = 0;
+  TS_IPX_TCP(ts)->tcp_check_be16 = 0;
 }
 
 void ci_tcp_state_tcb_reinit_minimal(ci_netif* netif, ci_tcp_state* ts)
@@ -207,7 +196,7 @@ static void ci_tcp_state_tcb_reinit(ci_netif* netif, ci_tcp_state* ts,
   ci_tcp_state_connected_opts_init(netif, ts);
 
   /* Initialise packet header and flow control state. */
-  TS_TCP(ts)->tcp_urg_ptr_be16 = 0;
+  TS_IPX_TCP(ts)->tcp_urg_ptr_be16 = 0;
   tcp_enq_nxt(ts) = tcp_snd_una(ts) = tcp_snd_nxt(ts) = tcp_snd_up(ts) = 0;
   ts->snd_delegated = 0;
   ts->snd_max = tcp_snd_nxt(ts) + 1;
@@ -225,9 +214,9 @@ static void ci_tcp_state_tcb_reinit(ci_netif* netif, ci_tcp_state* ts,
   tcp_rcv_up(ts) = SEQ_SUB(tcp_rcv_nxt(ts), 1);
 
   /* setup header length */
-  CI_TCP_HDR_SET_LEN(TS_TCP(ts),
+  CI_TCP_HDR_SET_LEN(TS_IPX_TCP(ts),
                      (ts->outgoing_hdrs_len - sizeof(ci_ip4_hdr)));
-  TS_TCP(ts)->tcp_flags = 0u;
+  TS_IPX_TCP(ts)->tcp_flags = 0u;
 
 
 #if CI_CFG_BURST_CONTROL
@@ -243,6 +232,8 @@ static void ci_tcp_state_tcb_reinit(ci_netif* netif, ci_tcp_state* ts,
 #endif
   ts->t_last_recv_ack = ts->t_last_recv_payload = ts->t_prev_recv_payload = 
     ci_tcp_time_now(netif);
+  ts->t_last_invalid_ack = ci_tcp_time_now(netif) -
+                           NI_CONF(netif).tconst_invalid_ack_ratelimit;
 
   /* TCP_MAXSEG */
   ts->c.user_mss = 0;
@@ -267,7 +258,8 @@ static void ci_tcp_state_tcb_reinit(ci_netif* netif, ci_tcp_state* ts,
 
 
   memset(&ts->stats, 0, sizeof(ts->stats));
-  ci_tcp_metrics_init(ts);
+
+  ci_assert(OO_PP_IS_NULL(ts->pmtus));
 
   /* ts is in valid state now */
   ci_wmb();
@@ -277,7 +269,7 @@ static void ci_tcp_state_tcb_reinit(ci_netif* netif, ci_tcp_state* ts,
 
 void ci_tcp_state_init(ci_netif* netif, ci_tcp_state* ts, int from_cache)
 {
-  ci_assert(CI_PTR_OFFSET(&ts->s.pkt.ip, 4) == 0);
+  ci_assert(CI_PTR_OFFSET(&ts->s.pkt.ipx.ip4, 4) == 0);
   LOG_TV(ci_log(LPF "%s(): %d", __FUNCTION__, S_FMT(ts)));
 
 #if defined(TCP_STATE_POISON) && !defined(NDEBUG)
@@ -291,7 +283,6 @@ void ci_tcp_state_init(ci_netif* netif, ci_tcp_state* ts, int from_cache)
 
   /* Initialise the lower level. */
   ci_sock_cmn_init(netif, &ts->s, !from_cache);
-  ci_pmtu_state_init(netif, &ts->s, &ts->pmtus, CI_IP_TIMER_PMTU_DISCOVER);
 #if CI_CFG_TIMESTAMPING
   ci_udp_recv_q_init(&ts->timestamp_q);
 #endif
@@ -303,7 +294,7 @@ void ci_tcp_state_init(ci_netif* netif, ci_tcp_state* ts, int from_cache)
 
 void ci_tcp_state_reinit(ci_netif* netif, ci_tcp_state* ts)
 {
-  ci_assert(CI_PTR_OFFSET(&ts->s.pkt.ip, 4) == 0);
+  ci_assert(CI_PTR_OFFSET(&ts->s.pkt.ipx.ip4, 4) == 0);
   LOG_TV(ci_log(LPF "%s(): %d", __FUNCTION__, S_FMT(ts)));
 
   /* When we have not finished it, the state in not valid and should not be
@@ -316,7 +307,6 @@ void ci_tcp_state_reinit(ci_netif* netif, ci_tcp_state* ts)
 
   /* Reinitialise the lower level. */
   ci_sock_cmn_reinit(netif, &ts->s);
-  ci_pmtu_state_reinit(netif, &ts->s, &ts->pmtus);
 #if CI_CFG_TIMESTAMPING
   ci_udp_recv_q_init(&ts->timestamp_q);
 #endif
@@ -440,18 +430,18 @@ void ci_ni_aux_more_bufs(ci_netif* ni)
   wo->header.state = CI_TCP_STATE_AUXBUF;
   sp = oo_sockp_to_statep(ni, W_SP(&wo->waitable));
   ci_assert_equal(CI_MEMBER_OFFSET(ci_ni_aux_mem, link), 0);
+  OO_P_ADD(sp, CI_AUX_HEADER_SIZE);
 
-  for( aux = (void *)((ci_uintptr_t)wo + CI_AUX_MEM_SIZE), i = 1;
-       (ci_uintptr_t)(wo+1) > (ci_uintptr_t)aux;
+  for( aux = (void *)((ci_uintptr_t)wo + CI_AUX_HEADER_SIZE), i = 1;
+       (ci_uintptr_t)(wo+1) >= (ci_uintptr_t)(aux+1);
        aux++, i++ ) {
-    OO_P_ADD(sp, CI_AUX_MEM_SIZE);
     ci_ni_dllist_link_init(ni, &aux->link, sp, "faux");
-    aux->no = i;
     /* We could call ci_ni_aux_free() here, but we already have correct sp
      * to use. */
     aux->link.next = ni->state->free_aux_mem;
     ni->state->free_aux_mem = sp;
     ni->state->n_free_aux_bufs++;
+    OO_P_ADD(sp, CI_AUX_MEM_SIZE);
   }
 }
 

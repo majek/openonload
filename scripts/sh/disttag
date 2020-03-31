@@ -1,9 +1,8 @@
 # -*- Mode: shell-script; -*- 
-######################################################################
-#   Copyright: 2005 Level 5 Networks Inc.
-#      Author: David Riddoch
-# Description: "Get distribution tag" function
-######################################################################
+# SPDX-License-Identifier: GPL-2.0
+# X-SPDX-Copyright-Text: (c) Solarflare Communications Inc
+
+# "Get distribution tag" function
 
 err  () { echo >&2 "$*";    }
 log  () { err "$p: $*";    }
@@ -32,9 +31,7 @@ sfc_disttag() {
         /Fedora release/ { printf "FC%s\n", $3; exit }
 	/Red Hat Enterprise Linux release/ { printf "RHEL%s\n", substr($6, 1, 1); exit }
 	/Red Hat Enterprise Linux (WS|Server|Client|Workstation)/ { printf "RHEL%s\n", substr($7, 1, 1); exit }
-        /CentOS release 5/ { printf "RHEL5\n"; exit }
-	/CentOS release 4/ { printf "RHEL4\n"; exit }
-	/CentOS release 3/ { printf "RHEL3\n"; exit }
+        /CentOS release / { printf "RHEL%s\n", substr($3, 1, 1); exit }
 	' /etc/redhat-release
   elif [ -f /etc/SuSE-release ]; then
     awk '
@@ -50,7 +47,7 @@ sfc_disttag() {
 	/Scyld Beowulf release/ { printf "SCYLD%s\n", $4; exit }
 	' /etc/scyld-release
   elif [ -f /etc/debian_version ]; then
-    echo "Debian"`cat /etc/debian_version`
+    echo "Debian"$(cat /etc/debian_version | tr "/" _ )
   elif [ "$OS" = Windows_NT ]; then
     echo "Windows_NT"
   elif [ "$(uname -s)" = "SunOS" ]; then

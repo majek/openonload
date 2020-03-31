@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /* Changes to the CI_CFG_* options needed to support the L3XUDP and
  * related features with diagnostics
  */
@@ -20,14 +7,27 @@
 #ifndef __CI_INTERNAL_TRANSPORT_CONFIG_OPT_L3XUDP_H__
 #define __CI_INTERNAL_TRANSPORT_CONFIG_OPT_L3XUDP_H__
 
-/* This build profile is based on the 'l3xudp-nodiag' profile
+/* Use default values for the most of options: */
+#include <ci/internal/transport_config_opt_extra.h>
+
+/* Enable IPv6 */
+#undef CI_CFG_IPV6
+#define CI_CFG_IPV6 1
+
+/* Support for custom overlay encapsulation.  See task69716.
  */
-#include <ci/internal/transport_config_opt_l3xudp-nodiag.h>
+#undef CI_CFG_L3XUDP
+#define CI_CFG_L3XUDP                     1
 
 
-/* Turn on TCP metrics */
-#undef CI_CFG_TCP_METRICS
-#define CI_CFG_TCP_METRICS 1
+
+/* TCP TOA option support, default to off */
+#undef CI_CFG_TCP_TOA
+#define CI_CFG_TCP_TOA 1
+
+/* Decluster on unpostponed signal (task79148). */
+#undef CI_CFG_DECLUSTER
+#define CI_CFG_DECLUSTER 1
 
 
 #endif /* __CI_INTERNAL_TRANSPORT_CONFIG_OPT_L3XUDP_H__ */

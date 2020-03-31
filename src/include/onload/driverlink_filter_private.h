@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_HEADER >
@@ -41,9 +28,9 @@
 typedef struct efx_dlfilt_entry_s {
   int       thr_id;     /*!< TCP helper res. ID from char driver 
 			* (-1 if unknown) */
-  ci_uint32 raddr_be32;
+  ci_addr_t raddr;
+  ci_addr_t laddr;
   ci_uint16 rport_be16;
-  ci_uint32 laddr_be32;
   ci_uint16 lport_be16;
   ci_uint16 state;
 #define EFAB_DLFILT_INUSE      0x0000

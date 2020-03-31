@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_SOURCE>
@@ -137,103 +124,30 @@ ci_netif_stats_report_text(ci_netif *netif, char *buf, int count)
 #endif  
 
   /* IP statistics */
-  __TEXT_NETIF_COUNT_LOG("In_recvs:", ipv4,
+  __TEXT_NETIF_COUNT_LOG("In_recvs:", ip,
                          in_recvs);
-  __TEXT_NETIF_COUNT_LOG("In_hdr_errs:", ipv4,
+  __TEXT_NETIF_COUNT_LOG("In_hdr_errs:", ip,
                          in_hdr_errs);
-  __TEXT_NETIF_COUNT_LOG("In_addr_errs:", ipv4,
-                         in_addr_errs);
-  __TEXT_NETIF_COUNT_LOG("Forw_dgrams:", ipv4,
-                         forw_dgrams);
-  __TEXT_NETIF_COUNT_LOG("In_unknown_protos:", ipv4,
-                         in_unknown_protos);
-  __TEXT_NETIF_COUNT_LOG("In_discards:", ipv4,
+  __TEXT_NETIF_COUNT_LOG("In_discards:", ip,
                          in_discards);
-  __TEXT_NETIF_COUNT_LOG("In_delivers:", ipv4,
+  __TEXT_NETIF_COUNT_LOG("In_delivers:", ip,
                          in_delivers);
-  __TEXT_NETIF_COUNT_LOG("Out_requests:", ipv4,
-                         out_requests);
-  __TEXT_NETIF_COUNT_LOG("Out_discards:", ipv4,
-                         out_discards);
-  __TEXT_NETIF_COUNT_LOG("Out_no_routes:", ipv4,
-                         out_no_routes);
-  __TEXT_NETIF_COUNT_LOG("Reasm_timeout:", ipv4,
-                         reasm_timeout);
-  __TEXT_NETIF_COUNT_LOG("Reasm_reqds:", ipv4,
-                         reasm_reqds);
-  __TEXT_NETIF_COUNT_LOG("Reasm_oks:", ipv4,
-                         reasm_oks);
-  __TEXT_NETIF_COUNT_LOG("Reasm_fails:", ipv4,
-                         reasm_fails);
-  __TEXT_NETIF_COUNT_LOG("Frag_oks:", ipv4,
-                         frag_oks);
-  __TEXT_NETIF_COUNT_LOG("Frag_fails:", ipv4,
-                         frag_fails);
-  __TEXT_NETIF_COUNT_LOG("Frag_creates:", ipv4,
-                         frag_creates);
-
-  /* ICMP statistics */
-  __TEXT_NETIF_COUNT_LOG("Icmp_in_msgs:", icmp,
-                         icmp_in_msgs);
-  __TEXT_NETIF_COUNT_LOG("Icmp_in_errs:", icmp,
-                         icmp_in_errs);
-  __TEXT_NETIF_COUNT_LOG("Icmp_in_dest_unreachs:", icmp,
-                         icmp_in_dest_unreachs);
-  __TEXT_NETIF_COUNT_LOG("Icmp_in_time_excds:", icmp,
-                         icmp_in_time_excds);
-  __TEXT_NETIF_COUNT_LOG("Icmp_in_parm_probs:", icmp,
-                         icmp_in_parm_probs);
-  __TEXT_NETIF_COUNT_LOG("Icmp_in_src_quenchs:", icmp,
-                         icmp_in_src_quenchs);
-  __TEXT_NETIF_COUNT_LOG("Icmp_in_redirects:", icmp,
-                         icmp_in_redirects);
-  __TEXT_NETIF_COUNT_LOG("Icmp_in_echos:", icmp,
-                         icmp_in_echos);
-  __TEXT_NETIF_COUNT_LOG("Icmp_in_echo_reps:", icmp,
-                         icmp_in_echo_reps);
-  __TEXT_NETIF_COUNT_LOG("Icmp_in_timestamps:", icmp,
-                         icmp_in_timestamps);
-  __TEXT_NETIF_COUNT_LOG("Icmp_in_timestamp_reps:", icmp,
-                         icmp_in_timestamp_reps);
-  __TEXT_NETIF_COUNT_LOG("Icmp_in_addr_masks:", icmp,
-                         icmp_in_addr_masks);
-  __TEXT_NETIF_COUNT_LOG("Icmp_in_addr_mask_reps:", icmp,
-                         icmp_in_addr_mask_reps);
-
-  __TEXT_NETIF_COUNT_LOG("Icmp_out_msgs:", icmp,
-                         icmp_out_msgs);
-  __TEXT_NETIF_COUNT_LOG("Icmp_out_errs:", icmp,
-                         icmp_out_errs);
-  __TEXT_NETIF_COUNT_LOG("Icmp_out_dest_unreachs:", icmp,
-                         icmp_out_dest_unreachs);
-  __TEXT_NETIF_COUNT_LOG("Icmp_out_time_excds:", icmp,
-                         icmp_out_time_excds);
-  __TEXT_NETIF_COUNT_LOG("Icmp_out_parm_probs:", icmp,
-                         icmp_out_parm_probs);
-  __TEXT_NETIF_COUNT_LOG("Icmp_out_src_quenchs:", icmp,
-                         icmp_out_src_quenchs);
-  __TEXT_NETIF_COUNT_LOG("Icmp_out_redirects:", icmp,
-                         icmp_out_redirects);
-  __TEXT_NETIF_COUNT_LOG("Icmp_out_echos:", icmp,
-                         icmp_out_echos);
-  __TEXT_NETIF_COUNT_LOG("Icmp_out_echo_reps:", icmp,
-                         icmp_out_echo_reps);
-  __TEXT_NETIF_COUNT_LOG("Icmp_out_timestamps:", icmp,
-                         icmp_out_timestamps);
-  __TEXT_NETIF_COUNT_LOG("Icmp_out_timestamp_reps:", icmp,
-                         icmp_out_timestamp_reps);
-  __TEXT_NETIF_COUNT_LOG("Icmp_out_addr_masks:", icmp,
-                         icmp_out_addr_masks);
-  __TEXT_NETIF_COUNT_LOG("Icmp_out_addr_mask_reps:", icmp,
-                         icmp_out_addr_mask_reps);
+#if CI_CFG_IPV6
+  __TEXT_NETIF_COUNT_LOG("In6_recvs:", ip,
+                         in6_recvs);
+  __TEXT_NETIF_COUNT_LOG("In6_hdr_errs:", ip,
+                         in6_hdr_errs);
+  __TEXT_NETIF_COUNT_LOG("In6_discards:", ip,
+                         in6_discards);
+  __TEXT_NETIF_COUNT_LOG("In6_delivers:", ip,
+                         in6_delivers);
+#endif
 
   /* TCP statistics */
   __TEXT_NETIF_COUNT_LOG("Tcp_active_opens:", tcp,
                          tcp_active_opens);
   __TEXT_NETIF_COUNT_LOG("Tcp_passive_opens:", tcp,
                          tcp_passive_opens);
-  __TEXT_NETIF_COUNT_LOG("Tcp_attempt_fails:", tcp,
-                         tcp_attempt_fails);
   __TEXT_NETIF_COUNT_LOG("Tcp_estab_resets:", tcp,
                          tcp_estab_resets);
   __TEXT_NETIF_COUNT_LOG("Tcp_curr_estab:", tcp,
@@ -244,8 +158,6 @@ ci_netif_stats_report_text(ci_netif *netif, char *buf, int count)
                          tcp_out_segs);
   __TEXT_NETIF_COUNT_LOG("Tcp_retran_segs:", tcp,
                          tcp_retran_segs);
-  __TEXT_NETIF_COUNT_LOG("Tcp_in_errs:", tcp,
-                         tcp_in_errs);
   __TEXT_NETIF_COUNT_LOG("Tcp_out_rsts:", tcp,
                          tcp_out_rsts);
   /* UDP statistics */
@@ -467,103 +379,30 @@ ci_netif_stats_report_xml(ci_netif* netif, char *buf, int count)
   __XML_NETIF_LOG( __XML_NETIF_DATASTART_FMT, __XML_NETIF_DATASTART(netif));
 
   /* IP statistics */
-  __XML_NETIF_COUNT_LOG("In_recvs:", ipv4,
+  __XML_NETIF_COUNT_LOG("In_recvs:", ip,
                             in_recvs);
-  __XML_NETIF_COUNT_LOG("In_hdr_errs:", ipv4,
+  __XML_NETIF_COUNT_LOG("In_hdr_errs:", ip,
                             in_hdr_errs);
-  __XML_NETIF_COUNT_LOG("In_addr_errs:", ipv4,
-                            in_addr_errs);
-  __XML_NETIF_COUNT_LOG("Forw_dgrams:", ipv4,
-                            forw_dgrams);
-  __XML_NETIF_COUNT_LOG("In_unknown_protos:", ipv4,
-                            in_unknown_protos);
-  __XML_NETIF_COUNT_LOG("In_discards:", ipv4,
+  __XML_NETIF_COUNT_LOG("In_discards:", ip,
                             in_discards);
-  __XML_NETIF_COUNT_LOG("In_delivers:", ipv4,
+  __XML_NETIF_COUNT_LOG("In_delivers:", ip,
                             in_delivers);
-  __XML_NETIF_COUNT_LOG("Out_requests:", ipv4,
-                            out_requests);
-  __XML_NETIF_COUNT_LOG("Out_discards:", ipv4,
-                            out_discards);
-  __XML_NETIF_COUNT_LOG("Out_no_routes:", ipv4,
-                            out_no_routes);
-  __XML_NETIF_COUNT_LOG("Reasm_timeout:", ipv4,
-                            reasm_timeout);
-  __XML_NETIF_COUNT_LOG("Reasm_reqds:", ipv4,
-                            reasm_reqds);
-  __XML_NETIF_COUNT_LOG("Reasm_oks:", ipv4,
-                            reasm_oks);
-  __XML_NETIF_COUNT_LOG("Reasm_fails:", ipv4,
-                            reasm_fails);
-  __XML_NETIF_COUNT_LOG("Frag_oks:", ipv4,
-                            frag_oks);
-  __XML_NETIF_COUNT_LOG("Frag_fails:", ipv4,
-                            frag_fails);
-  __XML_NETIF_COUNT_LOG("Frag_creates:", ipv4,
-                            frag_creates);
-
-  /* ICMP statistics */
-  __XML_NETIF_COUNT_LOG("Icmp_in_msgs:", icmp,
-                            icmp_in_msgs);
-  __XML_NETIF_COUNT_LOG("Icmp_in_errs:", icmp,
-                            icmp_in_errs);
-  __XML_NETIF_COUNT_LOG("Icmp_in_dest_unreachs:", icmp,
-                            icmp_in_dest_unreachs);
-  __XML_NETIF_COUNT_LOG("Icmp_in_time_excds:", icmp,
-                            icmp_in_time_excds);
-  __XML_NETIF_COUNT_LOG("Icmp_in_parm_probs:", icmp,
-                            icmp_in_parm_probs);
-  __XML_NETIF_COUNT_LOG("Icmp_in_src_quenchs:", icmp,
-                            icmp_in_src_quenchs);
-  __XML_NETIF_COUNT_LOG("Icmp_in_redirects:", icmp,
-                            icmp_in_redirects);
-  __XML_NETIF_COUNT_LOG("Icmp_in_echos:", icmp,
-                            icmp_in_echos);
-  __XML_NETIF_COUNT_LOG("Icmp_in_echo_reps:", icmp,
-                            icmp_in_echo_reps);
-  __XML_NETIF_COUNT_LOG("Icmp_in_timestamps:", icmp,
-                            icmp_in_timestamps);
-  __XML_NETIF_COUNT_LOG("Icmp_in_timestamp_reps:", icmp,
-                            icmp_in_timestamp_reps);
-  __XML_NETIF_COUNT_LOG("Icmp_in_addr_masks:", icmp,
-                            icmp_in_addr_masks);
-  __XML_NETIF_COUNT_LOG("Icmp_in_addr_mask_reps:", icmp,
-                            icmp_in_addr_mask_reps);
-
-  __XML_NETIF_COUNT_LOG("Icmp_out_msgs:", icmp,
-                            icmp_out_msgs);
-  __XML_NETIF_COUNT_LOG("Icmp_out_errs:", icmp,
-                            icmp_out_errs);
-  __XML_NETIF_COUNT_LOG("Icmp_out_dest_unreachs:", icmp,
-                            icmp_out_dest_unreachs);
-  __XML_NETIF_COUNT_LOG("Icmp_out_time_excds:", icmp,
-                            icmp_out_time_excds);
-  __XML_NETIF_COUNT_LOG("Icmp_out_parm_probs:", icmp,
-                            icmp_out_parm_probs);
-  __XML_NETIF_COUNT_LOG("Icmp_out_src_quenchs:", icmp,
-                            icmp_out_src_quenchs);
-  __XML_NETIF_COUNT_LOG("Icmp_out_redirects:", icmp,
-                            icmp_out_redirects);
-  __XML_NETIF_COUNT_LOG("Icmp_out_echos:", icmp,
-                            icmp_out_echos);
-  __XML_NETIF_COUNT_LOG("Icmp_out_echo_reps:", icmp,
-                            icmp_out_echo_reps);
-  __XML_NETIF_COUNT_LOG("Icmp_out_timestamps:", icmp,
-                            icmp_out_timestamps);
-  __XML_NETIF_COUNT_LOG("Icmp_out_timestamp_reps:", icmp,
-                            icmp_out_timestamp_reps);
-  __XML_NETIF_COUNT_LOG("Icmp_out_addr_masks:", icmp,
-                            icmp_out_addr_masks);
-  __XML_NETIF_COUNT_LOG("Icmp_out_addr_mask_reps:", icmp,
-                            icmp_out_addr_mask_reps);
+#if CI_CFG_IPV6
+  __XML_NETIF_COUNT_LOG("In6_recvs:", ip,
+                            in6_recvs);
+  __XML_NETIF_COUNT_LOG("In6_hdr_errs:", ip,
+                            in6_hdr_errs);
+  __XML_NETIF_COUNT_LOG("In6_discards:", ip,
+                            in6_discards);
+  __XML_NETIF_COUNT_LOG("In6_delivers:", ip,
+                            in6_delivers);
+#endif
 
   /* TCP statistics */
   __XML_NETIF_COUNT_LOG("Tcp_active_opens:", tcp,
                             tcp_active_opens);
   __XML_NETIF_COUNT_LOG("Tcp_passive_opens:", tcp,
                             tcp_passive_opens);
-  __XML_NETIF_COUNT_LOG("Tcp_attempt_fails:", tcp,
-                            tcp_attempt_fails);
   __XML_NETIF_COUNT_LOG("Tcp_estab_resets:", tcp,
                             tcp_estab_resets);
   __XML_NETIF_COUNT_LOG("Tcp_curr_estab:", tcp,
@@ -574,8 +413,6 @@ ci_netif_stats_report_xml(ci_netif* netif, char *buf, int count)
                             tcp_out_segs);
   __XML_NETIF_COUNT_LOG("Tcp_retran_segs:", tcp,
                             tcp_retran_segs);
-  __XML_NETIF_COUNT_LOG("Tcp_in_errs:", tcp,
-                            tcp_in_errs);
   __XML_NETIF_COUNT_LOG("Tcp_out_rsts:", tcp,
                             tcp_out_rsts);
   

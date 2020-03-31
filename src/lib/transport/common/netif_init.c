@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file netif_init.c
 ** <L5_PRIVATE L5_SOURCE>
@@ -29,6 +16,7 @@
 #include <ci/internal/ip.h>
 #include <ci/internal/transport_config_opt.h>
 #include <ci/internal/transport_common.h>
+#include <ci/internal/banner.h>
 
 /* This breaks the "common" code separation by including stuff from
  * unix directly with no windows equivalent implemented */
@@ -213,8 +201,7 @@ int citp_netif_by_id(ci_uint32 stack_id, ci_netif** out_ni, int locked)
   if( ! locked )
     CITP_FDTABLE_UNLOCK();
 
-  ci_log("Importing "ONLOAD_PRODUCT" "ONLOAD_VERSION" "ONLOAD_COPYRIGHT
-         " [%s]", ni->state->pretty_name);
+  ci_netif_log_startup_banner(ni, "Importing", /* check_expiry*/ 0);
 
   *out_ni = ni;
   return 0;

@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_SOURCE>
@@ -43,10 +30,10 @@
 static void ci_udp_hdrs_init(ci_ip_cached_hdrs* ipcache)
 {
   /* Caller should already have done ci_ip_cache_init(). */
-  ci_ip_hdr_init_fixed(&ipcache->ip, IPPROTO_UDP,
-                       CI_IP_DFLT_TTL, CI_IP_DFLT_TOS);
-  ipcache->ip.ip_saddr_be32 = 0;
-  ipcache->ip.ip_daddr_be32 = 0;
+  ci_ipx_hdr_init_fixed(&ipcache->ipx, ipcache_af(ipcache),
+                        IPPROTO_UDP, CI_IP_DFLT_TTL, CI_IP_DFLT_TOS);
+  ipcache->ipx.ip4.ip_saddr_be32 = 0;
+  ipcache->ipx.ip4.ip_daddr_be32 = 0;
 }
 
 
@@ -81,8 +68,9 @@ static void ci_udp_state_init(ci_netif* netif, ci_udp_state* us)
   us->s.so.rcvbuf = NI_OPTS(netif).udp_rcvbuf_def;
 
   /* Init the ip-caches (packet header templates). */
+  us->s.laddr = ip4_addr_any;
   ci_udp_hdrs_init(&us->s.pkt);
-  ci_ip_cache_init(&us->ephemeral_pkt);
+  ci_ip_cache_init(&us->ephemeral_pkt, AF_INET);
   ci_udp_hdrs_init(&us->ephemeral_pkt);
   udp_lport_be16(us) = 0;
   udp_rport_be16(us) = 0;
@@ -167,6 +155,11 @@ ci_fd_t ci_udp_ep_ctor(citp_socket* ep, ci_netif* netif, int domain, int type)
   us->s.tx_errno = 0;
   us->s.so_error = 0;
   us->s.cp.sock_cp_flags |= OO_SCP_UDP_WILD;
+#if CI_CFG_IPV6
+  ci_assert(CI_IPX_ADDR_EQ(us->s.laddr, ip4_addr_any));
+  if( domain == AF_INET6 )
+    us->s.laddr = addr_any;
+#endif
 
   ep->s = &us->s;
   ep->netif = netif;
@@ -176,36 +169,6 @@ ci_fd_t ci_udp_ep_ctor(citp_socket* ep, ci_netif* netif, int domain, int type)
 }
 #endif
 
-
-void ci_udp_set_laddr(citp_socket* ep, ci_addr_t addr, int lport_be16)
-{
-  ci_udp_state* us = SOCK_TO_UDP(ep->s);
-
-  ci_sock_set_laddr(&us->s, addr, lport_be16);
-#if CI_CFG_IPV6
-  if( ipcache_is_ipv6(us->s.pkt) )
-    return;
-#endif
-  if( CI_IP_IS_MULTICAST(addr.ip4) )
-    us->s.cp.ip_laddr_be32 = 0;
-  else
-    us->s.cp.ip_laddr_be32 = addr.ip4;
-  us->s.cp.lport_be16 = lport_be16;
-}
-
-
-/* Get the IP TOS */
-ci_uint8 ci_udp_get_tos( ci_udp_state* us )
-{
-  return UDP_IP_HDR(us)->ip_tos;
-}
-
-/* Set the IP TOS */
-void ci_udp_set_tos( ci_udp_state* us, ci_uint32 tos )
-{
-  ci_ip_hdr_init_fixed(UDP_IP_HDR(us), IPPROTO_UDP, UDP_IP_HDR(us)->ip_ttl,
-		       CI_MIN(tos, CI_IP_MAX_TOS));
-}
 
 #endif	/* #ifndef __KERNEL__ */
 
@@ -282,7 +245,7 @@ void ci_udp_state_dump(ci_netif* ni, ci_udp_state* us, const char* pf,
   (void) tx_total;
 
 #if CI_CFG_TIMESTAMPING
-  if( us->s.timestamping_flags & ONLOAD_SOF_TIMESTAMPING_TX_HARDWARE )
+  if( onload_timestamping_want_tx_nic(us->s.timestamping_flags) )
     ci_udp_recvq_dump(ni, &us->timestamp_q, pf, "  TX timestamping queue:",
                       logger, log_arg);
 #endif
@@ -333,9 +296,9 @@ void ci_udp_state_dump(ci_netif* ni, ci_udp_state* us, const char* pf,
          OOFA_IPCACHE_STATE(ni, ipcache));
   logger(log_arg, "%s  snd: TO "OOF_IPCACHE_DETAIL, pf,
          OOFA_IPCACHE_DETAIL(ipcache));
-  logger(log_arg, "%s  snd: TO "OOF_IP4PORT" => "OOF_IP4PORT, pf,
-         OOFA_IP4PORT(ipcache->ip_saddr.ip4, udp_lport_be16(us)),
-         OOFA_IP4PORT(ipcache->ip.ip_daddr_be32, ipcache->dport_be16));
+  logger(log_arg, "%s  snd: TO "OOF_IPXPORT" => "OOF_IPXPORT, pf,
+         OOFA_IPXPORT(ipcache_laddr(ipcache), udp_lport_be16(us)),
+         OOFA_IPXPORT(ipcache_raddr(ipcache), ipcache->dport_be16));
    
   /* State relating to connected sends. */
   ipcache = &us->s.pkt;

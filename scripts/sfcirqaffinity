@@ -1,8 +1,8 @@
 #!/usr/bin/env python2
-######################################################################
+# SPDX-License-Identifier: GPL-2.0
+# X-SPDX-Copyright-Text: (c) Solarflare Communications Inc
+
 # Set affinity for interrupts.
-# Author: David Riddoch <driddoch@solarflare.com>
-######################################################################
 
 import os, sys
 import sfcaffinity as affinity

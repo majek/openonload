@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_HEADER >
@@ -240,13 +227,14 @@ cicppl_ip_pkt_handover(ci_netif *netif, oo_pkt_p src_pktid)
 
 #ifndef NDEBUG
 static void
-cicppl_mac_defer_send_failed(ci_ip4_hdr *iph, ci_ip_addr_t dst, int err)
+cicppl_mac_defer_send_failed(int af, ci_ipx_hdr_t *iph, ci_addr_t dst, int err)
 {
-  ci_log(CODEID": IP "CI_IP_PRINTF_FORMAT"->"CI_IP_PRINTF_FORMAT
+  ci_addr_t saddr = ipx_hdr_saddr(af, iph);
+
+  ci_log(CODEID": IP " IPX_FMT "->" IPX_FMT
          " %s pkt handover failed, rc %d",
-         CI_IP_PRINTF_ARGS(&iph->ip_saddr_be32),
-         CI_IP_PRINTF_ARGS(&dst),\
-         iph->ip_protocol == IPPROTO_TCP ? "TCP" : "UDP",
+         IPX_ARG(AF_IP_L3(saddr)), IPX_ARG(AF_IP_L3(dst)),\
+         ipx_hdr_protocol(af, iph)  == IPPROTO_TCP ? "TCP" : "UDP",
          err);
 }
 #endif
@@ -258,12 +246,12 @@ cicppl_mac_defer_send_failed(ci_ip4_hdr *iph, ci_ip_addr_t dst, int err)
  */
 extern int /* bool */
 cicppl_mac_defer_send(ci_netif *netif, int *ref_os_rc,
-		      ci_ip_addr_t ip, oo_pkt_p ip_pktid, ci_ifid_t ifindex)
+		      ci_addr_t addr, oo_pkt_p ip_pktid, ci_ifid_t ifindex)
 { int pendable_pktid;
   
-  OO_DEBUG_ARP(ci_log(CODEID": ni %p (ID:%d) ip "CI_IP_PRINTF_FORMAT
+  OO_DEBUG_ARP(ci_log(CODEID": ni %p (ID:%d) ip "IPX_FMT
                       " pkt ID %d ifindex %d",
-                      netif, NI_ID(netif), CI_IP_PRINTF_ARGS(&ip), 
+                      netif, NI_ID(netif), IPX_ARG(AF_IP_L3(addr)),
                       OO_PP_FMT(ip_pktid), ifindex));
 
   ci_assert(ci_netif_is_locked(netif));
@@ -279,14 +267,15 @@ cicppl_mac_defer_send(ci_netif *netif, int *ref_os_rc,
     pendable_pktid = cicppl_ip_pkt_handover(netif, ip_pktid);
     if (pendable_pktid < 0) {
       LOG_U(
-        static ci_uint32 last_dst = 0;
-        ci_ip4_hdr *iph = oo_tx_ip_hdr(PKT(netif, ip_pktid));
-        if( last_dst != ip ) {
-          cicppl_mac_defer_send_failed(iph, ip, pendable_pktid);
-          last_dst = ip;
+        static ci_addr_t last_dst = {};
+        int af = CI_IS_ADDR_IP6(addr) ? AF_INET6 : AF_INET;
+        ci_ipx_hdr_t *iph = oo_tx_ipx_hdr(af, PKT(netif, ip_pktid));
+        if( !CI_IPX_ADDR_EQ(last_dst, addr) ) {
+          cicppl_mac_defer_send_failed(af, iph, addr, pendable_pktid);
+          last_dst = addr;
         }
         else {
-          CI_LOG_LIMITED(cicppl_mac_defer_send_failed(iph, ip,
+          CI_LOG_LIMITED(cicppl_mac_defer_send_failed(af, iph, addr,
                                                       pendable_pktid));
         }
         );
@@ -302,7 +291,7 @@ cicppl_mac_defer_send(ci_netif *netif, int *ref_os_rc,
 
       /* now we have a cicp_bufpool_t buffer ID we can call this: */
       *ref_os_rc = cicpplos_pktbuf_defer_send(
-                        netif->cplane, ip, pendable_pktid, ifindex,
+                        netif->cplane, addr, pendable_pktid, ifindex,
                         netif->flags & CI_NETIF_FLAG_IN_DL_CONTEXT);
 
       return (*ref_os_rc == 0);

@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /*! \cidoxg_lib_transport_ip */
 
 #include "ip_internal.h"
@@ -25,12 +12,13 @@ static void ci_active_wild_state_init(ci_netif* netif, ci_active_wild* aw)
   ci_sock_cmn_init(netif, &aw->s, 1);
   aw->s.b.state = CI_TCP_STATE_ACTIVE_WILD;
   aw->s.b.sb_aflags = 0;
+#if CI_CFG_IPV6
+  aw->s.pkt.ether_type = CI_ETHERTYPE_IP6;
+#endif
 
   sock_protocol(&aw->s) = IPPROTO_TCP;
-  sock_laddr_be32(&aw->s) = 0u;
-  sock_lport_be16(&aw->s) = 0u;
-  sock_raddr_be32(&aw->s) = 0u;;
-  sock_rport_be16(&aw->s) = 0u;
+  ci_sock_set_laddr_port(&aw->s, addr_any, 0);
+  ci_sock_set_raddr_port(&aw->s, addr_any, 0);
 
   p = TS_OFF(netif, aw);
   OO_P_ADD(p, CI_MEMBER_OFFSET(ci_active_wild, pool_link));
@@ -38,8 +26,8 @@ static void ci_active_wild_state_init(ci_netif* netif, ci_active_wild* aw)
   ci_ni_dllist_self_link(netif, &aw->pool_link);
 
   aw->expiry = ci_ip_time_now(netif);
-  aw->last_laddr = 0u;
-  aw->last_raddr = 0u;
+  aw->last_laddr = addr_any;
+  aw->last_raddr = addr_any;
   aw->last_rport = 0u;
 }
 

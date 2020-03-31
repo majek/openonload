@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 #ifndef __ONLOAD_HW_FILTER_H__
 #define __ONLOAD_HW_FILTER_H__
 
@@ -66,10 +53,12 @@ struct oo_hw_filter_spec {
 
   union {
     struct {
-      unsigned   saddr;
+      /* IPv4 addresses are passed via saddr[0]/daddr[0]. */
+      ci_uint32  saddr[4];
       int        sport;
-      unsigned   daddr;
+      ci_uint32  daddr[4];
       unsigned   dport;
+      int        af;
       int        protocol;
     } ip;
     struct {
@@ -84,6 +73,7 @@ struct oo_hw_filter_spec {
       /* IP-protocol filters may be MAC-qualified or not, and have different
        * values of [type] above in each case, but share this union element. */
       ci_uint8   mac[6];
+      ci_uint16  ethertype;
       ci_uint8   p;
     } ipproto;
   } addr;

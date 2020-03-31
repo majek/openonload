@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 ** <L5_PRIVATE L5_SOURCE>
 **   Copyright: (c) Solarflare Communications Inc.
@@ -29,32 +16,35 @@
 void oo_pkt_calc_checksums(ci_netif* netif, ci_ip_pkt_fmt* pkt,
                            struct iovec* host_iov)
 {
-  struct iphdr* ip = oo_l3_hdr(pkt);
+  int af = ci_ethertype2af(oo_tx_ether_type_get(pkt));
+  ci_ipx_hdr_t* ipx = oo_ipx_hdr(pkt);
+  ci_uint8 protocol = ipx_hdr_protocol(af, ipx);
 
   /* The packet must contain at least one buffer. */
   ci_assert_ge(pkt->n_buffers, 1);
 
   /* The IP header must be contained entirely in the first buffer. */
   ci_assert_ge(pkt->buf_len + pkt->pkt_start_off,
-               pkt->pkt_eth_payload_off + sizeof(*ip));
+               pkt->pkt_eth_payload_off + CI_IPX_HDR_SIZE(af));
   /* N.B.: [buf_len] measures the length of the packet starting from [dma_start
    * + pkt_start_off], but [pkt_eth_payload_off] is relative to [dma_start],
    * without regard to [pkt_start_off].  Furthermore, in practice, if
    * [pkt_start_off] is not zero then it is equal to -4 (!) because VLAN tags
    * cause the start of the packet to come _before_ [dma_start]. */
 
-  ip->check = ef_ip_checksum(ip);
+  if( af == AF_INET )
+    ipx->ip4.ip_check_be16 = ef_ip_checksum((struct iphdr*)&ipx->ip4);
 
-  if( ip->protocol == IPPROTO_TCP ) {
-    struct tcphdr* tcp = (struct tcphdr*) (ip+1);
+  if( protocol == IPPROTO_TCP ) {
+    struct tcphdr* tcp = (struct tcphdr*) oo_ipx_data(af, pkt);
     size_t tcp_hlen;
 
     /* The TCP header must be contained entirely in the first buffer. */
     ci_assert_ge(pkt->buf_len + pkt->pkt_start_off,
-                 pkt->pkt_eth_payload_off + sizeof(*ip) + sizeof(*tcp));
+                 pkt->pkt_eth_payload_off + CI_IPX_HDR_SIZE(af) + sizeof(*tcp));
     tcp_hlen = 4 * tcp->doff;
     ci_assert_ge(pkt->buf_len + pkt->pkt_start_off,
-                 pkt->pkt_eth_payload_off + sizeof(*ip) + tcp_hlen);
+                 pkt->pkt_eth_payload_off + CI_IPX_HDR_SIZE(af) + tcp_hlen);
 
     struct iovec tmp_iov = host_iov[0];
 
@@ -64,12 +54,12 @@ void oo_pkt_calc_checksums(ci_netif* netif, ci_ip_pkt_fmt* pkt,
     host_iov[0].iov_base = (void*) new_base;
 
     /* Now we can fill in the checksum. */
-    tcp->check = ef_tcp_checksum(ip, tcp, host_iov, pkt->n_buffers);
+    tcp->check = ef_tcp_checksum_ipx(af, ipx, tcp, host_iov, pkt->n_buffers);
 
     host_iov[0] = tmp_iov;
   }
-  else if( ip->protocol == IPPROTO_UDP ) {
-    struct udphdr* udp = (struct udphdr*) (ip+1);
+  else if( protocol == IPPROTO_UDP ) {
+    struct udphdr* udp = (struct udphdr*) oo_ipx_data(af, pkt);
 
     /* If the UDP datagram is fragmented, then the UDP checksum has already
      * been computed.
@@ -78,12 +68,14 @@ void oo_pkt_calc_checksums(ci_netif* netif, ci_ip_pkt_fmt* pkt,
      * Onload never fragments TCP, so good to avoid this check for the TCP
      * case.
      */
-    if( ip->frag_off & htons(IP_OFFMASK | IP_MF) )
+    /* FIXIT: process properly IPv6-fragmented UDP datagram case */
+    if( af == AF_INET &&
+        (ipx->ip4.ip_frag_off_be16 & htons(IP_OFFMASK | IP_MF)) )
       return;
 
     /* The UDP header must be contained entirely in the first buffer. */
     ci_assert_ge(pkt->buf_len + pkt->pkt_start_off,
-                 pkt->pkt_eth_payload_off + sizeof(*ip) + sizeof(*udp));
+                 pkt->pkt_eth_payload_off + CI_IPX_HDR_SIZE(af) + sizeof(*udp));
 
     struct iovec tmp_iov = host_iov[0];
 
@@ -93,7 +85,7 @@ void oo_pkt_calc_checksums(ci_netif* netif, ci_ip_pkt_fmt* pkt,
     host_iov[0].iov_base = (void*) new_base;
 
     /* Now we can fill in the checksum. */
-    udp->check = ef_udp_checksum(ip, udp, host_iov, pkt->n_buffers);
+    udp->check = ef_udp_checksum_ipx(af, ipx, udp, host_iov, pkt->n_buffers);
 
     host_iov[0] = tmp_iov;
   }

@@ -1,4 +1,6 @@
 /* -*- Mode: c; -*- */
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_HEADER >
@@ -20,15 +22,19 @@
 **
 **   CI_MK_ID(x)             - must create an identifier with suffix x
 **   CI_ILL_ADDR_T           - type for indirect addresses
-**   CI_ILL_CTX_T            - type for address conversion context 
-**   CI_ILL_PTR(ctx,a)       - convert address to pointer
+**   CI_ILL_CTX_T            - type for address conversion context
+**   CI_ILL_PTR(ctx,a)       - convert address to pointer, must return pointer
+**                             of type CI_MK_ID(_link)*
 **   CI_ILL_ADDR(ctx,lnk)    - return address of link (optional)
+**   CI_ILL_ADDR_EQ(a, b)    - Equality function for indirect address type
+**   CI_ILL_ADDR_NULL        - NULL value for indirect addresses
 **   CI_ILL_CAS(p, old, new) - CAS *p for indirect addresses (optional)
 **   CI_ILL_XCHG(p, new)     - Exchange new for *p (required iff CI_ILL_CAS is
 **                             defined)
 **
 ** The code has been crafted with the assumption that CI_ILL_ADDR() is cheaper
 ** than dereferencing a pointer.
+**
 */
 
 #if !defined(CI_MK_ID) || !defined(CI_ILL_ADDR_T)
@@ -97,7 +103,7 @@ typedef struct {
 
 #define CI_IDLLIST_LINK_ASSERT_VALID(ctx, l)                            \
   do{                                                                   \
-    ci_assert(CI_ILL_PTR((ctx), CI_ILL_ADDR((ctx), (l))) == (l));       \
+    ci_assert_equal(CI_ILL_PTR((ctx), CI_ILL_ADDR((ctx), (l))), (l));   \
     ci_assert(CI_ILL_ADDR_EQ(CI_ILL_PTR((ctx), (l)->prev)->next,        \
                              CI_ILL_ADDR((ctx), (l))));                 \
     ci_assert(CI_ILL_ADDR_EQ(CI_ILL_PTR((ctx), (l)->next)->prev,        \
@@ -117,14 +123,14 @@ ci_inline void CI_MK_ID(_init)(ctx_t ctx, list_t* list, CI_ILL_ADDR_T a,
                                const char* name) {
   CI_ILL_IF_ADDR_F(list->l.addr = a);
   list->l.next = list->l.prev = CI_ILL_ADDR(ctx, &list->l);
-  ci_assert(CI_ILL_PTR(ctx, list->l.next) == &list->l);
+  ci_assert_equal(CI_ILL_PTR(ctx, list->l.next), &list->l);
   CI_ILL_SET_NAME(&(list->l), name);
 }
 
 ci_inline void CI_MK_ID(_link_init)(ctx_t ctx, link_t* link,
 				    CI_ILL_ADDR_T a, const char* name) {
   CI_ILL_IF_ADDR_F(link->addr = a;
-		   ci_assert(CI_ILL_PTR(ctx, a) == link));
+		   ci_assert_equal(CI_ILL_PTR(ctx, a), link));
   CI_ILL_SET_NAME(link, name);
 }
 
@@ -324,7 +330,7 @@ ci_inline void CI_MK_ID(_rehome)(ctx_t ctx,
   
   if( CI_MK_ID(_is_empty)(ctx, from) ) {
     to->l.next = to->l.prev = CI_ILL_ADDR(ctx, &to->l);
-    ci_assert(CI_ILL_PTR(ctx, to->l.next) == &to->l);
+    ci_assert_equal(CI_ILL_PTR(ctx, to->l.next), &to->l);
   }
   else {
     to->l.next = from->l.next;
@@ -333,7 +339,7 @@ ci_inline void CI_MK_ID(_rehome)(ctx_t ctx,
     CI_ILL_PTR(ctx, to->l.prev)->next = CI_ILL_ADDR(ctx, &to->l);
     /* clear "from" list */
     from->l.next = from->l.prev = CI_ILL_ADDR(ctx, &from->l);
-    ci_assert(CI_ILL_PTR(ctx, from->l.next) == &from->l);
+    ci_assert_equal(CI_ILL_PTR(ctx, from->l.next), &from->l);
   }
 
   CI_IDLLIST_LINK_ASSERT_VALID(ctx, &to->l);
@@ -395,6 +401,8 @@ ci_inline CI_ILL_ADDR_T CI_MK_ID(_link_addr)(ctx_t ctx, link_t* link)
 #undef CI_ILL_ADDR_EQ
 #undef CI_ILL_ADDR_NULL
 #undef CI_ILL_IF_ADDR_F
+#undef CI_ILL_CAS
+#undef CI_ILL_XCHG
 
 
 /*! \cidoxg_end */

@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 	.file	"vfork_intercept.S"
 /*
    The general idea for all platforms is as follows:
@@ -47,8 +49,6 @@
 	.type	onload_vfork,@function
 	.globl onload___vfork_as_fork
 	.globl ci_sys_vfork
-	.globl onload___vfork_rtaddr
-	.globl onload___vfork_ebx
 	.globl onload___vfork_is_vfork
 	.globl citp_netif_child_vfork_hook
 	.globl citp_netif_parent_vfork_hook
@@ -63,14 +63,8 @@ onload_vfork:
 	call onload___vfork_is_vfork@PLT
 	test %eax, %eax
 	jz 1f
-	popl %eax                   /* EAX is now caller's EBX */
-/* Saving caller's EBX */
-	movl onload___vfork_ebx@GOT(%ebx), %edx
-	movl %eax, (%edx)
-	popl %eax                   /* EAX is now return address */
-/* Saving the return address */
-	movl onload___vfork_rtaddr@GOT(%ebx), %edx
-	movl %eax, (%edx)
+	popl 4(%eax)                  /* save caller's EBX */
+	popl (%eax)                   /* save return address */
 /* Calling system vfork() through function pointer */
 	movl ci_sys_vfork@GOT(%ebx), %eax
 	call *(%eax)
@@ -85,12 +79,11 @@ onload_vfork:
 	call citp_netif_child_vfork_hook
 3:
 /* Restoring everything */
+	mov 4(%eax), %ebx
+	mov (%eax), %edx
 	pop %eax
-	movl onload___vfork_ebx@GOT(%ebx), %ecx
-	movl onload___vfork_rtaddr@GOT(%ebx), %edx
-	movl (%ecx), %ebx
 /* Jump to the preserved return address */
-	jmp *(%edx)
+	jmp *%edx
 1:
 	call onload___vfork_as_fork@PLT
 	popl %ebx
@@ -106,7 +99,6 @@ onload_vfork:
 	.globl	onload_vfork
 	.type	onload_vfork,@function
 	.globl ci_sys_vfork
-	.globl onload___vfork_rtaddr
 	.globl onload___vfork_as_fork
 	.globl onload___vfork_is_vfork
 	.globl citp_netif_child_vfork_hook
@@ -116,12 +108,9 @@ onload_vfork:
 /* x86_64 has direct support for IP-relative addressing, */
 /* hence no special support for PIC, only need to save the return adddress */
 	call onload___vfork_is_vfork@PLT
-	testl %eax, %eax
+	test %rax, %rax
 	jz 1f
-	popq %rdi                   /* RDI == return address (RDI is volatile, so may be freely used) */
-/* Saving the return address */
-	movq onload___vfork_rtaddr@GOTPCREL(%rip), %rsi
-	movq %rdi, (%rsi)
+	popq (%rax)            /* saving return address */
 /* Calling system vfork() */
 	movq ci_sys_vfork@GOTPCREL(%rip), %rax
 	call *(%rax)
@@ -135,10 +124,10 @@ onload_vfork:
 	call citp_netif_child_vfork_hook
 3:
 /* Restore everything */
+	movq (%rax), %rdx
 	popq %rax
-	movq onload___vfork_rtaddr@GOTPCREL(%rip), %rdx
 /* Jump to the returned address */
-	jmp *(%rdx)
+	jmp *%rdx
 1:
 	jmp onload___vfork_as_fork@PLT
 
@@ -349,17 +338,25 @@ vfork = onload_vfork
 onload_vfork:
 /* AArch64 has direct support for IP-relative addressing, */
 /* hence no special support for PIC, only need to save the return adddress */
-     adr x16, onload___vfork_rtaddr
-     str x30, [x16]
+     /* save lr on stack across call to __vfork_is_vfork */
+     sub sp, sp, #16
+     str x30, [sp]
      bl onload___vfork_is_vfork
-     cmp w0, #0
+     ldr x30, [sp]
+     add sp, sp, #16
+
+     cmp x0, #0
      b.eq 1f
+     str x30, [x0]     /* save return addr in TLS */
 /* Calling system vfork() */
-     ldr x0, ci_sys_vfork
+/* This should be just adrl x0, ci_sys_vfork, */
+/* but GNU as 2.28 does not understand this pseudo-instruction */
+     adrp x0, ci_sys_vfork
+     ldr x0, [x0, #:lo12:ci_sys_vfork]
      blr x0
 /* Preserving the return value of vfork() across calling hooks */
-     adr x16, onload__vfork_retval
-     str x0, [x16]
+     sub sp, sp, #16
+     str w0, [sp]
      cmp w0, #0
 	 b.eq 2f
 	 bl citp_netif_parent_vfork_hook
@@ -368,12 +365,12 @@ onload_vfork:
 	 bl citp_netif_child_vfork_hook
 3:
 /* Restore everything */
-     ldr x0, onload__vfork_retval
-	 ldr x30, onload___vfork_rtaddr
+     ldr x30, [x0]
+     ldr w0, [sp]
+     add sp, sp, #16
 /* Jump to the returned address */
 	 ret
 1:
-   ldr x30, onload___vfork_rtaddr
 	 b onload___vfork_as_fork
 
 .globl vfork

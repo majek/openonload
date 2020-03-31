@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: Solarflare-Binary */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 **  \brief  TCPDirect TCP API
@@ -132,6 +119,14 @@ zftl_getname(struct zftl* ts, struct sockaddr* laddr_out, socklen_t* laddrlen);
 ** on the zocket that have not yet been accepted.  The application must not
 ** use @p ts after this call.
 **
+** \note The listening zocket is not removed until all accepted zockets have
+** also been freed. If any connections to the listening zocket have been
+** accepted, but the resulting zocket has not been freed by calling
+** zft_free(), the listening zocket remains. It will not accept any new
+** connections, and is shown in the output from \ref zf_stackdump. Attempting
+** to create an additional listening zocket on the same port results in an
+** error.
+**
 ** \return 0      Success.
 */
 ZF_LIBENTRY ZF_COLD int zftl_free(struct zftl* ts);
@@ -245,7 +240,7 @@ zft_handle_getname(struct zft_handle* ts, struct sockaddr* laddr_out,
 ** \return -EADDRNOTAVAIL  @p laddr is not a local address.
 ** \return -EAFNOSUPPORT   @p laddr is not an AF_INET address.
 ** \return -EFAULT         Invalid pointer.
-** \return -EINVAL         Zocket is already bound, invalid @p flags, or 
+** \return -EINVAL         Zocket is already bound, invalid @p flags, or
 **                         invalid laddrlen.
 ** \return -ENOMEM         Out of memory.
 */
@@ -287,6 +282,7 @@ zft_addr_bind(struct zft_handle* handle, const struct sockaddr* laddr,
 ** \return -EFAULT         Invalid pointer.
 ** \return -EHOSTUNREACH   No route to remote host.
 ** \return -ENOMEM         Out of memory.
+** \return -EINVAL         Zocket in unexpected TCP state, or no raddr supplied
 **
 ** \see zft_addr_bind()
 */
@@ -391,7 +387,7 @@ zft_getname(struct zft* ts, struct sockaddr* laddr_out, socklen_t* laddrlen,
 
 /*! \brief TCP zero-copy RX message structure.
 **
-** This structure is passed to zft_zc_recv(), which will populate it and a 
+** This structure is passed to zft_zc_recv(), which will populate it and a
 ** referenced iovec array with pointers to received packets.
 */
 struct zft_msg {
@@ -401,11 +397,15 @@ struct zft_msg {
   int pkts_left;
   /** Reserved. */
   int flags;
-  /** In: Length of #iov array expressed as a count of iovecs; out: number of
-      entries of #iov populated with pointers to packets. */
+  /** In: Length of #iov array expressed as a count of iovecs.\n
+      Out: number of entries of #iov populated with pointers to packets. */
   int iovcnt;
-  /** In: base of separate iovec array, available for writing; out: iovec array
-      is filled with iovecs pointing to the payload of the received packets. */
+  /** In: A separate iovec array, available for writing, with @p iovcnt
+      entries, must immediately follow this structure. This structure and
+      the iovec array are typically wrapped by a structure. For an example,
+      see the \ref zftcppingpong application.\n
+      Out: iovec array is filled with iovecs pointing to the payload of
+      the received packets. */
   struct iovec iov[ZF_FLEXIBLE_ARRAY_COUNT];
 };
 
@@ -419,8 +419,8 @@ struct zft_msg {
 ** This function completes the supplied @p msg structure and its referenced
 ** iovec array with details of received packet buffers.
 **
-** In case of EOF a zero-length buffer is appended at the end of data stream, 
-** and to identify the reason of stream termination check the result of 
+** In case of EOF a zero-length buffer is appended at the end of data stream,
+** and to identify the reason of stream termination check the result of
 ** zft_zc_recv_done() or of zft_zc_recv_done_some().
 **
 ** The function will only fill fewer iovecs in @p msg than are provided in the
@@ -686,10 +686,12 @@ zft_send_single(struct zft *ts, const void* buf, size_t buflen, int flags);
 ** \param buf      The buffer of data to send.
 ** \param buflen   The length of buffer.
 **
+** \return Number of bytes warmed on success.
 ** \return -EAGAIN    Events need to be processed before warming.
                       Call zf_reactor_perform()
 ** \return -EMSGSIZE  Data buffer too long.
 ** \return -ENOTCONN  Zocket is not in a valid TCP state for sending.
+** \return -ENOMEM    Not enough packet buffers available.
 **
 ** This function can be called repeatedly while the application waits
 ** for an input that will trigger a call to zft_send_single().
@@ -699,7 +701,7 @@ zft_send_single(struct zft *ts, const void* buf, size_t buflen, int flags);
 ** be sent.
 **
 ** This function only supports warming the code path where the send
-** queue is empty and a PIO send would be performed.  If @p buflen
+** queue is empty and a PIO or CTPIO send would be performed.  If @p buflen
 ** is too large for PIO then -EMSGSIZE will be returned.  If previous
 ** sends may still be in progress -EAGAIN will be returned.  In this case,
 ** the application can call zf_reactor_perform() and then try again.

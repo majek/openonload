@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This library is free software; you can redistribute it and/or
-** modify it under the terms of version 2.1 of the GNU Lesser General Public
-** License as published by the Free Software Foundation.
-**
-** This library is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-** Lesser General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: LGPL-2.1 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /****************************************************************************
  * Copyright 2002-2005: Level 5 Networks Inc.
  * Copyright 2005-2008: Solarflare Communications Inc,
@@ -414,9 +401,9 @@ static int ef10_ef_vi_transmit_copy_pio(ef_vi* vi, int offset,
 static void ef10_ef_vi_transmit_pio_warm(ef_vi* vi)
 {
   ef_vi_tx_warm_state state;
-  ef_vi_start_transmit_warm(vi, &state);
+  ef_vi_start_transmit_warm(vi, &state, NULL);
   ef10_ef_vi_transmit_pio(vi, 0, 0, 0);
-  ef_vi_stop_transmit_warm(vi, state);
+  ef_vi_stop_transmit_warm(vi, &state);
 }
 
 
@@ -424,9 +411,9 @@ static void ef10_ef_vi_transmit_copy_pio_warm(ef_vi* vi, int pio_offset,
                                               const void* src_buf, int len)
 {
   ef_vi_tx_warm_state state;
-  ef_vi_start_transmit_warm(vi, &state);
+  ef_vi_start_transmit_warm(vi, &state, NULL);
   ef10_ef_vi_transmit_copy_pio(vi, pio_offset, src_buf, len, 0);
-  ef_vi_stop_transmit_warm(vi, state);
+  ef_vi_stop_transmit_warm(vi, &state);
 }
 
 
@@ -492,13 +479,14 @@ ef_vi_inline size_t iovec_bytes(const struct iovec* iov, int iovcnt)
   return bytes;
 }
 
-
-/* Use this if CPU generally emits write-combined writes in-order.
- */
-static void
-  ef10_ef_vi_transmitv_ctpio_fast(ef_vi* vi, size_t frame_len,
-                                  const struct iovec* iov, int iovcnt,
-                                  unsigned threshold)
+/* Common implementation of ef_vi_transmitv_ctpio, parametrised by
+ * compile-time values to produce versions with various behaviours */
+static inline __attribute__((always_inline)) void
+  ef10_ef_vi_transmitv_ctpio(ef_vi* vi, size_t frame_len,
+                              const struct iovec* iov, int iovcnt,
+                              unsigned threshold,
+                              int wb_flush, uint32_t wb_ticks,
+                              int copy_to_fallback, void* fallback)
 {
   int time_stamp_req = (vi->vi_flags & EF_VI_TX_TIMESTAMPS) != 0;
   ci_dword_t header;
@@ -513,9 +501,29 @@ static void
                       ESF_FZ_FRAME_LENGTH, frame_len);
 
   memcpy_iov_to_ctpio((void*) vi->vi_ctpio_mmap_ptr,
-                      header.u32[0], iov, iovcnt, 0, 0);
+                      header.u32[0], iov, iovcnt, wb_flush, wb_ticks,
+                      copy_to_fallback, fallback);
 }
 
+/* Use this if CPU generally emits write-combined writes in-order.
+ */
+static void
+  ef10_ef_vi_transmitv_ctpio_fast(ef_vi* vi, size_t frame_len,
+                                  const struct iovec* iov, int iovcnt,
+                                  unsigned threshold)
+{
+  ef10_ef_vi_transmitv_ctpio(vi, frame_len, iov, iovcnt, threshold,
+                             0, 0, 0, NULL);
+}
+
+static void
+  ef10_ef_vi_transmitv_ctpio_copy_fast(ef_vi* vi, size_t frame_len,
+                                     const struct iovec* iov, int iovcnt,
+                                     unsigned threshold, void* fallback)
+{
+  ef10_ef_vi_transmitv_ctpio(vi, frame_len, iov, iovcnt, threshold,
+                             0, 0, 1, fallback);
+}
 
 /* Emit write-combined writes with gaps in between -- seems to keep them in
  * order most of the time, and is faster than using barriers.
@@ -525,22 +533,18 @@ static void
                                    const struct iovec* iov, int iovcnt,
                                    unsigned threshold)
 {
-  int time_stamp_req = (vi->vi_flags & EF_VI_TX_TIMESTAMPS) != 0;
-  ci_dword_t header;
-
-  EF_VI_ASSERT( vi->vi_flags & EF_VI_TX_CTPIO );
-  EF_VI_ASSERT( vi->vi_ctpio_mmap_ptr != NULL );
-  EF_VI_ASSERT( frame_len == iovec_bytes(iov, iovcnt) );
-
-  CI_POPULATE_DWORD_3(header,
-                      ESF_FZ_USER_THRESHOLD, threshold,
-                      ESF_FZ_TIME_STAMP_REQ, time_stamp_req,
-                      ESF_FZ_FRAME_LENGTH, frame_len);
-
-  memcpy_iov_to_ctpio((void*) vi->vi_ctpio_mmap_ptr,
-                      header.u32[0], iov, iovcnt, 0, vi->vi_ctpio_wb_ticks);
+  ef10_ef_vi_transmitv_ctpio(vi, frame_len, iov, iovcnt, threshold,
+                             0, vi->vi_ctpio_wb_ticks, 0, NULL);
 }
 
+static void
+  ef10_ef_vi_transmitv_ctpio_copy_paced(ef_vi* vi, size_t frame_len,
+                                      const struct iovec* iov, int iovcnt,
+                                      unsigned threshold, void* fallback)
+{
+  ef10_ef_vi_transmitv_ctpio(vi, frame_len, iov, iovcnt, threshold,
+                             0, vi->vi_ctpio_wb_ticks, 1, fallback);
+}
 
 /* Emit write-combined writes with barriers in between.  This achieves
  * correct order in almost always, but has poor throughput.  (Throughput is
@@ -551,20 +555,16 @@ static void
                                       const struct iovec* iov, int iovcnt,
                                       unsigned threshold)
 {
-  int time_stamp_req = (vi->vi_flags & EF_VI_TX_TIMESTAMPS) != 0;
-  ci_dword_t header;
-
-  EF_VI_ASSERT( vi->vi_flags & EF_VI_TX_CTPIO );
-  EF_VI_ASSERT( vi->vi_ctpio_mmap_ptr != NULL );
-  EF_VI_ASSERT( frame_len == iovec_bytes(iov, iovcnt) );
-
-  CI_POPULATE_DWORD_3(header,
-                      ESF_FZ_USER_THRESHOLD, threshold,
-                      ESF_FZ_TIME_STAMP_REQ, time_stamp_req,
-                      ESF_FZ_FRAME_LENGTH, frame_len);
-
-  memcpy_iov_to_ctpio((void*) vi->vi_ctpio_mmap_ptr,
-                      header.u32[0], iov, iovcnt, 1, 0);
+  ef10_ef_vi_transmitv_ctpio(vi, frame_len, iov, iovcnt, threshold,
+                             1, 0, 0, NULL);
+}
+static void
+  ef10_ef_vi_transmitv_ctpio_copy_in_order(ef_vi* vi, size_t frame_len,
+                                         const struct iovec* iov, int iovcnt,
+                                         unsigned threshold, void* fallback)
+{
+  ef10_ef_vi_transmitv_ctpio(vi, frame_len, iov, iovcnt, threshold,
+                             1, 0, 1, fallback);
 }
 
 
@@ -572,6 +572,13 @@ static void
   ef10_ef_vi_transmitv_ctpio_not_supp(ef_vi* vi, size_t frame_len,
                                       const struct iovec* iov, int iovcnt,
                                       unsigned threshold)
+{
+  /* We return an error in ef_vi_transmit_ctpio_fallback(). */
+}
+static void
+  ef10_ef_vi_transmitv_ctpio_copy_not_supp(ef_vi* vi, size_t frame_len,
+                                         const struct iovec* iov, int iovcnt,
+                                         unsigned threshold, void* copy_buf)
 {
   /* We return an error in ef_vi_transmit_ctpio_fallback(). */
 }
@@ -733,13 +740,16 @@ static void select_ctpio_method(ef_vi* vi)
   const char* s = getenv("EF_VI_CTPIO_MODE");
   if( s != NULL ) {
     if( ! strcmp(s, "fast") ) {
-      vi->ops.transmitv_ctpio = ef10_ef_vi_transmitv_ctpio_fast;
+      vi->ops.transmitv_ctpio      = ef10_ef_vi_transmitv_ctpio_fast;
+      vi->ops.transmitv_ctpio_copy = ef10_ef_vi_transmitv_ctpio_copy_fast;
     }
     else if( ! strcmp(s, "paced") ) {
-      vi->ops.transmitv_ctpio = ef10_ef_vi_transmitv_ctpio_paced;
+      vi->ops.transmitv_ctpio      = ef10_ef_vi_transmitv_ctpio_paced;
+      vi->ops.transmitv_ctpio_copy = ef10_ef_vi_transmitv_ctpio_copy_paced;
     }
     else if( ! strcmp(s, "in_order") ) {
-      vi->ops.transmitv_ctpio = ef10_ef_vi_transmitv_ctpio_in_order;
+      vi->ops.transmitv_ctpio      = ef10_ef_vi_transmitv_ctpio_in_order;
+      vi->ops.transmitv_ctpio_copy = ef10_ef_vi_transmitv_ctpio_copy_in_order;
     }
     else {
       ef_log("ef_vi: ERROR: bad EF_VI_CTPIO_MODE='%s'", s);
@@ -748,9 +758,12 @@ static void select_ctpio_method(ef_vi* vi)
     return;
   }
 #endif
-  vi->ops.transmitv_ctpio = ef10_ef_vi_transmitv_ctpio_paced;
+  vi->ops.transmitv_ctpio      = ef10_ef_vi_transmitv_ctpio_paced;
+  vi->ops.transmitv_ctpio_copy = ef10_ef_vi_transmitv_ctpio_copy_paced;
   (void) ef10_ef_vi_transmitv_ctpio_fast;
+  (void) ef10_ef_vi_transmitv_ctpio_copy_fast;
   (void) ef10_ef_vi_transmitv_ctpio_in_order;
+  (void) ef10_ef_vi_transmitv_ctpio_copy_in_order;
 }
 
 
@@ -764,10 +777,13 @@ static void ef10_vi_initialise_ops(ef_vi* vi)
   vi->ops.transmit_copy_pio      = ef10_ef_vi_transmit_copy_pio;
   vi->ops.transmit_pio_warm      = ef10_ef_vi_transmit_pio_warm;
   vi->ops.transmit_copy_pio_warm = ef10_ef_vi_transmit_copy_pio_warm;
-  if( EF_VI_CONFIG_PIO )
+  if( EF_VI_CONFIG_PIO ) {
     select_ctpio_method(vi);
-  else
+  }
+  else {
     vi->ops.transmitv_ctpio      = ef10_ef_vi_transmitv_ctpio_not_supp;
+    vi->ops.transmitv_ctpio_copy = ef10_ef_vi_transmitv_ctpio_copy_not_supp;
+  }
   vi->ops.transmit_alt_select    = ef10_ef_vi_transmit_alt_select;
   vi->ops.transmit_alt_select_default = ef10_ef_vi_transmit_alt_select_normal;
   vi->ops.transmit_alt_stop      = ef10_ef_vi_transmit_alt_stop;
@@ -815,6 +831,50 @@ void ef10_vi_init(ef_vi* vi)
                    | 1LL << ESF_DZ_RX_ECRC_ERR_LBN);
 
   ef10_vi_initialise_ops(vi);
+}
+
+
+/* ef_vi_start_transmit_warm / ef_vi_stop_transmit_warm are not
+ * strictly ef10 specific but only currently used there. Placing
+ * functions in this file appears to benefit performance of slow sends
+ * due to compiler/linker behaviour. See bug 85385. */
+
+/* This prevents ef_vi transmit functions from sending by modifying
+ * TXQ removed account to make the queue appear full.  This is
+ * used to warm the transmit path without sending data.
+ * CTPIO writes are redirected to a dummy buffer also. */
+void ef_vi_start_transmit_warm(ef_vi* vi, ef_vi_tx_warm_state* saved_state,
+                               char* warm_ctpio_mmap_ptr)
+{
+  ef_vi_txq_state* qs = &vi->ep_state->txq;
+  ef_vi_txq* q = &vi->vi_txq;
+  saved_state->removed = qs->removed;
+  /* qs->removed is modified so ( qs->added - qs->removed < q->mask )
+   * is false and packet is not sent.  Descriptor will be written to
+   * qs->added & q->mask. */
+  qs->removed = qs->added - q->mask;
+  saved_state->vi_ctpio_mmap_ptr = vi->vi_ctpio_mmap_ptr;
+  vi->vi_ctpio_mmap_ptr = warm_ctpio_mmap_ptr;
+}
+
+
+/* This resets the state of the transmit queue so sending can continue
+ * after warming.  saved_state should be the output state from the
+ * last call to ef_vi_start_transmit_warm for the same VI. */
+#ifndef __KERNEL__
+#include <assert.h>
+#endif
+void ef_vi_stop_transmit_warm(ef_vi* vi, const ef_vi_tx_warm_state* state)
+{
+  ef_vi_txq_state* qs = &vi->ep_state->txq;
+#if ! defined(__KERNEL__) && ! defined(NDEBUG)
+  /* We assert that the queue id was not modified by any transmit
+   * since warming was started. */
+  ef_vi_txq* q = &vi->vi_txq;
+  assert(q->ids[qs->added & q->mask] == EF_REQUEST_ID_MASK);
+#endif
+  qs->removed = state->removed;
+  vi->vi_ctpio_mmap_ptr = state->vi_ctpio_mmap_ptr;
 }
 
 /*! \cidoxg_end */

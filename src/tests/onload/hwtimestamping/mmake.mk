@@ -1,4 +1,6 @@
-TARGETS	:= rx_timestamping tx_timestamping
+# SPDX-License-Identifier: BSD-2-Clause
+# X-SPDX-Copyright-Text: (c) Solarflare Communications Inc
+TARGETS	:= rx_timestamping tx_timestamping cpacket_send
 
 ifneq ($(strip $(USEONLOADEXT)),)
 CFLAGS += -DONLOADEXT_AVAILABLE

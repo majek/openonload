@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_SOURCE>
@@ -26,6 +13,7 @@
 
 /*! \cidoxg_lib_citools */
 
+#include <ci/internal/transport_config_opt.h>
 
 #include "citools_internal.h"
 
@@ -62,13 +50,9 @@ ci_uint32 ci_toeplitz_hash(const ci_uint8 *key, const ci_uint8 *input, int n)
  * Original key should have a period of 4-bytes. Only the least significant
  * byte is accurate. Returns ci_uint32 for compatibility.
  */
-static ci_uint32
-ci_toeplitz_hash_sse(const ci_uint32 *key, const ci_uint32 *input, int size)
+ci_inline ci_uint32
+ci_toeplitz_hash_sse_finish(const ci_uint32 *key, ci_uint32 result)
 {
-  /* This implementation is tailored to our 12-byte IP 4-tuple */
-  ci_assert_equal(size, 12);
-
-  ci_uint32 result = input[0] ^ input[1] ^ input[2];
   __m128i vkey = _mm_set_epi32(0, result, key[0], key[1]);
 
   result = _mm_extract_epi8(_mm_clmulepi64_si128(vkey, vkey, 0x01), 5);
@@ -76,6 +60,34 @@ ci_toeplitz_hash_sse(const ci_uint32 *key, const ci_uint32 *input, int size)
   /* Perform a bit-reversal before returning */
   return ((result * 0x80200802ULL) & 0x0884422110) * 0x0101010101ULL >> 32;
 }
+
+static ci_uint32
+ci_toeplitz_hash_sse_ip4(const ci_uint32 *key, const ci_uint32 *input, int size)
+{
+  /* This implementation is tailored to our 12-byte IP 4-tuple */
+  ci_assert_equal(size, 12);
+
+  return ci_toeplitz_hash_sse_finish(key, input[0] ^ input[1] ^ input[2]);
+}
+
+#if defined(CI_CFG_IPV6) && CI_CFG_IPV6
+
+#define IPV6_TUPLE_SIZE 36
+
+static uint32_t
+ci_toeplitz_hash_sse_ip6(const uint32_t *key, const uint32_t *input, int size)
+{
+  __m128i a, b;
+
+  ci_assert_equal(size, IPV6_TUPLE_SIZE);
+
+  a = _mm_xor_si128(_mm_loadu_si128((__m128i*)input),
+                    _mm_loadu_si128((__m128i*)(input + 4)));
+  b = _mm_xor_si128(_mm_srli_si128(a, 8), a);
+  return ci_toeplitz_hash_sse_finish(key, _mm_extract_epi32(b, 0) ^
+                                     _mm_extract_epi32(b, 1) ^ input[8]);
+}
+#endif
 
 #endif /* CI_HAVE_X86INTRIN */
 
@@ -88,8 +100,16 @@ ci_uint32 ci_toeplitz_hash_ul(const ci_uint8 *key, const ci_uint8 *sse_key,
   if(CI_UNLIKELY( pclmul_support < 0 ))
     pclmul_support = ci_cpu_has_feature("pclmul");
 
-  if( pclmul_support )
-    return ci_toeplitz_hash_sse((ci_uint32*) sse_key, (ci_uint32*) input, size);
+  if( pclmul_support ) {
+#if defined(CI_CFG_IPV6) && CI_CFG_IPV6
+    if( size == IPV6_TUPLE_SIZE )
+      return ci_toeplitz_hash_sse_ip6((ci_uint32*) sse_key, (ci_uint32*) input,
+                                      size);
+    else
+#endif
+      return ci_toeplitz_hash_sse_ip4((ci_uint32*) sse_key, (ci_uint32*) input,
+                                      size);
+  }
   else
 #endif /* CI_HAVE_X86INTRIN */
     return ci_toeplitz_hash(key, input, size);

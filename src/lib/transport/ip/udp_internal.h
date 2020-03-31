@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_SOURCE>
@@ -133,7 +120,6 @@ ci_inline void ci_udp_rollback_rx_future(ci_netif* ni,
  */
 ci_inline void ci_udp_handle_rx_post_future(ci_netif* ni, ci_ip_pkt_fmt* pkt,
                                             ci_udp_hdr* udp, int ip_paylen,
-                                            ci_uint16 ether_type,
                                             struct ci_udp_rx_future* future)
 {
   ci_udp_state* us = future->socket;
@@ -148,7 +134,7 @@ ci_inline void ci_udp_handle_rx_post_future(ci_netif* ni, ci_ip_pkt_fmt* pkt,
     ci_udp_wake(ni, us, CI_SB_FLAG_WAKE_RX);
   }
   else {
-    ci_udp_handle_rx(ni, pkt, udp, ip_paylen, ether_type);
+    ci_udp_handle_rx(ni, pkt, udp, ip_paylen);
   }
 }
 

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: BSD-2-Clause
+# X-SPDX-Copyright-Text: (c) Solarflare Communications Inc
 TARGETS		:= libpthread_intercept.so.1.0.0.1 \
 				onload_fd_stat \
 				onload_is_present \

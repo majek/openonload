@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /****************************************************************************
  * Copyright 2002-2005: Level 5 Networks Inc.
  * Copyright 2005-2008: Solarflare Communications Inc,
@@ -487,6 +474,18 @@ ci_inline uid_t ci_make_kuid(struct user_namespace*ns, uid_t uid)
   return uid;
 #endif
 }
+
+#ifndef EFRM_HAVE_REMAP_VMALLOC_RANGE_PARTIAL
+static inline int remap_vmalloc_range_partial(struct vm_area_struct* vma,
+                       unsigned long uaddr, void* kaddr, unsigned long size)
+{
+  struct vm_area_struct fake;
+  memcpy(&fake, vma, sizeof(fake));
+  fake.vm_start = uaddr;
+  fake.vm_end = uaddr + size;
+  return remap_vmalloc_range(&fake, kaddr, 0);
+}
+#endif
 
 #endif  /* __CI_TOOLS_LINUX_KERNEL_H__ */
 /*! \cidoxg_end */

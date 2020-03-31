@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This library is free software; you can redistribute it and/or
-** modify it under the terms of version 2.1 of the GNU Lesser General Public
-** License as published by the Free Software Foundation.
-**
-** This library is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-** Lesser General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: LGPL-2.1 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /****************************************************************************
  * Copyright 2002-2005: Level 5 Networks Inc.
  * Copyright 2005-2008: Solarflare Communications Inc,
@@ -87,5 +74,18 @@ static inline int sys_is_numa(void)
   return num_online_nodes() > 1;
 }
 
+
+#ifndef mmiowb
+/* Kernels from 5.2 onwards no longer have mmiowb(), because it is now
+ * implied by spin_unlock() on architectures that require it.
+ *
+ * NB Sasha
+ * I am a bit afraid of this, because it looks that we use mmiowb() without
+ * spin_unlock().  I guess it was already wrong before linux changed its
+ * internal API.
+ * See also EFX_HAVE_MMIOWB
+ */
+#define mmiowb()
+#endif
 
 #endif  /* __CI_CIUL_SYSDEP_LINUX_H__ */

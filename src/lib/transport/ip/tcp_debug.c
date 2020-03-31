@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 ** <L5_PRIVATE L5_SOURCE>
 **   Copyright: (c) Level 5 Networks Limited.
@@ -50,11 +37,11 @@ void ci_tcp_tx_pkt_assert_valid(ci_netif* ni, ci_tcp_state* ts,
   verify(tcp == PKT_TCP_HDR(pkt));
 
   /* Verify addressing. */
-  verify(tcp->tcp_source_be16 == TS_TCP(ts)->tcp_source_be16);
+  verify(tcp->tcp_source_be16 == TS_IPX_TCP(ts)->tcp_source_be16);
   if( ts->s.b.state != CI_TCP_LISTEN ) {
-    verify(tcp->tcp_dest_be16 == TS_TCP(ts)->tcp_dest_be16);
-    verify(oo_tx_ip_hdr(pkt)->ip_saddr_be32 == ts->s.pkt.ip.ip_saddr_be32);
-    verify(oo_tx_ip_hdr(pkt)->ip_daddr_be32 == ts->s.pkt.ip.ip_daddr_be32);
+    verify(tcp->tcp_dest_be16 == TS_IPX_TCP(ts)->tcp_dest_be16);
+    verify(oo_tx_ip_hdr(pkt)->ip_saddr_be32 == ts->s.pkt.ipx.ip4.ip_saddr_be32);
+    verify(oo_tx_ip_hdr(pkt)->ip_daddr_be32 == ts->s.pkt.ipx.ip4.ip_daddr_be32);
   }
 
   /* Verify sequence numbers are vaguely sensible. */
@@ -414,7 +401,7 @@ void ci_tcp_state_assert_valid(ci_netif* netif, ci_tcp_state* ts,
          ts->s.b.state == CI_TCP_CLOSED);
   verify(ts->s.b.state >= CI_TCP_CLOSED);
   verify(ts->s.b.state <= CI_TCP_TIME_WAIT);
-  ci_assert(ts->s.pkt.ip.ip_protocol == IPPROTO_TCP);
+  ci_assert(ts->s.pkt.ipx.ip4.ip_protocol == IPPROTO_TCP);
 
 # define chk(x)                                         \
   verify(!ci_ip_timer_pending(netif, &ts->x) ||         \
@@ -425,7 +412,6 @@ void ci_tcp_state_assert_valid(ci_netif* netif, ci_tcp_state* ts,
   chk(delack_tid);
   chk(zwin_tid);
   chk(kalive_tid);
-  chk(pmtus.tid);
 # undef chk
 
   verify(SEQ_LE(tcp_snd_una(ts), tcp_snd_nxt(ts)));
@@ -462,7 +448,7 @@ void ci_tcp_state_assert_valid(ci_netif* netif, ci_tcp_state* ts,
     verify(ts->outgoing_hdrs_len == sizeof(ci_ip4_hdr) + sizeof(ci_tcp_hdr));
     verify(tcp_outgoing_opts_len(ts) == 0);
   }
-  verify(CI_TCP_HDR_LEN(TS_TCP(ts)) ==
+  verify(CI_TCP_HDR_LEN(TS_IPX_TCP(ts)) ==
          sizeof(ci_tcp_hdr) + tcp_outgoing_opts_len(ts));
 
   /* Validate receive queues. */
@@ -760,10 +746,14 @@ void ci_tcp_state_dump(ci_netif* ni, ci_tcp_state* ts,
   int n;
 
 #if CI_CFG_TIMESTAMPING
-  if( ts->s.timestamping_flags & ONLOAD_SOF_TIMESTAMPING_TX_HARDWARE )
+  if( onload_timestamping_want_tx_nic(ts->s.timestamping_flags) )
     ci_udp_recvq_dump(ni, &ts->timestamp_q, pf, "  TX timestamping queue:",
                       logger, log_arg);
 #endif
+  if( ts->s.s_flags & CI_SOCK_FLAG_DNAT )
+    logger(log_arg, "%s  DNAT: original destination "CI_IP_PRINTF_FORMAT":%d",
+           pf, CI_IP_PRINTF_ARGS(&ts->pre_nat.daddr_be32),
+           CI_BSWAP_BE16(ts->pre_nat.dport_be16));
 
   ci_tcp_socket_cmn_dump(ni, &ts->c, pf, logger, log_arg);
 
@@ -839,29 +829,37 @@ void ci_tcp_state_dump(ci_netif* ni, ci_tcp_state* ts,
          stats.tx_tmpl_active);
 
 #ifndef __KERNEL__
-# define fmt_timer(_b, _l, _n, name, field)                             \
-  if( ci_ip_timer_pending(ni, &ts->field) )                             \
-    _n = line_fmt_timer(_b, _l, _n, #name"(%ums[%x]) ",                 \
-                        ci_ip_time_ticks2ms(ni, ts->field.time-now),    \
-                        ts->field.time,                                 \
+# define fmt_timer(_b, _l, _n, name, tid)                       \
+  if( ci_ip_timer_pending(ni, &tid) )                           \
+    _n = line_fmt_timer(_b, _l, _n, #name"(%ums[%x]) ",         \
+                        ci_ip_time_ticks2ms(ni, tid.time-now),  \
+                        tid.time,                               \
                         logger, log_arg)
 #else
-# define fmt_timer(_b, _l, _n, name, field)                     \
-  if( ci_ip_timer_pending(ni, &ts->field) )                     \
-    _n = line_fmt_timer(_b, _l, _n,  #name"(%uticks[%x]) ",     \
-                        ts->field.time-now, ts->field.time,     \
+# define fmt_timer(_b, _l, _n, name, tid)                   \
+  if( ci_ip_timer_pending(ni, &tid) )                       \
+    _n = line_fmt_timer(_b, _l, _n,  #name"(%uticks[%x]) ", \
+                        tid.time-now, tid.time,             \
                         ci_log_dump_fn, NULL)
 #endif
 
   logger(log_arg, "%s  timers: ", pf);
   n = 0;
   buf[0] = '\0';
-  fmt_timer(buf, LINE_LEN, n, rto, rto_tid);
-  fmt_timer(buf, LINE_LEN, n, delack, delack_tid);
-  fmt_timer(buf, LINE_LEN, n, zwin, zwin_tid);
-  fmt_timer(buf, LINE_LEN, n, kalive, kalive_tid);
-  fmt_timer(buf, LINE_LEN, n, pmtu, pmtus.tid);
+  fmt_timer(buf, LINE_LEN, n, rto, ts->rto_tid);
+  fmt_timer(buf, LINE_LEN, n, delack, ts->delack_tid);
+  fmt_timer(buf, LINE_LEN, n, zwin, ts->zwin_tid);
+  fmt_timer(buf, LINE_LEN, n, kalive, ts->kalive_tid);
+  if( OO_PP_NOT_NULL(ts->pmtus) ) {
+    ci_pmtu_state_t* pmtus = ci_ni_aux_p2pmtus(ni, ts->pmtus);
+    fmt_timer(buf, LINE_LEN, n, pmtu, pmtus->tid);
+  }
+#undef fmt_timer
   logger(log_arg, "%s", buf);
+  if( OO_PP_NOT_NULL(ts->pmtus) ) {
+    ci_pmtu_state_t* pmtus = ci_ni_aux_p2pmtus(ni, ts->pmtus);
+    logger(log_arg, "%s  pmtu=%d: ", pf, pmtus->pmtu);
+  }
 }
 
 

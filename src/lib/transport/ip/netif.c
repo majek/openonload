@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 ** <L5_PRIVATE L5_SOURCE>
 **   Copyright: (c) Level 5 Networks Limited.
@@ -25,6 +12,7 @@
 
 #include "ip_internal.h"
 #include <ci/tools/utils.h>
+#include <onload/cplane_ops.h>
 
 #define LPF "NETIF "
 
@@ -1015,6 +1003,7 @@ ci_uint64 ci_netif_unlock_slow_common(ci_netif* ni, ci_uint64 lock_val)
 {
   const ci_uint64 ALL_HANDLED_FLAGS = CI_EPLOCK_NETIF_IS_PKT_WAITER |
                                       CI_EPLOCK_NETIF_NEED_POLL |
+                                      CI_EPLOCK_NETIF_HAS_DEFERRED_PKTS |
                                       CI_EPLOCK_NETIF_MERGE_ATOMIC_COUNTERS;
   ci_uint64 set_flags = 0;
 
@@ -1043,6 +1032,11 @@ ci_uint64 ci_netif_unlock_slow_common(ci_netif* ni, ci_uint64 lock_val)
   if( lock_val & CI_EPLOCK_NETIF_NEED_POLL ) {
     CITP_STATS_NETIF(++ni->state->stats.deferred_polls);
     ci_netif_poll(ni);
+  }
+
+  if( lock_val & CI_EPLOCK_NETIF_HAS_DEFERRED_PKTS ) {
+    if( ! oo_deferred_send(ni) )
+      set_flags |= CI_EPLOCK_NETIF_HAS_DEFERRED_PKTS;
   }
 
   if( lock_val & CI_EPLOCK_NETIF_MERGE_ATOMIC_COUNTERS )
@@ -1298,6 +1292,12 @@ int ci_netif_raw_send(ci_netif* ni, int intf_i,
     pkt->pkt_eth_payload_off = pkt->pkt_start_off + ETH_HLEN;
   else
     pkt->pkt_eth_payload_off = pkt->pkt_start_off + ETH_HLEN + ETH_VLAN_HLEN;
+#if CI_CFG_IPV6
+  if( oo_pkt_ether_type(pkt) == CI_ETHERTYPE_IP )
+    pkt->flags &=~ CI_PKT_FLAG_IS_IP6;
+  else
+    pkt->flags |= CI_PKT_FLAG_IS_IP6;
+#endif
 
   pkt->pay_len = pkt->buf_len;
   ci_netif_pkt_hold(ni, pkt);
@@ -1311,19 +1311,10 @@ int ci_netif_raw_send(ci_netif* ni, int intf_i,
 
 
 static ci_uint32 __ci_netif_active_wild_hash(ci_netif *ni,
-                                             ci_uint32 laddr, ci_uint16 lport,
-                                             ci_uint32 raddr, ci_uint16 rport)
+                                             ci_addr_t laddr, ci_uint16 lport,
+                                             ci_addr_t raddr, ci_uint16 rport)
 {
   /* FIXME lots of insights into efrm */
-  struct {
-    ci_uint32 raddr_be32;
-    ci_uint32 laddr_be32;
-    ci_uint16 rport_be16;
-    ci_uint16 lport_be16;
-  } __attribute__((packed)) data = {
-    raddr, laddr, rport, lport };
-  int data_size = sizeof(data);
-
   /* FIXME this is copy of hash in efrm_vi_set.c */
   static const uint8_t rx_hash_key[40] = {
     0x6d, 0x5a, 0x6d, 0x5a, 0x6d, 0x5a, 0x6d, 0x5a,
@@ -1332,6 +1323,7 @@ static ci_uint32 __ci_netif_active_wild_hash(ci_netif *ni,
     0x6d, 0x5a, 0x6d, 0x5a, 0x6d, 0x5a, 0x6d, 0x5a,
     0x6d, 0x5a, 0x6d, 0x5a, 0x6d, 0x5a, 0x6d, 0x5a,
   };
+
 #ifndef __KERNEL__
   /* We use a transformed key for our optimised Toeplitz hash. */
   __attribute__((aligned(sizeof(ci_uint32))))
@@ -1342,21 +1334,55 @@ static ci_uint32 __ci_netif_active_wild_hash(ci_netif *ni,
     0xb5, 0x6c, 0xb5, 0x6c, 0xb5, 0x6c, 0xb5, 0x6c,
     0xb5, 0x6c, 0xb5, 0x6c, 0xb5, 0x6c, 0xb5, 0x6c,
   };
-
-  /* N.B.: Only the lower byte is guaranteed to be accurate here, but this is
-   * good enough for our purposes. */
-  return ci_toeplitz_hash_ul(rx_hash_key, rx_hash_key_sse, (ci_uint8*) &data,
-                             data_size);
 #endif
-  return ci_toeplitz_hash(rx_hash_key, (ci_uint8*) &data, data_size);
+
+#if CI_CFG_IPV6
+  if( CI_IS_ADDR_IP6(laddr) ) {
+    struct {
+      ci_ip6_addr_t raddr;
+      ci_ip6_addr_t laddr;
+      ci_uint16 rport_be16;
+      ci_uint16 lport_be16;
+    } __attribute__((packed)) data;
+    int data_size = sizeof(data);
+    memcpy(data.raddr, raddr.ip6, sizeof(ci_ip6_addr_t));
+    memcpy(data.laddr, laddr.ip6, sizeof(ci_ip6_addr_t));
+    data.rport_be16 = rport;
+    data.lport_be16 = lport;
+
+#ifndef __KERNEL__
+    return ci_toeplitz_hash_ul(rx_hash_key, rx_hash_key_sse, (ci_uint8*) &data,
+                               data_size);
+#endif
+    return ci_toeplitz_hash(rx_hash_key, (ci_uint8*) &data, data_size);
+  }
+#endif
+  {
+    struct {
+      ci_uint32 raddr_be32;
+      ci_uint32 laddr_be32;
+      ci_uint16 rport_be16;
+      ci_uint16 lport_be16;
+    } __attribute__((packed)) data = {
+      raddr.ip4, laddr.ip4, rport, lport };
+    int data_size = sizeof(data);
+
+#ifndef __KERNEL__
+    /* N.B.: Only the lower byte is guaranteed to be accurate here, but this is
+     * good enough for our purposes. */
+    return ci_toeplitz_hash_ul(rx_hash_key, rx_hash_key_sse, (ci_uint8*) &data,
+                               data_size);
+#endif
+    return ci_toeplitz_hash(rx_hash_key, (ci_uint8*) &data, data_size);
+  }
 }
 
 
 /* Returns the index in the NIC's RSS indirection table to which the supplied
  * four-tuple would be hashed. */
 int ci_netif_active_wild_nic_hash(ci_netif *ni,
-                                  ci_uint32 laddr, ci_uint16 lport,
-                                  ci_uint32 raddr, ci_uint16 rport)
+                                  ci_addr_t laddr, ci_uint16 lport,
+                                  ci_addr_t raddr, ci_uint16 rport)
 {
   return __ci_netif_active_wild_hash(ni, laddr, lport, raddr, rport) &
          RSS_HASH_MASK;
@@ -1375,28 +1401,6 @@ ci_netif_active_wild_pool_table(ci_netif* ni, int aw_pool)
 }
 
 
-/* Returns the first-choice location in the (per-NIC-hash) hash table for an
- * active wild.
- */
-static ci_uint32 active_wild_table_hash1(ci_netif *ni, ci_uint32 laddr)
-{
-  /* Spread the entropy (such as it is) from the higher-order bits of the
-   * address down a bit. */
-  ci_uint32 laddr_he = CI_BSWAP_BE32(laddr);
-  ci_uint32 ip_bits = laddr_he ^ (laddr_he >> 8);
-
-  return ip_bits & (ni->state->active_wild_table_entries_n - 1);
-}
-
-
-/* Returns the stride used in the hash table for an active wild for resolving
- * collisions. */
-static ci_uint32 active_wild_table_hash2(ci_netif *ni, ci_uint32 laddr)
-{
-  return (laddr | 1) & (ni->state->active_wild_table_entries_n - 1);
-}
-
-
 /* Returns the list of active wilds in a specified pool for the specified local
  * address.  If such a list does not exist, an empty list is returned, into
  * which new active wilds for that IP address may be inserted.  The list does
@@ -1404,7 +1408,7 @@ static ci_uint32 active_wild_table_hash2(ci_netif *ni, ci_uint32 laddr)
  * that the stack lock must not be dropped between retrieving the address of a
  * list using this function and ceasing to use the returned pointer to that
  * list. */
-int ci_netif_get_active_wild_list(ci_netif* ni, int aw_pool, unsigned laddr,
+int ci_netif_get_active_wild_list(ci_netif* ni, int aw_pool, ci_addr_t laddr,
                                   ci_ni_dllist_t** list_out)
 {
   ci_ni_dllist_t* table = ci_netif_active_wild_pool_table(ni, aw_pool);
@@ -1412,8 +1416,9 @@ int ci_netif_get_active_wild_list(ci_netif* ni, int aw_pool, unsigned laddr,
 
   ci_assert(ci_netif_is_locked(ni));
 
-  bucket = hash1 = active_wild_table_hash1(ni, laddr);
-  hash2 = active_wild_table_hash2(ni, laddr);
+  ci_addr_simple_hash(laddr, ni->state->active_wild_table_entries_n,
+                      &hash1, &hash2);
+  bucket = hash1;
 
   do {
     ci_active_wild* aw;
@@ -1432,7 +1437,7 @@ int ci_netif_get_active_wild_list(ci_netif* ni, int aw_pool, unsigned laddr,
      * it in order to determine and check the local address. */
     link = ci_ni_dllist_head(ni, *list_out);
     aw = CI_CONTAINER(ci_active_wild, pool_link, link);
-    if( sock_laddr_be32(&aw->s) == laddr )
+    if( CI_IPX_ADDR_EQ(sock_ipx_laddr(&aw->s), laddr) )
       return 0;
 
     /* This list is for the wrong IP address, so advance to the next bucket. */
@@ -1441,7 +1446,7 @@ int ci_netif_get_active_wild_list(ci_netif* ni, int aw_pool, unsigned laddr,
 
   NI_LOG_ONCE(ni, RESOURCE_WARNINGS,
               "No space in active wild table %d for local address "
-              CI_IP_PRINTF_FORMAT, aw_pool, CI_IP_PRINTF_ARGS(&laddr));
+              IPX_FMT, aw_pool, IPX_ARG(AF_IP_L3(laddr)));
 
   return -ENOSPC;
 }
@@ -1450,8 +1455,8 @@ int ci_netif_get_active_wild_list(ci_netif* ni, int aw_pool, unsigned laddr,
 #ifndef __KERNEL__
 #ifndef NDEBUG
 static int __ci_netif_active_wild_rss_ok(ci_netif* ni,
-                                         ci_uint32 laddr, ci_uint16 lport,
-                                         ci_uint32 raddr, ci_uint16 rport)
+                                         ci_addr_t laddr, ci_uint16 lport,
+                                         ci_addr_t raddr, ci_uint16 rport)
 {
   /* This function checks the compatability of a 4-tuple with this stack.
    * To do so implies we have a destination address and port, have selected
@@ -1460,8 +1465,8 @@ static int __ci_netif_active_wild_rss_ok(ci_netif* ni,
    */
   ci_assert_nequal(lport, 0);
   ci_assert_nequal(rport, 0);
-  ci_assert_nequal(laddr, 0);
-  ci_assert_nequal(raddr, 0);
+  ci_assert(!CI_IPX_ADDR_IS_ANY(laddr));
+  ci_assert(!CI_IPX_ADDR_IS_ANY(raddr));
 
   /* It's always ok if we don't have a multi-instance cluster */
   if( ni->state->cluster_size < 2 )
@@ -1477,8 +1482,8 @@ static int __ci_netif_active_wild_rss_ok(ci_netif* ni,
 #endif
 
 
-static int __ci_netif_active_wild_pool_select(ci_netif* ni, ci_uint32 laddr,
-                                              ci_uint32 raddr, ci_uint16 rport,
+static int __ci_netif_active_wild_pool_select(ci_netif* ni, ci_addr_t laddr,
+                                              ci_addr_t raddr, ci_uint16 rport,
                                               int offset)
 {
   ci_uint32 pool_index = 0;
@@ -1514,33 +1519,44 @@ static int __ci_netif_active_wild_pool_select(ci_netif* ni, ci_uint32 laddr,
  * keep looking (potentially increasing the pool).
  */
 static int __ci_netif_active_wild_allow_reuse(ci_netif* ni, ci_active_wild* aw,
-                                              unsigned laddr, unsigned raddr,
+                                              ci_addr_t laddr, ci_addr_t raddr,
                                               unsigned rport)
 {
   if( ci_ip_time_now(ni) > aw->expiry ||
       NI_OPTS(ni).tcp_shared_local_ports_reuse_fast )
     return 1;
   else
-    return (aw->last_laddr != laddr) || (aw->last_raddr != raddr) ||
+    return !CI_IPX_ADDR_EQ(aw->last_laddr, laddr) ||
+           !CI_IPX_ADDR_EQ(aw->last_raddr, raddr) ||
            (aw->last_rport != rport);
 }
 
 
 static oo_sp __ci_netif_active_wild_pool_get(ci_netif* ni, int aw_pool,
-                                             unsigned laddr, unsigned raddr,
+                                             ci_addr_t laddr, ci_addr_t raddr,
                                              unsigned rport,
                                              ci_uint16* port_out,
                                              ci_uint32* prev_seq_out)
 {
   ci_active_wild* aw;
   ci_uint16 lport;
-  ci_uint32 laddr_aw = NI_OPTS(ni).tcp_shared_local_ports_per_ip ? laddr : 0;
+  ci_addr_t laddr_aw =
+            NI_OPTS(ni).tcp_shared_local_ports_per_ip ? laddr : addr_any;
   int rc;
+  int af_space = AF_SPACE_FLAG_IP4;
+  oo_sp sp;
   ci_ni_dllist_t* list;
   ci_ni_dllist_link* link = NULL;
   ci_ni_dllist_link* tail;
 
   ci_assert(ci_netif_is_locked(ni));
+
+#if CI_CFG_IPV6
+  if( CI_IPX_ADDR_IS_ANY(laddr) )
+    af_space = AF_SPACE_FLAG_IP6 | AF_SPACE_FLAG_IP4;
+  else if( CI_IS_ADDR_IP6(laddr) )
+    af_space = AF_SPACE_FLAG_IP6;
+#endif
 
   *prev_seq_out = 0;
 
@@ -1570,11 +1586,11 @@ static oo_sp __ci_netif_active_wild_pool_get(ci_netif* ni, int aw_pool,
      */
     ci_assert(__ci_netif_active_wild_rss_ok(ni, laddr, lport, raddr, rport));
 
-    rc = ci_netif_filter_lookup(ni, laddr, lport, raddr, rport,
+    sp = ci_netif_filter_lookup(ni, af_space, laddr, lport, raddr, rport,
                                 sock_protocol(&aw->s));
 
-    if( rc >= 0 ) {
-      ci_sock_cmn* s = ID_TO_SOCK(ni, ni->filter_table->table[rc].id);
+    if( OO_SP_NOT_NULL(sp) ) {
+      ci_sock_cmn* s = ID_TO_SOCK(ni, sp);
       if( s->b.state == CI_TCP_TIME_WAIT ) {
         ci_uint32 seq;
         /* This 4-tuple is in use as TIME_WAIT, but it is safe to re-use
@@ -1615,12 +1631,11 @@ static oo_sp __ci_netif_active_wild_pool_get(ci_netif* ni, int aw_pool,
 
       CITP_STATS_NETIF_INC(ni, tcp_shared_local_ports_skipped_in_use);
     }
-
-    /* If no-one's using this 4-tuple we can let the caller share this
-     * active wild.
-     */
-    if( rc == -ENOENT &&
-        __ci_netif_active_wild_allow_reuse(ni, aw, laddr, raddr, rport) ) {
+    else if( __ci_netif_active_wild_allow_reuse(ni, aw, laddr,
+                                                raddr, rport) ) {
+      /* If no-one's using this 4-tuple we can let the caller share this
+       * active wild.
+       */
       *port_out = lport;
       return SC_SP(&aw->s);
     }
@@ -1631,8 +1646,8 @@ static oo_sp __ci_netif_active_wild_pool_get(ci_netif* ni, int aw_pool,
 }
 
 
-static oo_sp __ci_netif_active_wild_get(ci_netif* ni, unsigned laddr,
-                                        unsigned raddr, unsigned rport,
+static oo_sp __ci_netif_active_wild_get(ci_netif* ni, ci_addr_t laddr,
+                                        ci_addr_t raddr, unsigned rport,
                                         ci_uint16* port_out,
                                         ci_uint32* prev_seq_out)
 {
@@ -1657,8 +1672,8 @@ static oo_sp __ci_netif_active_wild_get(ci_netif* ni, unsigned laddr,
 }
 
 
-oo_sp ci_netif_active_wild_get(ci_netif* ni, unsigned laddr,
-                               unsigned raddr, unsigned rport,
+oo_sp ci_netif_active_wild_get(ci_netif* ni, ci_addr_t laddr,
+                               ci_addr_t raddr, unsigned rport,
                                ci_uint16* port_out, ci_uint32* prev_seq_out)
 {
   oo_sp active_wild;
@@ -1675,7 +1690,8 @@ oo_sp ci_netif_active_wild_get(ci_netif* ni, unsigned laddr,
   while( active_wild == OO_SP_NULL &&
          ni->state->active_wild_n < NI_OPTS(ni).tcp_shared_local_ports_max ) {
     int rc;
-    ci_uint32 laddr_aw = NI_OPTS(ni).tcp_shared_local_ports_per_ip ? laddr : 0;
+    ci_addr_t laddr_aw =
+              NI_OPTS(ni).tcp_shared_local_ports_per_ip ? laddr : addr_any;
     LOG_TC(ci_log(FN_FMT "Didn't get active wild, getting more",
                   FN_PRI_ARGS(ni)));
     rc = ci_tcp_helper_alloc_active_wild(ni, laddr_aw);
@@ -1688,9 +1704,10 @@ oo_sp ci_netif_active_wild_get(ci_netif* ni, unsigned laddr,
       break;
     }
     else {
-      LOG_TC(ci_log(FN_FMT "Alloc active wild for %s:0 %s:%u FAILED - rc %d",
-                    FN_PRI_ARGS(ni), ip_addr_str(laddr), ip_addr_str(raddr),
-                    htons(rport), rc));
+      LOG_TC(ci_log(FN_FMT "Alloc active wild for "IPX_FMT":0 "
+                    IPX_FMT":%u FAILED - rc %d",
+                    FN_PRI_ARGS(ni), IPX_ARG(AF_IP(laddr)),
+                    IPX_ARG(AF_IP(raddr)), htons(rport), rc));
       CITP_STATS_NETIF_INC(ni, tcp_shared_local_ports_grow_failed);
       break;
     }
@@ -1698,15 +1715,18 @@ oo_sp ci_netif_active_wild_get(ci_netif* ni, unsigned laddr,
 
   if( active_wild != OO_SP_NULL ) {
     CITP_STATS_NETIF_INC(ni, tcp_shared_local_ports_used);
-    LOG_TC(ci_log(FN_FMT "Lookup active wild for %s:0 %s:%u FOUND - lport %u",
-                  FN_PRI_ARGS(ni), ip_addr_str(laddr), ip_addr_str(raddr),
+    LOG_TC(ci_log(FN_FMT "Lookup active wild for "IPX_FMT":0 "
+                  IPX_FMT":%u FOUND - lport %u",
+                  FN_PRI_ARGS(ni), IPX_ARG(AF_IP(laddr)),
+                  IPX_ARG(AF_IP(raddr)),
                   htons(rport), htons(*port_out)));
   }
   else {
     CITP_STATS_NETIF_INC(ni, tcp_shared_local_ports_exhausted);
-    LOG_TC(ci_log(FN_FMT "Lookup active wild for %s:0 %s:%u NOT AVAILABLE",
-                FN_PRI_ARGS(ni), ip_addr_str(laddr), ip_addr_str(raddr),
-                htons(rport)));
+    LOG_TC(ci_log(FN_FMT "Lookup active wild for "IPX_FMT":0 "
+                  IPX_FMT":%u NOT AVAILABLE",
+                FN_PRI_ARGS(ni), IPX_ARG(AF_IP(laddr)),
+                IPX_ARG(AF_IP(raddr)), htons(rport)));
   }
   return active_wild;
 }
@@ -1717,20 +1737,19 @@ oo_sp ci_netif_active_wild_get(ci_netif* ni, unsigned laddr,
  */
 void ci_netif_active_wild_sharer_closed(ci_netif* ni, ci_sock_cmn* s)
 {
-  int rc;
   oo_sp id;
   ci_active_wild* aw;
 
-  rc = ci_netif_filter_lookup(ni, sock_laddr_be32(s), sock_lport_be16(s),
-                              0, 0, sock_protocol(s));
+  id = ci_netif_filter_lookup(ni, sock_af_space(s),
+                                sock_ipx_laddr(s), sock_lport_be16(s),
+                                addr_any, 0, sock_protocol(s));
 
-  if( rc >= 0 ) {
-    id = CI_NETIF_FILTER_ID_TO_SOCK_ID(ni, rc);
+  if( OO_SP_NOT_NULL(id) ) {
     aw = SP_TO_ACTIVE_WILD(ni, id);
     ci_assert(aw->s.b.state == CI_TCP_STATE_ACTIVE_WILD);
     aw->expiry = ci_ip_time_now(ni) + NI_CONF(ni).tconst_2msl_time;
-    aw->last_laddr = sock_laddr_be32(s);
-    aw->last_raddr = sock_raddr_be32(s);
+    aw->last_laddr = sock_ipx_laddr(s);
+    aw->last_raddr = sock_ipx_raddr(s);
     aw->last_rport = sock_rport_be16(s);
   }
 }

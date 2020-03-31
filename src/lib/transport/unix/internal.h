@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_SOURCE>
@@ -575,6 +562,7 @@ extern int citp_packet_interceptor_startup(void) CI_HF;
 extern int _citp_do_init_inprogress CI_HV;
 extern int citp_do_init(int max_init_level) CI_HF;
 
+extern int citp_basic_syscall_init(void) CI_HF;
 extern int citp_syscall_init(void) CI_HF;
 
 extern int citp_init_trampoline(ci_fd_t fd) CI_HF;
@@ -1040,9 +1028,13 @@ ci_inline void __citp_exit_lib(citp_lib_context_t *lib_context, int do_errno
  ** Environment handling
  */
 
-extern char** citp_environ_handle_args(const char* arg, va_list args,
-                                       char*** env_ptr) CI_HF;
-extern char** citp_environ_check_preload(char** env) CI_HF;
+extern size_t citp_environ_count_args(const char* arg, va_list args) CI_HF;
+extern void citp_environ_handle_args(char** argv, const char* arg,
+                                     va_list args, char*** env_ptr) CI_HF;
+extern char* const* citp_environ_check_preload(char* const* env,
+                                               size_t* bytes_reqd) CI_HF;
+extern void citp_environ_make_preload(char* const* env, char** new_env,
+                               size_t new_env_bytes) CI_HF;
 extern int    citp_environ_init(void) CI_HF;
 
 

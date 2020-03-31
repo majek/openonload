@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /**************************************************************************\
 *//*! \file
 ** <L5_PRIVATE L5_HEADER >
@@ -165,6 +167,7 @@ CI_MK_DECL(int           , execlp     , (const char*, const char*, ...));
 CI_MK_DECL(int           , execle     , (const char*, const char*, ...));
 CI_MK_DECL(int           , execv      , (const char*, char *const argv[]));
 CI_MK_DECL(int           , execvp     , (const char*, char *const argv[]));
+CI_MK_DECL(int           , execvpe    , (const char*, char *const argv[], char* const envp[]));
 #endif
 
 #if CI_CFG_USERSPACE_EPOLL

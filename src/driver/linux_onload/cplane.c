@@ -1,22 +1,8 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /* In-kernel support for UL Control Plane */
 #include <ci/compat.h>
 #include <ci/tools.h>
-#include <onload/mmap.h>
 #include <onload/debug.h>
 #include <linux/mm.h>
 #include <linux/netdevice.h>
@@ -26,43 +12,176 @@
 #include <linux/highuid.h>
 #include <net/neighbour.h>
 #include <net/arp.h>
+#include <net/route.h>
 #include "../linux_resource/kernel_compat.h"
 #include "../linux_onload/onload_kernel_compat.h"
+
+/* Include transport_config_opt.h with CI_CFG_IPV6 definition first,
+ * ci/net/ipvx.h next,
+ * cplane headers last.
+ *
+ * Some code here assumes that in IPv6 build cplane types are aliased to
+ * non-cplane, see ci_addr_sh_t.
+ */
+#include <ci/internal/transport_config_opt.h>
+#include <ci/net/ipvx.h>
+#include <onload/mmap.h>
 #include <cplane/mib.h>
 #include <onload/fd_private.h>
 #include <onload/tcp_driver.h>
 #include <onload/cplane_driver.h>
-#include <onload/cplane_module_params.h>
+#include <onload/linux_onload_internal.h>
 #include <cplane/server.h>
 
 #include "onload_internal.h"
 
 
-/* This is a module parameter.  It controls the timeout in seconds for which
- * stack-creation waits for the control plane to be ready. */
-int cplane_init_timeout = 10;
-
-/* Module parameter to control the grace period before the server is killed
- * when all users have gone. */
-int cplane_server_grace_timeout = 30;
-
-/* Module parameter limiting the depth of the route requests queue. */
-int cplane_route_request_limit = 1000;
-/* Module parameter limiting the route request timeout. */
-#define CP_ROUTE_REQ_TIMEOUT_DEFAULT_MS 200
-int cplane_route_request_timeout_ms = CP_ROUTE_REQ_TIMEOUT_DEFAULT_MS;
-unsigned long cplane_route_request_timeout_jiffies;
-
-/* Module parameters to set uid/gid.
- *
- * FIXME: the default is root, for compatibility with historic behaviour. For
- * the next release, the module parameters should be made mandatory so that
- * we are more secure by default.
+/*
+ * Onload module parameters for cplane.
  */
-int cplane_server_uid = 0;
-int cplane_server_gid = 0;
 
-/* Parsed cplane parameters */
+static int cplane_init_timeout = 10;
+module_param(cplane_init_timeout, int, S_IRUGO | S_IWUSR);
+MODULE_PARM_DESC(cplane_init_timeout,
+                 "Time in seconds to wait for the control plane to initialize "
+                 "when creating a stack.  This initialization requires that "
+                 "the user-level control plane process be spawned if one is "
+                 "not already running for the current network namespace.  "
+                 "If this parameter is zero, stack-creation will fail "
+                 "immediately if the control plane is not ready.  If it is "
+                 "negative, stack-creation will block indefinitely in wait "
+                 "for the control plane.");
+
+
+static bool cplane_spawn_server = 1;
+module_param(cplane_spawn_server, bool, S_IRUGO | S_IWUSR);
+MODULE_PARM_DESC(cplane_spawn_server,
+                 "If true, control plane server processes are spawned "
+                 "on-demand.  Typically this occurs when a stack is created "
+                 "in a network namespace in which there are no other stacks.");
+
+
+char* cplane_server_path = NULL;
+static int cplane_server_path_set(const char* val,
+                                  ONLOAD_MPC_CONST struct kernel_param*);
+static int cplane_server_path_get(char* buffer,
+                                  ONLOAD_MPC_CONST struct kernel_param*);
+#ifdef EFRM_HAVE_KERNEL_PARAM_OPS
+static const struct kernel_param_ops cplane_server_path_ops = {
+  .set = cplane_server_path_set,
+  .get = cplane_server_path_get,
+};
+module_param_cb(cplane_server_path, &cplane_server_path_ops, 
+                NULL, S_IRUGO | S_IWUSR);
+#else
+module_param_call(cplane_server_path, cplane_server_path_set,
+                  cplane_server_path_get, NULL, S_IRUGO | S_IWUSR);
+#endif
+MODULE_PARM_DESC(cplane_server_path,
+                 "Sets the path to the onload_cp_server binary.  Defaults to "
+                 DEFAULT_CPLANE_SERVER_PATH" if empty.");
+
+
+/* cplane_server_params is a purely virtual module option */
+static int cplane_server_params_set(const char* val,
+                                    ONLOAD_MPC_CONST struct kernel_param*);
+static int cplane_server_params_get(char* buffer,
+                                    ONLOAD_MPC_CONST struct kernel_param*);
+#ifdef EFRM_HAVE_KERNEL_PARAM_OPS
+static const struct kernel_param_ops cplane_server_params_ops = {
+  .set = cplane_server_params_set,
+  .get = cplane_server_params_get,
+};
+module_param_cb(cplane_server_params, &cplane_server_params_ops, 
+                NULL, S_IRUGO | S_IWUSR);
+#else
+module_param_call(cplane_server_params, cplane_server_params_set,
+                  cplane_server_params_get, NULL, S_IRUGO | S_IWUSR);
+#endif
+MODULE_PARM_DESC(cplane_server_params,
+                 "Set additional parameters for the onload_cp_server "
+                 "server when it is spawned on-demand.");
+
+
+static int cplane_server_grace_timeout = 30;
+static int 
+cplane_server_grace_timeout_set(const char* val,
+                                ONLOAD_MPC_CONST struct kernel_param* kp);
+#ifdef EFRM_HAVE_KERNEL_PARAM_OPS
+static const struct kernel_param_ops cplane_server_grace_timeout_ops = {
+  .set = cplane_server_grace_timeout_set,
+  .get = param_get_int,
+};
+module_param_cb(cplane_server_grace_timeout, &cplane_server_grace_timeout_ops, 
+                &cplane_server_grace_timeout, S_IRUGO | S_IWUSR);
+#else
+module_param_call(cplane_server_grace_timeout,
+                  cplane_server_grace_timeout_set, param_get_int,
+                  &cplane_server_grace_timeout, S_IRUGO | S_IWUSR);
+#endif
+MODULE_PARM_DESC(cplane_server_grace_timeout,
+                 "Time in seconds to wait before killing the control plane "
+                 "server after the last user has gone (i.e. the last Onload "
+                 "stack in this namespace have been destroyed).  It is used "
+                 "with cplane_spawn_server = Y only.");
+
+
+static int cplane_route_request_limit = 1000;
+module_param(cplane_route_request_limit, int, S_IRUGO | S_IWUSR);
+MODULE_PARM_DESC(cplane_route_request_limit,
+                 "Queue depth limit for route resolution requests.");
+
+
+#define CP_ROUTE_REQ_TIMEOUT_DEFAULT_MS 200
+static int cplane_route_request_timeout_ms = CP_ROUTE_REQ_TIMEOUT_DEFAULT_MS;
+static unsigned long cplane_route_request_timeout_jiffies;
+static int 
+cplane_route_request_timeout_set(const char* val,
+                                 ONLOAD_MPC_CONST struct kernel_param* kp);
+#ifdef EFRM_HAVE_KERNEL_PARAM_OPS
+static const struct kernel_param_ops cplane_route_request_timeout_ms_ops = {
+  .set = cplane_route_request_timeout_set,
+  .get = param_get_int,
+};
+module_param_cb(cplane_route_request_timeout_ms, 
+                &cplane_route_request_timeout_ms_ops, 
+                &cplane_route_request_timeout_ms, S_IRUGO | S_IWUSR);
+#else
+module_param_call(cplane_route_request_timeout_ms,
+                  cplane_route_request_timeout_set,
+                  param_get_int, &cplane_route_request_timeout_ms,
+                  S_IRUGO | S_IWUSR);
+#endif
+MODULE_PARM_DESC(cplane_route_request_timeout_ms,
+                 "Time out value for route resolution requests.");
+
+
+/* Module parameters to set uid/gid. This default is overridden by
+ * /etc/sysconfig/openonload, except in developer builds */
+static int cplane_server_uid = DEFAULT_OVERFLOWUID;
+static int cplane_server_gid = DEFAULT_OVERFLOWGID;
+module_param(cplane_server_uid, int, S_IRUGO | S_IWUSR);
+MODULE_PARM_DESC(cplane_server_uid,
+                 "UID to drop privileges to for the cplane server.");
+module_param(cplane_server_gid, int, S_IRUGO | S_IWUSR);
+MODULE_PARM_DESC(cplane_server_gid,
+                 "GID to drop privileges to for the cplane server.");
+
+
+#ifndef NDEBUG
+/* RLIMIT_CORE is unsigned, so -1 is "unlimited". */
+static int cplane_server_core_size = -1;
+module_param(cplane_server_core_size, int, S_IRUGO | S_IWUSR);
+MODULE_PARM_DESC(cplane_server_core_size,
+                 "RLIMIT_CORE value for the cplane server.  You probably want "
+                 "to set fs.suid_dumpable sysctl to 2 if you are using this.");
+#endif
+
+
+
+/*
+ * Parsed cplane parameters, from cplane_server_params module option.
+ */
 int cplane_server_params_array_num = 0;
 size_t cplane_server_params_array_len = 0;
 char** cplane_server_params_array = NULL;
@@ -80,6 +199,13 @@ const char* cplane_server_const_params[] = {
      */
     "--"CPLANE_SERVER_FORCE_BONDING_NETLINK,
 #endif
+#if !CI_CFG_IPV6
+    "--"CPLANE_SERVER_NO_IPV6,
+#else
+#ifndef CONFIG_IPV6_SUBTREES
+    "--"CPLANE_SERVER_IPV6_NO_SOURCE,
+#endif
+#endif /* CI_CFG_IPV6 */
     "--"CPLANE_SERVER_DAEMONISE_CMDLINE_OPT,
     "--"CPLANE_SERVER_HWPORT_NUM_OPT, OO_STRINGIFY(CI_CFG_MAX_HWPORTS),
     "--"CPLANE_SERVER_IPADDR_NUM_OPT, OO_STRINGIFY(CI_CFG_MAX_LOCAL_IPADDRS),
@@ -87,11 +213,19 @@ const char* cplane_server_const_params[] = {
 #define CP_SERVER_CONST_PARAM_NUM \
   (sizeof(cplane_server_const_params) / sizeof(char*))
 
+
+
 /* Protects the state that is not associated with a single cplane instance
  * -- for example, the hash table containing all the instances.  The "link"
- * member of each oo_cplane_handle is protected by that lock, though.
+ * member of each oo_cplane_handle is protected by that lock, though.  Also,
+ * the pool cp_instance_ids of free control plane IDs it protected by its own
+ * lock.
  */
 static spinlock_t cp_lock;
+
+static ci_id_pool_t cp_instance_ids;
+static ci_irqlock_t cp_instance_ids_lock;
+
 
 /* When onload module is loaded with a parameter, a handler from
  * module_param_call() may be called before module_init() hook.
@@ -107,6 +241,7 @@ static inline void cp_lock_init(void)
   if( cp_lock_inited )
     return;
   spin_lock_init(&cp_lock);
+  ci_irqlock_ctor(&cp_instance_ids_lock);
   cp_lock_inited = true;
 }
 
@@ -121,6 +256,16 @@ struct cp_vm_private_data {
 
   /* Reference count for the memory mapping. */
   atomic_t cp_vm_refcount;
+
+  union {
+    struct {
+      /* Forward table associated with this mapping. */
+      cp_fwd_table_id table_id;
+    } fwd;
+    struct {
+      off_t map_limit;
+    } mib;
+  } u;
 };
 
 
@@ -177,7 +322,8 @@ static struct oo_cplane_handle* cp_table_lookup(const struct net* netns)
 /* Add a new item to the control plane hash table. */
 static void cp_table_insert(struct net* netns, struct oo_cplane_handle* cp)
 {
-  OO_DEBUG_CPLANE(ci_log("%s: netns=%p cp=%p", __FUNCTION__, netns, cp));
+  OO_DEBUG_CPLANE(ci_log("%s: netns=%p cp=%u@%p", __FUNCTION__, netns,
+                         cp->cplane_id, cp));
 
   ci_assert(spin_is_locked(&cp_lock));
   ci_assert(! cp_table_lookup(netns));
@@ -209,6 +355,8 @@ cp_is_usable_for_oof(struct oo_cplane_handle* cp, cp_version_t version)
 static void cp_destroy(struct oo_cplane_handle* cp)
 {
   struct cp_mibs* mib = &cp->mib[0];
+  cp_fwd_table_id fwd_table_id;
+
   OO_DEBUG_CPLANE(ci_log("%s:", __FUNCTION__));
 
   ci_assert(! in_atomic());
@@ -218,8 +366,18 @@ static void cp_destroy(struct oo_cplane_handle* cp)
    * reference to [cp] is dropped. */
   ci_assert_equal(cp->server_pid, NULL);
 
-  vfree(mib->fwd_rw);
-  mib->fwd_rw = NULL;
+  if( cp->cplane_id != CI_ID_POOL_ID_NONE )
+    ci_id_pool_free(&cp_instance_ids, cp->cplane_id, &cp_instance_ids_lock);
+
+  for( fwd_table_id = 0; fwd_table_id < CP_MAX_INSTANCES; ++fwd_table_id ) {
+    struct cp_fwd_table* fwd_table = &cp->fwd_tables[fwd_table_id];
+    /* fwd rows pointer is equivalent to fwd_blob */
+    vfree(fwd_table->rows);
+    fwd_table->rows = NULL;
+    fwd_table->prefix = NULL;
+    vfree(fwd_table->rw_rows);
+    fwd_table->rw_rows = NULL;
+  }
   vfree(cp->mem);
   cp->mem = NULL;
   kfree(mib->dim);
@@ -234,6 +392,27 @@ static void cp_destroy(struct oo_cplane_handle* cp)
   put_net(cp->cp_netns);
   kfree(cp);
 }
+
+
+/* Frees all remaining control plane instances.  There shouldn't be any, and we
+ * assert this in debug builds. */
+static void cp_table_purge(void)
+{
+  int bucket;
+  for( bucket = 0; bucket < CP_INSTANCE_HASH_SIZE; ++bucket ) {
+    ci_dllink* link;
+    ci_dllink* temp_link;
+    CI_DLLIST_FOR_EACH4(link, &cp_hash_table[bucket], temp_link) {
+      struct oo_cplane_handle* cp = CI_CONTAINER(struct oo_cplane_handle, link,
+                                                 link);
+      ci_log("%s: purging cp for %p refcount=%d", __FUNCTION__, cp->cp_netns,
+             atomic_read(&cp->refcount));
+      ci_assert(0);
+      cp_destroy(cp);
+    }
+  }
+}
+
 
 static void cp_kill(struct oo_cplane_handle* cp)
 {
@@ -336,8 +515,8 @@ void cp_release(struct oo_cplane_handle* cp)
 
   if( last_ref_gone ) {
     /* cp_destroy() may not be called in atomic context, but
-     * cp_acquire_from_netns/cp_release may be called by users from any
-     * context.  So, we always use workqueue to call cp_destroy(). */
+     * cp_acquire_from_netns_if_exists/cp_release may be called by users from
+     * any context.  So, we always use workqueue to call cp_destroy(). */
     INIT_DELAYED_WORK(&cp->destroy_work, cp_destroy_work);
     queue_delayed_work(CI_GLOBAL_WORKQUEUE, &cp->destroy_work, 0);
   }
@@ -348,9 +527,13 @@ void cp_release(struct oo_cplane_handle* cp)
 
 struct cp_message {
   struct list_head link;
-  ssize_t buflen;
   char buf[0];
 };
+
+struct cp_message_buffer {
+  struct cp_message meta;
+  struct cp_helper_msg data;
+} __attribute__((packed));
 
 /* See DEFINE_FOP_READ in lib/efthrm/tcp_helper_linux.c for the "proper way"
  * of doing this for all possible kernels.  We do not need iov&async
@@ -377,8 +560,8 @@ ssize_t cp_fop_read(struct file* file, char __user* buf,
   spin_unlock_bh(&cp->msg_lock);
 
   /* Cplane server MUST proved valid and large buffer */
-  ci_assert_ge(len, msg->buflen);
-  len = CI_MIN(len, msg->buflen);
+  ci_assert_ge(len, sizeof(struct cp_helper_msg));
+  len = CI_MIN(len, sizeof(struct cp_helper_msg));
   if( copy_to_user(buf, msg->buf, len) )
     len = -EFAULT;
 
@@ -406,6 +589,19 @@ unsigned cp_fop_poll(struct file* file, poll_table* wait)
 
   cp_release(cp);
   return ret;
+}
+
+
+static cp_fwd_table_id priv_fwd_table_id(ci_private_t* priv)
+{
+  /* The fwd-table ID that we want is always the cplane ID of the _local_
+   * cplane.  If we have a stack, we can look this up directly.  Stackless
+   * handles did the lookup when they were associated with a cplane and
+   * remembered the result. */
+  if( priv->thr != NULL )
+    return priv->thr->netif.cplane->cplane_id;
+  else
+    return priv->fwd_table_id;
 }
 
 
@@ -470,12 +666,31 @@ static void vm_op_close(struct vm_area_struct* vma)
 static int cp_fault_mib(struct vm_area_struct *vma, struct vm_fault *vmf)
 {
   unsigned long offset = VM_FAULT_ADDRESS(vmf) - vma->vm_start;
-  struct oo_cplane_handle* cp = cp_get_vm_data(vma)->cp;
+  struct cp_vm_private_data* vm_data = cp_get_vm_data(vma);
+  struct oo_cplane_handle* cp = vm_data->cp;
 
   ci_assert(cp->bytes);
   ci_assert(cp->mem);
   ci_assert_lt(offset, cp->bytes);
-  vmf->page = vmalloc_to_page(cp->mem + offset);
+
+  if( offset < vm_data->u.mib.map_limit ) {
+    vmf->page = vmalloc_to_page(cp->mem + offset);
+    get_page(vmf->page);
+    return 0;
+  }
+  else {
+    return VM_FAULT_SIGBUS;
+  }
+}
+
+static int cp_fault_fwd(struct vm_area_struct *vma, struct vm_fault *vmf)
+{
+  unsigned long offset = VM_FAULT_ADDRESS(vmf) - vma->vm_start;
+  struct cp_vm_private_data* vm_data = cp_get_vm_data(vma);
+  struct oo_cplane_handle* cp = vm_data->cp;
+  struct cp_fwd_row* fwd_rows = cp->fwd_tables[vm_data->u.fwd.table_id].rows;
+
+  vmf->page = vmalloc_to_page((void*) ((uintptr_t) fwd_rows + offset));
   get_page(vmf->page);
 
   return 0;
@@ -484,9 +699,12 @@ static int cp_fault_mib(struct vm_area_struct *vma, struct vm_fault *vmf)
 static int cp_fault_fwd_rw(struct vm_area_struct *vma, struct vm_fault *vmf)
 {
   unsigned long offset = VM_FAULT_ADDRESS(vmf) - vma->vm_start;
-  struct oo_cplane_handle* cp = cp_get_vm_data(vma)->cp;
+  struct cp_vm_private_data* vm_data = cp_get_vm_data(vma);
+  struct oo_cplane_handle* cp = vm_data->cp;
+  cp_fwd_table_id fwd_table_id = vm_data->u.fwd.table_id;
+  struct cp_fwd_rw_row* fwd_rw_rows = cp->fwd_tables[fwd_table_id].rw_rows;
 
-  vmf->page = vmalloc_to_page((void*)((uintptr_t)cp->mib[0].fwd_rw + offset));
+  vmf->page = vmalloc_to_page((void*) ((uintptr_t) fwd_rw_rows + offset));
   get_page(vmf->page);
 
   return 0;
@@ -501,15 +719,19 @@ static vm_fault_t vm_op_fault(
   struct vm_area_struct *vma = vmf->vma;
 #endif
   struct oo_cplane_handle* cp = cp_get_vm_data(vma)->cp;
+  oo_mmap_id_t oo_mmap_id = OO_MMAP_OFFSET_TO_MAP_ID(VMA_OFFSET(vma));
+  cp_mmap_type_t cp_mmap_type = CP_MMAP_TYPE(oo_mmap_id);
 
   /* Is the server running?  It is silly to use cplane when server has
    * already gone. */
   if( cp->server_pid == NULL )
     return VM_FAULT_SIGBUS;
 
-  switch( vma->vm_pgoff >> OO_MMAP_TYPE_WIDTH ) {
+  switch( cp_mmap_type ) {
     case OO_MMAP_CPLANE_ID_MIB:
       return cp_fault_mib(vma, vmf);
+    case OO_MMAP_CPLANE_ID_FWD:
+      return cp_fault_fwd(vma, vmf);
     case OO_MMAP_CPLANE_ID_FWD_RW:
       return cp_fault_fwd_rw(vma, vmf);
     default:
@@ -530,6 +752,7 @@ cp_mmap_mib(struct file* file, struct oo_cplane_handle* cp,
             struct vm_area_struct* vma)
 {
   unsigned long bytes = vma->vm_end - vma->vm_start;
+  struct cp_vm_private_data* vm_data = cp_get_vm_data(vma);
 
   if( vma->vm_flags & VM_WRITE ) {
     int rc;
@@ -607,7 +830,7 @@ cp_mmap_mib(struct file* file, struct oo_cplane_handle* cp,
      * when the mapping is destroyed.  This means that we need to recognise
      * this mapping as being the one defining the association.  So, set a flag.
      */
-    cp_get_vm_data(vma)->cp_vm_flags |= CP_VM_PRIV_FLAG_SERVERLINK;
+    vm_data->cp_vm_flags |= CP_VM_PRIV_FLAG_SERVERLINK;
 
     /* We need a chunk of memory, continuious in both kernel and UL address
      * spaces.
@@ -615,9 +838,12 @@ cp_mmap_mib(struct file* file, struct oo_cplane_handle* cp,
     ci_assert_equal(cp->mem, NULL);
     cp->mem = vmalloc(bytes);
     cp->bytes = bytes;
+    vm_data->u.mib.map_limit = bytes;
     memset(cp->mem, 0, bytes);
   }
   else {
+    ci_private_t* priv = (ci_private_t*) file->private_data;
+
     /* Client wants to use MIBs. */
     if( cp->mem == NULL )
       return -ENOENT;
@@ -625,62 +851,161 @@ cp_mmap_mib(struct file* file, struct oo_cplane_handle* cp,
       return -ENOENT;
     if( bytes != cp->bytes )
       return -EPERM;
+
+    /* Local clients and suitably privileged users may map the whole mib.
+     * Other clients may only map the first portion of the mib.  Remember the
+     * boundary now, so that we can enforce it when faulting. */
+    if( cp->cplane_id != priv_fwd_table_id(priv) && ! capable(CAP_SYS_ADMIN) )
+      vm_data->u.mib.map_limit = cp_find_public_mib_end(cp->mib[0].dim);
+    else
+      vm_data->u.mib.map_limit = bytes;
+    ci_assert(vm_data->u.mib.map_limit);
+    ci_assert_le(vm_data->u.mib.map_limit, bytes);
   }
   return 0;
 }
 
+
 static int
-cp_mmap_fwd_rw(struct oo_cplane_handle* cp, struct vm_area_struct* vma)
+__cp_mmap_fwd(struct oo_cplane_handle* cp, struct vm_area_struct* vma,
+              cp_fwd_table_id fwd_table_id, void** target_fwd, size_t length)
+{
+  unsigned long bytes = vma->vm_end - vma->vm_start;
+
+  /* If the specified fwd doesn't exist yet, allocate it. */
+  if( *target_fwd == NULL ) {
+    /* kmalloc may be asked for too much memory, depending on fwd_mask */
+    *target_fwd = vmalloc(CI_ROUND_UP(length, PAGE_SIZE));
+    if( *target_fwd == NULL )
+      return -ENOMEM;
+
+    memset(*target_fwd, 0, bytes);
+  }
+
+  if( bytes != CI_ROUND_UP(length, PAGE_SIZE) ) {
+    ci_log("Unexpected size %ld instead of %ld for mapping fwd/fwd_rw "
+           "control plane memory", bytes,
+           CI_ROUND_UP(length, PAGE_SIZE));
+    return -EFAULT;
+  }
+
+  cp_get_vm_data(vma)->u.fwd.table_id = fwd_table_id;
+
+  return 0;
+}
+
+
+/* Once the server has filled in the mib->dim structure, we can initialise the
+ * kernel's mibs.  We also take a copy of mid->dim in UL-inaccessible memory,
+ * so that the cplane server can't crash the kernel. */
+int oo_cp_init_kernel_mibs(struct oo_cplane_handle* cp,
+                           cp_fwd_table_id* fwd_table_id_out)
 {
   struct cp_mibs* mib = &cp->mib[0];
-  unsigned long bytes = vma->vm_end - vma->vm_start;
+  size_t mib_size;
+
+  ci_assert_equal(task_pid(current), cp->server_pid);
+
+  mib->dim = kmalloc(sizeof(struct cp_tables_dim), GFP_KERNEL);
+  if( mib->dim == NULL )
+    return -ENOMEM;
+  memcpy(mib->dim, cp->mem, sizeof(struct cp_tables_dim));
+  cp->mib[1].dim = mib->dim;
+  mib_size = cp_init_mibs(cp->mem, mib);
+  if( mib_size > cp->bytes ) {
+    ci_log("%s: Cplane MIB dimensions 0x%zx do not match with mmaped area size"
+           " 0x%lx", __FUNCTION__, mib_size, cp->bytes);
+    kfree(mib->dim);
+    mib->dim = NULL;
+    return -EFAULT;
+  }
+
+  *fwd_table_id_out = cp->cplane_id;
+
+  return 0;
+}
+
+
+static int check_fwd_table_id_validity(struct oo_cplane_handle* cp,
+                                       cp_fwd_table_id fwd_table_id,
+                                       cp_fwd_table_id local_fwd_table_id)
+{
+  /* Clients are only allowed to map their local table, but servers can map
+   * them all. */
+  if( cp->server_pid != task_pid(current) &&
+      fwd_table_id != CP_FWD_TABLE_ID_INVALID ) {
+    ci_assert_equal(fwd_table_id, CP_FWD_TABLE_ID_INVALID);
+    return -EINVAL;
+  }
+
+  if( fwd_table_id != CP_FWD_TABLE_ID_INVALID &&
+      fwd_table_id >= CP_MAX_INSTANCES ) {
+    ci_assert_lt(fwd_table_id, CP_MAX_INSTANCES);
+    return -EINVAL;
+  }
+
+  /* This one doesn't come from UL, so an assertion alone is sufficient. */
+  ci_assert_lt(local_fwd_table_id, CP_MAX_INSTANCES);
+
+  return 0;
+}
+
+
+static int
+cp_mmap_fwd(struct oo_cplane_handle* cp, struct vm_area_struct* vma,
+            cp_fwd_table_id fwd_table_id, cp_fwd_table_id local_fwd_table_id)
+{
+  struct cp_fwd_table* fwd_table;
+  int rc = check_fwd_table_id_validity(cp, fwd_table_id, local_fwd_table_id);
+  if( rc != 0 )
+    return rc;
+
+  if( fwd_table_id == CP_FWD_TABLE_ID_INVALID )
+    fwd_table_id = local_fwd_table_id;
+
+  fwd_table = &cp->fwd_tables[fwd_table_id];
+
+  rc = __cp_mmap_fwd(cp, vma, fwd_table_id,
+                     (void**) &fwd_table->rows,
+                     cp_calc_fwd_blob_size(cp->mib[0].dim));
+  if( rc != 0 )
+    return rc;
+
+  if( fwd_table->prefix == NULL ) {
+    fwd_table->mask = cp->mib->dim->fwd_mask;
+    fwd_table->prefix = cp_fwd_prefix_within_blob(fwd_table->rows,
+                                                  cp->mib->dim);
+  }
+
+  return 0;
+}
+
+
+static int
+cp_mmap_fwd_rw(struct oo_cplane_handle* cp, struct vm_area_struct* vma,
+               cp_fwd_table_id fwd_table_id,
+               cp_fwd_table_id local_fwd_table_id)
+{
+  int rc = check_fwd_table_id_validity(cp, fwd_table_id, local_fwd_table_id);
+  if( rc != 0 )
+    return rc;
 
   if( ! (vma->vm_flags & VM_WRITE) )
     return -EACCES;
 
-  /* If it is the server, then finish all the allocations and setup */
-  if( task_pid(current) == cp->server_pid ) {
-    /* Server have filled in the mib->dim structure before calling this, so
-     * we can set up the mib structure.  We also copy the dimension structure
-     * to UL-unaccessible memory, so that cplane server can't crash kernel. */
-    mib->dim = kmalloc(sizeof(struct cp_tables_dim), GFP_KERNEL);
-    if( mib->dim == NULL )
-      return -ENOMEM;
-    memcpy(mib->dim, cp->mem, sizeof(struct cp_tables_dim));
-    if( cp_init_mibs(cp->mem, mib) > cp->bytes ) {
-      ci_log("Cplane MIB dimensions do not match with mmaped area size");
-        kfree(mib->dim);
-      return -EFAULT;
-    }
-    
-    /* mib->dim->fwd_mask may be ~128K, cp_fwd_rw_row is 16 bytes - i.e.
-     * kmalloc does not fit here. */
-    mib->fwd_rw = vmalloc(CI_ROUND_UP(
-                    (mib->dim->fwd_mask + 1) * sizeof(struct cp_fwd_rw_row),
-                      PAGE_SIZE));
-    if( mib->fwd_rw == NULL ) {
-      kfree(mib->dim);
-      return -ENOMEM;
-    }
-    /* mark server ready to accept notifications from the main netns cp_server */
+  if( fwd_table_id == CP_FWD_TABLE_ID_INVALID )
+    fwd_table_id = local_fwd_table_id;
+
+  rc = __cp_mmap_fwd(cp, vma, fwd_table_id,
+                     (void**)&cp->fwd_tables[fwd_table_id].rw_rows,
+                     cp_calc_fwd_rw_size(cp->mib[0].dim));
+  if( rc == 0 && fwd_table_id == cp->cplane_id ) {
+    /* mmapping fwd_rw is the last thing the cplane server does.  Mark server
+     * ready to accept notifications from the main netns cp_server. */
     ci_wmb();
     cp->server_initialized = 1;
   }
-  else if( mib->fwd_rw == NULL )
-    return -ENOENT;
-
-  if( bytes != CI_ROUND_UP(
-                (mib->dim->fwd_mask + 1) * sizeof(struct cp_fwd_rw_row),
-                PAGE_SIZE) ) {
-    ci_log("Unexpected size %ld instead of %ld for mapping fwd_rw "
-           "control plane memory", bytes,
-           CI_ROUND_UP((mib->dim->fwd_mask + 1) *
-                       sizeof(struct cp_fwd_rw_row),
-                       PAGE_SIZE));
-    return -EFAULT;
-  }
-
-  return 0;
+  return rc;
 }
 
 
@@ -721,6 +1046,7 @@ static struct oo_cplane_handle* __cp_acquire_from_netns(struct net* netns)
   struct oo_cplane_handle* existing_cplane_inst;
   int rc;
   const struct cred *orig_creds = NULL;
+  ci_irqlock_state_t lock_flags;
 
   existing_cplane_inst = __cp_acquire_from_netns_if_exists(netns, CI_TRUE);
   if( existing_cplane_inst != NULL )
@@ -737,6 +1063,10 @@ static struct oo_cplane_handle* __cp_acquire_from_netns(struct net* netns)
   new_cplane_inst = kzalloc(sizeof(struct oo_cplane_handle), GFP_KERNEL);
   if( new_cplane_inst == NULL )
     return NULL;
+
+  /* Invalidate the ID so that we can call cp_destroy() safely on the error
+   * paths. */
+  new_cplane_inst->cplane_id = CI_ID_POOL_ID_NONE;
 
 #ifdef EFRM_HAVE_NF_NET_HOOK
   if( oo_register_nfhook(netns) != 0 ) {
@@ -762,15 +1092,20 @@ static struct oo_cplane_handle* __cp_acquire_from_netns(struct net* netns)
   orig_creds = oo_cplane_empower_cap_net_raw(netns);
   rc = cicpplos_ctor(&new_cplane_inst->cppl);
   oo_cplane_drop_cap_net_raw(orig_creds);
+  if( rc != 0 )
+    goto fail;
 
-  if( rc != 0 ) {
-    cp_destroy(new_cplane_inst);
-    ci_log("ERROR: failed to create control plane protocol instance: "
-           "rc=%d", rc);
-    return NULL;
+  ci_irqlock_lock(&cp_instance_ids_lock, &lock_flags);
+  new_cplane_inst->cplane_id = ci_id_pool_alloc(&cp_instance_ids);
+  ci_irqlock_unlock(&cp_instance_ids_lock, &lock_flags);
+  if( new_cplane_inst->cplane_id == CI_ID_POOL_ID_NONE ) {
+    ci_log("%s: failed to allocate ID", __FUNCTION__);
+    rc = -EBUSY;
+    goto fail;
   }
 
   spin_lock(&cp_lock);
+
   existing_cplane_inst = cp_table_lookup(netns);
   if( existing_cplane_inst == NULL ) {
     /* Insert the new instance into the global state.  We already hold a
@@ -791,16 +1126,24 @@ static struct oo_cplane_handle* __cp_acquire_from_netns(struct net* netns)
   spin_unlock(&cp_lock);
 
   return new_cplane_inst;
+
+ fail:
+  cp_destroy(new_cplane_inst);
+  ci_log("ERROR: failed to create control plane protocol instance: rc=%d", rc);
+  return NULL;
 }
 
-struct oo_cplane_handle* cp_acquire_from_netns(struct net* netns)
+struct oo_cplane_handle* cp_acquire_and_sync(struct net* netns,
+                                             enum cp_sync_mode mode)
 {
+  int rc;
   struct oo_cplane_handle* cp = __cp_acquire_from_netns(netns);
   if( cp == NULL )
     return NULL;
 
-  if( ! cp_is_usable(cp) ) {
-    cp_release(cp);
+  rc = oo_cp_wait_for_server(cp, mode);
+  if( rc ) {
+    ci_log("%s: cplane didn't sync: rc=%d", __FUNCTION__, rc);
     return NULL;
   }
   return cp;
@@ -819,6 +1162,45 @@ struct oo_cplane_handle* cp_acquire_from_netns_if_exists(const struct net* netns
   }
   return cp;
 }
+
+
+/* Associates a priv with the control plane for the specified namespace. */
+static int cp_find_or_create(ci_private_t* priv, struct net* netns)
+{
+  struct oo_cplane_handle* priv_cp;
+
+  /* We mustn't already have a control plane for this priv. */
+  if( priv->priv_cp != NULL || priv->thr != NULL )
+    return -EALREADY;
+
+  priv_cp = __cp_acquire_from_netns(netns);
+  if( priv_cp == NULL )
+    return -ENOENT;
+
+  /* Interlock against other people trying to get a cplane handle for this fd.
+   */
+  spin_lock(&cp_lock);
+  if( priv->priv_cp == NULL ) {
+    /* Remember the handle.  The reference taken by __cp_acquire_from_netns()
+     * now belongs to the priv. */
+    priv->priv_cp = priv_cp;
+    spin_unlock(&cp_lock);
+  }
+  else {
+    /* Somebody else came along first and stashed a cplane handle inside this
+     * fd, so use that instead of the one that we just obtained. */
+    OO_DEBUG_CPLANE(ci_log("%s: Raced. priv=%p", __FUNCTION__, priv));
+    spin_unlock(&cp_lock);
+    cp_release(priv_cp);
+    /* We deliberately fail with the same error code as in the initial check
+     * in this function.  If there is a race such that we can hit this path,
+     * then but for timing we could have failed the earlier check, too. */
+    return -EALREADY;
+  }
+
+  return 0;
+}
+
 
 /* Takes out a reference to the control plane handle corresponding to a file
  * descriptor.  The caller should call cp_release() when it's finished with it.
@@ -839,35 +1221,21 @@ static struct oo_cplane_handle* cp_acquire_from_priv(ci_private_t* priv)
     return priv->priv_cp;
   }
   else {
-    struct oo_cplane_handle* priv_cp;
-
     /* If we don't have a stack and we don't already have a handle, we find (or
      * create) a control plane for the current namespace. */
+
+    int rc;
+
     OO_DEBUG_CPLANE(ci_log("%s: No handle. priv=%p", __FUNCTION__, priv));
-    priv_cp = __cp_acquire_from_netns(current->nsproxy->net_ns);
-    if( priv_cp == NULL )
+
+    rc = cp_find_or_create(priv, current->nsproxy->net_ns);
+    if( rc != 0 && rc != -EALREADY )
       return NULL;
-
-    /* Interlock against other people trying to get a cplane handle for this
-     * fd. */
-    spin_lock(&cp_lock);
-    if( priv->priv_cp == NULL ) {
-      /* Remember the handle and take an extra reference to it, so that in
-       * total we will have one reference for the caller and one for the priv
-       * itself. */
-      atomic_inc(&priv_cp->refcount);
-      priv->priv_cp = priv_cp;
-      spin_unlock(&cp_lock);
-    }
-    else {
-      /* Somebody else came along first and stashed a cplane handle inside this
-       * fd, so use that instead of the one that we just obtained. */
-      OO_DEBUG_CPLANE(ci_log("%s: Raced. priv=%p", __FUNCTION__, priv));
-      atomic_inc(&priv->priv_cp->refcount);
-      spin_unlock(&cp_lock);
-      cp_release(priv_cp);
-    }
-
+    /* cp_find_or_create() took out a reference that is now owned by the priv.
+     * We need to take out another reference on behalf of our caller. */
+    atomic_inc(&priv->priv_cp->refcount);
+    /* This is the local cplane, so the fwd-table ID is the cplane's own ID. */
+    priv->fwd_table_id = priv->priv_cp->cplane_id;
     return priv->priv_cp;
   }
 
@@ -912,6 +1280,9 @@ oo_cplane_mmap(struct file* file, struct vm_area_struct* vma)
   struct oo_cplane_handle* cp;
   struct cp_vm_private_data* cp_vm_data;
   int rc;
+  oo_mmap_id_t oo_mmap_id = OO_MMAP_OFFSET_TO_MAP_ID(VMA_OFFSET(vma));
+  cp_mmap_type_t cp_mmap_type = CP_MMAP_TYPE(oo_mmap_id);
+  cp_mmap_param_t cp_mmap_param = CP_MMAP_PARAM(oo_mmap_id);
 
   ci_assert_equal(OO_MMAP_TYPE(VMA_OFFSET(vma)), OO_MMAP_TYPE_CPLANE);
   cp = cp_acquire_from_priv(priv);
@@ -928,12 +1299,19 @@ oo_cplane_mmap(struct file* file, struct vm_area_struct* vma)
   vma->vm_ops = &vm_ops;
   vma->vm_private_data = (void*) cp_vm_data;
 
-  switch( OO_MMAP_ID(VMA_OFFSET(vma)) ) {
+  switch( cp_mmap_type ) {
     case OO_MMAP_CPLANE_ID_MIB:
       rc = cp_mmap_mib(file, cp, vma);
       break;
+    case OO_MMAP_CPLANE_ID_FWD:
+      /* cp_fwd_table_id and cp_mmap_param_t in fact resolve to the same type,
+       * but we cast for the sake of clarity. */
+      rc = cp_mmap_fwd(cp, vma, (cp_fwd_table_id) cp_mmap_param,
+                       priv_fwd_table_id(priv));
+      break;
     case OO_MMAP_CPLANE_ID_FWD_RW:
-      rc = cp_mmap_fwd_rw(cp, vma);
+      rc = cp_mmap_fwd_rw(cp, vma, (cp_fwd_table_id) cp_mmap_param,
+                          priv_fwd_table_id(priv));
       break;
     default:
       rc = -EINVAL;
@@ -1009,30 +1387,53 @@ static int cp_send_sig_info(int sig, struct siginfo* info, struct pid* pid)
   return rc;
 }
 
-static int cp_fwd_resolve(struct oo_cplane_handle* cp,
-                          ci_uint32 id, struct cp_fwd_key* key)
-{
-  struct {
-    struct cp_message meta;
-    struct cp_helper_msg data;
-  }  __attribute__((packed)) * msg = kmalloc(sizeof(*msg), GFP_ATOMIC);
-  if( msg == NULL )
-    return -ENOMEM;
-  msg->data.id = id;
-  memcpy(&msg->data.key, key, sizeof(*key));
 
-  msg->meta.buflen = sizeof(struct cp_helper_msg);
+static void
+cp_message_enqueue(struct oo_cplane_handle* cp, struct cp_message_buffer* msg)
+{
   spin_lock_bh(&cp->msg_lock);
   list_add(&msg->meta.link, &cp->msg);
   spin_unlock_bh(&cp->msg_lock);
   /* spin_unlock implies write barrier, see cp_fop_poll() */
 
   wake_up_poll(&cp->msg_wq, POLLIN | POLLRDNORM);
+}
+
+
+static int
+cp_veth_set_fwd_table_id(struct oo_cplane_handle* cp, ci_ifid_t veth_ifindex,
+                         cp_fwd_table_id fwd_table_id)
+{
+  struct cp_message_buffer* msg = kmalloc(sizeof(*msg), GFP_ATOMIC);
+  if( msg == NULL )
+    return -ENOMEM;
+  msg->data.hmsg_type = CP_HMSG_VETH_SET_FWD_TABLE_ID;
+  msg->data.u.veth_set_fwd_table_id.veth_ifindex = veth_ifindex;
+  msg->data.u.veth_set_fwd_table_id.fwd_table_id = fwd_table_id;
+
+  cp_message_enqueue(cp, msg);
+
   return 0;
 }
 
-int oo_op_route_resolve(struct oo_cplane_handle* cp,
-                        struct cp_fwd_key* key)
+static int cp_fwd_resolve(struct oo_cplane_handle* cp, ci_uint32 req_id,
+                          cp_fwd_table_id fwd_table_id, struct cp_fwd_key* key)
+{
+  struct cp_message_buffer* msg = kmalloc(sizeof(*msg), GFP_ATOMIC);
+  if( msg == NULL )
+    return -ENOMEM;
+  msg->data.hmsg_type = CP_HMSG_FWD_REQUEST;
+  msg->data.u.fwd_request.id = req_id;
+  msg->data.u.fwd_request.fwd_table_id = fwd_table_id;
+  memcpy(&msg->data.u.fwd_request.key, key, sizeof(*key));
+
+  cp_message_enqueue(cp, msg);
+
+  return 0;
+}
+
+int oo_op_route_resolve(struct oo_cplane_handle* cp, struct cp_fwd_key* key,
+                        cp_fwd_table_id fwd_table_id)
 {
   int rc;
   struct cp_fwd_req* req;
@@ -1042,7 +1443,7 @@ int oo_op_route_resolve(struct oo_cplane_handle* cp,
 
   if( ! (key->flag & CP_FWD_KEY_REQ_WAIT) ) {
     atomic_inc(&cp->stats.fwd_req_nonblock);
-    rc = cp_fwd_resolve(cp, 0, key);
+    rc = cp_fwd_resolve(cp, 0, fwd_table_id, key);
     return rc;
   }
 
@@ -1057,7 +1458,7 @@ int oo_op_route_resolve(struct oo_cplane_handle* cp,
   list_add_tail(&req->link, &cp->fwd_req);
   spin_unlock_bh(&cp->cp_handle_lock);
 
-  rc = cp_fwd_resolve(cp, req->id, key);
+  rc = cp_fwd_resolve(cp, req->id, fwd_table_id, key);
   if( rc < 0 )
     return rc;
 
@@ -1141,7 +1542,6 @@ int oo_cp_oof_sync(struct oo_cplane_handle* cp)
   return cp_wait_interruptible(cp, cp_is_usable_for_oof, ver);
 }
 
-
 int oo_cp_fwd_resolve_rsop(ci_private_t *priv, void *arg)
 {
   struct oo_cplane_handle* cp = cp_acquire_from_priv(priv);
@@ -1151,7 +1551,7 @@ int oo_cp_fwd_resolve_rsop(ci_private_t *priv, void *arg)
   if( cp == NULL )
     return -ENOMEM;
 
-  rc = oo_op_route_resolve(cp, key);
+  rc = oo_op_route_resolve(cp, key, priv_fwd_table_id(priv));
 
   cp_release(cp);
   return rc;
@@ -1203,38 +1603,52 @@ int oo_cp_fwd_resolve_complete(ci_private_t *priv, void *arg)
 
 static int verinfo2arp_req(struct oo_cplane_handle* cp,
                            cicp_verinfo_t* verinfo,
+                           struct neigh_table** neigh_table_out,
                            struct net_device** dev_out,
-                           ci_ip_addr_t* nexthop_out)
+                           void* nexthop_out, cp_fwd_table_id fwd_table_id)
 {
-  struct cp_mibs* mib = &cp->mib[0];
+  struct cp_fwd_table* fwd_table = oo_cp_get_fwd_table(cp, fwd_table_id);
   struct cp_fwd_row* fwd;
   struct cp_fwd_data* data;
   ci_ifid_t ifindex;
 
   if( ! CICP_ROWID_IS_VALID(verinfo->id) ||
-      verinfo->id > mib->dim->fwd_mask ) {
+      verinfo->id > fwd_table->mask ) {
     return -ENOENT;
   }
 
-  fwd = cp_get_fwd(mib, verinfo);
+  fwd = cp_get_fwd(fwd_table, verinfo);
   if( ~fwd->flags & CICP_FWD_FLAG_DATA_VALID )
     return -EBUSY;
 
-  data = cp_get_fwd_data(mib, verinfo);
+  data = cp_get_fwd_data(fwd_table, verinfo);
 
-  ifindex = data->ifindex;
-  ci_assert_impl(cp_fwd_version_matches(mib, verinfo),
+  ifindex = data->base.ifindex;
+  ci_assert_impl(cp_fwd_version_matches(fwd_table, verinfo),
                  ifindex != CI_IFID_BAD && ifindex != CI_IFID_LOOP);
   if( ifindex == CI_IFID_BAD || ifindex == CI_IFID_LOOP )
     return -ENOENT;
 
-  *nexthop_out = data->next_hop;
+#if CI_CFG_IPV6
+  if( CI_IS_ADDR_IP6(data->base.next_hop) ) {
+    *neigh_table_out = &nd_tbl;
+    memcpy(nexthop_out, &data->base.next_hop, sizeof(data->base.next_hop));
+  }
+  else
+  /* Cplane is always IPv6-capable, but we do not expect it to work with
+   * IPv6 unless Onload is compiled with it. */
+#endif
+  {
+    *neigh_table_out = &arp_tbl;
+    memcpy(nexthop_out, &data->base.next_hop.ip4,
+           sizeof(data->base.next_hop.ip4));
+  }
   ci_rmb();
-  if( ! cp_fwd_version_matches(mib, verinfo) )
+  if( ! cp_fwd_version_matches(fwd_table, verinfo) )
     return -ENOENT;
 
   /* Someone is definitely using this route: */
-  cp_get_fwd_rw(mib, verinfo)->frc_used = ci_frc64_get();
+  cp_get_fwd_rw(fwd_table, verinfo)->frc_used = ci_frc64_get();
 
   *dev_out = dev_get_by_index(netns_from_cp(cp), ifindex);
   if( *dev_out == NULL )
@@ -1243,20 +1657,21 @@ static int verinfo2arp_req(struct oo_cplane_handle* cp,
 }
 
 int __oo_cp_arp_resolve(struct oo_cplane_handle* cp,
-                        cicp_verinfo_t* op)
+                        cicp_verinfo_t* op, cp_fwd_table_id fwd_table_id)
 {
   struct net_device *dev;
   struct neighbour *neigh;
   int rc;
-  ci_ip_addr_t next_hop;
+  char next_hop[sizeof(ci_addr_t)];
+  struct neigh_table *neigh_table;
 
-  rc = verinfo2arp_req(cp, op, &dev, &next_hop);
+  rc = verinfo2arp_req(cp, op, &neigh_table, &dev, next_hop, fwd_table_id);
   if( rc != 0 )
     return rc;
 
-  neigh = neigh_lookup(&arp_tbl, &next_hop, dev);
+  neigh = neigh_lookup(neigh_table, next_hop, dev);
   if( neigh == NULL ) {
-    neigh = neigh_create(&arp_tbl, &next_hop, dev);
+    neigh = neigh_create(neigh_table, next_hop, dev);
     if(CI_UNLIKELY( IS_ERR(neigh) )) {
       rc = PTR_ERR(neigh);
       goto fail;
@@ -1265,8 +1680,9 @@ int __oo_cp_arp_resolve(struct oo_cplane_handle* cp,
 
   /* We should not ask to re-resolve ARP if it is REACHABLE or in the
    * process of resolving.  Just-created entry has 0 state. */
-  if( neigh->nud_state == 0 || neigh->nud_state & (~NUD_VALID | NUD_STALE) )
+  if( neigh->nud_state == 0 || neigh->nud_state & (~NUD_VALID | NUD_STALE) ) {
     neigh_event_send(neigh, NULL);
+  }
 
   neigh_release(neigh);
  fail:
@@ -1276,13 +1692,25 @@ int __oo_cp_arp_resolve(struct oo_cplane_handle* cp,
 
 int oo_cp_arp_resolve_rsop(ci_private_t *priv, void *arg)
 {
+  struct oo_op_cplane_arp_resolve* op = arg;
   struct oo_cplane_handle* cp = cp_acquire_from_priv(priv);
   int rc;
+  cp_fwd_table_id fwd_table_id;
 
   if( cp == NULL )
     return -ENOMEM;
 
-  rc = __oo_cp_arp_resolve(cp, arg);
+  /* We behave slightly differently depending on whether the ioctl was issued
+   * from the server: the server specifies the fwd-table ID, but from clients
+   * the ID is inferred. */
+  if( cp->server_pid == task_pid(current) ) {
+    fwd_table_id = op->fwd_table_id;
+  }
+  else {
+    ci_assert_equal(op->fwd_table_id, CP_FWD_TABLE_ID_INVALID);
+    fwd_table_id = priv_fwd_table_id(priv);
+  }
+  rc = __oo_cp_arp_resolve(cp, arg, fwd_table_id);
 
   cp_release(cp);
   return rc;
@@ -1300,27 +1728,28 @@ static int oo_cp_neigh_update(struct neighbour *neigh, int state)
 }
 
 int __oo_cp_arp_confirm(struct oo_cplane_handle* cp,
-                        cicp_verinfo_t* op)
+                        cicp_verinfo_t* op, cp_fwd_table_id fwd_table_id)
 {
+  struct cp_fwd_table* fwd_table = oo_cp_get_fwd_table(cp, fwd_table_id);
   struct net_device *dev;
   struct neighbour *neigh;
   int rc;
-  ci_ip_addr_t next_hop;
-  struct cp_mibs* mib = &cp->mib[0];
+  char next_hop[sizeof(ci_addr_t)];
+  struct neigh_table *neigh_table;
 
   atomic_inc(&cp->stats.arp_confirm_try);
 
-  rc = verinfo2arp_req(cp, op, &dev, &next_hop);
+  rc = verinfo2arp_req(cp, op, &neigh_table, &dev, next_hop, fwd_table_id);
   if( rc != 0 )
     return rc;
   rc = -ENOENT;
 
-  neigh = neigh_lookup(&arp_tbl, &next_hop, dev);
+  neigh = neigh_lookup(neigh_table, next_hop, dev);
   if( neigh == NULL )
     goto fail1;
 
   /* We've found a neigh entry based on fwd data.  Have it changed? */
-  if( ! cp_fwd_version_matches(mib, op) )
+  if( ! cp_fwd_version_matches(fwd_table, op) )
     goto fail2;
 
   /* In theory, we should update in NUD_REACHABLE state only, but
@@ -1353,7 +1782,7 @@ int oo_cp_arp_confirm_rsop(ci_private_t *priv, void *arg)
   if( cp == NULL )
     return -ENOMEM;
 
-  rc = __oo_cp_arp_confirm(cp, arg);
+  rc = __oo_cp_arp_confirm(cp, arg, priv_fwd_table_id(priv));
 
   cp_release(cp);
   return rc;
@@ -1426,7 +1855,11 @@ static int cp_spawn_server(ci_uint32 flags)
    * and CP_SPAWN_SERVER_BOOTSTRAP can't be used together, but let's be
    * safe.
    */
-  const int DIRECT_PARAM_MAX = 9;
+#ifdef NDEBUG
+  const int DIRECT_PARAM_MAX = 8;
+#else
+  const int DIRECT_PARAM_MAX = 10;
+#endif
 
   char* ns_file_path = NULL;
   char* path = cp_get_server_path();
@@ -1437,6 +1870,10 @@ static int cp_spawn_server(ci_uint32 flags)
 #define UID_STRLEN 7
   char uid_str[UID_STRLEN];
   char gid_str[UID_STRLEN];
+#ifndef NDEBUG
+#define UINT32_STRLEN 12
+  char core_str[UINT32_STRLEN];
+#endif
   char* str = NULL;
   char** argv;
   char* envp[] = { NULL };
@@ -1459,7 +1896,8 @@ static int cp_spawn_server(ci_uint32 flags)
     flags = CP_SPAWN_SERVER_BOOTSTRAP;
   }
 
-  if( flags & CP_SPAWN_SERVER_SWITCH_NS ){
+  if( flags & CP_SPAWN_SERVER_SWITCH_NS &&
+      current->nsproxy->net_ns != &init_net ) {
     ns_file_path = kmalloc(PATH_MAX, GFP_KERNEL);
     if( ns_file_path == NULL )
       return -ENOMEM;
@@ -1511,15 +1949,12 @@ static int cp_spawn_server(ci_uint32 flags)
   direct_param_base = 1 + num + CP_SERVER_CONST_PARAM_NUM;
   direct_param = 0;
 
-  if( flags & CP_SPAWN_SERVER_SWITCH_NS ) {
+  if( ns_file_path != NULL ) {
     argv[direct_param_base + direct_param++] = "--"CPLANE_SERVER_NS_CMDLINE_OPT;
     argv[direct_param_base + direct_param++] = ns_file_path;
   }
   if( flags & CP_SPAWN_SERVER_BOOTSTRAP )
     argv[direct_param_base + direct_param++] = "--"CPLANE_SERVER_BOOTSTRAP;
-#if !CI_CFG_IPV6
-  argv[direct_param_base + direct_param++] = "--"CPLANE_SERVER_NO_IPV6;
-#endif
   if( cplane_server_uid ) {
     snprintf(uid_str, UID_STRLEN, "%u", cplane_server_uid);
     argv[direct_param_base + direct_param++] = "--"CPLANE_SERVER_UID;
@@ -1531,6 +1966,14 @@ static int cp_spawn_server(ci_uint32 flags)
     argv[direct_param_base + direct_param++] = gid_str;
   }
 #undef UID_STRLEN
+
+#ifndef NDEBUG
+  if( cplane_server_core_size ) {
+    snprintf(core_str, sizeof(core_str), "%u", cplane_server_core_size);
+    argv[direct_param_base + direct_param++] = "--"CPLANE_SERVER_CORE_SIZE;
+    argv[direct_param_base + direct_param++] = core_str;
+  }
+#endif
 
   argv[direct_param_base + direct_param++] = NULL;
   ci_assert_le(direct_param, DIRECT_PARAM_MAX);
@@ -1566,6 +2009,8 @@ oo_cp_driver_ctor(void)
     cp_spawn_server(CP_SPAWN_SERVER_BOOTSTRAP);
   cp_initialized = 1;
 
+  ci_id_pool_ctor(&cp_instance_ids, CP_MAX_INSTANCES, /* initial size */ 8);
+
   return 0;
 }
 
@@ -1574,6 +2019,9 @@ oo_cp_driver_ctor(void)
 int
 oo_cp_driver_dtor(void)
 {
+  cp_table_purge();
+  ci_id_pool_dtor(&cp_instance_ids);
+  ci_irqlock_dtor(&cp_instance_ids_lock);
   return 0;
 }
 
@@ -1634,7 +2082,7 @@ static int cp_light_synced(struct oo_cplane_handle* cp, cp_version_t old_ver)
 
 /* Spawns a control plane server if one is not running, and waits for it to
  * initialise up to a module-parameter-configurable timeout. */
-static int
+int
 oo_cp_wait_for_server(struct oo_cplane_handle* cp, enum cp_sync_mode mode)
 {
   int rc;
@@ -1797,8 +2245,8 @@ static void cp_respawn_init_server(void)
     cp_spawn_server(CP_SPAWN_SERVER_BOOTSTRAP);
 }
 
-int cplane_server_path_set(const char* val,
-                           ONLOAD_MPC_CONST struct kernel_param* kp)
+static int cplane_server_path_set(const char* val,
+                                  ONLOAD_MPC_CONST struct kernel_param* kp)
 {
   char* old_path;
   char* new_path = kstrdup(skip_spaces(val), GFP_KERNEL);
@@ -1823,8 +2271,8 @@ int cplane_server_path_set(const char* val,
 }
 
 
-int cplane_server_path_get(char* buffer,
-                           ONLOAD_MPC_CONST struct kernel_param* kp)
+static int cplane_server_path_get(char* buffer,
+                                  ONLOAD_MPC_CONST struct kernel_param* kp)
 {
   char* path;
   int len;
@@ -1860,8 +2308,6 @@ static int cp_proc_stats_show(struct seq_file *m,
              atomic_read(&cp->stats.arp_confirm_try));
   seq_printf(m, "ARP confirmations (successful):\t%d\n",
              atomic_read(&cp->stats.arp_confirm_do));
-  seq_printf(m, "Dropped IP packets routed via OS:\t%d\n",
-             cp->cppl.stat.dropped_ip);
 
   cp_release(cp);
   return 0;
@@ -1997,8 +2443,9 @@ static char* get_next_word(char* str)
   return NULL;
 }
 
-int cplane_server_params_set(const char* val,
-                             ONLOAD_MPC_CONST struct kernel_param* kp)
+static int
+cplane_server_params_set(const char* val,
+                         ONLOAD_MPC_CONST struct kernel_param* kp)
 {
   char** old;
   char** new = NULL;
@@ -2051,8 +2498,9 @@ int cplane_server_params_set(const char* val,
   return 0;
 }
 
-int cplane_server_params_get(char* buffer,
-                             ONLOAD_MPC_CONST struct kernel_param* kp)
+static int
+cplane_server_params_get(char* buffer,
+                         ONLOAD_MPC_CONST struct kernel_param* kp)
 {
   char* s;
   size_t add, len;
@@ -2104,8 +2552,9 @@ int oo_cp_get_server_pid(struct oo_cplane_handle* cp)
   return pid;
 }
 
-int cplane_server_grace_timeout_set(const char* val,
-                                    ONLOAD_MPC_CONST struct kernel_param* kp)
+static int
+cplane_server_grace_timeout_set(const char* val,
+                                ONLOAD_MPC_CONST struct kernel_param* kp)
 {
   int old_val = cplane_server_grace_timeout;
   int rc = param_set_int(val, kp);
@@ -2116,8 +2565,9 @@ int cplane_server_grace_timeout_set(const char* val,
   return 0;
 }
 
-int cplane_route_request_timeout_set(const char* val,
-                                     ONLOAD_MPC_CONST struct kernel_param* kp)
+static int
+cplane_route_request_timeout_set(const char* val,
+                                 ONLOAD_MPC_CONST struct kernel_param* kp)
 {
   int rc = param_set_int(val, kp);
   if( rc != 0 )
@@ -2152,3 +2602,446 @@ int oo_cp_llap_change_notify_all(struct oo_cplane_handle* main_cp)
   return rc;
 }
 
+/* Determines whether Onload should attempt to accelerate traffic over a
+ * specified veth interface.  Returns zero if so, or -errno otherwise. */
+int
+oo_cp_check_veth_acceleration(struct oo_cplane_handle* cp, ci_ifid_t ifindex)
+{
+  int rc = 0;
+  struct net_device* dev;
+  ci_ifid_t peer_ifindex = CI_IFID_BAD;
+
+  if( ! oo_accelerate_veth )
+    return -ENOENT;
+
+  dev = dev_get_by_index(netns_from_cp(cp), ifindex);
+  if( dev == NULL )
+    return -ENODEV;
+
+  rtnl_lock();
+
+  /* Linux 3.19 gained the get_link_net() op, and Linux 4.0 introduced
+   * dev_get_if_link().  RHEL7 has both. */
+#if defined(EFRM_RTNL_LINK_OPS_HAS_GET_LINK_NET) && \
+    defined(EFRM_HAVE_DEV_GET_IF_LINK)
+  /* If this end of the veth is in init_net, there's no cross-namespace routing
+   * to be done. */
+  if( dev_net(dev) == &init_net ) {
+    rc = -ELOOP;
+  }
+  /* There's no particularly clean way in the kernel to check that this is a
+   * veth interface.  UL can do this easily and naturally using netlink, so
+   * we will be content here to ensure that the interface at least quacks like
+   * a veth. */
+  else if( dev->rtnl_link_ops == NULL ||
+           dev->rtnl_link_ops->get_link_net == NULL ) {
+    rc = -EMEDIUMTYPE;
+  }
+  /* At present we require that the peer interface be in init_net. */
+  else if( dev->rtnl_link_ops->get_link_net(dev) != &init_net ) {
+    rc = -EXDEV;
+  }
+  else {
+    peer_ifindex = dev_get_iflink(dev);
+    if( peer_ifindex == CI_IFID_BAD )
+      rc = -EPIPE;
+  }
+#else
+  /* RHEL6 doesn't have the get_link_net() op.  The intended use-cases for
+   * veth-acceleration are very likely to be run on more recent distros, so we
+   * just give up now. */
+  rc = -EOPNOTSUPP;
+#endif
+
+  rtnl_unlock();
+  dev_put(dev);
+
+  /* If this veth interface is acceleratable, we need to probe the associated
+   * fwd-table ID to init_net's control plane. */
+  if( rc == 0 ) {
+    struct oo_cplane_handle* cplane_init_net;
+    cplane_init_net = __cp_acquire_from_netns_if_exists(&init_net, CI_FALSE);
+    if( cplane_init_net == NULL )
+      return -ECOMM;
+    rc = cp_veth_set_fwd_table_id(cplane_init_net, peer_ifindex,
+                                  cp->cplane_id);
+    cp_release(cplane_init_net);
+  }
+
+  return rc;
+}
+
+
+int
+oo_cp_select_instance(ci_private_t* priv, enum oo_op_cp_select_instance inst)
+{
+  struct net* netns;
+  int rc;
+
+  switch( inst ) {
+  case CP_SELECT_INSTANCE_LOCAL:
+    netns = current->nsproxy->net_ns;
+    break;
+  case CP_SELECT_INSTANCE_INIT_NET:
+    netns = &init_net;
+    break;
+  default:
+    ci_assert(0);
+    return -EINVAL;
+  }
+
+  rc = cp_find_or_create(priv, netns);
+  if( rc != 0 )
+    return rc;
+
+  ci_assert(priv->priv_cp);
+
+  /* The fwd-table ID depends on whether this is a local or a foreign control
+   * plane: in both cases, we need to use the ID of the _local_ control plane,
+   * which we need to find if it's not the one that we're associating with the
+   * handle. */
+  if( inst != CP_SELECT_INSTANCE_LOCAL ) {
+    struct oo_cplane_handle* cplane_local =
+      __cp_acquire_from_netns(current->nsproxy->net_ns);
+    if( cplane_local == NULL ) {
+      cp_release(priv->priv_cp);
+      priv->priv_cp = NULL;
+      return -ENOENT;
+    }
+    priv->fwd_table_id = cplane_local->cplane_id;
+    cp_release(cplane_local);
+  }
+  else {
+    priv->fwd_table_id = priv->priv_cp->cplane_id;
+  }
+
+  return 0;
+}
+
+
+/* Asks the kernel to resolve an output route: that is, a route for a packet
+ * that morally originated on the local machine. */
+static struct rtable*
+cicp_ip4_route_output(struct net* netns, struct cp_fwd_key* key, uid_t uid,
+                      ci_addr_sh_t* src_out)
+{
+  struct rtable *rt;
+
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(2,6,38)
+  /* rhel6 case */
+  struct flowi fl;
+  int rc;
+
+  memset(&fl, 0, sizeof(fl));
+  fl.fl4_dst = key->dst.ip4;
+  fl.fl4_src = key->src.ip4;
+  fl.fl4_tos = key->tos;
+  fl.oif = key->ifindex;
+
+  rc = ip_route_output_key(netns, &rt, &fl);
+  if( rc < 0 )
+    return ERR_PTR(rc);
+  *src_out = CI_ADDR_SH_FROM_IP4(fl.fl4_src);
+#define RT_DST(rt) (&(rt)->u.dst)
+
+#else /* linux-2.6.39 and newer */
+  struct flowi4 fl4;
+
+  memset(&fl4, 0, sizeof(fl4));
+  fl4.daddr = key->dst.ip4;
+  fl4.saddr = key->src.ip4;
+  fl4.flowi4_tos = key->tos;
+  fl4.flowi4_oif = key->ifindex;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,10,0)
+  fl4.flowi4_uid = make_kuid(current_user_ns(), uid);
+#endif
+
+  ci_assert_equal(key->iif_ifindex, CI_IFID_BAD);
+  ci_assert_nflags(key->flag, CP_FWD_KEY_TRANSPARENT);
+
+  rt = ip_route_output_key(netns, &fl4);
+  *src_out = CI_ADDR_SH_FROM_IP4(fl4.saddr);
+
+#define RT_DST(rt) (&(rt)->dst)
+#endif /* 2.6.39 */
+
+#define DST_DEV(rt) (RT_DST(rt)->dev)
+
+  return rt;
+}
+
+
+/* Asks the kernel to resolve an input route: that is, a route for a packet
+ * that was received by the local machine on an interface, and is being
+ * forwarded.  Such route requests are distinguished from output route requests
+ * by specifying an input ifindex. */
+static struct rtable*
+cicp_ip4_route_input(struct net* netns, struct cp_fwd_key* key)
+{
+  ci_ifid_t iif = key->iif_ifindex;
+  struct net_device *dev;
+  struct sk_buff* skb;
+  struct rtable* rt;
+  int rc;
+  struct dst_entry* dst;
+
+  skb = alloc_skb(NLMSG_GOODSIZE, in_atomic() ? GFP_ATOMIC : GFP_KERNEL);
+  if( skb == NULL )
+    return ERR_PTR(-ENOBUFS);
+
+  /* When bug87317 is fixed, this special case should be removed. */
+  if( key->flag & CP_FWD_KEY_TRANSPARENT )
+    iif = CI_IFID_LOOP;
+
+  ci_assert_nequal(iif, CI_IFID_BAD);
+
+  dev = dev_get_by_index(netns, iif);
+  if( dev == NULL ) {
+    rt = ERR_PTR(-ENODEV);
+    goto fail1;
+  }
+
+  skb->protocol	= CI_ETHERTYPE_IP;
+  skb->dev = dev;
+  local_bh_disable();
+  rc = ip_route_input(skb, key->dst.ip4, key->src.ip4, key->tos, dev);
+  local_bh_enable();
+
+  if( rc != 0 ) {
+    rt = ERR_PTR(rc);
+    goto fail2;
+  }
+
+  rt = skb_rtable(skb);
+  dst = RT_DST(rt);
+  if( dst->error != 0 ) {
+    rt = ERR_PTR(-dst->error);
+    goto fail2;
+  }
+
+  /* Take an extra reference to rt to counteract kfree_skb(). */
+  dst_hold(dst);
+
+ fail2:
+  dev_put(dev);
+ fail1:
+  /* kfree_skb() will drop a reference to rt if ip_route_input() succeeded. */
+  kfree_skb(skb);
+  return rt;
+}
+
+
+#ifdef EFRM_RTABLE_HAS_RT_GW4
+/* linux<5.2: rt_gateway field
+ * linux>=5.2: union of rt_gw4 and rt_gw6 */
+#define rt_gateway rt_gw4
+#endif
+
+static void
+cicp_ip4_kernel_resolve(ci_netif* ni, struct oo_cplane_handle* cp,
+                        struct cp_fwd_key* key, struct cp_fwd_data* data)
+{
+  int rc;
+  struct rtable *rt;
+  cicp_hwport_mask_t rx_hwports = 0;
+
+  if( key->iif_ifindex != CI_IFID_BAD || key->flag & CP_FWD_KEY_TRANSPARENT ) {
+    data->base.src = key->src;
+    rt = cicp_ip4_route_input(cp->cp_netns, key);
+  }
+  else {
+    rt = cicp_ip4_route_output(cp->cp_netns, key, ni->state->uuid,
+                               &data->base.src);
+  }
+
+  if( IS_ERR(rt) ) {
+    data->base.ifindex = CI_IFID_BAD;
+    return;
+  }
+
+  data->base.ifindex = DST_DEV(rt)->ifindex;
+  data->base.next_hop = CI_ADDR_SH_FROM_IP4(rt->rt_gateway);
+  if( CI_IPX_ADDR_IS_ANY(data->base.next_hop) )
+    data->base.next_hop = key->dst;
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3,6,0)
+  data->base.mtu = 0;
+  /* We'll use interface MTU and ignore the route MTU even if it has one
+   * for the older kernels.  This code is mostly used for SYN-ACK replies,
+   * so MTU value is not too important. */
+#else
+  data->base.mtu = rt->rt_pmtu;
+#endif
+
+  data->flags = 0;
+  if( data->base.ifindex != 1 ) {
+    /* In theory the rt->dst structure has a reference to the neigh,
+     * but in practice it is not easy to dig the neigh out. */
+    struct neighbour *neigh = neigh_lookup(&arp_tbl, &data->base.next_hop.ip4,
+                                           DST_DEV(rt));
+    if( neigh != NULL && (neigh->nud_state & NUD_VALID) ) {
+      data->flags |= CICP_FWD_DATA_FLAG_ARP_VALID;
+      memcpy(data->dst_mac, neigh->ha, ETH_ALEN);
+    }
+    if( neigh != NULL )
+      neigh_release(neigh);
+  }
+
+  ip_rt_put(rt);
+
+  if( data->base.ifindex == CI_IFID_LOOP )
+    return;
+
+  /* We've got the route.  Let's look into llap table to find out the
+   * network interface details. */
+  rc = oo_cp_find_llap(cp, data->base.ifindex,
+                       data->base.mtu == 0 ? &data->base.mtu : NULL,
+                       &data->hwports, &rx_hwports, &data->src_mac, &data->encap);
+
+  if( rc < 0 || rx_hwports == 0 )
+    data->base.ifindex = CI_IFID_BAD;
+}
+
+#if CI_CFG_IPV6
+#include <net/ip6_route.h>
+
+
+/* Asks the kernel to resolve an IPv6 route.  This function handles both input
+ * and output routes, and so provides the equivalent functionality of both
+ * cicp_ip4_route_output() and cicp_ip4_route_input(). */
+static struct rt6_info*
+cicp_ip6_route(struct net* netns, struct cp_fwd_key* key, uid_t uid,
+               ci_addr_sh_t* src_out)
+{
+  struct dst_entry *dst = NULL;
+
+  /* When bug87317 is fixed, the special case for IP_TRANSPARENT should be
+   * removed. */
+  ci_ifid_t iif = key->flag & CP_FWD_KEY_TRANSPARENT ?
+                  CI_IFID_LOOP : key->iif_ifindex;
+
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(2,6,38)
+  /* rhel6 case */
+  struct flowi fl6;
+
+  memset(&fl6, 0, sizeof(fl6));
+  memcpy(&fl6.fl6_dst, key->dst.ip6, sizeof(fl6.fl6_dst));
+  memcpy(&fl6.fl6_src, key->src.ip6, sizeof(fl6.fl6_src));
+  fl6.oif = key->ifindex;
+  fl6.iif = iif;
+#define FL6_SADDR(fl6) fl6.fl6_src
+#define DST2RT6(dst) container_of(dst, struct rt6_info, u.dst)
+#define RT_PUT(rt) dst_release(&rt->u.dst)
+#define RT6_DST(rt) rt->u.dst
+#else /* linux-2.6.39 and newer */
+  struct flowi6 fl6;
+
+  memset(&fl6, 0, sizeof(fl6));
+  memcpy(&fl6.daddr, key->dst.ip6, sizeof(fl6.daddr));
+  memcpy(&fl6.saddr, key->src.ip6, sizeof(fl6.saddr));
+  fl6.flowlabel = 0;
+  fl6.flowi6_oif = key->ifindex;
+  fl6.flowi6_iif = iif;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,10,0)
+  fl6.flowi6_uid = make_kuid(current_user_ns(), uid);
+#endif
+#define FL6_SADDR(fl6) fl6.saddr
+#define DST2RT6(dst) container_of(dst, struct rt6_info, dst)
+#define RT_PUT(rt) ip6_rt_put(rt)
+#define RT6_DST(rt) rt->dst
+#endif /* 2.6.39 */
+
+  /* Now that we've built up the key, ask the kernel to resolve the route.  On
+   * recent kernels, we need to distinguish between input and output routes.
+   * Compare inet6_rtm_getroute(). */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,4,0)
+  if( iif != CI_IFID_BAD ) {
+#ifdef EFRM_IP6_ROUTE_INPUT_LOOKUP_EXPORTED  /* Linux >= 4.9 */
+    struct net_device* dev = dev_get_by_index(netns, iif);
+    if( dev == NULL )
+      return ERR_PTR(-ENODEV);
+    dst = ip6_route_input_lookup(netns, dev, &fl6,
+#ifdef EFRM_IP6_ROUTE_INPUT_LOOKUP_TAKES_SKB /* Linux >= 4.17 */
+                                 NULL,
+#endif
+                                 RT6_LOOKUP_F_HAS_SADDR);
+    dev_put(dev);
+#else
+    dst = ip6_route_lookup(netns, &fl6, RT6_LOOKUP_F_HAS_SADDR);
+#endif
+    ci_assert(! CI_IPX_ADDR_IS_ANY(key->src));
+  }
+  else
+#endif
+  {
+    dst = ip6_route_output(netns, NULL, &fl6);
+    if( IS_ERR(dst) )
+      return ERR_CAST(dst);
+  }
+  *src_out = CI_ADDR_SH_FROM_IP6((void*) &FL6_SADDR(fl6));
+  return DST2RT6(dst);
+}
+
+
+static void
+cicp_ip6_kernel_resolve(ci_netif* ni, struct oo_cplane_handle* cp,
+                        struct cp_fwd_key* key, struct cp_fwd_data* data)
+{
+  int rc;
+  struct rt6_info *rt;
+  cicp_hwport_mask_t rx_hwports = 0;
+
+  rt = cicp_ip6_route(cp->cp_netns, key, ni->state->uuid, &data->base.src);
+  if( IS_ERR(rt) ) {
+    data->base.ifindex = CI_IFID_BAD;
+    return;
+  }
+
+  data->base.ifindex = DST_DEV(rt)->ifindex;
+  data->base.next_hop = CI_ADDR_SH_FROM_IP6((void*)&rt->rt6i_gateway);
+  if( CI_IPX_ADDR_IS_ANY(data->base.next_hop) )
+    data->base.next_hop = key->dst;
+  data->base.mtu = dst_mtu(&RT6_DST(rt));
+
+  data->flags = 0;
+  if( data->base.ifindex != 1 ) {
+    /* In theory the rt->dst structure has a reference to the neigh,
+     * but in practice it is not easy to dig the neigh out. */
+    struct neighbour *neigh = neigh_lookup(&nd_tbl, &data->base.next_hop,
+                                           DST_DEV(rt));
+    if( neigh != NULL && (neigh->nud_state & NUD_VALID) ) {
+      data->flags = CICP_FWD_DATA_FLAG_ARP_VALID;
+      memcpy(data->dst_mac, neigh->ha, ETH_ALEN);
+    }
+    if( neigh != NULL )
+      neigh_release(neigh);
+  }
+
+  RT_PUT(rt);
+
+  if( data->base.ifindex == CI_IFID_LOOP )
+    return;
+
+  /* We've got the route.  Let's look into llap table to find out the
+   * network interface details. */
+  rc = oo_cp_find_llap(cp, data->base.ifindex,
+                       data->base.mtu == 0 ? &data->base.mtu : NULL,
+                       &data->hwports, &rx_hwports, &data->src_mac, &data->encap);
+
+  if( rc < 0 || rx_hwports == 0 )
+    data->base.ifindex = CI_IFID_BAD;
+}
+#endif /* CI_CFG_IPV6 */
+
+void
+cicp_kernel_resolve(ci_netif* ni, struct oo_cplane_handle* cp,
+                    struct cp_fwd_key* key,
+                    struct cp_fwd_data* data)
+{
+#if CI_CFG_IPV6
+  if( IS_AF_INET6(fwd_key2af(key)) )
+    cicp_ip6_kernel_resolve(ni, cp, key, data);
+  else
+#endif
+    cicp_ip4_kernel_resolve(ni, cp, key, data);
+}

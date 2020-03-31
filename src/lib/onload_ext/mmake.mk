@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: BSD-2-Clause
+# X-SPDX-Copyright-Text: (c) Solarflare Communications Inc
 
 # dynamic shared lib
 DLIB_SRCS	:= onload_ext.c

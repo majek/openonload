@@ -1,6 +1,6 @@
 Solarflare 4.X Linux network driver
 ===================================
-Version:  4.15.3.1011
+Version:  4.15.4.1003
 
 
 Overview
@@ -80,7 +80,7 @@ kernel
 Installation of the driver can be confirmed by typing:
    modinfo sfc | grep version
 and checking for the line:
-   version: 4.15.3.1011
+   version: 4.15.4.1003
 
 All network interfaces available on the system can be found with:
   ifconfig -a
@@ -90,14 +90,15 @@ Linux distribution support for Solarflare Adapters
 --------------------------------------------------
 
 This driver package is supported on:
- - RedHat Enterprise Linux                        6.8, 6.9, 6.10
- - RedHat Enterprise Linux                        7.4, 7.5, 7.6
+ - RedHat Enterprise Linux                        6.10
+ - RedHat Enterprise Linux                        7.5, 7.6, 7.7
+ - RedHat Enterprise Linux                        8.0
  - SuSE Linux Enterprise Server 12                sp3, sp4
- - SuSE Linux Enterprise Server 15                base
- - Canonical Ubuntu Server LTS                    14.04.5, 16.04.x, 18.04
+ - SuSE Linux Enterprise Server 15                base, sp1
+ - Canonical Ubuntu Server LTS                    16.04.x, 18.04
  - Debian 8 "Jessie"                              8.10
  - Debian 9 "Stretch"                             9.4
- - Kernel.org linux kernels                       3.0 to 4.20
+ - Kernel.org linux kernels                       3.0 to 5.2
 
 
 Solarflare aims to support the current and previous major release of each
@@ -116,6 +117,31 @@ Please contact your local Solarflare support representative or email
 
 Changelog
 ---------
+
+### v4.15.4.1003
+Issue 89009:
+ ~ Fix PTP support on Debian 8.
+
+Issue 76254:
+ ~ Allow changing the MAC address of a VM on RHEL 7.4 and later.
+
+Issue 88295:
+ ~ Remove stack trace when removing the PIO license.
+
+### v4.15.4.1002 - 19.2 release
+SF-122787-KI / Issue 88259:
+ ~ Fix issue with delivering PTP SYNC packets to sfptpd on VLANed interfaces.
+ ~ This regression is present in driver versions 4.15.2.1001 to 4.15.3.1011 inclusive.
+
+Issue 88012:
+ ~ Fix build error when CONFIG_SFC_SRIOV is disabled.
+
+Issue 87939,88582:
+ ~ Fix for warnings during driver load of the form
+   sysfs: cannot create duplicate filename '/devices/virtual/workqueue/sfc_pps_0000:02:00'
+
+Issue 87608,87609:
+ ~ Address potential WARNING efx_mtd_creation_work() seen on driver load.
 
 ### v4.15.3.1011
 [General changes]

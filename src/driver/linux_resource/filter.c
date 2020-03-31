@@ -1,18 +1,5 @@
-/*
-** Copyright 2005-2019  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
 /****************************************************************************
  * Driver for Solarflare network controllers -
  *          resource management for Xen backend, OpenOnload, etc
@@ -2311,6 +2298,17 @@ int efrm_filter_insert(struct efrm_client *client,
 	/* If [efx_dev] is NULL, the hardware is morally absent. */
 	if ( efx_dev == NULL )
 		return -ENETDOWN;
+
+#if CI_CFG_IPV6
+	/* FIXME: add IPv6 support to firewall rules (bug 85208) */
+	if ( (spec->match_flags & EFX_FILTER_MATCH_ETHER_TYPE) &&
+	     (spec->ether_type == htons(ETH_P_IPV6)) ) {
+		rc = efx_dl_filter_insert( efx_dev, spec, replace );
+		efhw_nic_release_dl_device(efhw_nic, efx_dev);
+		return rc;
+	}
+#endif
+
 	/* This should be called every time a driver wishes to insert a
 	   filter to the NIC, to check whether the firewall rules want to
 	   block it. */
