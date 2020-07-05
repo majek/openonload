@@ -577,7 +577,7 @@ static void handle_unacceptable_ack(ci_netif* netif, ci_tcp_state* ts,
   }
   else {
     CITP_STATS_NETIF_INC(netif, rst_sent_unacceptable_ack);
-    ci_tcp_reply_with_rst(netif, rxp);
+    ci_tcp_reply_with_rst(netif, &ts->s.cp, rxp);
   }
 
   CI_TCP_STATS_INC_OUT_SEGS( netif );
@@ -651,8 +651,12 @@ ci_inline void ci_tcp_opencwnd(ci_netif *ni, ci_tcp_state* ts)
   if( ts->cwnd >= ts->ssthresh ) {
     /* Hack - Increase less aggresively on small round trip times */
 #if CI_CFG_CONG_AVOID_SCALE_BACK
-    unsigned tmp = NI_OPTS(ni).cong_avoid_scale_back >> tcp_srtt(ts);
-    unsigned cwnd_scaled = CI_MAX(1, tmp) * ts->cwnd;
+    unsigned tmp = 0, cwnd_scaled;
+    /* tcp_srtt(ts) would relatively easy exceed 32 for a round trip time
+     * on longer links */
+    if( tcp_srtt(ts) < 32 )
+      tmp = NI_OPTS(ni).cong_avoid_scale_back >> tcp_srtt(ts);
+    cwnd_scaled = CI_MAX(1, tmp) * ts->cwnd;
 #else
     unsigned cwnd_scaled = ts->cwnd;
 #endif
@@ -1520,18 +1524,16 @@ static void ci_tcp_rx_handle_ack(ci_tcp_state* ts, ci_netif* netif,
       ci_tcp_rx_dupack(ts, netif, rxp);
   }
 
-  if( SEQ_SUB(ts->snd_max, rxp->ack) < tcp_eff_mss(ts) &&
-      ci_ip_queue_is_empty(&ts->retrans) &&
+  if( SEQ_SUB(ts->snd_max, rxp->ack) <= 0 &&
       OO_SP_IS_NULL(ts->local_peer) ) {
     /* Zero window: need to start probes.
-     * (We treat a window less than MSS as a zero window, as we don't want
-     * to split packets).
      *
      * If we are in a state that has an active TXQ, zero-ish window,
      * and the retrans queue is empty then zwin timer should be
      * running.  The zwin timer may not send anything when it expires
      * (e.g. if sendq is empty)
      */
+    ci_assert(ci_ip_queue_is_empty(&ts->retrans));
     if( ci_ip_timer_pending(netif, &ts->zwin_tid) ) {
       if( ts->zwin_probes > 0 ) {
         ++ts->zwin_acks;
@@ -2466,7 +2468,6 @@ static void handle_rx_synrecv_ack(ci_netif* netif, ci_tcp_socket_listen* tls,
     goto reset_out;
   }
 
-
   /* check paws */
   if( tsr->tcpopts.flags & CI_TCPT_FLAG_TSO &&
       rxp->flags & CI_TCPT_FLAG_TSO ) {
@@ -2529,7 +2530,7 @@ static void handle_rx_synrecv_ack(ci_netif* netif, ci_tcp_socket_listen* tls,
   return;
  reset_out:
   /* LOG_U already printed in all paths to here */
-  ci_tcp_reply_with_rst(netif, rxp);
+  ci_tcp_reply_with_rst(netif, &tls->s.cp, rxp);
   return;
 }
 
@@ -2661,6 +2662,7 @@ static void handle_rx_listen(ci_netif* netif, ci_tcp_socket_listen* tls,
    */
   ci_ip_cache_init(&ipcache, oo_pkt_af(pkt));
   ci_ipcache_set_daddr(&ipcache, RX_PKT_SADDR(pkt));
+  ipcache_protocol(&ipcache) = IPPROTO_TCP;
   ipcache.dport_be16 = tcp->tcp_source_be16;
   if( CI_UNLIKELY( pkt->intf_i == OO_INTF_I_LOOPBACK ) ) {
     /* This packet was received via loopback, so there is no need to call
@@ -2915,6 +2917,7 @@ static void handle_rx_listen(ci_netif* netif, ci_tcp_socket_listen* tls,
   /* setup synrecv state */
   tsr->l_addr = RX_PKT_DADDR(pkt);
   tsr->r_addr = RX_PKT_SADDR(pkt);
+  tsr->l_port = tcp->tcp_dest_be16;
   tsr->r_port = tcp->tcp_source_be16;
 
   /* store timestamp in echo reply */
@@ -2933,12 +2936,14 @@ static void handle_rx_listen(ci_netif* netif, ci_tcp_socket_listen* tls,
                             ci_tcp_rcvbuf_established(netif, &tls->s));
     }
   }
+  else {
+    tsr->rcv_wscl = 0;
+  }
 
   if( do_syncookie )
     ci_tcp_syncookie_syn(netif, tls, tsr);
   else {
-    tsr->snd_isn = ci_tcp_initial_seqno(netif,
-                                        tsr->l_addr, tcp_lport_be16(tls),
+    tsr->snd_isn = ci_tcp_initial_seqno(netif, tsr->l_addr, tsr->l_port,
                                         tsr->r_addr, tsr->r_port);
 
     /* Insert synrecv into the listen queue. */
@@ -3000,7 +3005,7 @@ static void handle_rx_listen(ci_netif* netif, ci_tcp_socket_listen* tls,
 
  reset_out:
   /* LOG_U already printed in all three paths to this point */
-  ci_tcp_reply_with_rst(netif, rxp);
+  ci_tcp_reply_with_rst(netif, &tls->s.cp, rxp);
   return;
 }
 
@@ -3029,7 +3034,7 @@ static int handle_syn_sent_opts(ci_netif* netif, ci_tcp_state* ts,
     /* We should set ACK in our RST */
     ci_tcp_set_flags(ts, CI_TCP_FLAG_ACK);
     CITP_STATS_NETIF_INC(netif, rst_sent_bad_options);
-    ci_tcp_reply_with_rst(netif, rxp);
+    ci_tcp_reply_with_rst(netif, &ts->s.cp, rxp);
     return -1;
 #endif
   }
@@ -3144,7 +3149,7 @@ static void handle_rx_syn_sent(ci_netif* netif, ci_tcp_state* ts,
       LOG_U(log(LPF "%d SYN-SENT unacceptable ACK will reset",
                 S_FMT(ts)));
       CITP_STATS_NETIF_INC(netif, rst_sent_unacceptable_ack);
-      ci_tcp_reply_with_rst(netif, rxp);
+      ci_tcp_reply_with_rst(netif, &ts->s.cp, rxp);
       return;
     }
   }
@@ -3173,7 +3178,6 @@ static void handle_rx_syn_sent(ci_netif* netif, ci_tcp_state* ts,
     goto free_out;
   }
 
-
   /* we have an acceptable SYN/ACK here so we need to transition to
   ** established and setup any negotiated options.
   ** We need to parse options before ci_tcp_rx_handle_ack(),
@@ -3196,7 +3200,6 @@ static void handle_rx_syn_sent(ci_netif* netif, ci_tcp_state* ts,
 set_isn:
   /* Snarf their initial sequence no. and window. */
   ci_tcp_rx_set_isn(ts, pkt->pf.tcp_rx.end_seq);
-
 
   ci_tcp_set_established_state(netif, ts);
   CITP_STATS_NETIF(++netif->state->stats.active_opens);
@@ -3503,7 +3506,7 @@ static int handle_rx_minor_states(ci_tcp_state* ts, ci_netif* netif,
       LOG_E(ci_log(LNT_FMT "ERROR demux to CLOSED socket",
                    LNT_PRI_ARGS(netif, ts)));
     CITP_STATS_NETIF_INC(netif, rst_sent_no_match);
-    ci_tcp_reply_with_rst(netif, rxp);
+    ci_tcp_reply_with_rst(netif, &ts->s.cp, rxp);
     break;
   default:
     return 0;
@@ -3719,7 +3722,7 @@ static void handle_unacceptable_seq(ci_netif* netif, ci_tcp_state* ts,
     LOG_U(log(LPF "%d handle unacceptable seq RSTACK needed because "
               "not in synchronized state",S_FMT(ts)));
     CITP_STATS_NETIF_INC(netif, rst_sent_bad_seq);
-    ci_tcp_reply_with_rst(netif, rxp);
+    ci_tcp_reply_with_rst(netif, &ts->s.cp, rxp);
     /* because we're not going to send an ACK here, the dsack block needs
        to be cleared to prevent the next packet getting confused when
        it finds there is a old block still waiting */
@@ -3946,10 +3949,16 @@ static void handle_rx_slow(ci_tcp_state* ts, ci_netif* netif,
         pkt->pf.tcp_rx.end_seq -= n;
         pkt->pf.tcp_rx.pay_len -= n;
         if( SEQ_LE(pkt->pf.tcp_rx.end_seq, tcp_rcv_nxt(ts)) ) {
-          /* There's nothing left that overlaps our window. */
-          pkt = ci_netif_pkt_rx_to_tx(netif, pkt);
-          if( pkt != NULL )
-            ci_tcp_send_ack_rx(netif, ts, pkt, CI_FALSE, CI_FALSE);
+          /* There's nothing left that overlaps our window (we started by
+           * saying that there is some new data but now we've realised that
+           * it's all out-of-window). We've called ci_tcp_rx_handle_ack() so
+           * there's a possibility that we can now advance the sendq. We send
+           * an ACK as well because the sender is clearly doing something a
+           * little odd, so it's best to remind them what they're supposed to
+           * be doing. */
+          ci_netif_pkt_release_rx(netif, pkt);
+          ts->s.b.sb_flags |= CI_SB_FLAG_TCP_POST_POLL;
+          TCP_NEED_ACK(ts);
           return;
         }
       }
@@ -4279,7 +4288,11 @@ static void handle_no_match(ci_netif* ni, ciip_tcp_rx_pkt* rxp)
     pkt->pf.tcp_rx.end_seq +=
       (tcp->tcp_flags & CI_TCP_FLAG_SYN) >> CI_TCP_FLAG_SYN_BIT;
     CITP_STATS_NETIF_INC(ni, rst_sent_no_match);
-    ci_tcp_reply_with_rst(ni, rxp);
+    /* We have no matching socket, so we have no sock_cp to pass here.  The
+     * only case where we actually need a sock_cp is when our local address is
+     * being NAT-ed.  In that case we'll to send the RST if we can't find a
+     * route over which to send it, but the same is true for the kernel. */
+    ci_tcp_reply_with_rst(ni, NULL, rxp);
   }
   else
     ci_netif_pkt_release_rx_1ref(ni, pkt);

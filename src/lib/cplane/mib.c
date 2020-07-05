@@ -83,11 +83,7 @@ static const struct cp_mib_region cp_mib_regions[] = {
   SB_MEMBER(cp_version_t, idle_version),
   SB_MEMBER(cp_version_t, oof_version),
 
-  SB_MEMBER(cp_activation_flags, valid_activation_flags),
-  SB_MEMBER(cp_activation_flags, expired_activation_flags),
-  SB_MEMBER(cp_string_t, act_licensee),
-  SB_MEMBER(cp_string_t, act_sku),
-  SB_MEMBER(cp_string_t, act_renewal),
+  DB_MEMBER(cp_string_t, sku),
 
   DB_MEMBER(cp_version_t, llap_version),
   DB_TABLE(struct cp_hwport_row, hwport, hwport_max),
@@ -309,11 +305,14 @@ ci_ifid_t cp_get_hwport_ifindex(struct cp_mibs* mib, ci_hwport_id_t hwport)
 }
 
 
-/* Returns the hash table id of a service or backend that matches the address
- * and port provided.  Returns CICP_MAC_ROWID_BAD if a match cannot be found */
+/* Iterates over all matches in the service table, calling the provided
+ * callback.  Iteration terminates when the callback returns true, and the
+ * ID of the table-entry at that point is returned.  The callback may be NULL,
+ * in which case the ID of the first matching entry is returned. */
 cicp_mac_rowid_t
-cp_svc_find_match(const struct cp_mibs* mib,
-                  const ci_addr_sh_t addr, const ci_uint16 port)
+cp_svc_iterate_matches(const struct cp_mibs* mib, const ci_addr_sh_t addr,
+                       ci_uint16 port, cp_svc_iterator_callback_t callback,
+                       void* opaque)
 {
   /* svc_ep_max is guaranteed to be 2^n, see cfg_svc_ep_max in server.c */
   unsigned svc_table_mask = mib->dim->svc_ep_max - 1;
@@ -329,8 +328,9 @@ cp_svc_find_match(const struct cp_mibs* mib,
 
     if( svc->use == 0 )
       return CICP_MAC_ROWID_BAD;
-    if( svc->row_type != CP_SVC_EMPTY &&
-        CI_IPX_ADDR_EQ(svc->ep.addr, addr) && svc->ep.port == port )
+    if( svc->row_type != CP_SVC_EMPTY && svc->ep.port == port &&
+        CI_IPX_ADDR_EQ(svc->ep.addr, addr) &&
+        (callback == NULL || callback(mib, hash, opaque)) )
       return hash;
 
     if( hash2 == 0 ) /* After initial zero hash2 is always odd. */
@@ -339,6 +339,17 @@ cp_svc_find_match(const struct cp_mibs* mib,
   } while( ++iter < (svc_table_mask >> 2) );
 
   return CICP_MAC_ROWID_BAD;
+}
+
+
+/* Returns the hash table id of a service or backend that matches the address
+ * and port provided.  Returns CICP_MAC_ROWID_BAD if a match cannot be found */
+cicp_mac_rowid_t
+cp_svc_find_match(const struct cp_mibs* mib, const ci_addr_sh_t addr,
+                  ci_uint16 port)
+{
+  /* Pass no callback to return the first match. */
+  return cp_svc_iterate_matches(mib, addr, port, NULL, NULL);
 }
 
 

@@ -89,6 +89,7 @@ static int cfg_rx_merge;
 static int cfg_eventq_wait;
 static int cfg_fd_wait;
 static int cfg_max_fill = -1;
+static int cfg_exit_pkts = -1;
 
 /* Mutex to protect printing from different threads */
 static pthread_mutex_t printf_mutex;
@@ -419,6 +420,9 @@ static void monitor(struct resources* res)
     prev_pkts = now_pkts;
     prev_bytes = now_bytes;
     start = end;
+
+    if( cfg_exit_pkts > 0 && now_pkts >= cfg_exit_pkts )
+      exit(0);
   }
 }
 
@@ -461,6 +465,7 @@ static __attribute__ ((__noreturn__)) void usage(void)
   fprintf(stderr, "  -e       block on eventq instead of busy wait\n");
   fprintf(stderr, "  -f       block on fd instead of busy wait\n");
   fprintf(stderr, "  -F <fl>  set max fill level for RX ring\n");
+  fprintf(stderr, "  -n <num> exit after receiving n packets\n");
   exit(1);
 }
 
@@ -473,7 +478,7 @@ int main(int argc, char* argv[])
   unsigned vi_flags;
   int c;
 
-  while( (c = getopt (argc, argv, "dtVL:vmbefF:")) != -1 )
+  while( (c = getopt (argc, argv, "dtVL:vmbefF:n:")) != -1 )
     switch( c ) {
     case 'd':
       cfg_hexdump = 1;
@@ -504,6 +509,9 @@ int main(int argc, char* argv[])
       break;
     case 'F':
       cfg_max_fill = atoi(optarg);
+      break;
+    case 'n':
+      cfg_exit_pkts = atoi(optarg);
       break;
     case '?':
       usage();
@@ -618,6 +626,9 @@ int main(int argc, char* argv[])
   pthread_mutex_init(&printf_mutex, NULL);
 
   TEST(pthread_create(&thread_id, NULL, monitor_fn, res) == 0);
+
+  printf("efsink is now ready to receive\n");
+  fflush(stdout);
 
   if( cfg_eventq_wait )
     event_loop_blocking(res);

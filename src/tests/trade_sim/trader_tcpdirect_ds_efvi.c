@@ -153,8 +153,8 @@ static int poll_udp_rx(struct client_state* cs)
   if( msg.msg.iovcnt == 0 )
     return -1;
 
-  int is_hit_me = msg.msg.iov[0].iov_len >= 6 &&
-                  strncmp(msg.msg.iov[0].iov_base, "hit me", 6) == 0;
+  int is_hit_me = msg.iov[0].iov_len >= 6 &&
+                  strncmp(msg.iov[0].iov_base, "hit me", 6) == 0;
   zfur_zc_recv_done(cs->udp_sock, &(msg.msg));
 
   return is_hit_me;

@@ -55,13 +55,7 @@ onload_set EF_MAX_PACKETS $(( (180000*32) / $EF_CLUSTER_SIZE ))
 onload_set EF_PREALLOC_PACKETS 1
 onload_set EF_USE_HUGE_PAGES 2
 
-# Disable low-latency sends to minimise CPU overheads.
-onload_set EF_TX_PUSH 0
-onload_set EF_PIO 0
-onload_set EF_CTPIO 0
-
-# Optimize packet handling for throughput rather than latency.
-onload_set EF_HIGH_THROUGHPUT_MODE 1
+onload_import throughput_base
 
 # Prevent spinning inside socket calls.  (Spinning will take place
 # on epoll_wait polling).

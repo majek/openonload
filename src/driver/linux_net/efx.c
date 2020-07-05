@@ -595,6 +595,9 @@ static int efx_poll(struct napi_struct *napi, int budget)
 	struct efx_channel *channel =
 		container_of(napi, struct efx_channel, napi_str);
 	struct efx_nic *efx = channel->efx;
+#ifdef CONFIG_RFS_ACCEL
+	unsigned int time;
+#endif
 	int spent;
 
 #if defined(EFX_USE_KCOMPAT) && defined(EFX_WANT_DRIVER_BUSY_POLL)
@@ -621,7 +624,10 @@ static int efx_poll(struct napi_struct *napi, int budget)
 
 #ifdef CONFIG_RFS_ACCEL
 		/* Perhaps expire some ARFS filters */
-		schedule_work(&channel->filter_work);
+		time = jiffies - channel->rfs_last_expiry;
+		/* Would our quota be >= 20? */
+		if (channel->rfs_filter_count * time >= 600 * HZ)
+			mod_delayed_work(system_wq, &channel->filter_work, 0);
 #endif
 
 		/* There is no race here; although napi_disable() will
@@ -798,7 +804,7 @@ efx_alloc_channel(struct efx_nic *efx, int i, struct efx_channel *old_channel)
 	channel->tx_coalesce_doorbell = false;
 	channel->irq_mem_node = NUMA_NO_NODE;
 #ifdef CONFIG_RFS_ACCEL
-	INIT_WORK(&channel->filter_work, efx_filter_rfs_expire);
+	INIT_DELAYED_WORK(&channel->filter_work, efx_filter_rfs_expire);
 #endif
 
 	channel->rx_queue.efx = efx;
@@ -860,6 +866,7 @@ efx_copy_channel(struct efx_channel *old_channel)
 			if (tx_queue->channel)
 				tx_queue->channel = channel;
 			tx_queue->buffer = NULL;
+			tx_queue->cb_page = NULL;
 			memset(&tx_queue->txd, 0, sizeof(tx_queue->txd));
 		}
 	} else {
@@ -874,7 +881,7 @@ efx_copy_channel(struct efx_channel *old_channel)
 	efx_set_affinity_notifier(channel);
 #endif
 #ifdef CONFIG_RFS_ACCEL
-	INIT_WORK(&channel->filter_work, efx_filter_rfs_expire);
+	INIT_DELAYED_WORK(&channel->filter_work, efx_filter_rfs_expire);
 #endif
 
 	return channel;
@@ -1760,7 +1767,11 @@ static int efx_init_io(struct efx_nic *efx)
 		rc = -EIO;
 		goto fail3;
 	}
-	efx->membase = ioremap_nocache(efx->membase_phys, mem_map_size);
+#if defined(EFX_USE_KCOMPAT)
+	efx->membase = efx_ioremap(efx->membase_phys, mem_map_size);
+#else
+	efx->membase = ioremap(efx->membase_phys, mem_map_size);
+#endif
 	if (!efx->membase) {
 		netif_err(efx, probe, efx->net_dev,
 			  "could not map memory BAR at %llx+%x\n",
@@ -3046,6 +3057,8 @@ static int efx_probe_filters(struct efx_nic *efx)
 				     ++i)
 					channel->rps_flow_id[i] =
 						RPS_FLOW_ID_INVALID;
+			channel->rfs_expire_index = 0;
+			channel->rfs_filter_count = 0;
 		}
 
 		if (!success) {
@@ -3057,8 +3070,6 @@ static int efx_probe_filters(struct efx_nic *efx)
 			rc = -ENOMEM;
 			goto out_unlock;
 		}
-
-		efx->rps_expire_index = efx->rps_expire_channel = 0;
 	}
 #endif
 out_unlock:
@@ -3073,6 +3084,7 @@ static void efx_remove_filters(struct efx_nic *efx)
 	struct efx_channel *channel;
 
 	efx_for_each_channel(channel, efx) {
+		cancel_delayed_work_sync(&channel->filter_work);
 		kfree(channel->rps_flow_id);
 		channel->rps_flow_id = NULL;
 	}
@@ -3680,6 +3692,7 @@ int efx_net_open(struct net_device *net_dev)
 		return -EBUSY;
 	if (efx_mcdi_poll_reboot(efx) && efx_reset(efx, RESET_TYPE_ALL))
 		return -EIO;
+	efx->reset_count = 0;
 
 	/* Notify the kernel of the link state polled during driver load,
 	 * before the monitor starts running */
@@ -3748,7 +3761,11 @@ void efx_set_stats_period(struct efx_nic *efx, unsigned int period_ms)
 }
 
 /* Context: netif_tx_lock held, BHs disabled. */
-void efx_watchdog(struct net_device *net_dev)
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_NDO_TX_TIMEOUT_TXQUEUE)
+static void efx_watchdog(struct net_device *net_dev, unsigned int txqueue)
+#else
+static void efx_watchdog(struct net_device *net_dev)
+#endif
 {
 	struct efx_nic *efx = netdev_priv(net_dev);
 	struct efx_channel *channel;
@@ -4394,7 +4411,7 @@ static int efx_netdev_event(struct notifier_block *this,
 		efx_update_name(efx);
 
 #if defined(CONFIG_SFC_MTD) && defined(EFX_WORKAROUND_87308)
-		if (atomic_xchg(&efx->mtds_probed_flag, 1) == 0)
+		if (atomic_xchg(&efx->mtd_struct->probed_flag, 1) == 0)
 			(void)efx_mtd_probe(efx);
 #endif
 	}
@@ -4913,6 +4930,7 @@ out:
 	 * won't recover, but we should try.
 	 */
 	efx->mc_bist_for_other_fn = false;
+	efx->reset_count = 0;
 }
 
 /* The worker thread exists so that code that cannot sleep can
@@ -4952,6 +4970,8 @@ static void efx_reset_work(struct work_struct *data)
 
 void efx_schedule_reset(struct efx_nic *efx, enum reset_type type)
 {
+	static const unsigned int RESETS_BEFORE_DISABLE = 5;
+	unsigned long last_reset = READ_ONCE(efx->last_reset);
 	enum reset_type method;
 
 	if (efx->state == STATE_RECOVERY) {
@@ -4972,8 +4992,8 @@ void efx_schedule_reset(struct efx_nic *efx, enum reset_type type)
 	case RESET_TYPE_MC_BIST:
 	case RESET_TYPE_MCDI_TIMEOUT:
 		method = type;
-		netif_dbg(efx, drv, efx->net_dev, "scheduling %s reset\n",
-			  RESET_TYPE(method));
+		netif_dbg(efx, drv, efx->net_dev,
+			  "scheduling %s reset\n", RESET_TYPE(method));
 		break;
 	default:
 		method = efx->type->map_reset_reason(type);
@@ -4982,6 +5002,29 @@ void efx_schedule_reset(struct efx_nic *efx, enum reset_type type)
 			  RESET_TYPE(method), RESET_TYPE(type));
 		break;
 	}
+
+	/* check we're scheduling a new reset and if so check we're
+	 * not scheduling resets too often.
+	 * this part is not atomically safe, but is also ultimately a
+	 * heuristic; if we lose increments due to dirty writes
+	 * that's fine and if we falsely increment or reset due to an
+	 * inconsistent read of last_reset on 32-bit arch it's also ok.
+	 */
+	if (time_after(jiffies, last_reset + HZ))
+		efx->reset_count = 0;
+	if (!(efx->reset_pending & (1 << method)) &&
+	    ++efx->reset_count > RESETS_BEFORE_DISABLE) {
+		method = RESET_TYPE_DISABLE;
+		netif_err(efx, drv, efx->net_dev,
+			  "too many resets, scheduling %s\n",
+			  RESET_TYPE(method));
+	}
+
+	/* It is not atomic-safe as well, but there is a high chance that
+	 * this code will catch the just-set current_reset value.  If we
+	 * fail once, we'll get the value next time. */
+	if (time_after(efx->current_reset, last_reset) )
+		efx->last_reset = efx->current_reset;
 
 	set_bit(method, &efx->reset_pending);
 
@@ -5085,11 +5128,8 @@ static int efx_init_struct(struct efx_nic *efx,
 	/* Initialise common structures */
 	spin_lock_init(&efx->biu_lock);
 #ifdef CONFIG_SFC_MTD
-	INIT_LIST_HEAD(&efx->mtd_list);
-#ifdef EFX_WORKAROUND_87308
-	atomic_set(&efx->mtds_probed_flag, 0);
-	INIT_DELAYED_WORK(&efx->mtd_creation_work, efx_mtd_creation_work);
-#endif
+	if(efx_mtd_init(efx) < 0)
+		goto fail;
 #endif
 	INIT_WORK(&efx->reset_work, efx_reset_work);
 	INIT_DELAYED_WORK(&efx->monitor_work, efx_monitor);
@@ -5157,7 +5197,7 @@ static int efx_init_struct(struct efx_nic *efx,
 	for (i = 0; i < EFX_MAX_CHANNELS; i++) {
 		efx->channel[i] = efx_alloc_channel(efx, i, NULL);
 		if (!efx->channel[i])
-			goto fail;
+			goto fail1;
 		efx->msi_context[i].efx = efx;
 		efx->msi_context[i].index = i;
 	}
@@ -5179,8 +5219,10 @@ static int efx_init_struct(struct efx_nic *efx,
 
 	return 0;
 
-fail:
+fail1:
 	efx_fini_struct(efx);
+fail:
+	efx_mtd_free(efx);
 	return -ENOMEM;
 }
 
@@ -5202,6 +5244,10 @@ static void efx_fini_struct(struct efx_nic *efx)
 #ifdef CONFIG_SFC_DEBUGFS
 	mutex_destroy(&efx->debugfs_symlink_mutex);
 #endif
+	if (efx->mtd_struct) {
+		efx->mtd_struct->efx = NULL;
+		efx->mtd_struct = NULL;
+	}
 }
 
 void efx_update_sw_stats(struct efx_nic *efx, u64 *stats)
@@ -5581,7 +5627,7 @@ static void efx_pci_remove(struct pci_dev *pci_dev)
 	rtnl_unlock();
 
 #if defined(CONFIG_SFC_MTD) && defined(EFX_WORKAROUND_87308)
-	(void)cancel_delayed_work_sync(&efx->mtd_creation_work);
+	(void)cancel_delayed_work_sync(&efx->mtd_struct->creation_work);
 #endif
 
 	if (efx->type->sriov_fini)
@@ -5590,7 +5636,7 @@ static void efx_pci_remove(struct pci_dev *pci_dev)
 
 #ifdef CONFIG_SFC_MTD
 #ifdef EFX_WORKAROUND_87308
-	if (atomic_read(&efx->mtds_probed_flag) == 1)
+	if (atomic_read(&efx->mtd_struct->probed_flag) == 1)
 		efx_mtd_remove(efx);
 #else
 	efx_mtd_remove(efx);
@@ -5867,7 +5913,7 @@ static int efx_pci_probe(struct pci_dev *pci_dev,
 
 #ifdef CONFIG_SFC_MTD
 #ifdef EFX_WORKAROUND_87308
-	schedule_delayed_work(&efx->mtd_creation_work, 5 * HZ);
+	schedule_delayed_work(&efx->mtd_struct->creation_work, 5 * HZ);
 #else
 	/* Try to create MTDs, but allow this to fail */
 	rtnl_lock();
@@ -6200,6 +6246,7 @@ static void efx_io_resume(struct pci_dev *pdev)
 			  "efx_reset failed after PCI error (%d)\n", rc);
 	} else {
 		efx->state = STATE_READY;
+		efx->reset_count = 0;
 		netif_dbg(efx, hw, efx->net_dev,
 			  "Done resetting and resuming IO after PCI error.\n");
 	}

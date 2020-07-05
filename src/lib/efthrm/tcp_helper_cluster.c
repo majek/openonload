@@ -1650,5 +1650,3 @@ int tcp_helper_cluster_dump(tcp_helper_resource_t* thr, void* buf, int buf_len)
 {
   return oo_dump_to_user(thc_dump_fn, NULL, buf, buf_len);
 }
-
-

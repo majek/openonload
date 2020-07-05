@@ -156,14 +156,43 @@ MODULE_PARM_DESC(cplane_route_request_timeout_ms,
                  "Time out value for route resolution requests.");
 
 
+/* Helper for int/bool module parameters which require cp_server restart. */
+static int
+cplane_server_param_int_set(const char* val,
+                            ONLOAD_MPC_CONST struct kernel_param* kp);
+static int
+cplane_server_param_bool_set(const char* val,
+                             ONLOAD_MPC_CONST struct kernel_param* kp);
+#ifdef EFRM_HAVE_KERNEL_PARAM_OPS
+static const struct kernel_param_ops cplane_server_param_int_ops = {
+  .set = cplane_server_param_int_set,
+  .get = param_get_int,
+};
+static const struct kernel_param_ops cplane_server_param_bool_ops = {
+  .set = cplane_server_param_bool_set,
+  .get = param_get_bool,
+};
+#define cplane_module_param_int(param, perms)  \
+    module_param_cb(param, &cplane_server_param_int_ops, &param, perms)
+#define cplane_module_param_bool(param, perms)  \
+    module_param_cb(param, &cplane_server_param_bool_ops, &param, perms)
+#else
+#define cplane_module_param_int(param, perms)  \
+    module_param_call(param, cplane_server_param_int_set, param_get_int, \
+                      &param, perms)
+#define cplane_module_param_bool(param, perms)  \
+    module_param_call(param, cplane_server_param_bool_set, param_get_bool, \
+                      &param, perms)
+#endif
+
 /* Module parameters to set uid/gid. This default is overridden by
  * /etc/sysconfig/openonload, except in developer builds */
 static int cplane_server_uid = DEFAULT_OVERFLOWUID;
 static int cplane_server_gid = DEFAULT_OVERFLOWGID;
-module_param(cplane_server_uid, int, S_IRUGO | S_IWUSR);
+cplane_module_param_int(cplane_server_uid, S_IRUGO | S_IWUSR);
 MODULE_PARM_DESC(cplane_server_uid,
                  "UID to drop privileges to for the cplane server.");
-module_param(cplane_server_gid, int, S_IRUGO | S_IWUSR);
+cplane_module_param_int(cplane_server_gid, S_IRUGO | S_IWUSR);
 MODULE_PARM_DESC(cplane_server_gid,
                  "GID to drop privileges to for the cplane server.");
 
@@ -171,12 +200,22 @@ MODULE_PARM_DESC(cplane_server_gid,
 #ifndef NDEBUG
 /* RLIMIT_CORE is unsigned, so -1 is "unlimited". */
 static int cplane_server_core_size = -1;
-module_param(cplane_server_core_size, int, S_IRUGO | S_IWUSR);
+cplane_module_param_int(cplane_server_core_size, S_IRUGO | S_IWUSR);
 MODULE_PARM_DESC(cplane_server_core_size,
                  "RLIMIT_CORE value for the cplane server.  You probably want "
                  "to set fs.suid_dumpable sysctl to 2 if you are using this.");
 #endif
 
+bool cplane_use_prefsrc_as_local = 0;
+cplane_module_param_bool(cplane_use_prefsrc_as_local, S_IRUGO | S_IWUSR);
+MODULE_PARM_DESC(cplane_use_prefsrc_as_local,
+                 "If true, use a preferred source of any accelerated route "
+                 "in the same way as an address assigned to accelerated "
+                 "interface.  This setting allows the acceleration of "
+                 "unbound connections via accelerated routes when the "
+                 "preferred source is assigned to another network "
+                 "interface.\n"
+                 "See also oof_use_all_local_ip_addresses module parameter.");
 
 
 /*
@@ -331,6 +370,13 @@ static void cp_table_insert(struct net* netns, struct oo_cplane_handle* cp)
   ci_dllist_push(&cp_hash_table[hash_netns(netns)], &cp->link);
 }
 
+static void cp_table_remove(struct oo_cplane_handle* cp)
+{
+  ci_assert(spin_is_locked(&cp_lock));
+  ci_assert(spin_is_locked(&cp->cp_handle_lock));
+  ci_dllist_remove_safe(&cp->link);
+}
+
 
 /* If this function returns true, then user may call all functions from
  * include/cplane/cplane.h without crash or other unexpected consequence. */
@@ -417,7 +463,7 @@ static void cp_table_purge(void)
 static void cp_kill(struct oo_cplane_handle* cp)
 {
 
-  ci_dllist_remove_safe(&cp->link);
+  cp_table_remove(cp);
 
   /* Holding cp_handle_lock ensures that cp->server_pid is not going to be
    * released under our feet.  Calling kill_pid() is safe in atomic context. */
@@ -477,7 +523,7 @@ void cp_release(struct oo_cplane_handle* cp)
   if( last_ref_gone ) {
     OO_DEBUG_CPLANE(ci_log("%s: last ref gone: cp=%p netns=%p", __FUNCTION__,
                            cp, cp->cp_netns));
-    ci_dllist_remove_safe(&cp->link);
+    cp_table_remove(cp);
   }
   /* If we have a server and the reference count has dropped to one, there
    * are no clients left, and we should kill the server, but only if Onload is
@@ -491,7 +537,7 @@ void cp_release(struct oo_cplane_handle* cp)
                                "cp=%p netns=%p", __FUNCTION__,
                                 cp, cp->cp_netns));
         last_ref_gone = 1;
-        ci_dllist_remove_safe(&cp->link);
+        cp_table_remove(cp);
       }
       /* else the refcount owner will release it in time */
     }
@@ -642,10 +688,13 @@ static void vm_op_close(struct vm_area_struct* vma)
       ci_assert(server_pid);
 
       /* Interlock with cp_kill_work(). */
+      spin_lock(&cp_lock);
       spin_lock_bh(&cp->cp_handle_lock);
       cp->server_pid = NULL;
       cp->server_file = NULL;
+      cp_table_remove(cp);
       spin_unlock_bh(&cp->cp_handle_lock);
+      spin_unlock(&cp_lock);
 
       put_pid(server_pid);
       fput(server_file);
@@ -791,11 +840,12 @@ cp_mmap_mib(struct file* file, struct oo_cplane_handle* cp,
                              task_tgid_nr(current)));
       rc = -EBUSY;
     }
-    /* Fixme: If a previous server exited while there will still clients
-     * active, and some of those clients are still around, we will hit this
-     * branch.  For now, we bail out; bug70351 tracks improvements. */
+    /* When a previous server exited, then we remove it from the
+     * cp_table, and can't get here.  There is no known way get here.
+     * See bugs 70351 & 89262 for some history. */
     else if( cp->mem != NULL ) {
-      OO_DEBUG_CPLANE(ci_log("%s: cp->mem not NULL: cp=%p", __FUNCTION__, cp));
+      ci_log("%s: cp->mem not NULL: cp=%p", __FUNCTION__, cp);
+      ci_assert(0);
       rc = -ENOTEMPTY;
     }
     /* Don't allow a server to run if there are no other references to the
@@ -1045,7 +1095,8 @@ static struct oo_cplane_handle* __cp_acquire_from_netns(struct net* netns)
   struct oo_cplane_handle* new_cplane_inst;
   struct oo_cplane_handle* existing_cplane_inst;
   int rc;
-  const struct cred *orig_creds = NULL;
+  const struct cred *orig_creds;
+  struct cred *my_creds;
   ci_irqlock_state_t lock_flags;
 
   existing_cplane_inst = __cp_acquire_from_netns_if_exists(netns, CI_TRUE);
@@ -1089,9 +1140,9 @@ static struct oo_cplane_handle* __cp_acquire_from_netns(struct net* netns)
 
   /* cicpplos_ctor() must be called with CAP_NET_RAW. */
   new_cplane_inst->cppl.cp = new_cplane_inst;
-  orig_creds = oo_cplane_empower_cap_net_raw(netns);
+  orig_creds = oo_cplane_empower_cap_net_raw(netns, &my_creds);
   rc = cicpplos_ctor(&new_cplane_inst->cppl);
-  oo_cplane_drop_cap_net_raw(orig_creds);
+  oo_cplane_drop_cap_net_raw(orig_creds, my_creds);
   if( rc != 0 )
     goto fail;
 
@@ -1399,6 +1450,40 @@ cp_message_enqueue(struct oo_cplane_handle* cp, struct cp_message_buffer* msg)
   wake_up_poll(&cp->msg_wq, POLLIN | POLLRDNORM);
 }
 
+int
+__cp_announce_hwport(struct oo_cplane_handle* cp, ci_ifid_t ifindex,
+                     ci_hwport_id_t hwport, ci_uint64 nic_flags)
+{
+  struct cp_message_buffer* msg;
+
+  msg = kmalloc(sizeof(*msg), GFP_ATOMIC);
+  if( msg == NULL )
+    return -ENOMEM;
+
+  msg->data.hmsg_type = CP_HMSG_SET_HWPORT;
+  msg->data.u.set_hwport.ifindex = ifindex;
+  msg->data.u.set_hwport.hwport = hwport;
+  msg->data.u.set_hwport.nic_flags = nic_flags;
+  cp_message_enqueue(cp, msg);
+
+  return 0;
+}
+
+int
+cp_announce_hwport(const struct efhw_nic* nic, ci_hwport_id_t hwport)
+{
+  struct oo_cplane_handle* cp;
+  int rc;
+
+  cp = __cp_acquire_from_netns_if_exists(dev_net(nic->net_dev), CI_TRUE);
+  if( cp == NULL )
+    return -ENOENT;
+
+  rc = __cp_announce_hwport(cp, nic->net_dev->ifindex, hwport, nic->flags);
+  cp_release(cp);
+  return rc;
+}
+
 
 static int
 cp_veth_set_fwd_table_id(struct oo_cplane_handle* cp, ci_ifid_t veth_ifindex,
@@ -1475,9 +1560,16 @@ int oo_op_route_resolve(struct oo_cplane_handle* cp, struct cp_fwd_key* key,
     }
     else {
       rc = -EAGAIN; /* timeout */
-      ci_log("WARNING: no response to route request 0x%x.  "
-             "Is the Control Plane server running?  Consider increasing "
-             "cplane_route_request_timeout_ms parameter.", req->id);
+      ci_log("WARNING: no response to route request 0x%x "CP_FWD_KEY_FMT".",
+             req->id, CP_FWD_KEY_ARGS(key));
+      if( cp->server_pid != NULL )
+        ci_log("The Onload Control Plane server pid is %d.  "
+               "Consider increasing cplane_route_request_timeout_ms "
+               "module parameter.",
+               pid_vnr(cp->server_pid));
+      else
+        ci_log("The Onload Control Plane server does not appear "
+               "to be running.");
     }
   }
   kfree(req);
@@ -1584,8 +1676,9 @@ int oo_cp_fwd_resolve_complete(ci_private_t *priv, void *arg)
   }
   if( &req->link == &cp->fwd_req ) {
     rc = -ENOENT;
-    ci_log("WARNING: %s: no route requests when asked to complete 0x%x; "
-           "next is 0x%x", __func__, req_id, cp->fwd_req_id);
+    CI_DEBUG(ci_log("WARNING: %s: no route requests when asked "
+                    "to complete 0x%x; next is 0x%x", __func__,
+                    req_id, cp->fwd_req_id));
     goto out_unlock;
   }
   ci_assert_equal(req->id, req_id);
@@ -1752,18 +1845,21 @@ int __oo_cp_arp_confirm(struct oo_cplane_handle* cp,
   if( ! cp_fwd_version_matches(fwd_table, op) )
     goto fail2;
 
-  /* In theory, we should update in NUD_REACHABLE state only, but
-   * we may be a bit slow in confirming ARP.
-   * It is not sufficient to set neigh->confirmed, because we need
-   * a netlink update to get the new "confirmed" value in the Cplane
-   * server. */
-  if( neigh->nud_state & (NUD_STALE | NUD_REACHABLE) ) {
-    /* We need the neigh timer to be restarted, so we must *change*
-     * the state value.  So we change to NUD_DELAY and then back to
-     * NUD_REACHABLE. */
-    oo_cp_neigh_update(neigh, NUD_DELAY);
-    oo_cp_neigh_update(neigh, NUD_REACHABLE);
-    atomic_inc(&cp->stats.arp_confirm_do);
+  switch( neigh->nud_state ) {
+    case NUD_REACHABLE:
+      /* We need the neigh timer to be restarted, so we must *change*
+       * the state value.  So we change to NUD_DELAY and then back to
+       * NUD_REACHABLE. */
+      oo_cp_neigh_update(neigh, NUD_DELAY);
+      /* fall through */
+    case NUD_STALE:
+      /* In theory, we should update in NUD_REACHABLE state only, but we
+       * may be a bit slow in confirming ARP.  It is not sufficient to set
+       * neigh->confirmed, because we need a netlink update to get the new
+       * "confirmed" value in the Cplane server. */
+      neigh->used = jiffies; /* We're confirming it => we're using it! */
+      oo_cp_neigh_update(neigh, NUD_REACHABLE);
+      atomic_inc(&cp->stats.arp_confirm_do);
   }
   rc = 0;
 
@@ -1856,9 +1952,9 @@ static int cp_spawn_server(ci_uint32 flags)
    * safe.
    */
 #ifdef NDEBUG
-  const int DIRECT_PARAM_MAX = 8;
+  const int DIRECT_PARAM_MAX = 9;
 #else
-  const int DIRECT_PARAM_MAX = 10;
+  const int DIRECT_PARAM_MAX = 11;
 #endif
 
   char* ns_file_path = NULL;
@@ -1967,6 +2063,10 @@ static int cp_spawn_server(ci_uint32 flags)
   }
 #undef UID_STRLEN
 
+
+  if( cplane_use_prefsrc_as_local )
+    argv[direct_param_base + direct_param++] = "--"CPLANE_SERVER_PREFSRC_AS_LOCAL;
+
 #ifndef NDEBUG
   if( cplane_server_core_size ) {
     snprintf(core_str, sizeof(core_str), "%u", cplane_server_core_size);
@@ -2022,6 +2122,12 @@ oo_cp_driver_dtor(void)
   cp_table_purge();
   ci_id_pool_dtor(&cp_instance_ids);
   ci_irqlock_dtor(&cp_instance_ids_lock);
+  if( cplane_server_params_array != NULL ) {
+    kfree(*cplane_server_params_array);
+    kfree(cplane_server_params_array);
+  }
+  if( cplane_server_path != NULL )
+    kfree(cplane_server_path);
   return 0;
 }
 
@@ -2576,6 +2682,31 @@ cplane_route_request_timeout_set(const char* val,
   return 0;
 }
 
+static int
+cplane_server_param_int_set(const char* val,
+                            ONLOAD_MPC_CONST struct kernel_param* kp)
+{
+  int old_val = *(int *)kp->arg;
+  int rc = param_set_int(val, kp);
+  if( rc != 0 )
+    return rc;
+  if( old_val != *(int *)kp->arg )
+    cp_respawn_init_server();
+  return 0;
+}
+static int
+cplane_server_param_bool_set(const char* val,
+                             ONLOAD_MPC_CONST struct kernel_param* kp)
+{
+  bool old_val = *(bool *)kp->arg;
+  int rc = param_set_bool(val, kp);
+  if( rc != 0 )
+    return rc;
+  if( old_val != *(bool *)kp->arg )
+    cp_respawn_init_server();
+  return 0;
+
+}
 
 int oo_cp_llap_change_notify_all(struct oo_cplane_handle* main_cp)
 {

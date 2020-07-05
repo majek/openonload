@@ -114,4 +114,20 @@ typedef int vm_fault_t;
 
 #endif /* raw_cpu_read */
 
+#ifndef EFRM_HAVE_FILE_INODE
+/* Only RHEL6 doesn't have this function */
+static inline struct inode *file_inode(const struct file *f)
+{
+        return f->f_path.dentry->d_inode;
+}
+#endif
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 19, 0)
+#define get_netns_id(net_ns)     ((net_ns)->ns.inum)
+#elif defined(EFRM_NET_HAS_PROC_INUM)
+#define get_netns_id(net_ns)     ((net_ns)->proc_inum)
+#else
+#define get_netns_id(net_ns)     0
+#endif
+
 #endif

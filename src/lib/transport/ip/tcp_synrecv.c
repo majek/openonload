@@ -19,10 +19,10 @@
 
 #define LPF "TCP SYNRECV "
 
-#define TSR_FMT "ptr:%x next:%x hash:%x l:"IPX_FMT" r:"IPX_FMT":%d"
+#define TSR_FMT "ptr:%x next:%x hash:%x l:"IPX_FMT":%d r:"IPX_FMT":%d"
 #define TSR_ARGS(tsr)                                               \
   ci_tcp_synrecv2p(ni, tsr), tsr->bucket_link, tsr->hash,           \
-  IPX_ARG(AF_IP(tsr->l_addr)),                                         \
+  IPX_ARG(AF_IP(tsr->l_addr)), CI_BSWAP_BE16(tsr->l_port),          \
   IPX_ARG(AF_IP(tsr->r_addr)), CI_BSWAP_BE16(tsr->r_port)
 
 #ifdef __KERNEL__
@@ -265,7 +265,7 @@ ci_tcp_listenq_bucket_lookup(ci_netif* ni, ci_tcp_listen_bucket* bucket,
   int idx = ci_tcp_listenq_hash2idx(rxp->hash, level);
   ci_tcp_state_synrecv* tsr;
   ci_addr_t saddr, daddr;
-  ci_uint16 sport;
+  ci_uint16 sport, dport;
 #ifdef __KERNEL__
   int i = 0;
 
@@ -279,11 +279,13 @@ ci_tcp_listenq_bucket_lookup(ci_netif* ni, ci_tcp_listen_bucket* bucket,
   saddr = RX_PKT_SADDR(rxp->pkt);
   daddr = RX_PKT_DADDR(rxp->pkt);
   sport = rxp->tcp->tcp_source_be16;
+  dport = rxp->tcp->tcp_dest_be16;
 
-  LOG_TV(ci_log("%s([%d] level=%d hash:%x l:"IPX_FMT" r:"IPX_FMT":%d)", __func__,
+  LOG_TV(ci_log("%s([%d] level=%d hash:%x l:"IPX_FMT":%d r:"IPX_FMT":%d)",
+                __func__,
                 NI_ID(ni), level, rxp->hash,
-                IPX_ARG(AF_IP(daddr)), IPX_ARG(AF_IP(saddr)),
-                CI_BSWAP_BE16(sport)));
+                IPX_ARG(AF_IP(daddr)), CI_BSWAP_BE16(dport),
+                IPX_ARG(AF_IP(saddr)), CI_BSWAP_BE16(sport)));
   if( OO_P_IS_NULL(bucket->bucket[idx]) )
     return NULL;
 
@@ -296,6 +298,7 @@ ci_tcp_listenq_bucket_lookup(ci_netif* ni, ci_tcp_listen_bucket* bucket,
   tsr = &aux->u.synrecv;
   do {
     if( sport == tsr->r_port &&
+        dport == tsr->l_port &&
         CI_IPX_ADDR_EQ(saddr, tsr->r_addr) &&
         CI_IPX_ADDR_EQ(daddr, tsr->l_addr) )
       return tsr;
@@ -329,7 +332,7 @@ ci_tcp_listenq_synrecv_print(ci_netif* ni, ci_tcp_state_synrecv* tsr,
 {
   struct oo_dump_synrecv* l = arg;
   l->logger(l->arg, "TCP 0 0 "OOF_IPXPORT" "OOF_IPXPORT" SYN_RECV",
-            OOFA_IPXPORT(tsr->l_addr, sock_lport_be16(&l->tls->s)),
+            OOFA_IPXPORT(tsr->l_addr, tsr->l_port),
             OOFA_IPXPORT(tsr->r_addr, tsr->r_port));
 }
 
@@ -421,7 +424,7 @@ void ci_tcp_listenq_remove(ci_netif* ni, ci_tcp_socket_listen* tls,
   }
 
   /* cancel timer if no more synrecv on queue */
-  if( --tls->n_listenq == 0 && ci_tcp_listen_has_timer(tls) )
+  if( --tls->n_listenq == 0 )
     ci_ip_timer_clear(ni, &tls->listenq_tid);
 }
 
@@ -515,7 +518,8 @@ get_ts_from_cache(ci_netif *netif,
     LOG_EP(ci_log("Taking cached fd %d off cached list, (onto acceptq)",
            ts->cached_on_fd));
 
-    if( CI_IPX_ADDR_EQ(ts->s.laddr, tsr->l_addr) ||
+    if( (CI_IPX_ADDR_EQ(ts->s.laddr, tsr->l_addr) &&
+         sock_lport_be16(&ts->s) == tsr->l_port) ||
         ((tls->s.s_flags & ts->s.s_flags & CI_SOCK_FLAGS_SCALABLE) != 0 ) ) {
       ci_tcp_state_init(netif, ts, 1);
       /* Shouldn't have touched these bits of state */
@@ -657,9 +661,9 @@ ci_inline void ci_tcp_set_addr_on_promote(ci_netif* netif, ci_tcp_state* ts,
       CI_ETHERTYPE_IP6 : CI_ETHERTYPE_IP;
   ci_ipcache_set_saddr(&ts->s.pkt, tsr->l_addr);
   ts->s.laddr = tsr->l_addr;
-  TS_IPX_TCP(ts)->tcp_source_be16 = sock_lport_be16(&tls->s);
+  TS_IPX_TCP(ts)->tcp_source_be16 = tsr->l_port;
   ts->s.cp.laddr = tsr->l_addr;
-  ts->s.cp.lport_be16 = sock_lport_be16(&tls->s);
+  ts->s.cp.lport_be16 = tsr->l_port;
   ci_tcp_set_peer(ts, tsr->r_addr, tsr->r_port);
 
   /* "filter" equivalent for loopback socket */
@@ -814,9 +818,8 @@ int ci_tcp_listenq_try_promote(ci_netif* netif, ci_tcp_socket_listen* tls,
          * will be updated if this is still around when the listener is closed.
          */
         rc = ci_netif_filter_insert(netif, S_SP(ts), sock_af_space(&ts->s),
-                                    tsr->l_addr, sock_lport_be16(&tls->s),
-                                    tsr->r_addr, tsr->r_port,
-                                    tcp_protocol(ts));
+                                    tsr->l_addr, tsr->l_port, tsr->r_addr,
+                                    tsr->r_port, tcp_protocol(ts));
       }
       if (rc < 0) {
         /* Bung it back on the cache list */
@@ -866,7 +869,6 @@ int ci_tcp_listenq_try_promote(ci_netif* netif, ci_tcp_socket_listen* tls,
     }
     CI_IP_SOCK_STATS_VAL_TXWSCL( ts, ts->snd_wscl);
     CI_IP_SOCK_STATS_VAL_RXWSCL( ts, ts->rcv_wscl);
-
 
     /* Send and receive sequence numbers */
     tcp_snd_una(ts) = tcp_snd_nxt(ts) = tcp_enq_nxt(ts) = tcp_snd_up(ts) =

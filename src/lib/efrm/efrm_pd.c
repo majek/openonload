@@ -1039,9 +1039,9 @@ int efrm_pd_dma_map(struct efrm_pd *pd, int n_pages, int nic_order,
 		return -EPROTO;
 	}
 
-		rc = efrm_pd_dma_map_nic(pd, n_pages, nic_order,
-					 addrs, addrs_stride,
-					 pci_addrs, pci_addrs_stride);
+	rc = efrm_pd_dma_map_nic(pd, n_pages, nic_order,
+				 addrs, addrs_stride,
+				 pci_addrs, pci_addrs_stride);
 	if (rc < 0)
 		goto fail1;
 

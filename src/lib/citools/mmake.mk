@@ -90,7 +90,8 @@ endif
 #
 ifdef MMAKE_USE_KBUILD
 all:
-	$(MAKE) $(MMAKE_KBUILD_ARGS) KBUILD_EXTMOD=$(BUILDPATH)/lib/citools _module_$(BUILDPATH)/lib/citools
+	$(MAKE) $(MMAKE_KBUILD_ARGS) KBUILD_EXTMOD=$(BUILDPATH)/lib/citools
+	$(LD) -r $(LIB_SRCS:%.c=%.o) -o citools_lib.o
 
 clean:
 	@$(MakeClean)
@@ -99,6 +100,5 @@ endif
 
 ifdef MMAKE_IN_KBUILD
 LIB_OBJS := $(LIB_SRCS:%.c=%.o)
-citools_lib-y    := $(LIB_OBJS)
-obj-m := citools_lib.o
+obj-y    := $(LIB_OBJS)
 endif

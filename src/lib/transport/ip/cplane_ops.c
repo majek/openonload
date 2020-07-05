@@ -144,10 +144,10 @@ cicp_user_bond_hash_get_hwport(ci_netif* ni, ci_ip_cached_hdrs* ipcache,
 #endif
 
 
-static int cicp_user_resolve(ci_netif* ni, struct oo_cplane_handle* cp,
-                             cicp_verinfo_t* verinfo,
-                             struct cp_fwd_key* key,
-                             struct cp_fwd_data* data)
+static int
+__cicp_user_resolve(ci_netif* ni, struct oo_cplane_handle* cp,
+                    cicp_verinfo_t* verinfo, struct cp_fwd_key* key,
+                    struct cp_fwd_data* data)
 {
   /* Note that, for the fwd-table ID, we always pass the ID of the _local_
    * control plane.  This is exactly what we want: if we're speaking to our
@@ -176,15 +176,14 @@ static int cicp_user_resolve(ci_netif* ni, struct oo_cplane_handle* cp,
   return rc;
 }
 
-static int cicp_user_resolve_src(ci_netif* ni, struct oo_cplane_handle* cp,
-                                 cicp_verinfo_t* verinfo,
-                                 ci_uint8 sock_cp_flags,
-                                 struct cp_fwd_key* key,
-                                 struct cp_fwd_data* data)
+
+int cicp_user_resolve(ci_netif* ni, struct oo_cplane_handle* cp,
+                      cicp_verinfo_t* verinfo, ci_uint8 sock_cp_flags,
+                      struct cp_fwd_key* key, struct cp_fwd_data* data)
 {
   int rc;
 
-  rc = cicp_user_resolve(ni, cp, verinfo, key, data);
+  rc = __cicp_user_resolve(ni, cp, verinfo, key, data);
   if( rc != 0 )
     return rc;
 
@@ -197,11 +196,73 @@ static int cicp_user_resolve_src(ci_netif* ni, struct oo_cplane_handle* cp,
   }
   else if( ! (key->flag & CP_FWD_KEY_SOURCELESS) ) {
     key->src = data->base.src;
-    rc = cicp_user_resolve(ni, cp, verinfo, key, data);
+    rc = __cicp_user_resolve(ni, cp, verinfo, key, data);
     data->base.src = key->src;
   }
   return rc;
 }
+
+
+int
+cicp_user_build_fwd_key(ci_netif* ni, const ci_ip_cached_hdrs* ipcache,
+                        const struct oo_sock_cplane* sock_cp, ci_addr_t daddr,
+                        int af, struct cp_fwd_key* key)
+{
+  key->dst = CI_ADDR_SH_FROM_ADDR(daddr);
+  key->iif_ifindex = CI_IFID_BAD;
+  /* Pass 0 IPv6 tclass value into cp_fwd_key tos field because Linux policy
+   * based routing doesn't consider tclass when performing route lookup
+   * for TCP and UDP connected send. Though, tclass is considered for UDP
+   * unconnected send. As a result, there would be a single fwd entry for all
+   * IPv6 tclass values. */
+  key->tos = IS_AF_INET6(af) ? 0 : sock_cp->ip_tos;
+  key->flag = 0;
+
+  if( ipcache_protocol(ipcache) == IPPROTO_UDP )
+    key->flag |= CP_FWD_KEY_UDP;
+
+  key->ifindex = sock_cp->so_bindtodevice;
+  if( CI_IPX_IS_MULTICAST(daddr) ) {
+    if( IS_AF_INET6(af) || sock_cp->sock_cp_flags & OO_SCP_NO_MULTICAST )
+      return -EHOSTUNREACH;
+
+    /* In linux, SO_BINDTODEVICE has the priority over IP_MULTICAST_IF */
+    if( key->ifindex == 0 )
+      key->ifindex = sock_cp->ip_multicast_if;
+    key->src = CI_ADDR_SH_FROM_IP4(sock_cp->ip_multicast_if_laddr_be32);
+    if( CI_IPX_ADDR_IS_ANY(key->src) && !CI_IPX_ADDR_IS_ANY(sock_cp->laddr) )
+      key->src = CI_ADDR_SH_FROM_ADDR(sock_cp->laddr);
+  }
+  else {
+    key->src = CI_ADDR_SH_FROM_ADDR(sock_cp->laddr);
+#if CI_CFG_IPV6
+    if( ! IS_AF_INET6(af) && CI_IPX_ADDR_EQ(key->src, addr_sh_any) )
+      key->src = ip4_addr_sh_any;
+#endif
+    if( sock_cp->sock_cp_flags & OO_SCP_TPROXY )
+      key->flag |= CP_FWD_KEY_TRANSPARENT;
+  }
+
+  /* Source policy routing works differently for IPv6 and IPv4.
+   * In IPv4, the source address is used unless OO_SCP_UDP_WILD.
+   * In IPv6, the source address is used if OO_SCP_BOUND_ADDR. */
+  if( IS_AF_INET6(af) && ! (sock_cp->sock_cp_flags & OO_SCP_BOUND_ADDR) ) {
+    key->src = addr_sh_any;
+    key->flag |= CP_FWD_KEY_SOURCELESS;
+  }
+  else if( CI_IPX_ADDR_IS_ANY(key->src) &&
+           (sock_cp->sock_cp_flags & OO_SCP_UDP_WILD) ) {
+    key->flag |= CP_FWD_KEY_SOURCELESS;
+  }
+
+#ifdef __KERNEL__
+  if( ! (ni->flags & CI_NETIF_FLAG_IN_DL_CONTEXT) )
+#endif
+    key->flag |= CP_FWD_KEY_REQ_WAIT;
+
+  return 0;
+}
+
 
 void
 cicp_user_retrieve(ci_netif*                    ni,
@@ -211,9 +272,10 @@ cicp_user_retrieve(ci_netif*                    ni,
   struct cp_fwd_key key;
   struct cp_fwd_data data;
   ci_addr_t daddr = ipcache_raddr(ipcache);
-#if CI_CFG_IPV6
   int af;
-#endif
+  /* Initialise to placate compiler. */
+  ci_addr_sh_t pre_nat_laddr = addr_sh_any;
+  int /*bool*/ nat_applied = 0;
 
   /* This function must be called when "the route is unusable".  I.e. when
    * the route is invalid or if there is no ARP.  In the second case, we
@@ -229,65 +291,22 @@ cicp_user_retrieve(ci_netif*                    ni,
       return;
   }
 
-#if CI_CFG_IPV6
   af = CI_IS_ADDR_IP6(daddr) ? AF_INET6 : AF_INET;
-#endif
 
-  key.dst = CI_ADDR_SH_FROM_ADDR(daddr);
-  key.iif_ifindex = CI_IFID_BAD;
-  /* Pass 0 IPv6 tclass value into cp_fwd_key tos field because Linux policy
-   * based routing doesn't consider tclass when performing route lookup
-   * for TCP and UDP connected send. Though, tclass is considered for UDP
-   * unconnected send. As a result, there would be a single fwd entry for all
-   * IPv6 tclass values. */
-  key.tos = IS_AF_INET6(af) ? 0 : sock_cp->ip_tos;
-  key.flag = 0;
+  if( cicp_user_build_fwd_key(ni, ipcache, sock_cp, daddr, af, &key) != 0 )
+    goto alien_route;
 
-  if( ipcache_protocol(ipcache) == IPPROTO_UDP )
-    key.flag |= CP_FWD_KEY_UDP;
-
-  key.ifindex = sock_cp->so_bindtodevice;
-  if( CI_IPX_IS_MULTICAST(daddr) ) {
-    if( IS_AF_INET6(af) || sock_cp->sock_cp_flags & OO_SCP_NO_MULTICAST )
-      goto alien_route;
-
-    /* In linux, SO_BINDTODEVICE has the priority over IP_MULTICAST_IF */
-    if( key.ifindex == 0 )
-      key.ifindex = sock_cp->ip_multicast_if;
-    key.src = CI_ADDR_SH_FROM_IP4(sock_cp->ip_multicast_if_laddr_be32);
-    if( CI_IPX_ADDR_IS_ANY(key.src) && !CI_IPX_ADDR_IS_ANY(sock_cp->laddr) )
-      key.src = CI_ADDR_SH_FROM_ADDR(sock_cp->laddr);
+  if( ni->cplane_init_net != NULL &&
+      ipcache_protocol(ipcache) == IPPROTO_TCP ) {
+    ci_uint16 lport = sock_cp->lport_be16;
+    pre_nat_laddr = key.src;
+    /* We ignore failure returns from cp_svc_check_dnat().  In the event that
+     * it fails, it leaves the address untranslated, which is the best that
+     * we can do. */
+    nat_applied = cp_svc_check_dnat(ni->cplane_init_net, &key.src, &lport) > 0;
   }
-  else {
-    key.src = CI_ADDR_SH_FROM_ADDR(sock_cp->laddr);
-#if CI_CFG_IPV6
-    if( ! IS_AF_INET6(af) && CI_IPX_ADDR_EQ(key.src, addr_sh_any) )
-      key.src = ip4_addr_sh_any;
-#endif
-    if( sock_cp->sock_cp_flags & OO_SCP_TPROXY )
-      key.flag |= CP_FWD_KEY_TRANSPARENT;
-  }
-
-  /* Source policy routing works differently for IPv6 and IPv4.
-   * In IPv4, the source address is used unless OO_SCP_UDP_WILD.
-   * In IPv6, the source address is used if OO_SCP_BOUND_ADDR. */
-  if( IS_AF_INET6(af) && ! (sock_cp->sock_cp_flags & OO_SCP_BOUND_ADDR) ) {
-    key.src = addr_sh_any;
-    key.flag |= CP_FWD_KEY_SOURCELESS;
-  }
-  else if( CI_IPX_ADDR_IS_ANY(key.src) &&
-           (sock_cp->sock_cp_flags & OO_SCP_UDP_WILD) ) {
-    key.flag |= CP_FWD_KEY_SOURCELESS;
-  }
-
-
-#ifdef __KERNEL__
-  if( ! (ni->flags & CI_NETIF_FLAG_IN_DL_CONTEXT) )
-#endif
-    key.flag |= CP_FWD_KEY_REQ_WAIT;
-
-  if( cicp_user_resolve_src(ni, ni->cplane, &ipcache->fwd_ver,
-                            sock_cp->sock_cp_flags, &key, &data) != 0 )
+  if( cicp_user_resolve(ni, ni->cplane, &ipcache->fwd_ver,
+                        sock_cp->sock_cp_flags, &key, &data) != 0 )
     goto alien_route;
 
   /* Look at main namespace if this route is across veth. */
@@ -301,13 +320,12 @@ cicp_user_retrieve(ci_netif*                    ni,
     key.iif_ifindex = data.encap.link_ifindex;
     ipcache->iif_ifindex = key.iif_ifindex;
     /* Note that we do want BAD here, rather than UNUSED.  In the typical case
-     * cicp_user_resolve_src() will set the id field to the row in init_net's
-     * fwd table, but if we look up the route by querying the kernel rather
-     * than the cplane server, then the field will not be touched. */
+     * cicp_user_resolve() will set the id field to the row in init_net's fwd
+     * table, but if we look up the route by querying the kernel rather than
+     * the cplane server, then the field will not be touched. */
     ipcache->fwd_ver_init_net.id = CICP_MAC_ROWID_BAD;
-    if( cicp_user_resolve_src(ni, ni->cplane_init_net,
-                              &ipcache->fwd_ver_init_net,
-                              sock_cp->sock_cp_flags, &key, &data) != 0 )
+    if( cicp_user_resolve(ni, ni->cplane_init_net, &ipcache->fwd_ver_init_net,
+                          sock_cp->sock_cp_flags, &key, &data) != 0 )
       goto alien_route;
   }
   else {
@@ -338,9 +356,7 @@ cicp_user_retrieve(ci_netif*                    ni,
           (data.hwports & ~(ci_netif_get_hwport_mask(ni))) == 0 )
         break;
       /* Check bond */
-      if( oo_cp_find_llap(ni->cplane, data.base.ifindex, NULL/*mtu*/,
-                           NULL /*tx_hwports*/, &hwports /*rx_hwports*/,
-                           NULL/*mac*/, NULL /*encap*/) != 0 ||
+      if( cicp_user_get_fwd_rx_hwports(ni, &data, &hwports) != 0 ||
           (hwports & ~(ci_netif_get_hwport_mask(ni))) )
         goto alien_route;
       break;
@@ -348,6 +364,7 @@ cicp_user_retrieve(ci_netif*                    ni,
   }
 
   ipcache->encap = data.encap;
+  cicp_ipcache_vlan_set(ipcache);
 #if CI_CFG_TEAMING
   if( ipcache->encap.type & CICP_LLAP_TYPE_USES_HASH ) {
     if( cicp_user_bond_hash_get_hwport(ni, ipcache, data.hwports,
@@ -359,7 +376,14 @@ cicp_user_retrieve(ci_netif*                    ni,
     ipcache->hwport = cp_hwport_mask_first(data.hwports);
 
   ipcache->mtu = data.base.mtu;
-  ci_ipcache_set_saddr(ipcache, CI_ADDR_FROM_ADDR_SH(data.base.src));
+  /* Use the local address returned by the control plane if we're not doing
+   * NAT, but if we are doing NAT, then use the pre-NAT source address.  This
+   * doesn't lose any information, as the route lookup only returns a different
+   * source address from the key if the latter address in INADDR_ANY or
+   * multicast, neither of which can apply if we're NAT-ing. */
+  ci_ipcache_set_saddr(ipcache,
+                       nat_applied ? CI_ADDR_FROM_ADDR_SH(pre_nat_laddr) :
+                                     CI_ADDR_FROM_ADDR_SH(data.base.src));
   ipcache->ifindex = data.base.ifindex;
   ipcache->nexthop = CI_ADDR_FROM_ADDR_SH(data.base.next_hop);
   if( ! ci_ip_cache_is_onloadable(ni, ipcache))
@@ -370,7 +394,6 @@ cicp_user_retrieve(ci_netif*                    ni,
    * call oo_cp_arp_resolve() explicitly in case of retrrc_nomac. */
   ipcache->status = (data.flags & CICP_FWD_DATA_FLAG_ARP_VALID) ?
                                         retrrc_success : retrrc_nomac;
-  cicp_ipcache_vlan_set(ipcache);
   memcpy(ci_ip_cache_ether_shost(ipcache), &data.src_mac, ETH_ALEN);
   if( data.flags & CICP_FWD_DATA_FLAG_ARP_VALID )
     memcpy(ci_ip_cache_ether_dhost(ipcache), &data.dst_mac, ETH_ALEN);

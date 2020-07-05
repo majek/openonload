@@ -1136,6 +1136,8 @@ static int ci_udp_zc_recv_from_os(ci_netif* ni, ci_udp_state* us,
         ci_netif_unlock(ni);
         return -ENOBUFS;
       }
+      pkt->flags |= CI_PKT_FLAG_RX;
+      ++ni->state->n_rx_pkts;
       pkt->frag_next = us->zc_kernel_datagram;
       us->zc_kernel_datagram = OO_PKT_P(pkt);
       ++us->zc_kernel_datagram_count;

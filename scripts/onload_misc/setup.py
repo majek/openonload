@@ -6,5 +6,5 @@ setup(name='OpenOnload utilities',
       author='David Riddoch',
       author_email='driddoch@solarflare.com',
       url='http://www.openonload.org/',
-      py_modules=['sfcmask', 'sfcaffinity', 'oobpfll', 'oobpf'],
+      py_modules=['sfcmask', 'sfcaffinity'],
       )

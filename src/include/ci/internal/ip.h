@@ -190,6 +190,7 @@ do {                                                            \
   (ipcache)->ether_type = ci_af2ethertype(af);                  \
   (ipcache)->flags = 0;                                         \
   (ipcache)->nexthop = addr_any;                                \
+  ipcache_ttl(ipcache) = CI_IPX_DFLT_TTL_HOPLIMIT(af);          \
 } while (0)
 #define ci_ip_cache_init(ipcache, af) ci_ip_cache_init_common(ipcache, af)
 
@@ -812,8 +813,13 @@ extern int __ci_icmp_send_error(ci_netif* ni, int af, ci_ipx_hdr_t* ipx,
 **********************************************************************/
 
 #define CI_UDP_INITIAL_MTU ETH_DATA_LEN
-#define CI_UDP_MAX_PAYLOAD_BYTES \
-  (0xffff - sizeof(ci_ip4_hdr) - sizeof(ci_udp_hdr))
+
+/* IPv4 "Total Length" 16-bit field defines the entire packet size in bytes,
+ * including header and data, while IPv6 "Payload Length" 16-bit field defines
+ * the size of payload only. So, when calculating UDP maximum payload size for
+ * IPv4 case, IPv4 header size should be considered, unlike IPv6 case. */
+#define CI_UDP_MAX_PAYLOAD_BYTES(af) \
+  (0xffff - sizeof(ci_udp_hdr) - (IS_AF_INET6(af) ? 0 : sizeof(ci_ip4_hdr)))
 
 #define UDP_FLAGS(us)           ((us)->udpflags)
 
@@ -927,7 +933,8 @@ struct cmsg_state {
 
 extern void ci_put_cmsg(struct cmsg_state *cmsg_state, int level, int type,
                         socklen_t len, const void *data) CI_HF;
-extern int ci_ip_cmsg_send(const struct msghdr*, struct in_pktinfo**) CI_HF;
+/* info_out contains a pointer to struct in_pktinfo or struct in6_pktinfo */
+extern int ci_ip_cmsg_send(const struct msghdr*, void** info_out) CI_HF;
 extern void ci_ip_cmsg_finish(struct cmsg_state* cmsg_state) CI_HF;
 
 #ifndef __KERNEL__
@@ -1666,10 +1673,11 @@ extern void ci_tcp_tx_advance_to(ci_netif* ni, ci_tcp_state* ts,
 extern void ci_tcp_send_rst_with_flags(ci_netif*, ci_tcp_state*,
                                        ci_uint8 extra_flags) CI_HF;
 extern void ci_tcp_send_rst(ci_netif* netif, ci_tcp_state* ts) CI_HF;
-extern void ci_tcp_reply_with_rst(ci_netif* netif, ciip_tcp_rx_pkt* rxp) CI_HF;
+extern void
+ci_tcp_reply_with_rst(ci_netif* netif, const struct oo_sock_cplane* sock_cp,
+                      ciip_tcp_rx_pkt* rxp) CI_HF;
 extern int ci_tcp_reset_untrusted(ci_netif *netif, ci_tcp_state *ts) CI_HF;
 extern void ci_tcp_send_zwin_probe(ci_netif* netif, ci_tcp_state* ts) CI_HF;
-extern void ci_tcp_fill_small_window(ci_netif* netif, ci_tcp_state* ts) CI_HF;
 extern void ci_tcp_set_established_state(ci_netif*, ci_tcp_state*) CI_HF;
 extern void ci_tcp_expand_sndbuf(ci_netif*, ci_tcp_state*) CI_HF;
 extern bool ci_tcp_should_expand_sndbuf(ci_netif*, ci_tcp_state*) CI_HF;
@@ -1699,8 +1707,7 @@ extern int  ci_tcp_send_wnd_update(ci_netif*, ci_tcp_state*,
 
 
 /* TCP/UDP filter insertion */
-extern void ci_netif_filter_init(ci_netif_filter_table* tbl,
-				 int size_lg2) CI_HF;
+extern void ci_netif_filter_init(ci_netif* ni, int size_lg2) CI_HF;
 
 #if CI_CFG_IPV6
 void ci_ip6_netif_filter_init(ci_ip6_netif_filter_table* tbl,
@@ -1770,6 +1777,24 @@ ci_netif_filter_remove(ci_netif* netif, oo_sp tcp_id, int af_space,
                        const ci_addr_t laddr, unsigned lport,
                        const ci_addr_t raddr, unsigned rport,
                        unsigned protocol) CI_HF;
+
+/* Applies to the IPv4 table only. */
+ci_inline ci_uint32 ci_netif_filter_table_size(ci_netif* ni)
+{
+  /* Endpoint lookup table.
+   * - The table must be a power of two in size >= 2**16.  This property is
+   *   used in ci_netif_filter_for_each_match() to make some deductions about
+   *   the behaviour of the hashing functions.
+   * - The table must be large enough for one filter per connection +
+   *   the extra filters required for wildcards i.e. "listen any" connections
+   *   (so we use double the number of endpoints).
+   *
+   * Fixme: max_ep_bufs is the number of ep states including the states
+   * used for aux buffers and pipe endpoints.  How many real sockets are
+   * we going to create?  Do we need a separate option? */
+  return 1u << CI_MAX(16, ci_log2_le(NI_OPTS(ni).max_ep_bufs) + 1);
+}
+
 
 #ifndef __KERNEL__
 extern oo_sp ci_netif_active_wild_get(ci_netif* ni, ci_addr_t laddr,
@@ -3625,24 +3650,48 @@ ci_inline int ci_tcp_taildrop_probe_enabled(const ci_netif* ni,
          (ts->s.b.state & CI_TCP_STATE_SYNCHRONISED);
 }
 
+/* Minimal TCP timeout.
+ *
+ * In linux
+ * TCP_TIMEOUT_MIN = 2 jiffies
+ * TCP_RTO_MIN = HZ / 5
+ * We have the same rto_min=200ms, and assuming HZ=100 we define
+ * the minimal TCP timeout to be rto_min/10.
+ *
+ * The tradeoff is:
+ * - With a small value for TCP_TIMEOUT_MIN we have a chance to retransmit
+ *   the last packet too early before we get the ACK which may be already
+ *   in-flight (see ON-11672).
+ * - With a large value for TCP_TIMEOUT_MIN the whole idea of the taildrop
+ *   probe is lost.
+ */
+#define TCP_TIMEOUT_MIN(netif) (NI_CONF(netif).tconst_rto_min / 10)
+
 ci_inline unsigned ci_tcp_taildrop_timeout(const ci_netif* netif,
                                            const ci_tcp_state* ts )
 {
   unsigned offset;
-  /* We follow Linux instead of the spec */
-  if( ts->sa ) {
-    offset = tcp_srtt(ts) * 2;
+
+  ci_assert_gt(TCP_TIMEOUT_MIN(netif), 0);
+
+  /* We follow Linux instead of the spec. */
+  if( ts->sa >= TCP_TIMEOUT_MIN(netif) ) {
+    /* rtt = sa >> 3; offset = rtt * 2 */
+    offset = ts->sa >> 2;
     if( ts->retrans.num == 1 )
       /* Wait long enough to ensure a delayed ack will be returned. */
       offset += NI_CONF(netif).tconst_rto_min;
     else
-      offset += 1; /* guarantee that it is non-0 */
+      offset += TCP_TIMEOUT_MIN(netif);
   }
   else {
+    /* ts->sa = 0 at start of day; it can be too small when 1 or 2 packets
+     * were acked. */
     offset =  NI_CONF(netif).tconst_rto_initial;
   }
   return CI_MIN(offset, ts->rto);
 }
+#undef TCP_TIMEOUT_MIN
 
 #else
 
@@ -4158,12 +4207,6 @@ ci_inline void ci_tcp_tx_pkt_set_end(ci_tcp_state* ts, ci_ip_pkt_fmt* pkt) {
 
 ci_inline int ci_tcp_listenq_max(ci_netif* ni)
 { return NI_OPTS(ni).tcp_backlog_max; }
-
-ci_inline int /*bool*/ ci_tcp_listen_has_timer(ci_tcp_socket_listen* tls)
-{
-  return ~tls->s.s_flags & CI_SOCK_FLAG_BOUND_ALIEN ||
-         tls->s.s_flags & CI_SOCK_FLAG_SCALPASSIVE;
-}
 
 ci_inline unsigned ci_ipx_tcp_checksum(int af, const ci_ipx_hdr_t* ipx,
                                        const ci_tcp_hdr* tcp, void* payload)

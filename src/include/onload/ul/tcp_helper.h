@@ -214,8 +214,5 @@ ci_tcp_inject_packets(ci_netif *ni, int ifindex, struct iovec* kernel_packets,
                       int num);
 
 
-
-int ci_tcp_helper_bpf_bind(ci_netif* ni, int intf_i, int attach_point);
-
 #endif /* __CI_UL_TCP_HELPER_H__ */
 

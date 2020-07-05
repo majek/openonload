@@ -1,313 +1,107 @@
-Onload-7.0.0
+Onload-7.1.0
 ============
 
- This is a major feature release of Onload that adds support for
- accelerating IPv6 and XDP ingress filtering as well as minor features
- and bugfixes. The features available will depend on the Onload license
- you have purchased and activated.
+ This is a feature release of Onload that adds system-level interface
+ blacklisting, provides improvements for XDP and TCPDirect, includes various
+ bug fixes and refreshes the sfc net driver included in the package.
 
- This release is the successor to the 201811-u1 version of OpenOnload
- and Cloud Onload.
+ This release is the successor to Onload-7.0.0.176.
 
+ See the accompanying ChangeLog for a list of bugs fixed.
 
 Linux distribution support
 --------------------------
+
  This package is supported on:
- - Red Hat Enterprise Linux 6.8 - 6.10*
- - Red Hat Enterprise Linux 7.4 - 7.7
- - Red Hat Enterprise Linux 8.0 - 8.1**
- - SuSE Linux Enterprise Server 12 sp3 and sp4
+ - Red Hat Enterprise Linux 6.8 - 6.10
+ - Red Hat Enterprise Linux 7.5 - 7.8
+ - Red Hat Enterprise Linux 8.0 - 8.2
+ - SuSE Linux Enterprise Server 12 sp4 and sp5
  - SuSE Linux Enterprise Server 15 and sp1
- - Canonical Ubuntu Server LTS 16.04 and 18.04
- - Canonical Ubuntu Server 19.04
+ - Canonical Ubuntu Server LTS 16.04, 18.04 and 20.04
  - Debian 9 "Stretch"
  - Debian 10 "Buster"
- - Linux kernels 3.10* - 5.2
-
- * The IPv6 and eBPF/XDP features are not supported on Red Hat Enterprise
-   Linux 6 or Linux kernels prior to 4.4 (except RHEL 7 kernels, which are
-   supported).
-
-** RHEL8.1 was only available in pre-release form at the point this Onload
-   release was tested.
+ - Linux kernels 3.10 - 5.5
 
 
-Long Term Support with EnterpriseOnload
----------------------------------------
+System-level interface blacklisting
+-----------------------------------
 
-Users seeking long term support for Onload are encouraged to ask their
-sales representative about EnterpriseOnload. Particular feature releases of
-Onload are periodically designated as the basis for long term support
-as EnterpriseOnload. For example, EnterpriseOnload-6.0.x is the current
-series of EnterpriseOnload and will receive bugfix updates for a number
-of years.
-
-
-Onload version numbering
-------------------------
-
-This release of Onload replaces date-based version numbering with a semantic
-version number of the form X.Y.Z.B, like the sfc netdriver, where the components
-have the following meanings:
-
- - X major version number, incremented after an EnterpriseOnload designation
- - Y minor version number, incremented for every feature release
- - Z bugfix number, incremented for every update release
- - B build number, fixed for each release at the final release candidate
-
-The major and minor version numbers for this scheme start at 7.0.0, following on
-from the latest EnterpriseOnload version, 6.0.1 therefore converging the
-numbering for all Onload packages.
-
-The build number will typically be a larger number of 3 or 4 digits.
+In addition to the per-stack EF_INTERFACE_BLACKLIST and EF_INTERFACE_WHITELIST
+in OpenOnload-201710, a system-level configuration has been added. Files
+in /proc/driver/sfc_resource/<intf-name>/enable may be written with "1" or
+"0" to enable or disable a network interface for all applications on the
+system. Onloaded applications will not accelerate sockets using a disabled
+interface (the socket will be handled by the kernel). ef_vi applications will
+fail the ef_pd_alloc call at startup. By default, all interfaces are enabled
+when the driver is loaded; to disable all interfaces initially pass the
+"enable_accel_by_default=0" module parameter to sfc_resource.
 
 
-Activation files
-----------------
+Onload Remote Monitor enhancement
+---------------------------------
 
-This release of Onload adds support for activation files, which, when deployed
-to a system, enable sets of Onload features according to the purchased
-licenses.  Once purchased, these files should be copied to the
-/etc/solarflare/activation.d directory, which is created when Onload is
-installed.
+The Onload Remote Monitor has been enhanced to add a new orm_json_lib library,
+which can be used by customers to build their own custom monitoring solutions.
 
-Onload is also enabled (without the need for an activation file) for NICs where
-a suitable AppFlex key is present on the adapter.
+The existing orm_webserver and orm_json functionality has been retained
+(internally this now uses the orm_json_lib library).
 
-Users that have purchased a Cloud Onload activation should typically build
-onload with the 'cloud' build profile. (Pass --build-profile cloud to
-onload_build or onload_install). The 'cloud' build profile is necessary to make
-all Cloud Onload features work and is suitable for cloud applications. This
-profile requires Linux kernels from 4.4 onwards or RHEL versions from RHEL 7.4
-onwards.
-
-For further information, please contact your sales representative.
-
-
-Running control plane server as non-root user
----------------------------------------------
-
-The control plane server now optionally drops privileges. This can be configured
-using the ONLOAD_CPLANE_USER setting in /etc/sysconfig/openonload, or by passing
-the cplane_server_uid and cplane_server_gid parameters to the onload module. The
-server retains CAP_NET_ADMIN capability.
-
-
-Red Hat Enterprise Linux 8
---------------------------
-
-Users of RHEL 8 will need to ensure that the new Codeready-Builder
-repository is included in their system's repository list to provide
-the libpcap-devel build dependency.
-
-
-IPv6
-----
-
-The following features are not supported:
-
- - multicast
- - fragmentation headers
- - IPV6-specific socket options (supported exception is IPV6_V6ONLY)
- - flowinfo (neither set nor considered)
- - SYN cookies
- - from the Onload extensions API: delegated send; zero-copy send
- - opportunistic packet processing
-
-IPv6 is not compiled in by default. To compile IPv6 support into
-Onload give the following options to onload_install:
-
- --build-profile cloud
+A simple example of how to use orm_json_lib is provided in
+src/tools/onload_remote_monitor/orm_zmq_publisher.c
+This will publish the chosen statistics via a ZeroMQ publisher every N seconds.
+A companion example src/tools/onload_remote_monitor/zmq_subscriber.c can be
+used to receive the JSON statistics via ZeroMQ.
 
 
 eBPF/XDP
 --------
 
-The eBPF/XDP support is based on that provided by the Linux 4.20
-kernel.
+The implementation of XDP features is now delegated to the currently-running
+kernel. This expands the set of supported XDP features to those provided by
+the kernel but means that XDP is no longer supported on older OSs that do not
+provide the corresponding features natively.
 
-eBPF is not compiled in by default. To compile eBPF support into
-Onload give the following option to onload_install:
-
- --build-profile cloud
-
-Onload tries to be completely compatible with kernel eBPF/XDP
-programmes in both source and binary form for a specifc set of
-supported features. The administrative interface (i.e. loading
-and attaching BPF programmes, manipulating maps, etc.) is not
-compatible but has similarities.
-
-The following quick-start example installs an XDP programme to
-drop all packets in Onload:
-
-# apt-get install clang    # or yum on redhatish distros
-# >test-bpf.c cat - <<HERE
-#include <linux/bpf.h>
-
-__attribute__((section("prog"), used))
-int xdp_drop(struct xdp_md *ctx)
-{
-    return XDP_DROP;
-}
-
-char __license[] __attribute__((section("license"), used)) = "GPL";
-HERE
-# clang -Wall -O2 -target bpf -o test-bpf.o -c test-bpf.c
-# onload_bpftool prog load obj test-bpf.o section prog attach xdp_ingress
-
-This will immediately affect all Onloaded applications (both
-currently-running and in the future) on all Solarflare NICs,
-causing them to drop all incoming packets; no additional EF_
-environment variables are required. It will have no effect on
-the kernel stack.
-
-Use "onload_bpftool help" for usage information. The "load"
-subcommand takes "dev" and "stack" qualifiers to allow a
-programme to be attached to only one NIC or to only one named
-Onload stack. This semantic allows more than one BPF programme
-to be considered applicable to a given packet; it is currently
-the case that Onload will run only the most-specific programme,
-however this behaviour may change before release. In this
-release, "dev" is only supported for attaching to physical
-Solarflare NICs (i.e. not VLANs, bonds, etc. on top of them).
-
-The above quick-start requires both clang>=3.7 and linux/bpf.h
-in the include path. An easy way to make this work is to do the
-BPF build on a recent machine with native kernel support, then
-to copy the .o file to the DUT(s) before using onload_bpftool.
+On Onload-7.0.0.176, XDP was implemented using a snapshot of the Linux 4.20
+implementation.
 
 
-eBPF/XDP: advanced functionality
---------------------------------
+Acceleration of traffic using addresses not configured on SFC NICs
+------------------------------------------------------------------
 
-For programmatic access, Onload exposes a library libbpfintf
-which provides the underlying feature set of onload_bpftool.
-See the doc-comments in onload/oobpf.h for usage information.
+A new module parameter, cplane_use_prefsrc_as_local, allows Onload to
+accelerate outgoing traffic over Solarflare interfaces where the route
+selects a preferred source IP address that is not configured on that
+interface.
 
-
-eBPF/XDP: supported feature set
--------------------------------
-
-Return values:
-
-  - XDP_PASS
-  - XDP_DROP
-
-Map types supported:
-
-  - BPF_MAP_TYPE_ARRAY
-  - BPF_MAP_TYPE_HASH
-  - BPF_MAP_TYPE_LPM_TRIE
-  - BPF_MAP_TYPE_PERF_EVENT_ARRAY
-
- BPF_MAP_TYPE_ARRAY supports only preallocated mode, i.e. map_flags=0.
-
-Helper functions:
-
-  - bpf_map_lookup_elem
-  - bpf_map_update_elem
-  - bpf_map_delete_elem
-  - bpf_ktime_get_ns
-  - bpf_perf_event_output
-
- BTF is not currently supported.
-
-There is set of Onload stats named rx_xdp_* counting the
-number of packets passed through the XDP programme, categorised
-by the return value from the programme.
-
-The packet given to an XDP programme is the full Ethernet frame
-(just like with kernel XDP).
-
-Like the kernel, onload_tcpdump runs after XDP, so packets
-dropped by the XDP programme will not be dumped.
-
-Perf events are only supported where the running kernel supports XDP
-perf events.  This is the case for kernels where enum perf_sw_ids
-includes PERF_COUNT_SW_BPF_OUTPUT, which includes the
-latest released kernel for all supported distributions.
-
-
-Enhanced packet timestamps
---------------------------
-
-A new extension API, onload_timestamping_request, allows applications to
-receive packet timestamps from multiple sources with sub-nanosecond resolution.
-Currently supported sources are hardware timestamps generated by Solarflare
-network adapters, and timestamps applied to received packets by external
-equipment using the cPacket format.
-
-This release also adds experimental support for the use of external timestamps
-for packet ordering when using onload_ordered_epoll_wait. This is enabled using
-the EF_RX_TIMESTAMPING_ORDERING environment variable. When using external
-timestamps, some packets may appear out of order due to external delays unknown
-to Onload.
-
-
-Ipvlan interfaces
--------------------------
-Support for IPVLAN interfaces has been added allowing acceleration of traffic
-using this virtual interface type.  Currently, only L2 mode is supported,
-that is modes L3 and L3s will not be accelerated.
-MAC filter-based scalable filter modes are not supported with IPVLAN interfaces.
+This parameter is in addition to the more general oof_use_all_ports module
+Parameter.
 
 
 New configuration options
 -------------------------
 
- - EF_DEFER_ARP_TIMEOUT
-   Onload now handles the deferral of packet sends during neighbour resolution
-   (IPv4 ARP or IPv6 ND) rather than delegating the sends to the OS. This option
-   specifies a timeout in seconds to wait for the OS to complete neighbour
-   resolution before sending deferred packets.
-   Defaults to 60.
+ - EF_XDP_MODE
 
- - EF_DEFER_ARP_MAX
-   Limits the total number of packets to queue in a stack for all next hops
-   while waiting for the OS to complete neighbour resolution.
-   Defaults to 128.
-
- - EF_AUTO_FLOWLABELS
-   Defines whether to generate non-zero IPv6 flow labels.
-   Defaults to the sysctl net.ipv6.auto_flowlabels setting.
-
- - EF_INVALID_ACK_RATELIMIT
-   Governs rate limiting for duplicate ACKs.
-   Defaults to the sysctl net.ipv4.tcp_invalid_ratelimit setting.
-
- - EF_USE_DSACK
-   Controls the use of Duplicate Selective Acknowledgment.
-   Defaults to 1 (on).
-
- - EF_CHALLENGE_ACK_LIMIT
-   Specifies limit for the number of RFC5961 Challenge ACKs to send per second.
-   Defaults to the sysctl net.ipv4.tcp_challenge_ack_limit setting if
-   available, else 1000.
-
- - EF_POLL_IN_KERNEL
-   If set, ensures that epoll mode 3 polling always occurs in kernel context.
-   Defaults to 0 (off).
-
- - EF_RX_TIMESTAMP_ORDERING
-   Defines whether ordered packet delivery is governed by timestamps from the
-   NIC ('nic') or from timestamps decoded from packet trailers ('cpacket').
-   Defaults to 'nic'.
+   Configure whether XDP programs are run on packets received by Onload.
+   The default is 'disabled'. 'compatible' causes Onload to use XDP programs
+   attached to Solarflare devices and implicitly enables in-kernel polling.
 
 
 Modified configuration options
 ------------------------------
 
  - EF_UDP_CONNECT_HANDOVER
-   The cases covered by EF_UDP_CONNECT_HANDOVER have been extended to include
-   the situation where resource limitations prevent RX filter installation.
-   The default setting remains the same, such that if the result of a connect
-   operation is that a socket will not receive acclerated traffic it is handed
-   over to the kernel.
+
+   In addition to the previously-accepted values, this option now also accepts
+   a value of 2, which will cause all UDP sockets to be handed over when
+   calling connect(), regardless of whether the socket could have been
+   accelerated.
 
 
 Deprecation
 -----------
 
 The ability to insert filters to steer kernel traffic using sfcaffinity
-is deprecated and will be removed in a future release. Instead ethtool should
-be used for this purpose.
+remains deprecated and will be removed in a future release. Instead ethtool
+should be used for this purpose.

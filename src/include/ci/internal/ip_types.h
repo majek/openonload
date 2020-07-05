@@ -15,10 +15,6 @@
 
 #ifndef __CI_INTERNAL_IP_TYPES_H__
 #define __CI_INTERNAL_IP_TYPES_H__
-#if ! defined __KERNEL__ && CI_CFG_BPF
-# include <onload/oobpf.h>
-# include <onload/bpf_jitintf.h>
-#endif
 
 /*
 ** READ ME FIRST please.
@@ -33,8 +29,6 @@
 **
 ** NO CODE IN THIS FILE PLEASE.
 */
-
-struct oo_bpf_prog;
 
 /*!
 ** ci_netif_nic_t
@@ -55,15 +49,6 @@ typedef struct ci_netif_nic_s {
 #endif
 #ifndef __KERNEL__
   ci_uint8              poll_in_kernel;
-#endif
-  /* Sequence number of the currently-used XDP eBPF program config. c.f.
-   * ci_netif_state_nic_t::xdp_current_gen */
-  ci_uint32             xdp_active_gen;
-#ifdef __KERNEL__
-  struct oo_bpf_prog*   xdp_prog;
-#elif CI_CFG_BPF
-  struct oo_bpf_jitted_prog xdp_jitted;
-  int                   xdp_prog_fd;
 #endif
 } ci_netif_nic_t;
 
@@ -157,6 +142,7 @@ struct ci_netif_s {
 #endif
 
   ci_netif_filter_table* filter_table;
+  ci_netif_filter_table_entry_ext* filter_table_ext;
 #if CI_CFG_IPV6
   ci_ip6_netif_filter_table* ip6_filter_table;
 #endif
@@ -265,7 +251,6 @@ struct ci_netif_s {
   struct ofe_engine*  ofe;
   struct ofe_channel* ofe_channel;
 #endif
-
 
 #ifndef __KERNEL__
 #define ID_TO_EPS(ni,id) (&(ni)->eps[id])

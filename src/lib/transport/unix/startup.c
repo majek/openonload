@@ -518,7 +518,6 @@ static void citp_opts_getenv(citp_opts_t* opts)
 #endif
 
   GET_ENV_OPT_INT("EF_ONLOAD_FD_BASE",	fd_base);
-
 }
 
 
@@ -545,6 +544,16 @@ static void citp_opts_validate_env(void)
     "EF_OFE_CONFIG_FILE",
 #endif
     "EF_LOG_FILE",
+    "EF_VI_TXQ_SIZE",
+    "EF_VI_RXQ_SIZE",
+    "EF_VI_EVQ_SIZE",
+    "EF_VI_CTPIO_WB_TICKS",
+    "EF_VI_CTPIO_MODE",
+    "EF_VI_CLUSTER_SOCKET",
+    "EF_VI_PD_FLAGS",
+    "EF_VI_LOG_LEVEL",
+    "EF_VI_EVQ_CLEAR_STRIDE",
+    "EF_BUILDTREE_UL",
     NULL
   };
   char** env_name;

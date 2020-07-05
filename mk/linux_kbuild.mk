@@ -45,9 +45,3 @@ EXTRA_AFLAGS += $(EXTRA_CPPFLAGS)
 # is not of much use to an out-of-tree driver, and we have far too many such
 # functions to rewrite them, so we turn off the checks.
 OBJECT_FILES_NON_STANDARD := y
-
-ifdef CONFIG_X86_64
-KBUILD_BPF_SUPPORTED := $(shell echo $$(( $(VERSION)*100+$(PATCHLEVEL) >= 310 )))
-else
-KBUILD_BPF_SUPPORTED := 0
-endif

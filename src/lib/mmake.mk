@@ -4,7 +4,7 @@
 SUBDIRS		:= citools ciapp
 
 ifeq ($(LINUX),1)
-DRIVER_SUBDIRS	:= citools ciul cplane bpf transport
+DRIVER_SUBDIRS	:= citools ciul cplane transport
 OTHER_SUBDIRS	:= spektor
 SUBDIRS		+= sfcaffinity onload_ext
 endif
@@ -12,9 +12,8 @@ endif
 ifeq ($(GNU),1)
 # N.B.: The order matters here.
 SUBDIRS		+= ciul kcompat
-SUBDIRS		+= cplane bpf transport tools
+SUBDIRS		+= cplane transport
 ifneq ($(ONLOAD_ONLY),1)
-SUBDIRS         += activation
 ifeq (${PLATFORM},gnu_x86_64)
 ifndef PREBUILD_ZF
 ifneq ($(NO_ZF),1)

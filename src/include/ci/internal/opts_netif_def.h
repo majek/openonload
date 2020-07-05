@@ -175,6 +175,17 @@ CI_CFG_OPT("EF_POLL_IN_KERNEL", poll_in_kernel, ci_uint32,
 "Do polling of eventq in kernel.  This introduces cost of additional syscall(s) "
 "per poll.",
            1, , 0, 0, 1, count)
+#if CI_CFG_WANT_BPF_NATIVE
+#define EF_XDP_MODE_DISABLED 0
+#define EF_XDP_MODE_COMPATIBLE 1
+CI_CFG_OPT("EF_XDP_MODE", xdp_mode, ci_uint32,
+"disabled    - disable running XDP programs "
+"compatible  - enable running XDP programs on packets received by Onload. "
+"Onload will use XDP programs attached to Solaflare devices. "
+"\n"
+"Enabling the feature implicitly enables in-kernel polling - see EF_POLL_IN_KERNEL.",
+           1, , EF_XDP_MODE_DISABLED, 0, EF_XDP_MODE_COMPATIBLE, oneof:disabled;compatible)
+#endif
 
 CI_CFG_OPT("EF_INT_REPRIME", int_reprime, ci_uint32,
 "Enable interrupts more aggressively than the default.",
@@ -255,15 +266,18 @@ CI_CFG_OPT("EF_TCP_CONNECT_HANDOVER", tcp_connect_handover, ci_uint32,
            1, , 0, 0, 1, yesno)
 
 CI_CFG_OPT("EF_UDP_CONNECT_HANDOVER", udp_connect_handover, ci_uint32,
-"When a UDP socket is connected to an IP address that cannot be accelerated "
-"by OpenOnload, or resource restrictions prevent RX acceleration, hand the "
-"socket over to the kernel stack.\n"
+"When set to 1, if a UDP socket is connected to an IP address that cannot be "
+"accelerated by OpenOnload, or resource restrictions prevent RX acceleration, "
+"hand the socket over to the kernel stack.\n"
 
 "When this option is disabled the socket remains under the control of "
 "OpenOnload.  This may be worthwhile because the socket may subsequently be "
 "re-connected to an IP address that can be accelerated, or the socket may be"
-"intended for TX use only.",
-           1, , 1, 0, 1, yesno)
+"intended for TX use only.\n"
+
+"When set to 2, hand the socket over on connect() even if the address could "
+"have been accelerated.",
+           2, , 1, 0, 2, level)
 
 CI_CFG_OPT("EF_FORCE_TCP_NODELAY", tcp_force_nodelay, ci_uint32,
 "This option allows the user to override the use of TCP_NODELAY. "
@@ -391,65 +405,6 @@ CI_CFG_OPT("EF_TAIL_DROP_PROBE", tail_drop_probe, ci_uint32,
 "the default.",
            , , 1, 0, 1, yesno)
 #endif
-
-/* These EF_*_SPIN options are only here so that the application defaults
- * set by environment variables get exposed through stackdump.  (Because
- * stackdump only has visibility of per-stack options).
- */
-CI_CFG_OPT("EF_SELECT_SPIN", ul_select_spin, ci_uint32,
-           "", 1, ,0, 0, 1, yesno)
-
-CI_CFG_OPT("EF_POLL_SPIN", ul_poll_spin, ci_uint32, 
-           "", 1, ,0, 0, 1, yesno)
-
-#if CI_CFG_USERSPACE_EPOLL
-CI_CFG_OPT("EF_EPOLL_SPIN", ul_epoll_spin, ci_uint32, 
-           "", 1, , 0, 0, 1, yesno)
-#endif
-
-#if CI_CFG_UDP
-CI_CFG_OPT("EF_UDP_RECV_SPIN", udp_recv_spin, ci_uint32,
-           "", 1, , 0, 0, 1, yesno)
-
-CI_CFG_OPT("EF_UDP_SEND_SPIN", udp_send_spin, ci_uint32,
-           "", 1, , 0, 0, 1, yesno)
-#endif
-
-CI_CFG_OPT("EF_TCP_RECV_SPIN", tcp_recv_spin, ci_uint32,
-           "", 1, , 0, 0, 1, yesno)
-
-CI_CFG_OPT("EF_TCP_SEND_SPIN", tcp_send_spin, ci_uint32,
-           "", 1, , 0, 0, 1, yesno)
-
-CI_CFG_OPT("EF_TCP_ACCEPT_SPIN", tcp_accept_spin, ci_uint32,
-           "", 1, , 0, 0, 1, yesno)
-
-CI_CFG_OPT("EF_TCP_CONNECT_SPIN", tcp_connect_spin, ci_uint32,
-           "", 1, , 0, 0, 1, yesno)
-
-CI_CFG_OPT("EF_PKT_WAIT_SPIN", pkt_wait_spin, ci_uint32,
-           "", 1, , 0, 0, 1, yesno)
-
-#if CI_CFG_USERSPACE_PIPE
-CI_CFG_OPT("EF_PIPE_RECV_SPIN", pipe_recv_spin, ci_uint32,
-           "", 1, , 0, 0, 1, yesno)
-
-CI_CFG_OPT("EF_PIPE_SEND_SPIN", pipe_send_spin, ci_uint32,
-           "", 1, , 0, 0, 1, yesno)
-
-CI_CFG_OPT("EF_PIPE_SIZE", pipe_size, ci_uint32,
-           "", , , OO_PIPE_DEFAULT_SIZE, OO_PIPE_MIN_SIZE,
-           CI_CFG_MAX_PIPE_SIZE, count)
-#endif
-
-CI_CFG_OPT("EF_SOCK_LOCK_BUZZ", sock_lock_buzz, ci_uint32,
-           "", 1, , 0, 0, 1, yesno)
-
-CI_CFG_OPT("EF_STACK_LOCK_BUZZ", stack_lock_buzz, ci_uint32,
-           "", 1, , 0, 0, 1, yesno)
-
-CI_CFG_OPT("EF_SO_BUSY_POLL_SPIN", so_busy_poll_spin, ci_uint32,
-           "", 1, , 0, 0, 1, yesno)
 
 CI_CFG_OPT("EF_TCP_RST_DELAYED_CONN", rst_delayed_conn, ci_uint32,
 "This option tells Onload to reset TCP connections rather than allow data to "
@@ -1729,7 +1684,6 @@ CI_CFG_OPT("EF_TCP_ISN_CACHE_SIZE", tcp_isn_cache_size, ci_uint32,
 "0 - automatically chosen.  "
 "Relevant when EF_TCP_ISN_MODE is set to clocked+cache.",
            , , 0, MIN, MAX, time:sec)
-
 
 #if CI_CFG_IPV6
 #define CITP_IP6_AUTO_FLOW_LABEL_OFF     0

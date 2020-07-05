@@ -9,8 +9,7 @@
 #undef CI_CFG_IPV6
 #define CI_CFG_IPV6 1
 
-/* Enable Berkeley Packet Filter program functionality
- * with Onload embedded implementation */
+/* Enable Berkeley Packet Filter program functionality. */
 #undef CI_CFG_BPF
 #define CI_CFG_BPF 1
 

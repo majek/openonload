@@ -149,6 +149,7 @@ typedef uint32_t cp_fwd_table_id;
 
 typedef ci_uint32 cp_hwport_flags_t;
 typedef cp_hwport_flags_t cp_llap_flags_t;
+typedef ci_uint64 cp_nic_flags_t;
 
 typedef struct cicp_llap_row_s {
   ci_ifid_t ifindex;
@@ -161,20 +162,12 @@ typedef struct cicp_llap_row_s {
 #define CP_LLAP_UP                     0x00000001u
 /* Interface is not acceleratable. */
 #define CP_LLAP_ALIEN                  0x00000002u
-/* Interface may send and receive UDP traffic. */
-#define CP_LLAP_LICENSED_ONLOAD_UDP    0x00000004u
-/* Interface may be used by TCPDirect. */
-#define CP_LLAP_LICENSED_TCP_DIRECT    0x00000008u
-/* The "Onload base feature" replaces the old-style ScaleOut key. */
-#define CP_LLAP_LICENSED_ONLOAD        0x00000010u
-/* lower interface not yet discoverd */
-#define CP_LLAP_LICENSE_POSTPONED      0x00000020u
 /* lower iface is in some other (main) namespace */
 #define CP_LLAP_IMPORTED               0x00000040u
-/* "Ultra-low latency". */
-#define CP_LLAP_LICENSED_ONLOAD_ULL    0x00000080u
 /* Hwport row is non-empty. */
 #define CP_HWPORT_ROW_IN_USE           0x00000100u
+/* Hwport supports acceleration of UDP. */
+#define CP_HWPORT_FLAG_UDP             0x00000200u
 
   char name[IFNAMSIZ+1];
   ci_mac_addr_t mac;          /*< MAC address of access point */
@@ -200,21 +193,11 @@ typedef struct cicp_llap_row_s {
   cp_fwd_table_id iif_fwd_table_id;
 } cicp_llap_row_t;
 
-/* Bitmask including all licences that allow the use of Onload.  Currently
- * there's only one of these. */
-#define CP_LLAP_ALL_ONLOAD_LICENCES CP_LLAP_LICENSED_ONLOAD
-
-/* Bitmask including all licences that allow Onload to accelerate UDP. */
-#define CP_LLAP_ONLOAD_UDP_ACCEL_LICENCES  CP_LLAP_LICENSED_ONLOAD_UDP
-
 
 struct cp_hwport_row {
 /* we reuse CP_LLAP flags here */
   cp_hwport_flags_t flags;
-  ci_uint32 oo_vi_flags_mask;
-  ci_uint32 efhw_flags_extra;
-  ci_uint8  pio_len_shift;
-  ci_uint32 ctpio_start_offset;
+  cp_nic_flags_t nic_flags CI_ALIGN(8);
 };
 
 
@@ -679,19 +662,6 @@ struct cp_svc_ep_array {
   struct cp_svc_endpoint eps[CP_SVC_BACKENDS_PER_ARRAY];
 };
 
-
-#define CP_ACTIVATION_FLAG_ONLOAD                0x00000001u
-#define CP_ACTIVATION_FLAG_ONLOAD_K8S            0x00000002u
-#define CP_ACTIVATION_FLAG_ONLOAD_ADVROUTING     0x00000004u
-#define CP_ACTIVATION_FLAG_ONLOAD_APPFLEX        0x00000008u
-#define CP_ACTIVATION_FLAG_ONLOAD_IPV6           0x00000010u
-#define CP_ACTIVATION_FLAG_ONLOAD_UDP            0x00000020u
-#define CP_ACTIVATION_FLAG_ONLOAD_ULL            0x00000040u
-#define CP_ACTIVATION_FLAG_ONLOAD_XDP            0x00000080u
-#define CP_ACTIVATION_FLAG_TCPDIRECT             0x00000100u
-typedef ci_uint32 cp_activation_flags;
-
-
 #define CP_STRING_LEN 256
 
 typedef struct cp_string { char value[CP_STRING_LEN]; } cp_string_t;
@@ -724,14 +694,8 @@ struct cp_mibs {
   /* Version exposed to oof subsystem. */
   cp_version_t* oof_version;
 
-  /* Flags indicating valid and expired activation keys. */
-  cp_activation_flags* valid_activation_flags;
-  cp_activation_flags* expired_activation_flags;
-
-  /* License details from the activation file, for use in logging */
-  cp_string_t* act_licensee;
-  cp_string_t* act_sku;
-  cp_string_t* act_renewal;
+  /* Branding string. */
+  cp_string_t* sku;
 
   struct cp_hwport_row* hwport;
   cicp_llap_row_t* llap;
@@ -927,19 +891,18 @@ cp_ipif_any_row_by_ifindex(struct cp_mibs* mib, ci_ifid_t ifindex)
 
 
 static inline cicp_hwport_mask_t
-cp_get_licensed_hwports(struct cp_mibs* mib, cicp_hwport_mask_t hwports, int flags)
+cp_get_hwports(struct cp_mibs* mib, cicp_hwport_mask_t hwports)
 {
-  cicp_hwport_mask_t licensed_hwports = 0;
+  cicp_hwport_mask_t all_hwports = 0;
 
   for( ; hwports; hwports &= (hwports - 1) ) {
     ci_hwport_id_t id = cp_hwport_mask_first(hwports);
     if( cicp_hwport_row_is_free(&mib->hwport[id]) )
       continue;
-    if( mib->hwport[id].flags & flags )
-      licensed_hwports |= cp_hwport_make_mask(id);
+    all_hwports |= cp_hwport_make_mask(id);
   }
 
-  return licensed_hwports;
+  return all_hwports;
 }
 
 
@@ -998,10 +961,13 @@ static inline int /*bool*/
 cp_fwd_udp_route_needs_promotion(struct cp_fwd_table* fwd_table,
                                  cicp_mac_rowid_t id, struct cp_fwd_key* key)
 {
+  ci_uint8 entry_flag;
+
   ci_assert_nequal(id, CICP_MAC_ROWID_BAD);
+  entry_flag = cp_get_fwd_by_id(fwd_table, id)->key.flag;
+
   /* "The row is a UDP-only entry for a non-UDP request." */
-  return cp_get_fwd_by_id(fwd_table, id)->key.flag &
-         ~key->flag & CP_FWD_KEY_UDP;
+  return entry_flag & ~key->flag & CP_FWD_KEY_UDP;
 }
 
 /* Some route properties (currently, whether the request was originated by a
@@ -1018,9 +984,18 @@ cp_fwd_find_row_found_perfect_match(struct cp_fwd_table* fwd_table,
 }
 
 
+typedef int /*bool*/
+(*cp_svc_iterator_callback_t)(const struct cp_mibs*, cicp_mac_rowid_t,
+                              void* opaque);
+
 extern cicp_mac_rowid_t
-cp_svc_find_match(const struct cp_mibs* mib,
-                  const ci_addr_sh_t dst_addr, const ci_uint16 dst_port);
+cp_svc_iterate_matches(const struct cp_mibs* mib, const ci_addr_sh_t addr,
+                       ci_uint16 port, cp_svc_iterator_callback_t callback,
+                       void* opaque);
+
+extern cicp_mac_rowid_t
+cp_svc_find_match(const struct cp_mibs* mib, const ci_addr_sh_t dst_addr,
+                  ci_uint16 dst_port);
 
 extern void
 cp_svc_walk_array_chain(const struct cp_mibs* mib,

@@ -825,7 +825,7 @@ static inline int oo_epoll1_wake_other_callback(wait_queue_entry_t* wait,
 /* this is essentially sys_poll([home_filp,other_filp], timeout_ms) */
 static int oo_epoll1_block_on(struct file* home_filp,
                               struct file* other_filp,
-                              int timeout_ms)
+                              ci_uint64 timeout_us)
 {
   struct oo_epoll_poll_table ept;
   int rc, ret = 0;
@@ -853,8 +853,19 @@ static int oo_epoll1_block_on(struct file* home_filp,
     else {
       oo_epoll_prime_all_stacks(home_filp->private_data);
       set_current_state(TASK_INTERRUPTIBLE);
-      if( ept.rc == 0 )
-        schedule_timeout(msecs_to_jiffies(timeout_ms));
+      if( ept.rc == 0 ) {
+        ktime_t kt;
+        /* Totally arbitrary heuristic for slack, based on the guess that
+         * applications waiting for a short amount of time want more accurate
+         * timing. This is equivalent to select_estimate_accuracy() in the
+         * kernel but much less sophisticated - we assume that all apps using
+         * Onload want pretty good timing. Note that Linux will tend to wait
+         * for the total timeout+slack if there's no other reason for it to
+         * wake. */
+        int slack_ns = timeout_us < 10000 ? 0 : 10000;
+        kt = ktime_set(0, timeout_us * 1000);
+        schedule_hrtimeout_range(&kt, slack_ns, HRTIMER_MODE_REL);
+      }
       __set_current_state(TASK_RUNNING);
       ret = ept.rc;
     }
@@ -888,7 +899,7 @@ static int oo_epoll_has_event(struct file* filp)
 
 static int oo_epoll1_spin_on(struct file* home_filp,
                              struct file* other_filp,
-                             int timeout_us, int sleep_iter_us)
+                             ci_uint64 timeout_us, int sleep_iter_us)
 {
   struct oo_epoll_poll_table ept;
   int rc, ret = 0;
@@ -1153,9 +1164,9 @@ static long oo_epoll_fop_unlocked_ioctl(struct file* filp,
     priv->p.p1.flags = 0;
 
     if( cmd == OO_EPOLL1_IOC_BLOCK_ON )
-      rc = oo_epoll1_block_on(filp, other_filp, local_arg.timeout_ms);
+      rc = oo_epoll1_block_on(filp, other_filp, local_arg.timeout_us);
     else
-      rc = oo_epoll1_spin_on(filp, other_filp, local_arg.timeout_ms,
+      rc = oo_epoll1_spin_on(filp, other_filp, local_arg.timeout_us,
                                                local_arg.sleep_iter_us);
 
     if( signal_pending(current) )

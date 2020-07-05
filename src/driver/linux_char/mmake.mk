@@ -44,23 +44,18 @@ $(objd)efch_manager.o: $(objd)efch_intf_ver.h
 # linux kbuild support
 #
 
+KBUILD_EXTRA_SYMBOLS := $(BUILDPATH)/driver/linux_resource/Module.symvers
 
-all: $(BUILDPATH)/driver/linux_char/Module.symvers
-	$(MMAKE_KBUILD_PRE_COMMAND)
+all: $(KBUILD_EXTRA_SYMBOLS)
 	$(MAKE) $(MMAKE_KBUILD_ARGS) M=$(CURDIR)
-	$(MMAKE_KBUILD_POST_COMMAND)
 	cp -f sfc_char.ko $(DESTPATH)/driver/linux
 ifndef CI_FROM_DRIVER
 	$(warning "Due to build order sfc.ko may be out-of-date. Please build in driver/linux_net")
 endif
 
-$(BUILDPATH)/driver/linux_char/Module.symvers: \
-	$(BUILDPATH)/driver/linux_resource/Module.symvers
-	cp $< $@
-
 clean:
 	@$(MakeClean)
-	rm -rf *.ko Module.symvers .tmp_versions .*.cmd
+	rm -rf *.ko Module.symvers .*.cmd
 
 
 ifdef MMAKE_IN_KBUILD

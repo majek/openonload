@@ -194,9 +194,6 @@ enum {
   OO_OP_TCP_LOOPBACK_CONNECT,
 #define OO_IOC_TCP_LOOPBACK_CONNECT OO_IOC_RW(TCP_LOOPBACK_CONNECT, \
                                               struct oo_op_loopback_connect)
-  OO_OP_TCP_DROP_FROM_ACCEPTQ,
-#define OO_IOC_TCP_DROP_FROM_ACCEPTQ OO_IOC_W(TCP_DROP_FROM_ACCEPTQ, \
-                                          struct oo_op_tcp_drop_from_acceptq)
 
   OO_OP_MOVE_FD,
 #define OO_IOC_MOVE_FD              OO_IOC_W(MOVE_FD, \
@@ -227,15 +224,11 @@ enum {
 #define OO_IOC_ALLOC_ACTIVE_WILD  OO_IOC_W(ALLOC_ACTIVE_WILD, \
                                            oo_alloc_active_wild_t)
 
-
   OO_OP_VETH_ACCELERATION_ENABLED,
 #define OO_IOC_VETH_ACCELERATION_ENABLED OO_IOC_NONE(VETH_ACCELERATION_ENABLED)
 
   OO_OP_EVQ_POLL,
 #define OO_IOC_EVQ_POLL         OO_IOC_W(EVQ_POLL, ci_uint32)
-
-  OO_OP_BPF_BIND,
-#define OO_IOC_BPF_BIND         OO_IOC_W(BPF_BIND, oo_bpf_bind_t)
 
   OO_OP_CONTIG_END,  /* This is the last in range of contigous opcodes */
 

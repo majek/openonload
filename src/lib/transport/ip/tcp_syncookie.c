@@ -122,8 +122,8 @@ ci_tcp_syncookie_hash(ci_netif* netif, ci_tcp_socket_listen* tls,
 {
   ci_uint8 hash_data[13];
 
-  hash_data[0] = tcp_lport_be16(tls) & 0xff;
-  hash_data[1] = tcp_lport_be16(tls) >> 8;
+  hash_data[0] = tsr->l_port & 0xff;
+  hash_data[1] = tsr->l_port >> 8;
   hash_data[2] = tsr->r_port & 0xff;
   hash_data[3] = tsr->r_port >> 8;
   hash_data[4] = tsr->l_addr.ip4 & 0xff;
@@ -225,6 +225,7 @@ ci_tcp_syncookie_ack(ci_netif* netif, ci_tcp_socket_listen* tls,
   memset(tsr, 0, sizeof(ci_tcp_state_synrecv));
   tsr->tcpopts.flags = CI_TCPT_FLAG_SYNCOOKIE;
 
+  tsr->l_port = rxp->tcp->tcp_dest_be16;
   tsr->r_port = rxp->tcp->tcp_source_be16;
   tsr->l_addr = CI_ADDR_FROM_IP4(oo_ip_hdr(rxp->pkt)->ip_daddr_be32);
   tsr->r_addr = CI_ADDR_FROM_IP4(oo_ip_hdr(rxp->pkt)->ip_saddr_be32);

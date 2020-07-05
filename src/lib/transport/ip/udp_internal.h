@@ -84,7 +84,6 @@ ci_inline void ci_udp_handle_rx_pre_future(ci_netif* ni, ci_ip_pkt_fmt* pkt,
   pkt->pf.udp.pay_len -= sizeof(ci_udp_hdr);
 
 
-
   daddr = CI_ADDR_FROM_IP4(ip4_hdr->ip_daddr_be32);
   saddr = CI_ADDR_FROM_IP4(ip4_hdr->ip_saddr_be32);
 

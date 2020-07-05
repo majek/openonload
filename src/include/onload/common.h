@@ -190,11 +190,6 @@ typedef struct {
   ci_int32              type;
 } oo_tcp_accept_sock_attach_t;
 
-typedef struct {
-  ci_int32 attach_point;
-  ci_int32 intf_i;
-} oo_bpf_bind_t;
-
 #if CI_CFG_USERSPACE_PIPE
 typedef struct {
   ci_fixed_descriptor_t rfd, wfd;   /* OUT for Unix */
@@ -388,11 +383,6 @@ struct oo_op_loopback_connect {
   ci_uint16 dst_port;   /*!< destination port to connect to */
   ci_uint8 out_moved;   /*!< have we moved socket to another stack? */
   ci_int8  out_rc;      /*!< rc of connect() */
-};
-
-struct oo_op_tcp_drop_from_acceptq {
-  ci_uint32 stack_id;
-  oo_sp sock_id;
 };
 
 

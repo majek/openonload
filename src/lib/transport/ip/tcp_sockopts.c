@@ -24,13 +24,28 @@
 
 /* Mapping for congestion states */
 static const unsigned char sock_congstate_linux_map[] = {
-  CI_TCPF_CA_Open,                        /* CI_TCP_CONG_OPEN */
-  CI_TCPF_CA_Loss,                        /* CI_TCP_CONG_RTO */
-  CI_TCPF_CA_Recovery,                    /* CI_TCP_CONG_FRECOVER */
-  CI_TCPF_CA_Loss,                        /* CI_TCP_CONG_ECN */
-  CI_TCPF_CA_Recovery | CI_TCPF_CA_Loss   /* CI_TCP_CONG_RTO_RECOVER */
+  TCP_CA_Open,           /* CI_TCP_CONG_OPEN */
+  TCP_CA_Loss,           /* CI_TCP_CONG_RTO */
+  TCP_CA_Recovery,       /* CI_TCP_CONG_RTO_RECOVER */
+  TCP_CA_Open,
+  TCP_CA_Disorder,       /* CI_TCP_CONG_FAST_RECOV */
+  TCP_CA_Open,
+  TCP_CA_Open,
+  TCP_CA_Open,
+  TCP_CA_Recovery,       /* CI_TCP_CONG_COOLING */
+  TCP_CA_Loss,           /* CI_TCP_CONG_RTO | CI_TCP_CONG_COOLING */
+  TCP_CA_Open,
+  TCP_CA_Open,
+  TCP_CA_CWR,            /* CI_TCP_CONG_NOTIFIED */
 };
 
+/*
+ * TCP constants to mimic linux kernel validation for TCP options.
+ * Constants originate from <net/tcp.h>
+ */
+#define CI_MAX_TCP_KEEPIDLE 32767
+#define CI_MAX_TCP_KEEPINTVL 32767
+#define CI_MAX_TCP_KEEPCNT 127
 
 static int
 ci_tcp_info_get(ci_netif* netif, ci_sock_cmn* s, struct ci_tcp_info* uinfo,
@@ -184,6 +199,7 @@ int ci_get_sol_tcp(ci_netif* netif, ci_sock_cmn* s, int optname, void *optval,
        * been set.
        */
       ci_assert(0);
+      break;
 #endif
   case TCP_DEFER_ACCEPT:
     {
@@ -281,24 +297,12 @@ static int ci_tcp_setsockopt_lk(citp_socket* ep, ci_fd_t fd, int level,
   ci_sock_cmn* s = ep->s;
   ci_tcp_socket_cmn* c = &(SOCK_TO_WAITABLE_OBJ(s)->tcp.c);
   ci_netif* netif = ep->netif;
-  int zeroval = 0;
   int rc;
 
-  /* ?? what to do about optval and optlen checking
-  ** Kernel can raise EFAULT, here we are a little in the dark.
-  ** Note: If the OS sock is sync'd then we get this checking for free.
-  */
-
-  if (optlen == 0) {
-    /* Match kernel behaviour: if length is 0, it treats the value as 0; and
-     * some applications rely on this.
-     */
-    optval = &zeroval;
-    optlen = sizeof(zeroval);
+  if( optlen < 0 ) {
+    rc = -EINVAL;
+    goto fail_inval;
   }
-
-  if( ! optval )
-    RET_WITH_ERRNO(EFAULT);
 
   /* If you're adding to this please remember to look in common_sockopts.c
    * and decide if the option is common to all protocols. */
@@ -351,6 +355,9 @@ static int ci_tcp_setsockopt_lk(citp_socket* ep, ci_fd_t fd, int level,
     return ci_set_sol_ip6(netif, s, optname, optval, optlen);
   }
   else if( level == IPPROTO_TCP ) {
+    /* These are ints values */
+    if( (rc = opt_not_ok(optval, optlen, int)) )
+      goto fail_inval;
     switch(optname) {
 # ifdef TCP_CORK
     case TCP_CORK:
@@ -400,18 +407,30 @@ static int ci_tcp_setsockopt_lk(citp_socket* ep, ci_fd_t fd, int level,
       break;
 
     case TCP_KEEPIDLE:
+      if( *(int*)optval < 1 || *(int*)optval > CI_MAX_TCP_KEEPIDLE ) {
+        rc = -EINVAL;
+        goto fail_inval;
+      }
       /* idle time for keepalives  */
       c->t_ka_time = ci_ip_time_ms2ticks(netif, *(unsigned*)optval*1000);
       c->t_ka_time_in_secs = *(unsigned*)optval;
       break;
 
     case TCP_KEEPINTVL:
+      if( *(int*)optval < 1 || *(int*)optval > CI_MAX_TCP_KEEPINTVL ) {
+        rc = -EINVAL;
+        goto fail_inval;
+      }
       /* time between keepalives */
       c->t_ka_intvl = ci_ip_time_ms2ticks(netif, *(unsigned*)optval*1000);
       c->t_ka_intvl_in_secs = *(unsigned*)optval;
       break;
 
     case TCP_KEEPCNT:
+      if( *(int*)optval < 1 || *(int*)optval > CI_MAX_TCP_KEEPINTVL ) {
+        rc = -EINVAL;
+        goto fail_inval;
+      }
       /* number of keepalives before giving up */
       c->ka_probe_th = *(unsigned*)optval;
       break;
@@ -452,16 +471,24 @@ static int ci_tcp_setsockopt_lk(citp_socket* ep, ci_fd_t fd, int level,
       break;
     default:
       LOG_TC(log("%s: "NSS_FMT" option %i unimplemented (ENOPROTOOPT)", 
-                 __FUNCTION__, NSS_PRI_ARGS(netif,s), optname));
-      RET_WITH_ERRNO(ENOPROTOOPT);
+             __FUNCTION__, NSS_PRI_ARGS(netif,s), optname));
+      goto fail_unsup;
     }
   }
   else {
-    LOG_U(log(FNS_FMT "unknown level=%d optname=%d accepted by O/S",
-              FNS_PRI_ARGS(netif, s), level, optname));
+    if( s->b.sb_aflags & CI_SB_AFLAG_OS_BACKED ) {
+      LOG_U(log(FNS_FMT "unknown level=%d optname=%d accepted by O/S",
+                FNS_PRI_ARGS(netif, s), level, optname));
+    }
+    else {
+      goto fail_unsup;
+    }
   }
 
   return 0;
+
+ fail_unsup:
+  RET_WITH_ERRNO(ENOPROTOOPT);
 
  fail_inval:
   LOG_TC(log("%s: "NSS_FMT" option %i  bad param (EINVAL or EFAULT)",
@@ -510,12 +537,6 @@ int ci_tcp_setsockopt(citp_socket* ep, ci_fd_t fd, int level,
         goto unlock_out;
       }
       rc = 0;
-    }
-    else if(CI_UNLIKELY( optval == NULL )) {
-      /* ci_sys_setsockopt() is used to sanity-test parameters; do it
-       * manually if there is no OS socket */
-      ci_netif_unlock(ni);
-      RET_WITH_ERRNO(EFAULT);
     }
   }
 

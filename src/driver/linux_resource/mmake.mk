@@ -56,24 +56,18 @@ TARGETS		:= $(RESOURCE_TARGET)
 # linux kbuild support
 #
 
+KBUILD_EXTRA_SYMBOLS := $(BUILDPATH)/driver/linux_affinity/Module.symvers
 
-all: $(BUILDPATH)/driver/linux_resource/Module.symvers
-	$(MMAKE_KBUILD_PRE_COMMAND)
+all: $(KBUILD_EXTRA_SYMBOLS)
 	$(MAKE) $(MMAKE_KBUILD_ARGS) M=$(CURDIR)
-	$(MMAKE_KBUILD_POST_COMMAND)
 	cp -f sfc_resource.ko $(DESTPATH)/driver/linux
 ifndef CI_FROM_DRIVER
 	$(warning "Due to build order sfc.ko may be out-of-date. Please build in driver/linux_net")
 endif
 
-$(BUILDPATH)/driver/linux_resource/Module.symvers: \
-		$(BUILDPATH)/driver/linux_net/Module.symvers \
-		$(BUILDPATH)/driver/linux_affinity/Module.symvers
-	cat $^ >$@
-
 clean:
 	@$(MakeClean)
-	rm -rf *.ko Module.symvers .tmp_versions .*.cmd
+	rm -rf *.ko Module.symvers .*.cmd
 
 
 ifdef MMAKE_IN_KBUILD

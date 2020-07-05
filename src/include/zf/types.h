@@ -49,6 +49,18 @@ struct zf_pkt_report {
   uint16_t flags;
 };
 
+/*! \brief Flags for handling overlapped receives.
+**
+** To be passed to zft_zc_recv() or zfur_zc_recv() in order to
+** process the payload of partially received frames. See \ref 
+** using_overlapped_receive.
+*/
+
+enum zf_zc_flags {
+  ZF_OVERLAPPED_WAIT = 0x10000, /*< wait for reception of overlapped data */
+  ZF_OVERLAPPED_COMPLETE = 0x20000, /*< wait for completion of overlapped receive */
+};
+
 
 #endif /* __ZF_TYPES_H__ */
 /** @} */

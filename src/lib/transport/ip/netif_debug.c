@@ -891,8 +891,8 @@ void ci_netif_dump_to_logger(ci_netif* ni, oo_dump_log_fn_t logger,
   if(ni->state->netns_id != 0) {
     logger(log_arg, "  namespace=net:[%u]", ni->state->netns_id);
   }
-  logger(log_arg, "  %s %s uid=%d pid=%d ns_flags=%x %s %s %s",
-         ni->cplane->mib->act_sku->value, ONLOAD_VERSION
+  logger(log_arg, "  %s %s uid=%d pid=%d ns_flags=%x %s %s %s %s",
+         ni->cplane->mib->sku->value, ONLOAD_VERSION
       , (int) ns->uuid, (int) ns->pid
       , ns->flags
       , (ns->flags & CI_NETIF_FLAG_ONLOAD_UNSUPPORTED)
@@ -906,6 +906,8 @@ void ci_netif_dump_to_logger(ci_netif* ni, oo_dump_log_fn_t logger,
       /* In most cases, this flag _is_ set, so text-decode the unusual case. */
       , (~ns->flags & CI_NETIF_FLAG_NO_INIT_NET_CPLANE)
           ? "INIT_NET_CPLANE" : ""
+      , (ns->flags & CI_NETIF_FLAG_USE_ALIEN_LADDRS)
+          ? "USE_ALIEN_LADDRS" : ""
       );
 #ifdef __KERNEL__
   getnstimeofday(&nowspec);

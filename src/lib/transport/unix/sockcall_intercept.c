@@ -1378,6 +1378,17 @@ out:
   Log_CALL_RESULT(rc);
   return rc;
 }
+#if CI_LIBC_HAS___ppoll_chk
+OO_INTERCEPT(int, __ppoll_chk,
+             (struct pollfd*__restrict__ fds, nfds_t nfds,
+              const struct timespec *timeout_ts, const sigset_t *sigmask,
+              size_t __fdslen))
+{
+  if(  __fdslen < nfds * sizeof(struct pollfd) )
+    ci_sys___ppoll_chk(fds, nfds, timeout_ts, sigmask, __fdslen);
+  return onload_ppoll(fds, nfds, timeout_ts, sigmask);
+}
+#endif
 #endif
 
 
@@ -1520,7 +1531,8 @@ OO_INTERCEPT(int, epoll_wait,
     int rc = CI_SOCKET_HANDOVER;
     if( fdi->protocol->type == CITP_EPOLL_FD ) {
       /* NB. citp_epoll_wait() calls citp_exit_lib(). */
-      rc = citp_epoll_wait(fdi, events, NULL, maxevents, timeout, NULL,
+      rc = citp_epoll_wait(fdi, events, NULL, maxevents,
+                           oo_epoll_ms_to_frc(timeout), NULL,
                            &lib_context);
       citp_reenter_lib(&lib_context);
     }
@@ -1569,7 +1581,8 @@ OO_INTERCEPT(int, epoll_pwait,
     int rc = CI_SOCKET_HANDOVER;
     if( fdi->protocol->type == CITP_EPOLL_FD ) {
       /* NB. citp_epoll_wait() calls citp_exit_lib(). */
-      rc = citp_epoll_wait(fdi, events, NULL, maxevents, timeout, sigmask,
+      rc = citp_epoll_wait(fdi, events, NULL, maxevents,
+                           oo_epoll_ms_to_frc(timeout), sigmask,
                            &lib_context);
       citp_reenter_lib(&lib_context);
     }
@@ -1893,22 +1906,16 @@ OO_INTERCEPT(int, close,
 }
 
 
-OO_INTERCEPT(int, fcntl,
-             (int fd, int cmd, ...))
+static int fcntl_common(int fd, int cmd, long arg,
+                        int (*sys_fcntl)(int, int, ...))
 {
   citp_fdinfo* fdi;
-  long arg;
-  va_list va;
   int rc;
   citp_lib_context_t lib_context;
 
-  va_start(va, cmd);
-  arg = va_arg(va, long);
-  va_end(va);
-
   if( CI_UNLIKELY(citp.init_level < CITP_INIT_ALL) ) {
     citp_do_init(CITP_INIT_SYSCALLS);
-    return ci_sys_fcntl(fd, cmd, arg);
+    return sys_fcntl(fd, cmd, arg);
   }
 
   Log_CALL(ci_log("%s(%d, %d, %ld)", __FUNCTION__, fd, cmd, arg));
@@ -1917,17 +1924,50 @@ OO_INTERCEPT(int, fcntl,
 
   if( (fdi = citp_fdtable_lookup(fd)) ) {
     ci_assert (citp_fdinfo_get_ops (fdi)->fcntl);
+    /* We're losing the 64-bitness of the fcntl here, however none of the cmds
+     * which change behaviour apply to sockets (they're all to do with large
+     * file offsets) so we're fine */
     rc = citp_fdinfo_get_ops(fdi)->fcntl(fdi, cmd, arg);
     citp_fdinfo_release_ref(fdi, 0);
     citp_exit_lib(&lib_context, rc == 0);
   } else {
     Log_PT(log("PT: sys_fcntl(%d, %d, ...)", fd, cmd));
     citp_exit_lib(&lib_context, TRUE);
-    rc = ci_sys_fcntl(fd, cmd, arg);
+    rc = sys_fcntl(fd, cmd, arg);
   }
   Log_CALL_RESULT(rc);
   return rc;
 }
+
+
+OO_INTERCEPT(int, fcntl,
+             (int fd, int cmd, ...))
+{
+  long arg;
+  va_list va;
+
+  va_start(va, cmd);
+  arg = va_arg(va, long);
+  va_end(va);
+
+  return fcntl_common(fd, cmd, arg, ci_sys_fcntl);
+}
+
+
+#if CI_LIBC_HAS_fcntl64
+OO_INTERCEPT(int, fcntl64,
+             (int fd, int cmd, ...))
+{
+  long arg;
+  va_list va;
+
+  va_start(va, cmd);
+  arg = va_arg(va, long);
+  va_end(va);
+
+  return fcntl_common(fd, cmd, arg, ci_sys_fcntl64);
+}
+#endif
 
 
 #ifdef __GLIBC__

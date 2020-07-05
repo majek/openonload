@@ -56,6 +56,8 @@ int ci_cmn_ioctl(ci_netif* netif, ci_sock_cmn* s, int request,
     RET_WITH_ERRNO(ENOENT);
 
   default:
+    if( !CI_IOCTL_ARG_OK(int, arg) )
+      goto fail_fault;
     if (!os_socket_exists)
       RET_WITH_ERRNO(ENOTTY);
     /* Assumes that errno is unchanged from the OS call, or that [os_rc] == 0 */

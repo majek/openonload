@@ -45,6 +45,11 @@
 #include <ci/internal/transport_common.h>
 
 
+/* Define onload_<syscall> functions to use in the library. */
+#define CI_MK_DECL(ret, fn, args) extern ret onload_##fn args;
+# include <onload/declare_syscalls.h.tmpl>
+
+
 /**********************************************************************
  ** Globals.
  */
@@ -1055,8 +1060,6 @@ extern int citp_sock_fcntl_os_sock(citp_sock_fdi* epi, int fd, int cmd,
  * \return        As per standard fcntl()
  */
 extern int citp_sock_fcntl(citp_sock_fdi*, int fd, int cmd, long arg) CI_HF;
-
-extern int onload_close(int fd) CI_HF;
 
 #define ci_major(dev) ((dev) & 0xff00)
 

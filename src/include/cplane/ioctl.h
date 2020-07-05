@@ -10,10 +10,10 @@
 #include <cplane/mib.h>
 
 struct oo_op_cplane_ipmod {
-  int address_family;
-  int mib_id;
-  cicp_rowid_t row_id;
+  ci_addr_sh_t addr;
+  ci_ifid_t ifindex;
   ci_int8/*bool*/ add;
+  ci_int8 af;
 };
 
 struct oo_op_cplane_llapmod {
@@ -36,6 +36,18 @@ struct oo_op_cplane_arp_resolve {
   cp_fwd_table_id fwd_table_id;  /* Respected only for the cplane server. */
 };
 
+struct oo_op_cplane_dnat_add {
+  ci_addr_sh_t orig_addr;
+  ci_addr_sh_t xlated_addr;
+  ci_uint16    orig_port;
+  ci_uint16    xlated_port;
+};
+
+struct oo_op_cplane_dnat_del {
+  ci_addr_sh_t orig_addr;
+  ci_uint16    orig_port;
+};
+
 #include <onload/ioctl_base.h>
 
 /* This is the first part of a large enum defined in
@@ -45,8 +57,16 @@ enum {
   OO_OP_GET_CPU_KHZ,
 #define OO_IOC_GET_CPU_KHZ        OO_IOC_R(GET_CPU_KHZ, ci_uint32)
 
-  OO_OP_IFINDEX_TO_HWPORT,
-#define OO_IOC_IFINDEX_TO_HWPORT  OO_IOC_RW(IFINDEX_TO_HWPORT, ci_uint32)
+  OO_OP_CP_DUMP_HWPORTS,
+#define OO_IOC_CP_DUMP_HWPORTS    OO_IOC_W(CP_DUMP_HWPORTS, ci_ifid_t)
+
+#ifdef CP_SYSUNIT
+#define cp_set_hwport_t \
+  typeof(((struct cp_helper_msg*)NULL)->u.set_hwport)
+  OO_OP_CP_SYSUNIT_MAKE_NIC,
+#define OO_IOC_CP_SYSUNIT_MAKE_NIC OO_IOC_W(CP_SYSUNIT_MAKE_NIC, \
+                                            cp_set_hwport_t)
+#endif
 
   OO_OP_CP_MIB_SIZE,
 #define OO_IOC_CP_MIB_SIZE        OO_IOC_R(CP_MIB_SIZE, ci_uint32)
@@ -85,6 +105,17 @@ enum {
   OO_OP_OOF_CP_LLAP_UPDATE_FILTERS,
 #define OO_IOC_OOF_CP_LLAP_UPDATE_FILTERS OO_IOC_W(OOF_CP_LLAP_UPDATE_FILTERS, \
                                                    struct oo_op_cplane_llapmod)
+
+  OO_OP_OOF_CP_DNAT_ADD,
+#define OO_IOC_OOF_CP_DNAT_ADD    OO_IOC_W(OOF_CP_DNAT_ADD, \
+                                           struct oo_op_cplane_dnat_add)
+
+  OO_OP_OOF_CP_DNAT_DEL,
+#define OO_IOC_OOF_CP_DNAT_DEL    OO_IOC_W(OOF_CP_DNAT_DEL, \
+                                           struct oo_op_cplane_dnat_del)
+
+  OO_OP_OOF_CP_DNAT_RESET,
+#define OO_IOC_OOF_CP_DNAT_RESET  OO_IOC_NONE(OOF_CP_DNAT_RESET)
 
   OO_OP_CP_NOTIFY_LLAP_MONITORS,
 #define OO_IOC_CP_NOTIFY_LLAP_MONITORS OO_IOC_NONE(CP_NOTIFY_LLAP_MONITORS)

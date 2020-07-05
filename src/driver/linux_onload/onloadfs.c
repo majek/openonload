@@ -17,6 +17,9 @@
 #include <onload/linux_onload_internal.h>
 #include "onload_kernel_compat.h"
 #include <onload/dshm.h>
+#ifdef EFRM_FSTYPE_HAS_INIT_PSEUDO
+#include <linux/pseudo_fs.h>
+#endif
 
 
 static struct file_operations *oo_fops_by_type(int fd_type)
@@ -137,7 +140,22 @@ static const struct dentry_operations onloadfs_dentry_operations = {
   .d_dname  = onloadfs_dname,
 };
 
-#ifdef EFRM_FSTYPE_HAS_MOUNT
+/* Linux>=5.3 : use .init_fs_context + init_pseudo
+ * Linux>=3.10: use .mount + mount_pseudo
+ * older      : use .get_sb + get_sb_pseudo
+ */
+#ifdef EFRM_FSTYPE_HAS_INIT_PSEUDO
+static int onloadfs_init_fs_context(struct fs_context *fc)
+{
+  struct pseudo_fs_context *ctx = init_pseudo(fc, ONLOADFS_MAGIC);
+  if (!ctx)
+    return -ENOMEM;
+  ctx->ops = &onloadfs_ops;
+  ctx->dops = &onloadfs_dentry_operations;
+  return 0;
+
+}
+#elif defined(EFRM_FSTYPE_HAS_MOUNT_PSEUDO)
 static struct dentry *
 onloadfs_mount(struct file_system_type *fs_type, int flags,
                const char *dev_name, void *data)
@@ -170,7 +188,9 @@ onloadfs_get_sb(struct file_system_type *fs_type, int flags,
 
 static struct file_system_type onload_fs_type = {
   .name    = "onloadfs",
-#ifdef EFRM_FSTYPE_HAS_MOUNT
+#ifdef EFRM_FSTYPE_HAS_INIT_PSEUDO
+  .init_fs_context = onloadfs_init_fs_context,
+#elif defined(EFRM_FSTYPE_HAS_MOUNT_PSEUDO)
   .mount   = onloadfs_mount,
 #else
   .get_sb  = onloadfs_get_sb,
@@ -240,8 +260,19 @@ void onloadfs_fini(void)
 }
 
 #ifndef EFRM_HAVE_ALLOC_FILE_PSEUDO
-/* Stolen from linux-4.19.  Tab intentation is stolen.
- * Space indented stuff is needed to work with linux<=4.18. */
+/* X-SPDX-Source-URL: https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git */
+/* X-SPDX-Source-Tag: v4.19 */
+/* X-SPDX-Source-File: fs/file_table.c */
+/* X-SPDX-License-Identifier: GPL-2.0-only */
+/* X-SPDX-Comment: This function exists in (and is exported from)
+ *                 Linux kernel version>=4.19; Onload uses it when compiled
+ *                 with such a kernel.  For older kernels Onload uses
+ *                 this copy of the function, modified to work with that
+ *                 older kernels.
+ *                 It allows Onload to have the same code regardless of the
+ *                 kernel version.
+ *                 Tab indentation comes from linux-4.19.
+ *                 Space indented stuff is needed to work with linux<=4.18. */
 static
 struct file *alloc_file_pseudo(struct inode *inode, struct vfsmount *mnt,
 				const char *name, int flags,
@@ -251,7 +282,7 @@ struct file *alloc_file_pseudo(struct inode *inode, struct vfsmount *mnt,
 	struct path path;
 	struct file *file;
 
-#ifdef EFRM_FSTYPE_HAS_MOUNT
+#ifdef EFRM_FSTYPE_HAS_MOUNT_PSEUDO
 	path.dentry = d_alloc_pseudo(mnt->mnt_sb, &this);
 #else
         path.dentry = d_alloc(mnt->mnt_sb->s_root, &this);
@@ -260,7 +291,7 @@ struct file *alloc_file_pseudo(struct inode *inode, struct vfsmount *mnt,
 	if (!path.dentry)
 		return ERR_PTR(-ENOMEM);
 
-#ifndef EFRM_FSTYPE_HAS_MOUNT
+#ifndef EFRM_FSTYPE_HAS_MOUNT_PSEUDO
         path.dentry->d_op = &onloadfs_dentry_operations;
 #endif
 
@@ -296,6 +327,7 @@ struct file *alloc_file_pseudo(struct inode *inode, struct vfsmount *mnt,
         file->f_flags = O_RDWR | (flags & O_NONBLOCK);
 	return file;
 }
+/* X-SPDX-Restore: */
 #endif
 
 int
@@ -315,7 +347,7 @@ onload_alloc_file(tcp_helper_resource_t *thr, oo_sp ep_id,
   inode = new_inode(onload_mnt->mnt_sb);
   if( inode == NULL )
     return -ENOMEM;
-#ifdef EFRM_FSTYPE_HAS_MOUNT
+#if defined(EFRM_FSTYPE_HAS_MOUNT_PSEUDO) || defined(EFRM_FSTYPE_HAS_INIT_PSEUDO)
   inode->i_ino = get_next_ino();
 #endif
   /* We can't set S_IFSOCK, as the kernel would assume incorrectly that our
@@ -416,7 +448,7 @@ int
 onloadfs_get_dev_t(ci_private_t* priv, void* arg)
 {
   ci_uint32 *p_dev = arg;
-  *p_dev = (ci_uint32)onload_mnt->mnt_sb->s_dev;
+  *p_dev = (ci_uint32) new_encode_dev(onload_mnt->mnt_sb->s_dev);
 
   return 0;
 }

@@ -201,7 +201,7 @@ int citp_netif_by_id(ci_uint32 stack_id, ci_netif** out_ni, int locked)
   if( ! locked )
     CITP_FDTABLE_UNLOCK();
 
-  ci_netif_log_startup_banner(ni, "Importing", /* check_expiry*/ 0);
+  ci_netif_log_startup_banner(ni, "Importing");
 
   *out_ni = ni;
   return 0;

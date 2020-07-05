@@ -766,13 +766,17 @@ ci_netif_pkt_release_in_poll(ci_netif* netif, ci_ip_pkt_fmt* pkt,
     if( pkt->flags & CI_PKT_FLAG_RX )
       --netif->state->n_rx_pkts;
     __ci_netif_pkt_clean(pkt);
-    if( pkt->flags & CI_PKT_FLAG_NONB_POOL ) {
+    if( ! (pkt->flags & CI_PKT_FLAG_NONB_POOL) ) {
+      ci_netif_pkt_put(netif, pkt);
+    }
+    else if( ps != NULL ) {
       *ps->tx_pkt_free_list_insert = OO_PKT_P(pkt);
       ps->tx_pkt_free_list_insert = &pkt->next;
       ++ps->tx_pkt_free_list_n;
     }
     else {
-      ci_netif_pkt_put(netif, pkt);
+      ci_netif_pkt_free_nonb_list(netif, OO_PKT_P(pkt), pkt);
+      netif->state->n_async_pkts ++;
     }
     return CI_TRUE;
   }

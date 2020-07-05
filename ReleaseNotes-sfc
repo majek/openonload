@@ -1,6 +1,6 @@
 Solarflare 4.X Linux network driver
 ===================================
-Version:  4.15.4.1003
+Version:  4.15.6.1004
 
 
 Overview
@@ -11,7 +11,7 @@ Adapters.
 
 Supported hardware platforms
 ----------------------------
-The drivers contained in this package support the following Solarflare 
+The drivers contained in this package support the following Solarflare
 adapters:
 
 - Solarflare Server Adapters:
@@ -19,6 +19,8 @@ adapters:
   - XtremeScale X2522-25G PCIe Dual Port SFP28
   - XtremeScale X2541 PCIe Single Port QSFP28
   - XtremeScale X2542 PCIe Dual Port QSFP28
+  - XtremeScale X2552 OCP 2.0 Dual Port SFP28
+  - XtremeScale X2562 OCP 3.0 Dual Port SFP28
   - Solarflare SFN8522M Dual Port SFP+ Server Adapter
   - Solarflare SFN8042 Dual Port QSFP+ Server Adapter
   - Solarflare SFN8522 Dual Port SFP+ Server Adapter
@@ -41,7 +43,7 @@ adapters:
   - Solarflare SFN5121T Dual Port 10GBASE-T Server Adapter
   - Solarflare SFN5802K Mezzanine Adapter (for HP BladeSystem c-Class)
   - Solarflare SFN5812H/SFN5814H Mezzanine Adapter (for IBM BladeCenter)
-  
+
 - Solarflare AOE Adapters:
   - Solarflare SFA7942Q QSFP+ AOE Adapter
 
@@ -62,25 +64,25 @@ adapters:
 Building and installation
 -------------------------
 To build a binary RPM for the running kernel type:
- 
+
   rpmbuild --rebuild <source rpm filename>
- 
+
 To install the resulting binary rpm:
- 
+
   Locate the file that was created in the preceding step, prefixed with the
   annotation "Wrote:", then type:
- 
+
   rpm -Uvh <binary rpm filename>
- 
+
 To ensure that the correct version of the driver is loaded into the current
 kernel
    /sbin/modprobe -r sfc
    /sbin/modprobe sfc
-  
+
 Installation of the driver can be confirmed by typing:
    modinfo sfc | grep version
 and checking for the line:
-   version: 4.15.4.1003
+   version: 4.15.6.1004
 
 All network interfaces available on the system can be found with:
   ifconfig -a
@@ -92,13 +94,15 @@ Linux distribution support for Solarflare Adapters
 This driver package is supported on:
  - RedHat Enterprise Linux                        6.10
  - RedHat Enterprise Linux                        7.5, 7.6, 7.7
- - RedHat Enterprise Linux                        8.0
+ - RedHat Enterprise Linux                        8.0, 8.1
+ - CentOS					  8.0, 8.1
  - SuSE Linux Enterprise Server 12                sp3, sp4
  - SuSE Linux Enterprise Server 15                base, sp1
  - Canonical Ubuntu Server LTS                    16.04.x, 18.04
  - Debian 8 "Jessie"                              8.10
  - Debian 9 "Stretch"                             9.4
- - Kernel.org linux kernels                       3.0 to 5.2
+ - Debian 10 "Stretch"                            10.2
+ - Kernel.org linux kernels                       3.0 to 5.5
 
 
 Solarflare aims to support the current and previous major release of each
@@ -118,7 +122,57 @@ Please contact your local Solarflare support representative or email
 Changelog
 ---------
 
-### v4.15.4.1003
+### v4.15.6.1004
+SF-123551-KI / Issue 3281:
+ ~ Changing ring sizes when using XDP could cause a kernel panic.
+
+Issue 3060:
+ ~ Warn when a non-primary function associates with the PHC.
+
+Issue 3547:
+ ~ Correct timestamp reconstruction at 16 bit rollover points on SFC8000.
+
+Issue 3527, 3274:
+ ~ Decouple MTD cleanup more from net device.
+
+### v4.15.6.1000
+
+Issues 3479, 3405:
+ ~ Adjust compatibility layer to improve range of kernel support.
+
+### v4.15.5.1007
+
+Issue 3405:
+ ~ Enhance the ARFS expiry mechanism.
+
+Issue 3376:
+ ~ Link down was sometimes misinterpreted as link-up.
+
+Issue 3332:
+ ~ Avoid too many MC reboots for UDP tunnels.
+
+### v4.15.5.1003
+
+Issue 3336:
+ ~ Fix a mistaken attempt to use PTP on NICs for which PTP is not licensed.
+
+Issue 876:
+ ~ Do not print an error when the old private ioctl EFX_TS_INIT is issued
+    on new kernels.
+
+Issue 3350:
+ ~ An optimisation that reduces latency in some situations.
+
+Issue 88589:
+ ~ Fix KBUILD_SRC detection to be compatible with linux-5.3.
+
+Issue 89184:
+ ~ Correct the channel count for ethtool -x.
+
+Issue 89155:
+ ~ If we notice the that NIC has gone into an infinite reset loop, disable it.
+
+### v4.15.4.1003 - 19.2 release
 Issue 89009:
  ~ Fix PTP support on Debian 8.
 
@@ -128,7 +182,7 @@ Issue 76254:
 Issue 88295:
  ~ Remove stack trace when removing the PIO license.
 
-### v4.15.4.1002 - 19.2 release
+### v4.15.4.1002
 SF-122787-KI / Issue 88259:
  ~ Fix issue with delivering PTP SYNC packets to sfptpd on VLANed interfaces.
  ~ This regression is present in driver versions 4.15.2.1001 to 4.15.3.1011 inclusive.
@@ -361,7 +415,7 @@ Issue 77378:
  ~ Add control of forward_fcs through ethtool feature flags.
  ~ support X2 VI strides other than 8k.
 
-SF-119883-KI / Issue 78131: 
+SF-119883-KI / Issue 78131:
  ~ Address a potential kernel panic where the backtrace will include
    "efx_mcdi_rpc_completer".
  ~ This affected systems running sfc v4.12 prior to v4.12.2.1013.
@@ -505,7 +559,7 @@ Issue 73384:
 Issue 73143:
  ~ Fixed reading of ef10 data on non-ef10 NIC (i.e. SFN5000 or SFN6000 series)
  ~ This was detected using KASAN by Stefano Brivio at Redhat:
-      BUG: KASAN: slab-out-of-bounds in efx_mcdi_mac_stats 
+      BUG: KASAN: slab-out-of-bounds in efx_mcdi_mac_stats
 
 Issue 73104:
  ~ Only report link down if it was previously up.
@@ -533,7 +587,7 @@ Issue 72328:
 Issue 72220:
   ~ [32bit PHC support]. Fix bug in efx_phc_gettime32() that returns junk time.
   ~ This only affects systems without 64bit PHC support e.g. some SLES11
-    (kernel 3.0.101) 
+    (kernel 3.0.101)
 
 Issue 71931:
  ~ Correct endianness of filters debugfs output.
@@ -573,11 +627,11 @@ Issue 58792:
 Issue 56902:
  ~ Ensure filter is removed during an MC reboot (e.g. sfupdate) when onload is
    being used. This has been seen to cause the following errors:
-     [onload] tcp_helper_endpoint_clear_filters: [0:28]  
-     sfc 0000:01:00.0 enp1s0f0: MC command 0x8a inlen 108 failed rc=-22 (raw=0) 
+     [onload] tcp_helper_endpoint_clear_filters: [0:28]
+     sfc 0000:01:00.0 enp1s0f0: MC command 0x8a inlen 108 failed rc=-22 (raw=0)
    and
      [onload] __oof_manager_addr_del: 0:79 CLEAR TCP 172.16.132.67:35769
-     sfc 0000:01:00.0 enp1s0f0: MC command 0x8a inlen 108 failed rc=-22 (raw=0) 
+     sfc 0000:01:00.0 enp1s0f0: MC command 0x8a inlen 108 failed rc=-22 (raw=0)
 
 Issue 48050:
  ~ Handle adapter VPD data residing at offsets greater than 512bytes in PCI
@@ -692,7 +746,7 @@ Issue 61922:
 Issue 66869 (ESX only):
  ~ Fix a race in the admin side of MCDI proxy authorization.
  ~ The error message reported would be of the form:
-     efx_proxy_auth_handle_request: invalid req state 5 
+     efx_proxy_auth_handle_request: invalid req state 5
 
 Issue 65427:
  ~ Correctly report UDP RSS hashing mode as 2-tuple (address only) or 4-tuple
@@ -984,7 +1038,7 @@ Issue 59701 & 58885:
    using SR-IOV direct pass-thru mode.
 
 
-### v4.7.0.1031 -- Feature release 
+### v4.7.0.1031 -- Feature release
 
 [General changes]
  ~ Support adapter firmware state dump via ethtool.
@@ -1337,7 +1391,7 @@ Issue 47603:
 
 New features to support the SolarCapture 1.3 release:
    ~ New forward_fcs attribute in sysfs which when enabled, causes the driver to
-     not strip CRCs on ingress path. When enabled frames with bad CRCs are not 
+     not strip CRCs on ingress path. When enabled frames with bad CRCs are not
      discarded. Changing forward_fcs requires reconfiguring the adapter's MAC
    ~ Disable ARFS if the required adapter filter flags are not supported
    ~ Disable RSS on Packed Stream firmware variant
@@ -1352,14 +1406,14 @@ Issue 44095:
    ~ change EFX_BUG_ON_PARANOID on mcdi failure in ptp_synchronize to a proper
      error path.
 Issue 43849:
-   ~ recheck mcdi->state after timeout in efx_mcdi_await_completion 
+   ~ recheck mcdi->state after timeout in efx_mcdi_await_completion
 Issue 42806:
-   ~ handle nonlinear SKBs in efx_filter_rfs() 
+   ~ handle nonlinear SKBs in efx_filter_rfs()
 Issue 45444:
-   ~ fix calling of free_irq with already free vector 
+   ~ fix calling of free_irq with already free vector
 Issue 40785:
    ~ add module option "underreport_skb_truesize" to falsify skb->truesize for
-     LRO packets 
+     LRO packets
 Issue 43391:
    ~ use __GFP_NOWARN when allocating RX pages from atomic context.
 Issue 44829:
@@ -1398,7 +1452,7 @@ New Features:
     feature.
   ~ Implement SARFS; Solarflare Accelerated Receive Flow Steering
     (disabled by default) This inserts hardware RX filters in order to direct
-    flows back to the same CPU where the user-land process is transmitted. This 
+    flows back to the same CPU where the user-land process is transmitted. This
     should help cache locality.
     This feature can be used when Accelerated RFS is not available in the
     currently running kernel, and if ARFS is in use will be disabled.
@@ -1410,7 +1464,7 @@ New Features:
     Alternatively if your kernel supports it you can enable XPS by following the
     instructions at:
       https://www.kernel.org/doc/Documentation/networking/scaling.txt
-    or in the Solarflare Adapter User Guide (SF-103837-CD) 
+    or in the Solarflare Adapter User Guide (SF-103837-CD)
       section 3.20 Performance Tuning on Linux
   ~ 7xxx: Add support for SFC9140 40G QSFP network controller silicon.
     (network adapter part number SFN7142Q).
@@ -1421,9 +1475,9 @@ New Features:
     packets.
 
 PTP issues/features:
-Issue 35011: 
+Issue 35011:
   ~ PTP: Use net_ratelimit() for PTP event queue overflow messages.
-Issue 41277: 
+Issue 41277:
   ~ PTP: Advertise translated hardware timestamps.
 Issue 41479:
   ~ PTP: Remove warning when synchronize operation gets no usable samples.
@@ -1437,7 +1491,7 @@ Issue 41335:
   ~ PTP: Accept fake PPS events whether or not packet timestamping of PTP
     packets is enabled in the NIC. This allows phc2sys to be used without
     requiring linuxptp to be running
-Issue 42466: 
+Issue 42466:
  ~ PTP: check for NULL efx->ptp_data in efx_ptp_event
 Issue 42956:
   ~ PTP: Test for ethtool get_ts_info support directly
@@ -1549,8 +1603,8 @@ Support VMware ESXi 5.5:
 ### v4.0.2.6628 -- Feature release
 
 Add support for RX time-stamping and PTP on SFN7XXX family adapters:
-   ~ This release provides the driver support necessary for both the 
-     Solarflare Enhanced PTP daemon ("sfptpd") and linuxptpd which is 
+   ~ This release provides the driver support necessary for both the
+     Solarflare Enhanced PTP daemon ("sfptpd") and linuxptpd which is
      provided in some distributions.
 
 Issue 37568:
@@ -1582,7 +1636,7 @@ TX improvements:
     This is controlled by the new module parameter "piobuf_size" (default on
     x86 is 256 bytes). For frames that are smaller than this, and if there are
     adapter resources available, a packet will be transfered directly to the
-    adapter via PIO rather than incur the latency of a bus mastered DMA. 
+    adapter via PIO rather than incur the latency of a bus mastered DMA.
 
 RX improvements:
   ~ The driver now uses a single optimized RX buffer allocation strategy
@@ -1688,7 +1742,7 @@ Issue 37110:
 
 Issue 35400:
   ~ PTP: Fix incorrect filter address for PTP Peer Delay Multicast
-Issue 
+Issue
   ~ PTP: Fix crash if PTP hardware clock cannot be registered
 Issue 37248:
   ~ PTP: mask out PCP and DEI fields in VLAN matching
@@ -1696,12 +1750,12 @@ Issue 37248:
 
 ### v3.3.0.6262 -- Update release
 
-Issue 31533: 
-  ~ Fix sync of RX DMA buffer when it is not the last in the page (non issue on x86 servers) 
-Issue 31533: 
+Issue 31533:
+  ~ Fix sync of RX DMA buffer when it is not the last in the page (non issue on x86 servers)
+Issue 31533:
   ~ Fix efx_rx_buf_offset() in the presence of swiotlb (used on 32bit systems with >3Gb RAM)
 Issue 33851:
-  ~ Fix very rare data corruption - use TX push only with a single descriptor 
+  ~ Fix very rare data corruption - use TX push only with a single descriptor
 
 Issue
   ~ AOE: Expose FC partition for use by sfupdate
@@ -1712,7 +1766,7 @@ Issue 33719:
   ~ PTP: Check that PTP is enabled in the kernel before compiling PHC support
 Issue 34355:
   ~ PTP: Guard against using PPS ioctl API on non-PTP adapters
-Issue 34356: 
+Issue 34356:
   ~ PTP: Improve accuracy of PPS timestamps
 Issue 34482:
   ~ PTP: Fix to SO_TIMESTAMPING system timestamps (in conversion of hardware
@@ -1762,19 +1816,19 @@ Issue 21781 / 24969:
     copy buffer. The size must be a power of 2 between 128 and 4096
     (default 128)
 Issue 24887:
-  ~ Implement VLAN tag insertion for SFC9000 family 
+  ~ Implement VLAN tag insertion for SFC9000 family
 Issue 31308:
   ~ Enable VLAN SG and TSO offloads for SFC9000 family on RHEL 5.5+
-Issue 20784: 
-  ~ Add hardware monitor for sensors managed by firmware 
+Issue 20784:
+  ~ Add hardware monitor for sensors managed by firmware
 Issue 23165:
-  ~ Implement the VF spoofchk (TX filtering) attribute (requires Linux 3.2) 
+  ~ Implement the VF spoofchk (TX filtering) attribute (requires Linux 3.2)
 Issue 30065:
-  ~ Fix compilation issues with 3.4 kernels 
+  ~ Fix compilation issues with 3.4 kernels
 Issue 31530:
-  ~ Fix reporting of IPv4 full filters through ethtool/sfctool 
+  ~ Fix reporting of IPv4 full filters through ethtool/sfctool
 Issues 31576 / 22910:
-  ~ Really disable flow control while flushing 
+  ~ Really disable flow control while flushing
 Issue 31671:
   ~ Work-around flush timeout when flushes have completed
 
@@ -1792,37 +1846,37 @@ Issue 31092:
 
 
 ### v3.2.1.6099 -- Update release
- 
+
 Issue 30312:
   ~ Latency reduction: Use 128bit write for TX descriptor push
 Issue 28547:
   ~ Enhancement: Expose SFP+ module vendor information via ethtool
-Issue 30286 / CVE-2012-3412: 
-  ~ DoS protection - prevent extreme TSO parameters from stalling TX queues 
+Issue 30286 / CVE-2012-3412:
+  ~ DoS protection - prevent extreme TSO parameters from stalling TX queues
 Issue 30845:
   ~ Self-test: disable VFs and never set RX_DESCQ_EN for safety
-Issue 26646 / 22607: 
-  ~ Fix possibility of some statistics counters being non-contiguous 
+Issue 26646 / 22607:
+  ~ Fix possibility of some statistics counters being non-contiguous
 Issue 30038:
   ~ Build fix for kernel 3.4-rc5
-Issue 30762: 
-  ~ Fix kernel-compat test for PCI VPD in sysfs 
+Issue 30762:
+  ~ Fix kernel-compat test for PCI VPD in sysfs
 
 
 ### v3.2.1.6090 -- Update release
 
 Issue 28324:
   ~ Fix recovery path from memory parity hardware errors
-  ~ Add module option "efx_disable_port_on_mpe" to top recovery and disable 
+  ~ Add module option "efx_disable_port_on_mpe" to top recovery and disable
     interface (to allow bonding to fail over on such errors)
 Issue 29760:
   ~ Report serial number of adapter on memory parity hardware error
 Issue 25050:
-  ~ Limit number of retries on RX queue flush hardware failures 
+  ~ Limit number of retries on RX queue flush hardware failures
 Issue:
-  ~ Fix missing cleanup in failure path of efx_pci_probe() 
+  ~ Fix missing cleanup in failure path of efx_pci_probe()
 Issue 29758:
-  ~ Reporting of MC scheduler message downgraded 
+  ~ Reporting of MC scheduler message downgraded
 Issue 26972:
   ~ Fix start of day NAPI race < 2.6.24
 Issue 23581:
@@ -1831,7 +1885,7 @@ Issue 28008:
   ~ Timer quantum is incorrect for Falcon user-mode queues
 Issue 20567:
   ~ Fix kernel panic with efx_mcdi_phy_remove on failure path to probe port
-Issue 27481 
+Issue 27481
   ~ Fix possible race when stopping TX queues
 Issue 28139:
   ~ Self test can fail on machines that disable interrupts for > 10ms
@@ -1839,7 +1893,7 @@ Issue 28767:
   ~ Build fix for kernel 3.3
 
 Issue 28406:
-  ~ SR-IOV: Fix race condition involving rtnetlink and pci_enable_sriov 
+  ~ SR-IOV: Fix race condition involving rtnetlink and pci_enable_sriov
 Issue 27202:
   ~ SR-IOV: Fix initialisation and teardown race
 Issue 28110:
@@ -1849,43 +1903,43 @@ Issue 27924:
 Issue 28404:
   ~ SR-IOV: RSS only works on VF if also enabled on PF
 Issue 28528:
-  ~ SR-IOV: Correct validation of allocation size in peer_page_count 
+  ~ SR-IOV: Correct validation of allocation size in peer_page_count
 
 Issue 27838:
-  ~ Implement EFX_FILTER_FLAG_RX_OVERRIDE_IP for 'default' filters 
+  ~ Implement EFX_FILTER_FLAG_RX_OVERRIDE_IP for 'default' filters
 Issue 27571:
-  ~ RX n-tuple interface now deprecated, replaced by RX NFC  
+  ~ RX n-tuple interface now deprecated, replaced by RX NFC
     (users that are configuring RX n-tuple filters with sfctool must also
     update sfutils to version 3.2.1.6079 or later)
 Issue 27514:
-  ~ Allow RX hash insertion to be disabled 
+  ~ Allow RX hash insertion to be disabled
 Issue 26944:
   ~ Self test on driver load removed from Onload build of driver
 Issue 22798:
-  ~ Set IRQ affinity_hint where supported 
+  ~ Set IRQ affinity_hint where supported
 Issue 28546:
-  ~ Display adapter part number (from VPD) in syslog 
+  ~ Display adapter part number (from VPD) in syslog
 Issue 28086:
   ~ Display turbo mode in sysfs
 Issue 29546:
   ~ Refill RX rings as soon as space for a batch (reducing latency jitter)
   ~ Fill RX rings completely full, rather than to 95% full
 
-  
+
 ### v3.2.0.6044 -- Update release
 
-Issue T2716: 
-  ~ Build fix for sfc_minimal=1 
-Issue 27569: 
+Issue T2716:
+  ~ Build fix for sfc_minimal=1
+Issue 27569:
   ~ Build fix for gcc 4.6
 Issue 27486:
   ~ Build fix for RHEL5.7 2.6.18-274.12.1.el5
 Issue 27466
-  ~ Build fix for Linux 3.3 
+  ~ Build fix for Linux 3.3
 
 Issue 27470:
   ~ Fix ethtool -x support
-Issue 
+Issue
   ~ SR-IOV: Explicitly keep track of which channel is used for VFDI
 
 
@@ -1906,30 +1960,30 @@ Issue 26985:
 
 ### v3.1.0.4091 -- Update release
 
-Issue 26616: 
+Issue 26616:
   ~ Fix possible self-test failure on driver load - remove dependence on NAPI polling
 Issue 26697:
-  ~ Fix logging in debug driver on Linux 2.6.34+ 
+  ~ Fix logging in debug driver on Linux 2.6.34+
 Issue 26408
   ~ Build fixes for Linux 3.1
 Issue 26406
-  ~ Redhat 6.2 build fix - EFX_HAVE_NTUPLE_SUPPORT compat test 
-Issue 24109 
+  ~ Redhat 6.2 build fix - EFX_HAVE_NTUPLE_SUPPORT compat test
+Issue 24109
   ~ Make all MAC statistics consistently 64 bits wide
 
-Issue 
+Issue
   ~ SR-IOV: correct warning on error from efx_mcdi_rpc(MC_CMD_FLUSH_RX_QUEUES)
 Issue 26841
   ~ SR-IOV: Use full memory barriers at entry and exit of efx_sriov_memcpy()
-Issue 26436: 
-  ~ SR-IOV: Correct validation of VI indices within VF 
-Issue 26437: 
-  ~ SR-IOV: Report unsupported VFDI operations specifically and quietly 
+Issue 26436:
+  ~ SR-IOV: Correct validation of VI indices within VF
+Issue 26437:
+  ~ SR-IOV: Report unsupported VFDI operations specifically and quietly
 
 
 ### v3.1.0.4083 -- Update release
 
-Issue 
+Issue
   ~ Fix assertion failure when using SFC4000 with internal SRAM
 Issue 25985
   ~ Export rss_spread through driverlink
@@ -1938,17 +1992,17 @@ Issue 26000
 Issue 6531
   ~ Use correct fields of struct ethtool_coalesce
 Issue 24380
-  ~ Correct reporting and validation of TX interrupt moderation 
+  ~ Correct reporting and validation of TX interrupt moderation
 Issue 24380
-  ~ Correct error code for unsupported interrupt moderation parameters 
+  ~ Correct error code for unsupported interrupt moderation parameters
 Issue 25815
-  ~ Change rss_cpus default to "cores" 
-Issue 
+  ~ Change rss_cpus default to "cores"
+Issue
   ~ Fix kernel compat condition for EFX_HAVE_ETHTOOL_RESET
 Issue 25542
   ~ Fix build failure on Linux 2.6.25
-Issue 25542  
-  ~ Avoid build errors with some gcc versions 
+Issue 25542
+  ~ Avoid build errors with some gcc versions
 Issue 25420
   ~ Export efx_filter_set_{uc,mc}_def()
 Issue 25414
@@ -1969,25 +2023,25 @@ Issue
   ~ Make LRO module parameter read-only
 Issue 19703
   ~ Reduce number of workqueues used
-Issue 
-  ~ Make reset_nic try ETHTOOL_RESET before private ioctl 
 Issue
-  ~ Cleanup Company/adapter names 
-Issue 
+  ~ Make reset_nic try ETHTOOL_RESET before private ioctl
+Issue
+  ~ Cleanup Company/adapter names
+Issue
   ~ Use napi_gro_(receive_frags)_gr() on RHEL6.1
-Issue 
-  ~ Fix MAC statistics on big endian platforms 
 Issue
-  ~ Add EFX_USE_GRO build time parameter 
+  ~ Fix MAC statistics on big endian platforms
+Issue
+  ~ Add EFX_USE_GRO build time parameter
 
-Issue 25756 
-  ~ SR-IOV: Don't reset the PF if a VM causes a descriptor fetch error 
-Issue 25486 
-  ~ SR-IOV: Add SCATTER_EN support to VFDI_INIT_RXQ 
+Issue 25756
+  ~ SR-IOV: Don't reset the PF if a VM causes a descriptor fetch error
+Issue 25486
+  ~ SR-IOV: Add SCATTER_EN support to VFDI_INIT_RXQ
 Issue 24004
-  ~ SR-IOV: Change the vf_limit that rtnetlink exports to 32 
-Issue 25091 
-  ~ SR-IOV: Only broadcast the peer list when it changes 
+  ~ SR-IOV: Change the vf_limit that rtnetlink exports to 32
+Issue 25091
+  ~ SR-IOV: Only broadcast the peer list when it changes
 Issue 21004
   ~ SR-IOV: Move VFDI processing onto its own workqueue for onload
 Issue 23954
@@ -1995,56 +2049,56 @@ Issue 23954
 Issue 24582
   ~ SR-IOV: Fix "sleeping whilst atomic" during FLR
 Issue 24373
-  ~ SR-IOV: Remove the VF MAC address from the peer list when there is no RX filter. 
+  ~ SR-IOV: Remove the VF MAC address from the peer list when there is no RX filter.
 Issue 24373
   ~ SR-IOV: Fix crash when init/fini races with sysfs/netlink access
 Issue 24373
-  ~ SR-IOV: Broadcast the peer list from a work item 
-Issue 23696: 
+  ~ SR-IOV: Broadcast the peer list from a work item
+Issue 23696:
   ~ SR-IOV: Reduce the maximum VF EVQ size to 8192 entries
-Issue 24293: 
+Issue 24293:
   ~ SR-IOV: Add module parameter to control tx filtering
 Issue 21004
   ~ SR-IOV: Insert a VF security filter when MAC address non-zero
-Issue 23954: 
+Issue 23954:
   ~ SR-IOV: Advertise configuration through driverlink
 Issue 23905
   ~ SR-IOV: Reprogram the rx filter when the VF address changes
-Issue 
+Issue
   ~ SR-IOV: Fix calculation of driverlink buffer table limits
 Issue 23843
   ~ SR-IOV: Support legacy interrupts on the PF
-Issue 23676: 
-  ~ SR-IOV: Fix mac_addr/tci export 
-  
-  
+Issue 23676:
+  ~ SR-IOV: Fix mac_addr/tci export
+
+
 ### v3.1.0.4047
 
 Performance:
 
-  - TX push: reduces TX latency 
+  - TX push: reduces TX latency
   - Write-combining: reduces TX latency (dependent on kernel version)
   - RX hash insertion: allows faster flow lookup in software
   - Driver structures reorganised for improved cache locality
 
 Features:
 
-  - SR-IOV support: host-side support for accelerated guest networking in 
-    KVM and Xen 
+  - SR-IOV support: host-side support for accelerated guest networking in
+    KVM and Xen
   - RX n-tuple support: use 'ethtool -U' or 'sfctool -U' as an alternative to
     the sfc_affinity module
   - Soft-TSO statistics: included in statistics reported by 'ethtool -S'
-  - Driver logging control: for diagnostic purposes, 
+  - Driver logging control: for diagnostic purposes,
     use 'ethtool -s ethX msglvl ...' to enable and disable messages
-  - Register dump support: for diagnostic purposes, 
+  - Register dump support: for diagnostic purposes,
     use 'ethtool -d' to dump register state
 
 
 ### v3.0.11.2248 -- Update release
 
 Issue 22752
-  ~ Fix CPU topology package selection 
-Issue 22539 
+  ~ Fix CPU topology package selection
+Issue 22539
   ~ Fix potential crash on load - drop packets received during on-load selftest setup
 Issue 22157
   ~ kernel compat fix for 2.6.37 - print_hex_dump()
@@ -2061,7 +2115,7 @@ Issue 21675
 ### v3.0.8.2221 -- Update release
 
 Issue 21669
-  ~ Fix issue with multiple ports/adapters, where each port has different 
+  ~ Fix issue with multiple ports/adapters, where each port has different
     number of MSI-X interrupts allocated by the kernel
 Issue 21641
   ~ Changing RX/TX ring size can crash when using legacy interrupt
@@ -2083,7 +2137,7 @@ Issue 21465
 Issue 21437
   ~ fix bogus gcc 4.5 build warning/error
 Issue 21351
-  ~ Fix for dual speed optics fix using ethtool -s speed 
+  ~ Fix for dual speed optics fix using ethtool -s speed
 Issue 21267
   ~ Event based MCDI completion and MC REBOOT/CMDDONE ordering issue
 Issue 21197
@@ -2140,7 +2194,7 @@ Issue 20359
 Issue 20262
   ~ Fix SIOCEFX for 32bit processes (used by sfupdate to reboot MC firmware)
 Issue 20065
-  ~ Allocate DMA and event rings using GFP_KERNEL 
+  ~ Allocate DMA and event rings using GFP_KERNEL
 Issue 20055
   ~ Log ethtool and MCDI params when set link fails
 Issue 19906
@@ -2371,17 +2425,6 @@ Issue 47490:
   ~ Bad interactions can occur with NetworkManager scripts when it sees
     new VFs with random MAC addresses. Alternatively use the older networking
     service/scripts.
-Issue 50308:
-  ~ For RHEL 7.0 disabling GRO after passing traffic is unsafe, and can lead to
-    a kernel NULL pointer deference. This is believed to be addressed by Redhat
-    in RHEL 7.1. This will only happen when LRO is also disabled. For
-    configurations that disable GRO and LRO, please disable GRO after the driver
-    is loaded, but before the interface is brought up.
-Issue 50873:
-  ~ Changing the MTU across the page size (4K for x86) on a network team in
-    RHEL 7.0 can cause a hang. As a workaround please change the MTU of the
-    component interfaces of the team before creating it. This is fixed in
-    RHEL 7.1
 
 
 Known Issues with Solarflare driver/firmware

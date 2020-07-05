@@ -18,13 +18,68 @@
 #include <onload/hash.h>
 #include "netif_table.h"
 
+/* A filter-table entry can be in one of four states:
+ *   A. empty non-tombstone;
+ *   B. tombstone;
+ *   C. valid, containing an entry at its preferred location (i.e. hash1); or
+ *   D. valid, containing an entry not at its preferred location.
+ * We choose the encoding of the __id_and_state field and define the numerical
+ * values that represent these states to try to help the compiler to generate
+ * efficient code.  Most importantly, we want state C., which is the state that
+ * sends us down the fast lookup path, to be handled with as little fuss as
+ * possible.  To this end, the two bits representing the state are packed into
+ * the most significant bits of the __id_and_state field, and the value for
+ * state C. is chosen to be zero to make promotion of the remaining 30 bits to
+ * a 32-bit socket index a no-op. */
+#define FILTER_TABLE_ID_BITS    30
+#define FILTER_TABLE_ID_MASK    ((1u << FILTER_TABLE_ID_BITS) - 1)
+#define FILTER_TABLE_STATE_MASK (~FILTER_TABLE_ID_MASK)
+enum {
+  OCCUPIED_PREFERRED = 0,
+  OCCUPIED_REHASHED  = (1u << FILTER_TABLE_ID_BITS),
+  EMPTY              = (2u << FILTER_TABLE_ID_BITS),
+  TOMBSTONE          = (3u << FILTER_TABLE_ID_BITS),
+};
+
+ci_inline ci_uint32 STATE(ci_netif_filter_table_entry_fast* entry)
+{
+  return entry->__id_and_state & FILTER_TABLE_STATE_MASK;
+}
+
+ci_inline ci_uint32 OCCUPIED(ci_netif_filter_table_entry_fast* entry)
+{
+  CI_BUILD_ASSERT(CI_IS_POW2(EMPTY & TOMBSTONE));
+  return ~STATE(entry) & EMPTY & TOMBSTONE;
+}
+
+#define __ID(entry) ((entry)->__id_and_state & FILTER_TABLE_ID_MASK)
+ci_inline ci_uint32 ID(ci_netif_filter_table_entry_fast* entry)
+{
+  ci_assert(OCCUPIED(entry));
+  return __ID(entry);
+}
+
+ci_inline void
+set_entry_state(ci_netif_filter_table_entry_fast* entry, ci_uint32 state)
+{
+  entry->__id_and_state = __ID(entry) | state;
+}
+
+ci_inline void
+set_entry_id(ci_netif_filter_table_entry_fast* entry, ci_uint32 id)
+{
+  ci_assert_nflags(id, FILTER_TABLE_STATE_MASK);
+  entry->__id_and_state = STATE(entry) | id;
+}
+
 #define CI_NETIF_FILTER_ID_TO_SOCK_ID(ni, filter_id)            \
-  OO_SP_FROM_INT((ni), (ni)->filter_table->table[filter_id].id)
+  OO_SP_FROM_INT((ni), ID(&(ni)->filter_table->table[filter_id]))
 
 #if CI_CFG_IPV6
 #define CI_NETIF_IP6_FILTER_ID_TO_SOCK_ID(ni, filter_id)            \
   OO_SP_FROM_INT((ni), (ni)->ip6_filter_table->table[filter_id].id)
 #endif
+
 
 /* Returns table entry index, or -1 if lookup failed. */
 static int
@@ -52,17 +107,23 @@ ci_ip4_netif_filter_lookup(ci_netif* netif, unsigned laddr, unsigned lport,
 	     hash1));
 
   while( 1 ) {
-    int id = tbl->table[hash1].id;
-    if( CI_LIKELY(id >= 0) ) {
-      ci_sock_cmn* s = ID_TO_SOCK(netif, id);
-      if( ((laddr    - tbl->table[hash1].laddr) |
-	   (lport    - sock_lport_be16(s)     ) |
-	   (raddr    - sock_raddr_be32(s)     ) |
-	   (rport    - sock_rport_be16(s)     ) |
-	   (protocol - sock_protocol(s)       )) == 0 )
+    ci_netif_filter_table_entry_fast* entry = &tbl->table[hash1];
+
+    /* This function is not used on fast paths, so we don't try to avoid
+     * touching the extra state. */
+    ci_netif_filter_table_entry_ext* entry_ext;
+    entry_ext = &netif->filter_table_ext[hash1];
+
+    if( CI_LIKELY(OCCUPIED(entry)) ) {
+      ci_sock_cmn* s = ID_TO_SOCK(netif, ID(entry));
+      if( ((laddr    - entry->laddr      ) |
+	   (lport    - entry_ext->lport  ) |
+	   (raddr    - sock_raddr_be32(s)) |
+	   (rport    - sock_rport_be16(s)) |
+	   (protocol - sock_protocol(s)  )) == 0 )
       	return hash1;
     }
-    if( id == EMPTY )  break;
+    if( STATE(entry) == EMPTY )  break;
     /* We defer calculating hash2 until it's needed, just to make the fast
      * case that little bit faster. */
     if( hash1 == first )
@@ -127,188 +188,44 @@ ci_netif_filter_hash(ci_netif* ni, ci_addr_t laddr, unsigned lport,
 }
 
 
-ci_inline int ci_sock_intf_check(ci_netif* ni, ci_sock_cmn* s,
-                                 int intf_i, int vlan)
+ci_inline int /*bool*/
+handle_entry(ci_netif* ni, ci_netif_filter_table_entry_fast* entry,
+             ci_netif_filter_table_entry_ext* entry_ext,
+             unsigned laddr, unsigned lport, unsigned raddr, unsigned rport,
+             unsigned protocol, int intf_i, int vlan,
+             int (*callback)(ci_sock_cmn*, void*), void* callback_arg,
+             int /*bool*/ check_lport)
 {
-  ci_hwport_id_t hwport = ni->state->intf_i_to_hwport[intf_i];
-  return ((s->rx_bind2dev_hwports & (1ull << hwport)) != 0 &&
-          s->rx_bind2dev_vlan == vlan);
-}
+  ci_sock_cmn* s = ID_TO_SOCK(ni, ID(entry));
+  int is_match = 0;
 
+  /* An unconnected IPv6 socket bound to :: can receive both IPv4 and IPv6
+   * packets, but it has IPv4 ipcache, so its sock_raddr_be32() is 0 and
+   * can be used without checking for CI_SOCK_FLAG_CONNECTED, in contrast
+   * to the equivlalent test in ci_netif_filter_for_each_match_ip6(). */
+  if( ((laddr    - entry->laddr      ) |
+       /* check_lport is expected to be a compile-time constant, so when
+        * inlining this function the compiler should either generate sensible
+        * code here. */
+       (lport    - entry_ext->lport) * !! check_lport |
+       (raddr    - sock_raddr_be32(s)) |
+       (rport    - sock_rport_be16(s)) |
+       (protocol - sock_protocol(s)  )) == 0 )
+    is_match = 1;
+  LOG_NV(ci_log("%s match=%d: %s %s:%u->%s:%u hash=%u:%u at=%u check_lport=%d",
+                __FUNCTION__, is_match, CI_IP_PROTOCOL_STR(protocol),
+                ip_addr_str(laddr), (unsigned) CI_BSWAP_BE16(lport),
+                ip_addr_str(raddr), (unsigned) CI_BSWAP_BE16(rport),
+                __onload_hash1(ni->filter_table->table_size_mask, laddr, lport,
+                               raddr, rport, protocol),
+                __onload_hash2(laddr, lport, raddr, rport, protocol),
+                (unsigned) (entry - ni->filter_table->table), check_lport));
 
-static inline unsigned
-laddr_xor(int af, const void* laddr_ptr)
-{
-  ci_assert(laddr_ptr != NULL);
-#if CI_CFG_IPV6
-  if( af == AF_INET6 )
-    return onload_addr_xor(*(ci_addr_t*)laddr_ptr);
-  else
-#endif
-    return *(const unsigned*)laddr_ptr;
-}
-static inline unsigned
-raddr_xor(int af, const void* raddr_ptr)
-{
-#if CI_CFG_IPV6
-  if( af == AF_INET6 )
-    return raddr_ptr == NULL ? 0 : onload_addr_xor(*(ci_addr_t*)raddr_ptr);
-  else
-#endif
-    return *(const unsigned*)raddr_ptr;
-}
-
-static inline unsigned
-common_hash1(int af, unsigned size_mask,
-             const void* laddr_ptr, unsigned lport,
-             const void* raddr_ptr, unsigned rport, unsigned protocol)
-{
-  return __onload_hash1(size_mask, laddr_xor(af, laddr_ptr), lport,
-                        raddr_xor(af, raddr_ptr), rport, protocol);
-}
-static inline unsigned
-common_hash2(int af, const void* laddr_ptr, unsigned lport,
-             const void* raddr_ptr, unsigned rport, unsigned protocol)
-{
-  return __onload_hash2(laddr_xor(af, laddr_ptr), lport,
-                        raddr_xor(af, raddr_ptr), rport, protocol);
-}
-static inline unsigned
-common_hash3(int af, const void* laddr_ptr, unsigned lport,
-             const void* raddr_ptr, unsigned rport, unsigned protocol)
-{
-  return __onload_hash3(laddr_xor(af, laddr_ptr), lport,
-                        raddr_xor(af, raddr_ptr), rport, protocol);
-}
-
-static int
-for_each_match_common(ci_netif* ni, int af,
-                      const void* laddr_ptr, unsigned lport,
-                      /* raddr_ptr==NULL means [::] */
-                      const void* raddr_ptr, unsigned rport,
-                      unsigned protocol, int intf_i, int vlan,
-                      int (*callback)(ci_sock_cmn*, void*),
-                      void* callback_arg, ci_uint32* hash_out)
-{
-  ci_netif_filter_table* tbl = NULL;
-#if CI_CFG_IPV6
-  ci_ip6_netif_filter_table* ip6_tbl = NULL;
-#endif
-  unsigned hash1, hash2 = 0;
-  unsigned first, table_size_mask;
-
-  /* We MUST NOT use CI_ADDR_FROM_IP4() in NDEBUG build!
-   * It is REALLY SLOW!  We use it for logging only. */
-  CI_DEBUG(ci_addr_t laddr;)
-  CI_DEBUG(ci_addr_t raddr;)
-
-  tbl = ni->filter_table;
-
-#if CI_CFG_IPV6
-  if( af == AF_INET6 ) {
-    ip6_tbl = ni->ip6_filter_table;
-    table_size_mask = ip6_tbl->table_size_mask;
-#ifndef NDEBUG
-    laddr = *((ci_addr_t*)laddr_ptr);
-    raddr = raddr_ptr == NULL ? addr_any : *((ci_addr_t*)raddr_ptr);
-#endif
-  } else
-#endif
-  {
-    tbl = ni->filter_table;
-    table_size_mask = tbl->table_size_mask;
-#ifndef NDEBUG
-    laddr = CI_ADDR_FROM_IP4(*((ci_ip_addr_t*)laddr_ptr));
-    raddr = CI_ADDR_FROM_IP4(*((ci_ip_addr_t*)raddr_ptr));
-#endif
-  }
-
-  if( hash_out != NULL )
-    *hash_out = common_hash3(af, laddr_ptr, lport, raddr_ptr, rport, protocol);
-  hash1 = common_hash1(af, table_size_mask, laddr_ptr, lport,
-                       raddr_ptr, rport, protocol);
-  first = hash1;
-
-  LOG_NV(log("%s: %s " IPX_PORT_FMT "->" IPX_PORT_FMT " hash=%u:%u at=%u",
-             __FUNCTION__, CI_IP_PROTOCOL_STR(protocol),
-	     IPX_ARG(AF_IP(laddr)), (unsigned) CI_BSWAP_BE16(lport),
-	     IPX_ARG(AF_IP(raddr)), (unsigned) CI_BSWAP_BE16(rport),
-	     first, common_hash2(af, laddr_ptr, lport, raddr_ptr, rport, protocol),
-	     hash1));
-
-  while( 1 ) {
-    int id;
-
-#if CI_CFG_IPV6
-    if ( af == AF_INET6 ) {
-      id = ip6_tbl->table[hash1].id;
-    }
-    else
-#endif
-    {
-      id = tbl->table[hash1].id;
-    }
-    if(CI_LIKELY( id >= 0 )) {
-      int is_match = 0;
-
-      ci_sock_cmn* s = ID_TO_SOCK(ni, id);
-#if CI_CFG_IPV6
-      if ( af == AF_INET6 ) {
-        if( memcmp(laddr_ptr, ip6_tbl->table[hash1].laddr,
-                   sizeof(ci_ip6_addr_t)) == 0 &&
-            lport == sock_lport_be16(s) &&
-            protocol == sock_protocol(s) &&
-            ( (raddr_ptr == NULL && !(s->s_flags & CI_SOCK_FLAG_CONNECTED)) ||
-              (raddr_ptr != NULL &&
-               memcmp(raddr_ptr, sock_ip6_raddr(s),
-                      sizeof(ci_ip6_addr_t)) == 0 &&
-               rport == sock_rport_be16(s)) )
-          )
-          is_match = 1;
-      } else
-#endif
-      {
-        ci_ip_addr_t laddr_ip4 = *((ci_ip_addr_t*)laddr_ptr);
-        ci_ip_addr_t raddr_ip4 = *((ci_ip_addr_t*)raddr_ptr);
-        /* Non-connected IPv6 socket bound to :: can receiver both IPv4 and
-         * IPv6 packets, but it has IPv4 ipcache, so its sock_raddr_be32()
-         * is 0 and can be used without checking for
-         * CI_SOCK_FLAG_CONNECTED. */
-        if( ((laddr_ip4 - tbl->table[hash1].laddr) |
-            (lport      - sock_lport_be16(s)     ) |
-            (raddr_ip4  - sock_raddr_be32(s)     ) |
-            (rport      - sock_rport_be16(s)     ) |
-            (protocol   - sock_protocol(s)       )) == 0 )
-          is_match = 1;
-      }
-      LOG_NV(ci_log("%s match=%d: %s " IPX_PORT_FMT "->"
-                    IPX_PORT_FMT " hash=%u:%u at=%u",
-                    __FUNCTION__, is_match, CI_IP_PROTOCOL_STR(protocol),
-                    IPX_ARG(AF_IP(laddr)), (unsigned) CI_BSWAP_BE16(lport),
-                    IPX_ARG(AF_IP(raddr)), (unsigned) CI_BSWAP_BE16(rport),
-                    first, common_hash2(af, laddr_ptr, lport, raddr_ptr,
-                    rport, protocol), hash1));
-
-      if(is_match && CI_LIKELY( (s->rx_bind2dev_ifindex == CI_IFID_BAD ||
-                     ci_sock_intf_check(ni, s, intf_i, vlan)) ))
-        if( callback(s, callback_arg) != 0 )
-          return 1;
-    }
-    else if( id == EMPTY )
-      break;
-    /* We defer calculating hash2 until it's needed, just to make the fast
-    ** case that little bit faster. */
-    if( hash1 == first )
-      hash2 = common_hash2(af, laddr_ptr, lport, raddr_ptr, rport, protocol);
-    hash1 = (hash1 + hash2) & table_size_mask;
-    if( hash1 == first ) {
-      LOG_NV(ci_log(FN_FMT "ITERATE FULL " IPX_PORT_FMT "->"
-                    IPX_PORT_FMT " hash=%u:%u",
-                    FN_PRI_ARGS(ni), IPX_ARG(AF_IP(laddr)), lport,
-                    IPX_ARG(AF_IP(raddr)), rport, hash1, hash2));
-      break;
-    }
-  }
+  if( is_match &&
+      CI_LIKELY((s->rx_bind2dev_ifindex == CI_IFID_BAD ||
+                 ci_sock_intf_check(ni, s, intf_i, vlan))) &&
+      callback(s, callback_arg) != 0 )
+    return 1;
   return 0;
 }
 
@@ -321,26 +238,84 @@ ci_netif_filter_for_each_match(ci_netif* ni,
                                int (*callback)(ci_sock_cmn*, void*),
                                void* callback_arg, ci_uint32* hash_out)
 {
-  return for_each_match_common(ni, AF_INET, &laddr, lport, &raddr, rport,
-                               protocol, intf_i,
-                               vlan, callback, callback_arg, hash_out);
-}
+  ci_netif_filter_table* tbl = NULL;
+  unsigned hash1, hash2 = 0;
+  unsigned first, table_size_mask;
+  ci_netif_filter_table_entry_fast* entry;
 
+  tbl = ni->filter_table;
+  table_size_mask = tbl->table_size_mask;
 
-#if CI_CFG_IPV6
-int
-ci_netif_filter_for_each_match_ip6(ci_netif* ni,
-                                   const ci_addr_t* laddr, unsigned lport,
-                                   const ci_addr_t* raddr, unsigned rport,
-                                   unsigned protocol, int intf_i, int vlan,
-                                   int (*callback)(ci_sock_cmn*, void*),
-                                   void* callback_arg, ci_uint32* hash_out)
-{
-  return for_each_match_common(ni, AF_INET6, laddr, lport, raddr,
-                               rport, protocol, intf_i,
-                               vlan, callback, callback_arg, hash_out);
+  if( hash_out != NULL )
+    *hash_out = __onload_hash3(laddr, lport, raddr, rport, protocol);
+  hash1 = __onload_hash1(table_size_mask, laddr, lport, raddr, rport,
+                         protocol);
+  first = hash1;
+
+  LOG_NV(log("%s: %s %s:%u->%s:%u hash=%u:%u at=%u",
+             __FUNCTION__, CI_IP_PROTOCOL_STR(protocol),
+	     ip_addr_str(laddr), (unsigned) CI_BSWAP_BE16(lport),
+	     ip_addr_str(raddr), (unsigned) CI_BSWAP_BE16(rport),
+	     first, __onload_hash2(laddr, lport, raddr, rport, protocol),
+	     hash1));
+
+  /* The loop a little way below iterates over the hash table looking for
+   * matches.  The test of the first entry in our walk through the table is
+   * pulled out of the loop, however, as that first entry (i.e., the entry at
+   * the location for hash1 of the lookup-query) has some useful properties
+   * that we can exploit.
+   *     If we find that this entry is at its preferred location, then we know
+   * that the value of hash1 of our inputs that we have just calculated is also
+   * equal to __onload_hash1() for the tuple stored in this entry.  But our
+   * value of table_size_mask is large enough that __onload_hash1() has the
+   * Local Port Recovery Property, as defined and proven next to the definition
+   * of that function.  As such, if we find that the protocol, remote address,
+   * local address and remote port of the entry match our inputs, we are
+   * guaranteed also that its local port must match too, and we don't need to
+   * check it.  As well as allowing us to avoid a little bit of work when
+   * testing whether the entry matches, it allows us to keep the entry's local
+   * port in the slow-path state, as in the common case we don't need to touch
+   * it. */
+  ci_assert_ge(table_size_mask + 1, 1u << 16);
+  entry = &tbl->table[hash1];
+  if( STATE(entry) == OCCUPIED_PREFERRED ) {
+    /* We pass the entry in filter_table_ext here, but as check_lport is false
+     * it won't be used, and moreover the inlining will drop it entirely. */
+    if( handle_entry(ni, entry, &ni->filter_table_ext[hash1], laddr, lport,
+                     raddr, rport, protocol, intf_i, vlan, callback,
+                     callback_arg, 0 /*check_lport*/) )
+      return 1;
+  }
+  /* If the state of that first entry was OCCUPIED_REHASHED, it's a guaranteed
+   * non-match for this lookup, because this location is the preferred bucket
+   * for the query.  So we enter the loop at the point at which we've decided
+   * that the entry is a non-match. */
+  while( 1 ) {
+    ci_netif_filter_table_entry_ext* entry_ext;
+    if( STATE(entry) == EMPTY )
+      break;
+    /* We defer calculating hash2 until it's needed, just to make the fast
+    ** case that little bit faster. */
+    if( hash1 == first )
+      hash2 = __onload_hash2(laddr, lport, raddr, rport, protocol);
+    hash1 = (hash1 + hash2) & table_size_mask;
+    if( hash1 == first ) {
+      LOG_NV(ci_log(FN_FMT "ITERATE FULL %s:%u->%s:%u hash=%u:%u",
+                    FN_PRI_ARGS(ni), ip_addr_str(laddr), CI_BSWAP_BE16(lport),
+                    ip_addr_str(raddr), CI_BSWAP_BE16(rport), hash1, hash2));
+      break;
+    }
+    entry = &tbl->table[hash1];
+    entry_ext = &ni->filter_table_ext[hash1];
+    if( OCCUPIED(entry) ) {
+      if( handle_entry(ni, entry, entry_ext, laddr, lport, raddr, rport,
+                       protocol, intf_i, vlan, callback, callback_arg,
+                       1 /*check_lport*/) )
+        return 1;
+    }
+  }
+  return 0;
 }
-#endif
 
 
 /* Insert for either TCP or UDP */
@@ -351,7 +326,8 @@ ci_ip4_netif_filter_insert(ci_netif_filter_table* tbl,
                            unsigned raddr, unsigned rport,
                            unsigned protocol)
 {
-  ci_netif_filter_table_entry* entry;
+  ci_netif_filter_table_entry_fast* entry;
+  ci_netif_filter_table_entry_ext* entry_ext;
   unsigned hash1, hash2;
 #if !defined(NDEBUG) || CI_CFG_STATS_NETIF
   unsigned hops = 1;
@@ -366,9 +342,10 @@ ci_ip4_netif_filter_insert(ci_netif_filter_table* tbl,
   /* Find a free slot. */
   while( 1 ) {
     entry = &tbl->table[hash1];
-    if( entry->id < 0 )  break;
+    entry_ext = &netif->filter_table_ext[hash1];
+    if( ! OCCUPIED(entry) )  break;
 
-    ++entry->route_count;
+    ++entry_ext->route_count;
 #if !defined(NDEBUG) || CI_CFG_STATS_NETIF
     ++hops;
 #endif
@@ -377,7 +354,7 @@ ci_ip4_netif_filter_insert(ci_netif_filter_table* tbl,
      * entry has a different [laddr].
      */
     ci_assert(
-      !((entry->id == OO_SP_TO_INT(tcp_id)) && (laddr == entry->laddr)) );
+      !((ID(entry) == OO_SP_TO_INT(tcp_id)) && (laddr == entry->laddr)) );
 
     hash1 = (hash1 + hash2) & tbl->table_size_mask;
 
@@ -400,11 +377,11 @@ ci_ip4_netif_filter_insert(ci_netif_filter_table* tbl,
 
   /* Now insert the new entry. */
   LOG_TC(ci_log(FN_FMT "%d INSERT %s %s:%u->%s:%u hash=%u:%u at=%u "
-    "over=%d hops=%u", FN_PRI_ARGS(netif), OO_SP_FMT(tcp_id),
+    "over=%u:%u hops=%u", FN_PRI_ARGS(netif), OO_SP_FMT(tcp_id),
                 CI_IP_PROTOCOL_STR(protocol),
     ip_addr_str(laddr), (unsigned) CI_BSWAP_BE16(lport),
     ip_addr_str(raddr), (unsigned) CI_BSWAP_BE16(rport),
-    first, hash2, hash1, entry->id, hops));
+    first, hash2, hash1, STATE(entry), __ID(entry), hops));
 
 #if CI_CFG_STATS_NETIF
   if( hops > netif->state->stats.table_max_hops )
@@ -415,13 +392,16 @@ ci_ip4_netif_filter_insert(ci_netif_filter_table* tbl,
   netif->state->stats.table_mean_hops =
     (netif->state->stats.table_mean_hops * 9 + hops) / 10;
 
-  if( entry->id == EMPTY )
+  if( STATE(entry) == EMPTY )
     ++netif->state->stats.table_n_slots;
   ++netif->state->stats.table_n_entries;
 #endif
 
-  entry->id = OO_SP_TO_INT(tcp_id);
+  set_entry_state(entry,
+                  hash1 == first ? OCCUPIED_PREFERRED : OCCUPIED_REHASHED);
+  set_entry_id(entry, OO_SP_TO_INT(tcp_id));
   entry->laddr = laddr;
+  entry_ext->lport = lport;
   return 0;
 }
 
@@ -431,18 +411,20 @@ __ci_ip4_netif_filter_remove(ci_netif_filter_table* tbl, ci_netif* ni,
                              unsigned hash1, unsigned hash2,
                              int hops, unsigned last_tbl_i)
 {
-  ci_netif_filter_table_entry* entry;
+  ci_netif_filter_table_entry_fast* entry;
+  ci_netif_filter_table_entry_ext* entry_ext;
   unsigned tbl_i;
   int i;
 
   tbl_i = hash1;
   for( i = 0; i < hops; ++i ) {
     entry = &tbl->table[tbl_i];
-    ci_assert(entry->id != EMPTY);
-    ci_assert(entry->route_count > 0);
-    if( --entry->route_count == 0 && entry->id == TOMBSTONE ) {
+    entry_ext = &ni->filter_table_ext[tbl_i];
+    ci_assert(STATE(entry) != EMPTY);
+    ci_assert(entry_ext->route_count > 0);
+    if( --entry_ext->route_count == 0 && STATE(entry) == TOMBSTONE ) {
       CITP_STATS_NETIF(--ni->state->stats.table_n_slots);
-      entry->id = EMPTY;
+      set_entry_state(entry, EMPTY);
     }
     tbl_i = (tbl_i + hash2) & tbl->table_size_mask;
   }
@@ -450,12 +432,13 @@ __ci_ip4_netif_filter_remove(ci_netif_filter_table* tbl, ci_netif* ni,
 
   CITP_STATS_NETIF(--ni->state->stats.table_n_entries);
   entry = &tbl->table[tbl_i];
-  if( entry->route_count == 0 ) {
+  entry_ext = &ni->filter_table_ext[tbl_i];
+  if( entry_ext->route_count == 0 ) {
     CITP_STATS_NETIF(--ni->state->stats.table_n_slots);
-    entry->id = EMPTY;
+    set_entry_state(entry, EMPTY);
   }
   else {
-    entry->id = TOMBSTONE;
+    set_entry_state(entry, TOMBSTONE);
   }
 }
 
@@ -467,7 +450,7 @@ ci_ip4_netif_filter_remove(ci_netif_filter_table* tbl,
                            unsigned raddr, unsigned rport,
                            unsigned protocol)
 {
-  ci_netif_filter_table_entry* entry;
+  ci_netif_filter_table_entry_fast* entry;
   unsigned hash1, hash2, tbl_i;
   int hops = 0;
   unsigned first;
@@ -496,11 +479,11 @@ ci_ip4_netif_filter_remove(ci_netif_filter_table* tbl,
   tbl_i = hash1;
   while( 1 ) {
     entry = &tbl->table[tbl_i];
-    if( entry->id == OO_SP_TO_INT(sock_p) ) {
+    if( OCCUPIED(entry) && ID(entry) == OO_SP_TO_INT(sock_p) ) {
       if( laddr == entry->laddr )
         break;
     }
-    else if( entry->id == EMPTY ) {
+    else if( STATE(entry) == EMPTY ) {
       /* We allow multiple removes of the same filter -- helps avoid some
        * complexity in the filter module.
        */
@@ -603,21 +586,24 @@ ci_netif_filter_remove(ci_netif* netif, oo_sp sock_p, int af_space,
 
 #ifdef __ci_driver__
 
-void ci_netif_filter_init(ci_netif_filter_table* tbl, int size_lg2)
+void ci_netif_filter_init(ci_netif* ni, int size_lg2)
 {
   unsigned i;
   unsigned size = ci_pow2(size_lg2);
 
-  ci_assert(tbl);
-  ci_assert_gt(size_lg2, 0);
+  ci_assert(ni);
+  ci_assert(ni->filter_table);
+  ci_assert(ni->filter_table_ext);
+  ci_assert_ge(size_lg2, 16);  /* For ci_netif_filter_for_each_match(). */
   ci_assert_le(size_lg2, 32);
 
-  tbl->table_size_mask = size - 1;
+  ni->filter_table->table_size_mask = size - 1;
 
   for( i = 0; i < size; ++i ) {
-    tbl->table[i].id = EMPTY;
-    tbl->table[i].route_count = 0;
-    tbl->table[i].laddr = 0;
+    set_entry_state(&ni->filter_table->table[i], EMPTY);
+    ni->filter_table_ext[i].route_count = 0;
+    ni->filter_table_ext[i].lport = 0;
+    ni->filter_table->table[i].laddr = 0;
   }
 }
 
@@ -677,7 +663,7 @@ __ci_netif_filter_lookup(ci_netif* netif, int af_space,
     rc = __ci_ip4_netif_filter_lookup(netif, laddr.ip4, lport, raddr.ip4, rport,
                                       protocol);
     if(CI_LIKELY( rc >= 0 ))
-      return ID_TO_SOCK(netif, netif->filter_table->table[rc].id);
+      return ID_TO_SOCK(netif, ID(&netif->filter_table->table[rc]));
   }
 
   return 0;
@@ -690,7 +676,6 @@ __ci_netif_filter_lookup(ci_netif* netif, int af_space,
 
 void ci_netif_filter_dump(ci_netif* ni)
 {
-  int id;
   unsigned i;
   ci_netif_filter_table* tbl;
 
@@ -706,20 +691,22 @@ void ci_netif_filter_dump(ci_netif* ni)
 #endif
 
   for( i = 0; i <= tbl->table_size_mask; ++i ) {
-    id = tbl->table[i].id;
-    if( CI_LIKELY(id >= 0) ) {
-      ci_sock_cmn* s = ID_TO_SOCK(ni, id);
-      unsigned laddr = tbl->table[i].laddr;
-      int lport = sock_lport_be16(s);
+    ci_netif_filter_table_entry_fast* entry = &tbl->table[i];
+    ci_netif_filter_table_entry_ext* entry_ext = &ni->filter_table_ext[i];
+    if( CI_LIKELY(OCCUPIED(entry)) ) {
+      ci_sock_cmn* s = ID_TO_SOCK(ni, ID(entry));
+      unsigned laddr = entry->laddr;
+      int lport = entry_ext->lport;
       unsigned raddr = sock_raddr_be32(s);
       int rport = sock_rport_be16(s);
       int protocol = sock_protocol(s);
       unsigned hash1 = __onload_hash1(tbl->table_size_mask, laddr, lport,
                                       raddr, rport, protocol);
       unsigned hash2 = __onload_hash2(laddr, lport, raddr, rport, protocol);
-      log("%010d id=%-10d rt_ct=%d %s "CI_IP_PRINTF_FORMAT":%d "
+      log("%010d state=%u id=%-10d rt_ct=%d %s "CI_IP_PRINTF_FORMAT":%d "
           CI_IP_PRINTF_FORMAT":%d %010d:%010d",
-	  i, id, tbl->table[i].route_count, CI_IP_PROTOCOL_STR(protocol),
+          i, STATE(entry) >> FILTER_TABLE_ID_BITS, ID(entry),
+          entry_ext->route_count, CI_IP_PROTOCOL_STR(protocol),
           CI_IP_PRINTF_ARGS(&laddr), CI_BSWAP_BE16(lport),
 	  CI_IP_PRINTF_ARGS(&raddr), CI_BSWAP_BE16(rport), hash1, hash2);
     }

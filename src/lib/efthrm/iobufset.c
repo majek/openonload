@@ -74,7 +74,7 @@ static int oo_bufpage_huge_alloc(struct oo_buffer_pages *p, int *flags)
   unsigned id;
   int rc;
   const struct cred *orig_creds = NULL;
-  struct cred *creds;
+  struct cred *creds = NULL;
   struct vm_area_struct* vma;
 
   ci_assert( current->mm );
@@ -188,8 +188,10 @@ fail2:
 fail3:
   efab_linux_sys_shmctl(shmid, IPC_RMID, NULL);
 out:
-  if (orig_creds != NULL)
+  if (orig_creds != NULL) {
     revert_creds(orig_creds);
+    put_cred(creds);
+  }
   return rc;
 }
 

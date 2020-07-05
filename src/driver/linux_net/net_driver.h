@@ -79,7 +79,7 @@
  *
  **************************************************************************/
 
-#define EFX_DRIVER_VERSION	"4.15.4.1003"
+#define EFX_DRIVER_VERSION	"4.15.6.1004"
 
 #ifdef DEBUG
 #define EFX_WARN_ON_ONCE_PARANOID(x) WARN_ON_ONCE(x)
@@ -689,6 +689,13 @@ struct efx_rss_context {
  * @event_test_cpu: Last CPU to handle interrupt or test event for this channel
  * @irq_count: Number of IRQs since last adaptive moderation decision
  * @irq_mod_score: IRQ moderation score
+ * @rfs_filter_count: number of accelerated RFS filters currently in place;
+ *	equals the count of @rps_flow_id slots filled
+ * @rfs_last_expiry: value of jiffies last time some accelerated RFS filters
+ *	were checked for expiry
+ * @rfs_expire_index: next accelerated RFS filter ID to check for expiry
+ * @n_rfs_succeeded: number of successful accelerated RFS filter insertions
+ * @n_rfs_failed; number of failed accelerated RFS filter insertions
  * @filter_work: Work item for efx_filter_rfs_expire()
  * @rps_flow_id: Flow IDs of filters allocated for accelerated RFS,
  *      indexed by filter ID
@@ -748,8 +755,12 @@ struct efx_channel {
 	unsigned int irq_count;
 	unsigned int irq_mod_score;
 #ifdef CONFIG_RFS_ACCEL
-	unsigned int rfs_filters_added;
-	struct work_struct filter_work;
+	unsigned int rfs_filter_count;
+	unsigned int rfs_last_expiry;
+	unsigned int rfs_expire_index;
+	unsigned int n_rfs_succeeded;
+	unsigned int n_rfs_failed;
+	struct delayed_work filter_work;
 #define RPS_FLOW_ID_INVALID 0xFFFFFFFF
 	u32 *rps_flow_id;
 #endif
@@ -1260,6 +1271,28 @@ struct efx_vport {
 	bool vlan_restrict;
 };
 
+
+/**
+ * struct efx_mtd - Struct to holds mtd list and krer for deletion without efx
+ * @efx: The associated efx_nic
+ * @list: List of MTDs attached to the NIC
+ * @parts: Memory allocated for MTD data
+ * @creation_work: I don't know what this is
+ * @probed_flag: I don't know what this is
+ */
+#ifdef CONFIG_SFC_MTD
+struct efx_mtd {
+	struct efx_nic *efx;
+	struct list_head list;
+	void *parts;
+	struct kref parts_kref;
+#if defined(EFX_WORKAROUND_87308)
+	struct delayed_work creation_work;
+	atomic_t probed_flag;
+};
+#endif
+#endif
+
 /**
  * struct efx_nic - an Efx NIC
  * @name: Device name (net device name or bus id before net device registered)
@@ -1339,8 +1372,7 @@ struct efx_vport {
  * @irq_zero_count: Number of legacy IRQs seen with queue flags == 0
  * @irq_level: IRQ level/index for IRQs not triggered by an event queue
  * @selftest_work: Work item for asynchronous self-test
- * @mtd_list: List of MTDs attached to the NIC
- * @mtd_parts: Memory allocated for MTD data
+ * @mtd_struct: A struct for holding combined mtd data for freeing independently
  * @nic_data: Hardware dependent state
  * @mcdi: Management-Controller-to-Driver Interface state
  * @mac_lock: MAC access lock. Protects @port_enabled, @link_up, @phy_mode,
@@ -1389,9 +1421,6 @@ struct efx_vport {
  * @filter_sem: Filter table rw_semaphore, protects existence of @filter_state
  * @filter_state: Architecture-dependent filter table state
  * @rps_mutex: Protects RPS state of all channels
- * @rps_expire_channel: Next channel to check for expiry
- * @rps_expire_index: Next index to check for expiry in
- *	@rps_expire_channel's @rps_flow_id
  * @rps_slot_map: bitmap of in-flight entries in @rps_slot
  * @rps_slot: array of ARFS insertion requests for efx_filter_rfs_work()
  * @rps_hash_lock: Protects ARFS filter mapping state (@rps_hash_table and
@@ -1468,6 +1497,8 @@ struct efx_nic {
 	enum nic_state state;
 	unsigned long reset_pending;
 	unsigned long last_reset;
+	unsigned long current_reset;
+	unsigned int reset_count;
 
 	struct efx_channel *channel[EFX_MAX_CHANNELS];
 	struct efx_msi_context msi_context[EFX_MAX_CHANNELS];
@@ -1542,13 +1573,7 @@ struct efx_nic {
 	struct delayed_work selftest_work;
 
 #ifdef CONFIG_SFC_MTD
-	struct list_head mtd_list;
-	void *mtd_parts;
-	struct kref mtd_parts_kref;
-#if defined(EFX_WORKAROUND_87308)
-	struct delayed_work mtd_creation_work;
-	atomic_t mtds_probed_flag;
-#endif
+	struct efx_mtd *mtd_struct;
 #endif
 
 	void *nic_data;
@@ -1625,8 +1650,6 @@ struct efx_nic {
 	void *filter_state;
 #ifdef CONFIG_RFS_ACCEL
 	struct mutex rps_mutex;
-	unsigned int rps_expire_channel;
-	unsigned int rps_expire_index;
 	unsigned long rps_slot_map;
 	struct efx_async_filter_insertion rps_slot[EFX_RPS_MAX_IN_FLIGHT];
 	spinlock_t rps_hash_lock;
@@ -1721,7 +1744,7 @@ static inline unsigned int efx_port_num(struct efx_nic *efx)
 #ifdef CONFIG_SFC_MTD
 struct efx_mtd_partition {
 	struct list_head node;
-	struct efx_nic *efx;
+	struct efx_mtd *mtd_struct;
 	struct mtd_info mtd;
 #if defined(EFX_USE_KCOMPAT) && !defined(EFX_USE_MTD_WRITESIZE)
 	size_t writesize;

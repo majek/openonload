@@ -663,7 +663,6 @@ CI_CFG_OPT("EF_SYNC_CPLANE_AT_CREATE", sync_cplane, ci_uint32,
 "Sync operation time is limited by cplane_init_timeout onload module option.",
            2, , 1, 0, 2, oneof:never;first;always)
 
-
 #ifdef CI_CFG_OPTGROUP
 /* put definitions of categories and expertise levels here */
 #endif

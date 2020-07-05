@@ -4,7 +4,6 @@
  * clients.
  */
 
-#ifndef __KERNEL__
 #include <ci/tools.h>
 
 #define CI_CFG_IPV6 1
@@ -80,4 +79,3 @@ cp_svc_check_dnat(struct oo_cplane_handle* cp,
   }
   return rc;
 }
-#endif

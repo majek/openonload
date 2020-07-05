@@ -71,7 +71,6 @@ static void ci_mcast_set_outgoing_if(ci_netif* ni, ci_udp_state* us,
 
 
 struct llap_param_data {
-  cicp_encap_t* encap;
   cicp_hwport_mask_t* hwports;
   ci_ifid_t* ifindex;
 };
@@ -80,7 +79,6 @@ llap_param_from_ip(struct oo_cplane_handle* cp,
                    cicp_llap_row_t* llap, void* data)
 {
   struct llap_param_data* d = data;
-  *d->encap = llap->encap;
   *d->hwports = llap->rx_hwports;
   *d->ifindex = llap->ifindex;
   return 1;
@@ -91,7 +89,6 @@ static int ci_mcast_join_leave(ci_netif* ni, ci_udp_state* us,
                                ci_uint32 maddr, int /*bool*/ add)
 {
   cicp_hwport_mask_t hwports = 0;
-  cicp_encap_t encap = {CICP_LLAP_TYPE_NONE, 0}; /* Shut up gcc */
   int rc;
 
   if( add )
@@ -102,62 +99,57 @@ static int ci_mcast_join_leave(ci_netif* ni, ci_udp_state* us,
   if( ! NI_OPTS(ni).mcast_recv )
     return 0;
 
-  if( ifindex != 0 )
+  /* Find the RX hwports on which to join the group. */
+  if( ifindex != 0 ) {
+    /* The application specified the ifindex on which to join the group. */
     rc = oo_cp_find_llap(ni->cplane, ifindex, NULL, NULL, &hwports, NULL,
-                         &encap);
+                         NULL);
+  }
+  else if( laddr != 0 ) {
+    /* The application specified an IP address of the interface on which to
+     * join the group. */
+    struct llap_param_data data;
+    data.hwports = &hwports;
+    data.ifindex = &ifindex;
+    rc = ! oo_cp_find_llap_by_ip(ni->cplane, laddr, llap_param_from_ip, &data);
+  }
   else {
-    if( laddr != 0 ) {
-      struct llap_param_data data;
-      data.encap = &encap;
-      data.hwports = &hwports;
-      data.ifindex = &ifindex;
-      rc = ! oo_cp_find_llap_by_ip(ni->cplane, laddr, llap_param_from_ip,
-                                   &data);
+    /* The application did not specify the interface on which to join the
+     * group.  This means that we must infer the interface from the routing
+     * table. */
+    ci_ip_cached_hdrs ipcache;
+    struct oo_sock_cplane sock_cp = us->s.cp;
+    struct cp_fwd_key key;
+    struct cp_fwd_data data;
+
+    ci_ip_cache_init(&ipcache, AF_INET);
+    ipcache.ipx.ip4.ip_daddr_be32 = maddr;
+    ipcache.dport_be16 = 0;
+
+    /* OO_SCP_NO_MULTICAST may forbid multicast send through this socket.
+     * Here we are not going to send anything; we want to receive, and we
+     * need a route resolution even if sending is forbidden.
+     * We use a copy of sock_cp to resolve this multicast route;
+     * original flag is not changed. */
+    sock_cp.sock_cp_flags &=~ OO_SCP_NO_MULTICAST;
+
+    /* Look up the routing table.  Note that, in the cross-veth case, we
+     * resolve the first hop only. */
+    rc = cicp_user_build_fwd_key(ni, &ipcache, &sock_cp,
+                                 CI_ADDR_FROM_IP4(maddr), AF_INET, &key);
+    if( rc == 0 )
+      rc = cicp_user_resolve(ni, ni->cplane, &ipcache.fwd_ver,
+                             sock_cp.sock_cp_flags, &key, &data);
+    if( rc == 0 && data.base.ifindex != CI_IFID_BAD ) {
+      ifindex = data.base.ifindex;
+      rc = cicp_user_get_fwd_rx_hwports(ni, &data, &hwports);
     }
     else {
-      ci_ip_cached_hdrs ipcache;
-      struct oo_sock_cplane sock_cp = us->s.cp;
-
-      ci_ip_cache_init(&ipcache, AF_INET);
-      ipcache.ipx.ip4.ip_daddr_be32 = maddr;
-      ipcache.dport_be16 = 0;
-
-      /* OO_SCP_NO_MULTICAST may forbid multicast send through this socket.
-       * Here we are not going to send anything; we want to receive, and we
-       * need a route resolution even if sending is forbidden.
-       * We use a copy of sock_cp to resolve this multicast route;
-       * original flag is not changed. */
-      sock_cp.sock_cp_flags &=~ OO_SCP_NO_MULTICAST;
-      cicp_user_retrieve(ni, &ipcache, &sock_cp);
-
-      /* Fixme: we need all hwports here, but ipcache does not store them */
-      hwports = cp_hwport_make_mask(ipcache.hwport);
-      encap = ipcache.encap;
-      ifindex = ipcache.ifindex;
-      switch( ipcache.status ) {
-      case retrrc_success:
-      case retrrc_nomac:
-        rc = 0;
-        break;
-      default:
-        rc = 1;
-        break;
-      }
-    }
-    if( rc == 0 && hwports == 0 ) {
-      /* check case when interface is a bond with acceleratable slaves
-       * but none active */
-      rc = oo_cp_find_llap(ni->cplane, ifindex, NULL, NULL, &hwports, NULL,
-                           &encap);
+      rc = 1;
     }
   }
 
-
-  /* Use ci_hwport_check_onload() rather than testing CI_HWPORT_ID_BAD
-   * because we should support this on a bond with no slaves.
-   */
-  if( rc != 0 ||
-      ! ci_hwport_check_onload(cp_hwport_mask_first(hwports), &encap) )
+  if( rc != 0 || hwports == 0 )
     /* Not acceleratable.  NB. The mcast_join_handover takes effect even if
      * this socket has joined a group that is accelerated.  This is
      * deliberate.

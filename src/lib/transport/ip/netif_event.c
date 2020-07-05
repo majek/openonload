@@ -22,25 +22,6 @@
 #include <etherfabric/vi.h>
 #include <ci/internal/pio_buddy.h>
 
-#define CI_BPF_MODE_DISABLED  0
-#define CI_BPF_MODE_COMPAT    1
-#if CI_CFG_BPF && ! defined NO_BPF
-# define CI_USE_BPF CI_BPF_MODE_COMPAT
-#else
-# define CI_USE_BPF CI_BPF_MODE_DISABLED
-#endif
-
-#if CI_USE_BPF == CI_BPF_MODE_COMPAT
-# include <ci/internal/xdp_buff.h>
-# ifdef __KERNEL__
-#  include <onload/bpf_internal.h>
-#  include <ci/efrm/efrm_client.h>
-#  include <ci/efrm/vi_resource_manager.h>
-# else
-#  include <onload/oobpf.h>
-# endif
-#endif
-
 #include <linux/ip.h>
 #ifdef __KERNEL__
 #include <linux/time.h>
@@ -48,8 +29,10 @@
 #include <time.h>
 #endif
 
-#if defined(__KERNEL__) && CI_USE_BPF != CI_BPF_MODE_DISABLED
-# include <etherfabric/internal/evq_rx_iter.h>
+#if defined(__KERNEL__)
+#if CI_CFG_WANT_BPF_NATIVE && CI_HAVE_BPF_NATIVE
+#include <etherfabric/internal/evq_rx_iter.h>
+#endif
 #endif
 
 
@@ -818,7 +801,7 @@ static void handle_rx_scatter_merge(ci_netif* ni, struct oo_rx_state* s,
       /* The first buffer contains a prefix, but all intervening buffers are
        * are filled, so this contains whatever's leftover.
        */
-      pkt->buf_len = (s->frag_bytes + prefix_bytes) % full_buffer;
+      pkt->buf_len = ((s->frag_bytes + prefix_bytes - 1) % full_buffer) + 1;
       oo_offbuf_init(&pkt->buf, pkt->dma_start, pkt->buf_len);
       CI_DEBUG(pkt->pay_len = -1);
 
@@ -1327,214 +1310,13 @@ void ci_netif_tx_pkt_complete(ci_netif* ni, struct ci_netif_poll_state* ps,
 }
 
 
-#if CI_USE_BPF == CI_BPF_MODE_COMPAT
-
 #ifdef __KERNEL__
-static void prog_free_wq_callback(struct work_struct* work)
-{
-  ook_bpf_prog_free_only(CI_CONTAINER(struct oo_bpf_prog, work, work));
-}
-#endif
-
-
-static void reload_xdp_config(ci_netif* ni, int intf_i)
-{
-  ci_netif_nic_t* nic = &ni->nic_hw[intf_i];
-#ifdef __KERNEL__
-  tcp_helper_resource_t* trs = netif2tcp_helper_resource(ni);
-  int rc;
-
-  if( nic->xdp_prog ) {
-    if( ook_bpf_prog_decref_only(nic->xdp_prog) == 0 ) {
-      INIT_WORK(&nic->xdp_prog->work, prog_free_wq_callback);
-      queue_work(trs->wq, &nic->xdp_prog->work);
-    }
-    nic->xdp_prog = NULL;
-  }
-
-  rc = ook_get_prog_for_onload(OO_BPF_ATTACH_XDP_INGRESS, trs->name,
-                               ni->intf_i_to_hwport[intf_i],
-                               &nic->xdp_prog);
-  if( rc && rc != -ENOENT ) {
-    ci_log("ERROR: failed to use XDP (%d)", rc);
-    /* continue to update the xdp_active_gen anyway, because there's no point
-     * in retrying (and presumably refailing) on every poll */
-  }
-#else
-  if( nic->xdp_prog_fd >= 0 ) {
-    oo_bpf_jit_free(&nic->xdp_jitted);
-    memset(&nic->xdp_jitted, 0, sizeof(nic->xdp_jitted));
-    close(nic->xdp_prog_fd);
-    nic->xdp_prog_fd = -1;
-  }
-  if( ! NI_OPTS(ni).poll_in_kernel ) {
-    /* No need to load programme if we're polling in kernel, because we'd
-     * never use it anyway and our logic for determining where to run the XDP
-     * depends on it not being loaded in the address space where it shouldn't
-     * be run */
-    int require_kernel_poll = 0;
-    int rc = ci_tcp_helper_bpf_bind(ni, intf_i, OO_BPF_ATTACH_XDP_INGRESS);
-    if( rc < 0 ) {
-      if( rc == -EOPNOTSUPP ) {
-        /* Magic return code (see ook_get_prog_fd_for_onload()) to indicate
-         * that there is a programme attached here, but it can't be given to
-         * us because it calls stuff which only works in the kernel. This
-         * check needs to happen for every address space (except the kernel -
-         * programmes always work in the kernel) because we maintain the
-         * 'poll_in_kernel' variable in non-shared state (alongside the JITted
-         * programme) to make the thread-safety of reloads simpler. */
-        require_kernel_poll = 1;
-      }
-      else if( rc != -ENOENT ) {
-        ci_log("ERROR: failed to bind XDP (%d)", rc);
-      }
-    }
-    else {
-      nic->xdp_prog_fd = rc;
-      rc = oo_bpf_jit(&nic->xdp_jitted, nic->xdp_prog_fd);
-      if( rc ) {
-        ci_log("ERROR: failed to reJIT XDP (%d)", rc);
-        close(nic->xdp_prog_fd);
-        nic->xdp_prog_fd = -1;
-      }
-    }
-    nic->poll_in_kernel = require_kernel_poll;
-  }
-  ni->future_intf_mask = ci_netif_build_future_intf_mask(ni);
-#endif
-
-  nic->xdp_active_gen = ni->state->nic[intf_i].xdp_current_gen;
-}
-
-
-static inline void check_reload_xdp_config(ci_netif* ni, int intf_i)
-{
-  if( ni->state->nic[intf_i].xdp_current_gen !=
-      ni->nic_hw[intf_i].xdp_active_gen ) {
-    /* TODO: figure out some way of achieving this which doesn't involve a
-     * check on every poll */
-    reload_xdp_config(ni, intf_i);
-  }
-}
-
-
-/* Ugly: we can't drag in either our own uapi/linux/bpf.h because that'll
- * involve messing with the include directories of this file's compilation
- * (which can cause kernel mismatches), and we can't get the local machine's
- * copy of the same because it might not exist, so here's some code
- * duplication: */
-enum oo_xdp_action {
-  OO_XDP_ABORTED = 0,
-  OO_XDP_DROP,
-  OO_XDP_PASS,
-  OO_XDP_TX,
-  OO_XDP_REDIRECT,
-};
-
-ci_inline int xdp_check_pkt(ci_netif* ni, int intf_i, ci_ip_pkt_fmt* pkt)
-{
-  int act;
-  struct oo_xdp_buff xdp;
-  struct oo_xdp_rxq_info xdp_rx_queue = {};
-  bpf_prog_t* func;
-  struct bpf_insn* insns;
-
-#ifdef __KERNEL__
-  if( ! ni->nic_hw[intf_i].xdp_prog )
-    return 1;
-  func = ni->nic_hw[intf_i].xdp_prog->kernel_progs[0].func;
-  insns = ni->nic_hw[intf_i].xdp_prog->insns;
-#else
-  func = ni->nic_hw[intf_i].xdp_jitted.jitted;
-  insns = ni->nic_hw[intf_i].xdp_jitted.insns;
-  if( ! func ) {
-    /* We may have run XDP in the kernel (via the poll-in-kernel feature) but
-     * not in userspace (i.e. here), so we need to check whether the kernel
-     * set the drop flag as a result of it running. See more big comments in
-     * ci_netif_poll_evq and reload_xdp_config. */
-    return ! (pkt->flags & CI_PKT_FLAG_XDP_DROP);
-  }
-#endif
-
-  /* The XDP program wants to see the packet starting at the MAC
-   * header. */
-  xdp.data = oo_ether_hdr(pkt);
-  xdp.data_meta = xdp.data; /* note: netdriver does not support metadata at
-                             * all, we could do the same */
-  /* There are two commonly-discussed behaviours for jumbograms:
-   * 1) Drop the packet here (it would be bad to bypass XDP without dropping
-   *    because that's a firewall bypass)
-   * 2) Pass only the first fragment to the XDP
-   * This code implements option (2), which is not what most kernel drivers
-   * do at time of writing but is likely to be the future. See discussion at
-   * https://github.com/xdp-project/xdp-project/blob/master/areas/core/xdp-multi-buffer01-design.org
-   */
-  xdp.data_end = (char*)xdp.data + oo_offbuf_left(&pkt->buf);
-  xdp.data_hard_start = xdp.data; /* no headroom, should be 256 bytes at
-                                   * least */
-  xdp.rxq = &xdp_rx_queue;
-  /* TODO: more tracking is needed here when we add support for
-   * adjust_head/tail helper functions */
-#ifdef __KERNEL__
-  /* The map implementations which are based on kernel code use RCU (hence
-   * them requiring kernel-only polling), so we need to take a read lock. We
-   * might not be using any of those maps, of course, but the cost of a
-   * conditional is likely to be higher than the cost of this read lock
-   * (which is often nothing).
-   *
-   * In many cases we can get away without the preempt_disable too, however
-   * detecting those cases is difficult and so, since we're already on a
-   * slowish path by being in the kernel, it's safer to do it anyway. */
-  preempt_disable();
-  rcu_read_lock();
-#endif
-  act = func(&xdp, insns);
-#ifdef __KERNEL__
-  rcu_read_unlock();
-  preempt_enable();
-#endif
-  switch( act ) {
-    case OO_XDP_PASS:
-      CITP_STATS_NETIF_INC(ni, rx_xdp_pass);
-      return 1;
-    case OO_XDP_DROP:
-      CITP_STATS_NETIF_INC(ni, rx_xdp_drop);
-      break;
-    case OO_XDP_TX:
-      CITP_STATS_NETIF_INC(ni, rx_xdp_tx);
-      break;
-    case OO_XDP_REDIRECT:
-      CITP_STATS_NETIF_INC(ni, rx_xdp_redirect);
-      break;
-    case OO_XDP_ABORTED:
-      CITP_STATS_NETIF_INC(ni, rx_xdp_aborted);
-      break;
-    default:
-      CITP_STATS_NETIF_INC(ni, rx_xdp_unknown);
-      /* drop */
-      break;
-  }
-
-  return 0;
-}
-#endif /* CI_USE_BPF */
-
-
-#ifdef __KERNEL__
-
-#if CI_USE_BPF == CI_BPF_MODE_COMPAT
-ci_inline int is_xdp_kernel_only(ci_netif* ni, int intf_i)
-{
-  return ni->nic_hw[intf_i].xdp_prog &&
-         ni->nic_hw[intf_i].xdp_prog->kernel_only;
-}
-#endif /* CI_USE_BPF */
 
 int ci_netif_evq_poll(ci_netif* ni, int intf_i)
 {
   ef_vi* evq = &ni->nic_hw[intf_i].vi;
   int n_evs;
-#if CI_USE_BPF != CI_BPF_MODE_DISABLED
+#if CI_CFG_WANT_BPF_NATIVE && CI_HAVE_BPF_NATIVE
   ef_event *ev = ni->state->events;
 #endif
 
@@ -1544,14 +1326,8 @@ int ci_netif_evq_poll(ci_netif* ni, int intf_i)
   n_evs = ef_eventq_poll(evq, ni->state->events,
                          sizeof(ni->state->events) / sizeof(ni->state->events[0]));
 
-#if CI_USE_BPF != CI_BPF_MODE_DISABLED
-#if CI_USE_BPF == CI_BPF_MODE_COMPAT
-  /* We must have come here from a userspace poll, so we checked for a
-   * userspace reload but we haven't yet checked for a kernelspace reload. */
-  check_reload_xdp_config(ni, intf_i);
-#endif
-
-  if( ! is_xdp_kernel_only(ni, intf_i) )
+#if CI_CFG_WANT_BPF_NATIVE && CI_HAVE_BPF_NATIVE
+  if( NI_OPTS(ni).xdp_mode == 0 )
     return n_evs;
 
   {
@@ -1580,9 +1356,13 @@ int ci_netif_evq_poll(ci_netif* ni, int intf_i)
         pkt->pay_len = len - evq->rx_prefix_len;
       oo_offbuf_init(&pkt->buf, PKT_START(pkt), pkt->pay_len);
       ci_parse_rx_vlan(pkt);
-      if( ! xdp_check_pkt(ni, intf_i, pkt) )
+      if( !efab_tcp_helper_xdp_rx_pkt(netif2tcp_helper_resource(ni), intf_i, pkt) )
         pkt->flags |= CI_PKT_FLAG_XDP_DROP; /* schedule drop */
-      pkt->pkt_eth_payload_off = 0xff; /* hack: fixup */
+      /* We called ci_parse_rx_vlan() above, which initialised
+       * pkt_eth_payload_off.  However, the main RX loop will call that
+       * function again, and it asserts at entry that the field is
+       * uninitialised, so we reset it here. */
+      CI_DEBUG(pkt->pkt_eth_payload_off = 0xff);
     }
   }
 
@@ -1591,21 +1371,51 @@ int ci_netif_evq_poll(ci_netif* ni, int intf_i)
 }
 #endif
 
+#if defined(__KERNEL__) && CI_CFG_WANT_BPF_NATIVE
+#if CI_HAVE_BPF_NATIVE
+ci_inline int oo_xdp_check_pkt(ci_netif* ni, int intf_i, ci_ip_pkt_fmt** pkt)
+{
+  if( NI_OPTS(ni).xdp_mode != 0 &&
+      ! efab_tcp_helper_xdp_rx_pkt(netif2tcp_helper_resource(ni), intf_i, *pkt) ) {
+    /* just drop */
+    (*pkt)->flags &= ~CI_PKT_FLAG_XDP_DROP;
+    ci_netif_pkt_release_rx_1ref(ni, *pkt);
+    *pkt = NULL;
+    return 0;
+  }
+  return 1;
+}
+#define oo_xdp_check_pkt oo_xdp_check_pkt
+#endif
+#endif
+
+#ifndef oo_xdp_check_pkt
+#if ! defined(__KERNEL__) && CI_CFG_WANT_BPF_NATIVE
+ci_inline int oo_xdp_check_pkt(ci_netif* ni, int intf_i, ci_ip_pkt_fmt** pkt)
+{
+  if( NI_OPTS(ni).xdp_mode != 0 &&
+      ((*pkt)->flags & CI_PKT_FLAG_XDP_DROP) ) {
+    /* just drop */
+    (*pkt)->flags &= ~CI_PKT_FLAG_XDP_DROP;
+    ci_netif_pkt_release_rx_1ref(ni, *pkt);
+    *pkt = NULL;
+    return 0;
+  }
+  return 1;
+}
+#else
+ci_inline int oo_xdp_check_pkt(ci_netif* ni, int intf_i, ci_ip_pkt_fmt** pkt)
+{
+  return 1;
+}
+#endif
+#endif
+
 
 ci_inline void __handle_rx_pkt(ci_netif* ni, struct ci_netif_poll_state* ps,
                               int intf_i, ci_ip_pkt_fmt** pkt)
 {
-  if( *pkt != NULL ) {
-#if CI_USE_BPF != CI_BPF_MODE_DISABLED
-    if( ! xdp_check_pkt(ni, intf_i, *pkt) ) {
-      /* just drop */
-      (*pkt)->flags &= ~CI_PKT_FLAG_XDP_DROP;
-      ci_netif_pkt_release_rx_1ref(ni, *pkt);
-      *pkt = NULL;
-      return;
-    }
-#endif
-
+  if( *pkt != NULL && oo_xdp_check_pkt(ni, intf_i, pkt) ) {
     ci_parse_rx_vlan(*pkt);
     handle_rx_pkt(ni, ps, *pkt);
   }
@@ -1629,10 +1439,6 @@ static int ci_netif_poll_evq(ci_netif* ni, struct ci_netif_poll_state* ps,
   s.frag_pkt = NULL;
   s.frag_bytes = 0;  /*??*/
 
-#if CI_USE_BPF == CI_BPF_MODE_COMPAT
-  check_reload_xdp_config(ni, intf_i);
-#endif
-
   if( OO_PP_NOT_NULL(ni->state->nic[intf_i].rx_frags) ) {
     pkt = PKT_CHK(ni, ni->state->nic[intf_i].rx_frags);
     ni->state->nic[intf_i].rx_frags = OO_PP_NULL;
@@ -1649,14 +1455,6 @@ static int ci_netif_poll_evq(ci_netif* ni, struct ci_netif_poll_state* ps,
     goto have_events;
 
   do {
-    /* The model for ensuring we run each packet through XDP exactly once is
-     * tricksy. If this function is running in kernelspace then everything's
-     * simple: the execution happens in __handle_rx_pkt and it's all fine.
-     * Likewise if poll_in_kernel is off then exactly the same happens in
-     * userspace. If poll_in_kernel is on then we'll execute XDP inside
-     * ci_netif_evq_poll in kernelspace but not in __handle_rx_pkt when we get
-     * back to userspace because there will be no programme because
-     * reload_xdp_config() won't have populated it (see comment therein) */
 #ifndef __KERNEL__
     if( poll_in_kernel ) {
       n_evs = 0;
@@ -2028,7 +1826,10 @@ static void ci_netif_loopback_pkts_send(ci_netif* ni)
 
     oo_offbuf_init(&pkt->buf, PKT_START(pkt), pkt->buf_len);
     pkt->intf_i = OO_INTF_I_LOOPBACK;
+    ci_assert_nflags(pkt->flags, CI_PKT_FLAG_RX);
     pkt->flags &= CI_PKT_FLAG_NONB_POOL;
+    pkt->flags |= CI_PKT_FLAG_RX;
+    ++ni->state->n_rx_pkts;
     pkt->tstamp_frc = IPTIMER_STATE(ni)->frc;
     if( oo_tcpdump_check(ni, pkt, OO_INTF_I_LOOPBACK) )
       oo_tcpdump_dump_pkt(ni, pkt);

@@ -138,21 +138,6 @@ endif
 _BUILDFLAG:=$(BUILDFLAG)
 
 ######################################################################
-# BUILD TREE local build sanity check
-ifeq ($(REMOTEBUILDFLAG),1)
-buildhost=$(shell uname -n)
-endif
-
-ifeq ($(BUILDFLAG)$(DESTFLAG),01)
-
-buildhost=$(shell uname -n)
-ifneq ($(BUILDHOST),$(buildhost))
-$(error "Cannot do a local build for host $(BUILDHOST). You are on $(buildhost)" )
-endif
-
-endif
-
-######################################################################
 # Function to convert cygwin to dos name
 ifdef MMAKE_USE_CYGPATH
 TODOSNAME=$(if $(filter-out .,$(1)),$(shell cygpath -w $(1)),$(1))

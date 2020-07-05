@@ -470,8 +470,18 @@ static int efrm_netdev_event(struct notifier_block *this,
 		if (dl_dev) {
 			nic = dl_dev->priv;
 			efrm_filter_rename(nic, net_dev);
+			efrm_nic_rename(nic, net_dev);
 		}
 	}
+#if CI_CFG_WANT_BPF_NATIVE && CI_HAVE_BPF_NATIVE
+	if (event == NETDEV_CHANGE) {
+		dl_dev = efx_dl_dev_from_netdev(net_dev, &efrm_dl_driver);
+		if (dl_dev) {
+			nic = dl_dev->priv;
+			efrm_nic_xdp_change(nic);
+		}
+	}
+#endif
 
 	return NOTIFY_DONE;
 }

@@ -26,6 +26,18 @@ pd_rm_alloc(ci_resource_alloc_t* alloc_, ci_resource_table_t* priv_opt,
     goto out;
   }
 
+  if (!efrm_client_accel_allowed(client)) {
+    /* (optionally) allow CAP_NET_ADMIN to bypass the blacklist, so that the
+     * cplane can interrogate all ports */
+    if (!(alloc->in_flags & EFCH_PD_FLAG_IGNORE_BLACKLIST &&
+          capable(CAP_NET_ADMIN))) {
+      EFCH_TRACE("%s: ERROR: ef_vi administratively disabled on ifindex=%d",
+                  __FUNCTION__, alloc->in_ifindex);
+      rc = -EPERM;
+      goto out;
+    }
+  }
+
   nic = efrm_client_get_nic(client);
   if ((alloc->in_flags & EFCH_PD_FLAG_RX_PACKED_STREAM) &&
       !(nic->flags & NIC_FLAG_PACKED_STREAM)) {

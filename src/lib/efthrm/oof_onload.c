@@ -4,6 +4,7 @@
 
 #include <onload/tcp_driver.h>
 #include <onload/oof_onload.h>
+#include <onload/oof_nat.h>
 
 #include "oof_onload_types.h"
 #include "oo_hw_filter.h"
@@ -127,6 +128,70 @@ void oof_onload_hwport_up_down(efab_tcp_driver_t* drv, int hwport, int up,
 }
 
 
+int oof_onload_dnat_add(efab_tcp_driver_t* drv, const ci_addr_t orig_addr,
+                        ci_uint16 orig_port, const ci_addr_t xlated_addr,
+                        ci_uint16 xlated_port)
+{
+  struct oo_filter_ns* fns;
+  int rc, af;
+
+  rc = oof_nat_table_add(drv->filter_ns_manager->ofnm_nat_table, orig_addr,
+                         orig_port, xlated_addr, xlated_port);
+  if( rc != 0)
+    return rc;
+
+  af = CI_IS_ADDR_IP6(xlated_addr) ? AF_INET6 : AF_INET;
+  mutex_lock(&drv->filter_ns_manager->ofnm_lock);
+  CI_DLLIST_FOR_EACH2(struct oo_filter_ns, fns, ofn_ofnm_link,
+                      &drv->filter_ns_manager->ofnm_ns_list) {
+    rc = oof_manager_dnat_add(fns->ofn_filter_manager, af, IPPROTO_TCP,
+                              orig_addr, orig_port,
+                              xlated_addr, xlated_port);
+    if( rc != 0 )
+      break;
+  }
+  mutex_unlock(&drv->filter_ns_manager->ofnm_lock);
+
+  if( rc != 0 )
+    oof_onload_dnat_del(drv, orig_addr, orig_port);
+
+  return rc;
+}
+
+
+void oof_onload_dnat_del(efab_tcp_driver_t* drv, const ci_addr_t orig_addr,
+                         ci_uint16 orig_port)
+{
+  struct oo_filter_ns* fns;
+
+  oof_nat_table_del(drv->filter_ns_manager->ofnm_nat_table, orig_addr,
+                    orig_port);
+
+  mutex_lock(&drv->filter_ns_manager->ofnm_lock);
+  CI_DLLIST_FOR_EACH2(struct oo_filter_ns, fns, ofn_ofnm_link,
+                      &drv->filter_ns_manager->ofnm_ns_list) {
+    oof_manager_dnat_del(fns->ofn_filter_manager, IPPROTO_TCP,
+                         orig_addr, orig_port);
+  }
+  mutex_unlock(&drv->filter_ns_manager->ofnm_lock);
+}
+
+
+void oof_onload_dnat_reset(efab_tcp_driver_t* drv)
+{
+  struct oo_filter_ns* fns;
+
+  oof_nat_table_reset(drv->filter_ns_manager->ofnm_nat_table);
+
+  mutex_lock(&drv->filter_ns_manager->ofnm_lock);
+  CI_DLLIST_FOR_EACH2(struct oo_filter_ns, fns, ofn_ofnm_link,
+                      &drv->filter_ns_manager->ofnm_ns_list) {
+    oof_manager_dnat_reset(fns->ofn_filter_manager, IPPROTO_TCP);
+  }
+  mutex_unlock(&drv->filter_ns_manager->ofnm_lock);
+}
+
+
 static void oof_do_deferred_work_fn(struct work_struct *data)
 {
   struct oo_filter_ns* fns = container_of(data, struct oo_filter_ns,
@@ -150,6 +215,7 @@ void oof_onload_manager_dump(struct efab_tcp_driver_s* drv,
     fns = CI_CONTAINER(struct oo_filter_ns, ofn_ofnm_link, link);
     oof_manager_dump(fns->ofn_filter_manager, log, log_arg);
   }
+  oof_nat_table_dump(drv->filter_ns_manager->ofnm_nat_table, log, log_arg);
   mutex_unlock(&drv->filter_ns_manager->ofnm_lock);
 }
 
@@ -283,15 +349,18 @@ static void oo_filter_ns_dtor(efab_tcp_driver_t* drv,
 
 int oo_filter_ns_manager_ctor(efab_tcp_driver_t* drv)
 {
-  int rc = 0;
+  /* This is the size of the NAT table, which is a hash table with chaining.
+   * In practice it's used for Kubernetes services with exactly one local
+   * pod, so 1024 is more than large enough. */
+  const ci_uint32 NAT_TABLE_SIZE = 1024;
+
+  int rc = -ENOMEM;
   int i;
   ci_assert(!drv->filter_ns_manager);
   drv->filter_ns_manager = CI_ALLOC_OBJ(struct oo_filter_ns_manager);
 
-  if( !drv->filter_ns_manager ) {
-    rc = -ENOMEM;
-    goto out;
-  }
+  if( !drv->filter_ns_manager )
+    goto fail1;
 
   CI_ZERO(drv->filter_ns_manager);
 
@@ -308,7 +377,15 @@ int oo_filter_ns_manager_ctor(efab_tcp_driver_t* drv)
     memset(otp->otf_filter_refs, 0, sizeof(otp->otf_filter_refs));
   }
 
- out:
+  drv->filter_ns_manager->ofnm_nat_table = oof_nat_table_alloc(NAT_TABLE_SIZE);
+  if( drv->filter_ns_manager->ofnm_nat_table == NULL )
+    goto fail2;
+
+  return 0;
+
+ fail2:
+  CI_FREE_OBJ(drv->filter_ns_manager);
+ fail1:
   return rc;
 }
 
@@ -320,6 +397,7 @@ void oo_filter_ns_manager_dtor(efab_tcp_driver_t* drv)
 
   ci_assert(ci_dllist_is_empty(&drv->filter_ns_manager->ofnm_ns_list));
 
+  oof_nat_table_free(drv->filter_ns_manager->ofnm_nat_table);
   mutex_destroy(&drv->filter_ns_manager->ofnm_tproxy_lock);
   mutex_destroy(&drv->filter_ns_manager->ofnm_lock);
   CI_FREE_OBJ(drv->filter_ns_manager);
@@ -510,3 +588,12 @@ int oo_filter_ns_remove_global_tproxy_filter(struct oo_filter_ns* fns,
 
   return 0;
 }
+
+
+struct oof_nat_table* oof_cb_nat_table(void* owner_private)
+{
+  struct oo_filter_ns* fns = owner_private;
+  struct oo_filter_ns_manager* ofnm = fns->ofn_ns_manager;
+  return ofnm->ofnm_nat_table;
+}
+

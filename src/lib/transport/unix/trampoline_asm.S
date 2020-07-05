@@ -49,18 +49,22 @@ ci_trampoline_handler_entry:
         push    %rdx
         push    %r8
         push    %r9
+#if __GNUC__ < 6
         /* Modern x86_64 ABI requires that stack pointer be 16-byte aligned
          * on function entry. Not doing so may result in SSE-related memory
          * traps (see bug 84269).
          *
-         * For gcc 6+ onwards this code may be replaced by force_align_arg_pointer
+         * For gcc 6+ onwards this code is replaced by force_align_arg_pointer
          * attribute for ci_trampoline_handler.
          */
         push    %rbp
         movq    %rsp, %rbp
         and     $~0x0f, %rsp
+#endif
 	call	ci_trampoline_handler@PLT
+#if __GNUC__ < 6
         leave
+#endif
         pop     %r9
         pop     %r8
         pop     %rdx

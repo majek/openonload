@@ -119,6 +119,9 @@ CI_MK_DECL(int           , ppoll      , (struct pollfd *, nfds_t, const struct t
 #if CI_LIBC_HAS___poll_chk
 CI_MK_DECL(int           , __poll_chk , (struct pollfd *, nfds_t, int, size_t));
 #endif
+#if CI_LIBC_HAS___ppoll_chk
+CI_MK_DECL(int           , __ppoll_chk , (struct pollfd *, nfds_t, const struct timespec *, const sigset_t *, size_t));
+#endif
 CI_MK_DECL(int           , select     , (int, fd_set*, fd_set*, fd_set*, struct timeval*));
 CI_MK_DECL(int           , pselect    , (int, fd_set*, fd_set*, fd_set*, const struct timespec*, const sigset_t *));
 #if !defined(OO_INTERCEPT)
@@ -138,6 +141,9 @@ CI_MK_DECL(int           , open64     , (const char*, int, ...));
 CI_MK_DECL(int           , creat64    , (const char*, mode_t));
 CI_MK_DECL(int           , setrlimit64, (__rlimit_resource_t, const struct rlimit64 *));
 CI_MK_DECL(int           , __fxstat64 , (int, int, struct stat64 *));
+#  if CI_LIBC_HAS_fcntl64
+CI_MK_DECL(int           , fcntl64    , (int, int, ...));
+#  endif
 # endif
 #endif
 

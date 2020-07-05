@@ -14,28 +14,25 @@ IMPORT		:= ../linux_net/driverlink_api.h
 # linux kbuild support
 #
 
-all: $(BUILDPATH)/driver/linux_affinity/Module.symvers $(BUILDPATH)/driver/linux_affinity/autocompat.h
-	$(MMAKE_KBUILD_PRE_COMMAND)
+KBUILD_EXTRA_SYMBOLS := $(BUILDPATH)/driver/linux_net/Module.symvers
+
+all: $(KBUILD_EXTRA_SYMBOLS) $(BUILDPATH)/driver/linux_affinity/autocompat.h
 	$(MAKE) $(MMAKE_KBUILD_ARGS) M=$(CURDIR)
-	$(MMAKE_KBUILD_POST_COMMAND)
 	cp -f sfc_affinity.ko $(DESTPATH)/driver/linux
 ifndef CI_FROM_DRIVER
 	$(warning "Due to build order sfc.ko may be out-of-date. Please build in driver/linux_net")
 endif
 
-$(BUILDPATH)/driver/linux_affinity/autocompat.h: kernel_compat.sh
+$(BUILDPATH)/driver/linux_affinity/autocompat.h: kernel_compat.sh ../linux_net/kernel_compat_funcs.sh
 	./kernel_compat.sh -k $(KPATH) $(if $(filter 1,$(V)),-v,-q) >$@
-
-$(BUILDPATH)/driver/linux_affinity/Module.symvers: \
-		$(BUILDPATH)/driver/linux_net/Module.symvers
-	cp $< $@
 
 clean:
 	@$(MakeClean)
-	rm -rf *.ko Module.symvers .tmp_versions .*.cmd
+	rm -rf *.ko Module.symvers .*.cmd
 
 
 ifdef MMAKE_IN_KBUILD
+
 dummy := $(shell echo>&2 "MMAKE_IN_KBUILD")
 
 obj-m := $(SFCAFF_TARGET) 

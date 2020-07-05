@@ -513,6 +513,11 @@ static int efx_init_debugfs_tx_queue(struct efx_tx_queue *tx_queue)
 		goto err_len;
 	tx_queue->debug_dir = debugfs_create_dir(name,
 						 tx_queue->efx->debug_dir);
+	if (IS_ERR(tx_queue->debug_dir)) {
+		rc = PTR_ERR(tx_queue->debug_dir);
+		tx_queue->debug_dir = NULL;
+		goto err;
+	}
 	if (!tx_queue->debug_dir)
 		goto err_mem;
 
@@ -611,6 +616,11 @@ static int efx_init_debugfs_rx_queue(struct efx_rx_queue *rx_queue)
 		goto err_len;
 	rx_queue->debug_dir = debugfs_create_dir(name,
 						 rx_queue->efx->debug_dir);
+	if (IS_ERR(rx_queue->debug_dir)) {
+		rc = PTR_ERR(rx_queue->debug_dir);
+		rx_queue->debug_dir = NULL;
+		goto err;
+	}
 	if (!rx_queue->debug_dir)
 		goto err_mem;
 
@@ -716,6 +726,11 @@ static int efx_init_debugfs_channel(struct efx_channel *channel)
 	    >= sizeof(name))
 		goto err_len;
 	channel->debug_dir = debugfs_create_dir(name, channel->efx->debug_dir);
+	if (IS_ERR(channel->debug_dir)) {
+		rc = PTR_ERR(channel->debug_dir);
+		channel->debug_dir = NULL;
+		goto err;
+	}
 	if (!channel->debug_dir)
 		goto err_mem;
 
@@ -898,16 +913,31 @@ int efx_init_debugfs_nic(struct efx_nic *efx)
 	/* Create directory */
 	efx->debug_dir = debugfs_create_dir(pci_name(efx->pci_dev),
 					    efx_debug_cards);
+	if (IS_ERR(efx->debug_dir)) {
+		rc = PTR_ERR(efx->debug_dir);
+		efx->debug_dir = NULL;
+		goto err;
+	}
 	if (!efx->debug_dir)
 		goto err_mem;
 
 	/* Create errors directory */
 	efx->errors.debug_dir = debugfs_create_dir("errors", efx->debug_dir);
+	if (IS_ERR(efx->errors.debug_dir)) {
+		rc = PTR_ERR(efx->errors.debug_dir);
+		efx->errors.debug_dir = NULL;
+		goto err;
+	}
 	if (!efx->errors.debug_dir)
 		goto err_mem;
 
 	/* Create port directory */
 	efx->debug_port_dir = debugfs_create_dir("port0", efx->debug_dir);
+	if (IS_ERR(efx->debug_port_dir)) {
+		rc = PTR_ERR(efx->debug_port_dir);
+		efx->debug_port_dir = NULL;
+		goto err;
+	}
 	if (!efx->debug_port_dir)
 		goto err_mem;
 

@@ -46,6 +46,9 @@ struct tcp_helper_nic {
   unsigned             thn_ctpio_io_mmap_bytes;
   void*                thn_ctpio_io_mmap;
 #endif
+#if CI_CFG_WANT_BPF_NATIVE && CI_HAVE_BPF_NATIVE
+  struct bpf_prog*     thn_xdp_prog;
+#endif
 };
 
 
@@ -176,6 +179,9 @@ typedef struct tcp_helper_resource_s {
 /* 0x40 is available for reuse; was OO_TRUSTED_LOCK_DONT_BLOCK_SHARED. */
 #define OO_TRUSTED_LOCK_SWF_UPDATE        0x80
 #define OO_TRUSTED_LOCK_PURGE_TXQS        0x100
+#if CI_CFG_WANT_BPF_NATIVE && CI_HAVE_BPF_NATIVE
+#define OO_TRUSTED_LOCK_XDP_CHANGE        0x200
+#endif
   volatile unsigned      trusted_lock;
 
   /*! Link for global list of stacks. */

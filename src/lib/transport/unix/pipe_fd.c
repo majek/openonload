@@ -98,7 +98,6 @@ int citp_splice_pipe_pipe(citp_pipe_fdi* in_pipe_fdi,
                          (flags & SPLICE_F_NONBLOCK) ? MSG_DONTWAIT : 0);
 }
 
-extern int onload_ioctl(int, unsigned long, ...);
 
 /* Copies data from an alien descriptor to pipe
  *
@@ -164,7 +163,7 @@ int citp_pipe_splice_write(citp_fdinfo* fdi, int alien_fd, loff_t* alien_off,
     else {
       /* alien_fd could block.  Do it before allocating pipe buffers. */
       citp_exit_lib_if(lib_context, TRUE);
-      poll(&pfd, 1, -1);
+      onload_poll(&pfd, 1, -1);
       citp_reenter_lib(lib_context);
     }
   }
@@ -237,7 +236,7 @@ int citp_pipe_splice_write(citp_fdinfo* fdi, int alien_fd, loff_t* alien_off,
 
     citp_exit_lib_if(lib_context, TRUE);
     /* Note: the following call might be non-blocking as well as blocking */
-    rc = readv(alien_fd, iov, count);
+    rc = onload_readv(alien_fd, iov, count);
     citp_reenter_lib(lib_context);
 
     if( rc > 0 ) {
@@ -291,7 +290,7 @@ static int oo_splice_read_cb(void* context, struct iovec* iov,
   struct oo_splice_read_context* ctx = context;
   int rc;
   citp_exit_lib_if(ctx->lib_context, TRUE);
-  rc = writev(ctx->alien_fd, iov, iov_num);
+  rc = onload_writev(ctx->alien_fd, iov, iov_num);
   citp_enter_lib(ctx->lib_context);
   return rc;
 }

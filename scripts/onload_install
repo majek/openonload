@@ -242,11 +242,6 @@ install_userland() {
     u64="gnu_${userarch}"
   fi
   want_zf=""
-  if [ "cloud" = "${build_profile}" ] ; then
-    want_bpf=1
-  else
-    want_bpf=""
-  fi
 
   if [ -d "$u64" ]; then
     # Tolerate lack of 32-bit transport library on 64-bit systems.
@@ -282,11 +277,6 @@ install_userland() {
     install_slib "$u64"/lib/ciul/libciul1.a "$i_lib64"
     install_slib32 "$u32"/lib/ciul/libciul1.a "$i_lib32"
     install_x "$u64/tools/ip/onload_stackdump" "$i_usrbin/onload_stackdump"
-    if [ -n "$want_bpf" ] ; then
-      install_x "$u64/tools/onload_bpftool/onload_bpftool" "$i_usrbin/onload_bpftool"
-      install_slib "$u64"/lib/bpf/bpfintf/libbpfintf0.a "$i_lib64"
-      install_dlib "$u64"/lib/bpf/bpfintf/oobpfintf0.so "$i_lib64"
-    fi
     install_x "$u64/tools/ip/onload_tcpdump.bin" "$i_usrbin/onload_tcpdump.bin"
     install_x "$u64/tools/ip/onload_fuser" "$i_usrbin/onload_fuser"
     install_x "$u64/tools/cplane/$debug_dir/onload_cp_server" \
@@ -363,10 +353,6 @@ install_userland() {
   try $do cd "$PYTMPDIR/scripts"
   python_manifest=$(mktemp)
   [ -f setup.py ] || try $do cp "$TOP/scripts/onload_misc/setup.py" .
-  if [ -n "$want_bpf" ] ; then
-    try $do cp $TOP/src/lib/bpf/bpfintf/oobpfll.py .
-    try $do cp $TOP/src/lib/bpf/bpfintf/oobpf.py .
-  fi
   if [ "$i_usr" = "/usr" ]; then
     # Debian and Ubuntu mess up if --prefix=/usr is set.
     $do python2 setup.py install --record=$python_manifest
@@ -389,10 +375,6 @@ install_userland() {
   install_f onload/extensions.h "$i_include/onload/extensions.h"
   install_f onload/extensions_timestamping.h "$i_include/onload/extensions_timestamping.h"
   install_f onload/extensions_zc.h "$i_include/onload/extensions_zc.h"
-  if [ -n "$want_bpf" ] ; then
-    install_f onload/oobpf.h "$i_include/onload/oobpf.h"
-    install_f onload/bpf_api.h "$i_include/onload/bpf_api.h"
-  fi
 
   if [ -n "$want_zf" ]; then
     # Install TCP direct public headers
@@ -409,12 +391,6 @@ install_userland() {
     while read -r f; do
       install_f "$f" "$i_include/$f"
     done;
-
-  # Install activation file.  N.B. We don't use install_dir to create the
-  # directory, as that would cause the entire directory to be removed on
-  # uninstallation.  install_f will create it for us if necessary.
-  try $docd "$TOP/scripts/onload_misc"
-  install_f "appflex_activation_file" "$i_activationdir/appflex_activation_file"
 }
 
 
@@ -531,7 +507,7 @@ install_modules_load_d() {
   else
     # For RHEL <= 6 (the only non-systemd platform we support)
     try mkdir -p "$i_etc/sysconfig/modules"
-    install_f onload_misc/sysconfig_onload_module "$i_etc/sysconfig/modules/onload.module"
+    install_x onload_misc/sysconfig_onload_modules "$i_etc/sysconfig/modules/onload.modules"
   fi
 }
 
@@ -660,7 +636,6 @@ calculate_install_paths() {
   i_etc="$i_prefix$sysconfdir"
   i_include="$i_prefix$includedir"
   i_kernelmodules="$i_prefix$kernelmodulesdir/$KVER/extra"
-  i_activationdir="$i_etc/solarflare/activation.d"
 
   # look for biarch/multiarch library directories
   if [ -z "$lib32dir" ]; then

@@ -2055,7 +2055,11 @@ static int efx_ef10_dimension_resources(struct efx_nic *efx)
 	}
 
 	/* Extend the original UC mapping of the memory BAR */
-	membase = ioremap_nocache(efx->membase_phys, uc_mem_map_size);
+#if defined(EFX_USE_KCOMPAT)
+	membase = efx_ioremap(efx->membase_phys, uc_mem_map_size);
+#else
+	membase = ioremap(efx->membase_phys, uc_mem_map_size);
+#endif
 	if (!membase) {
 		netif_err(efx, probe, efx->net_dev,
 			  "could not extend memory BAR to %x\n",
@@ -3215,7 +3219,7 @@ static void efx_ef10_mcdi_reboot_detected(struct efx_nic *efx)
 {
 	struct efx_ef10_nic_data *nic_data = efx->nic_data;
 
-	efx->last_reset = jiffies;
+	efx->current_reset = jiffies;
 
 	/* All our allocations have been reset */
 	efx_ef10_reset_mc_allocations(efx);
@@ -5870,11 +5874,15 @@ static int efx_ef10_filter_push(struct efx_nic *efx,
 {
 	MCDI_DECLARE_BUF(inbuf, MC_CMD_FILTER_OP_EXT_IN_LEN);
 	MCDI_DECLARE_BUF(outbuf, MC_CMD_FILTER_OP_EXT_OUT_LEN);
+	size_t outlen;
 	int rc;
 
 	efx_ef10_filter_push_prep(efx, spec, inbuf, *handle, ctx, vpx, replacing);
-	rc = efx_mcdi_rpc(efx, MC_CMD_FILTER_OP, inbuf, sizeof(inbuf),
-			  outbuf, sizeof(outbuf), NULL);
+	rc = efx_mcdi_rpc_quiet(efx, MC_CMD_FILTER_OP, inbuf, sizeof(inbuf),
+				outbuf, sizeof(outbuf), &outlen);
+	if (rc && spec->priority != EFX_FILTER_PRI_HINT)
+		efx_mcdi_display_error(efx, MC_CMD_FILTER_OP, sizeof(inbuf),
+				       outbuf, outlen, rc);
 	if (rc == 0)
 		*handle = MCDI_QWORD(outbuf, FILTER_OP_OUT_HANDLE);
 	if (rc == -ENOSPC)
@@ -6041,23 +6049,6 @@ static s32 efx_ef10_filter_insert_locked(struct efx_nic *efx,
 	if (is_mc_recip)
 		bitmap_zero(mc_rem_map, EFX_EF10_FILTER_SEARCH_LIMIT);
 
-	if (spec->flags & EFX_FILTER_FLAG_VPORT_ID) {
-		mutex_lock(&efx->vport_lock);
-		vport_locked = true;
-		if (spec->vport_id == 0)
-			vpx = &efx->vport;
-		else
-			vpx = efx_find_vport_entry(efx, spec->vport_id);
-		if (!vpx) {
-			rc = -ENOENT;
-			goto out_unlock;
-		}
-		if (vpx->vport_id == EVB_PORT_ID_NULL) {
-			rc = -EOPNOTSUPP;
-			goto out_unlock;
-		}
-	}
-
 	if (spec->flags & EFX_FILTER_FLAG_RX_RSS) {
 		mutex_lock(&efx->rss_lock);
 		rss_locked = true;
@@ -6070,6 +6061,23 @@ static s32 efx_ef10_filter_insert_locked(struct efx_nic *efx,
 			goto out_unlock;
 		}
 		if (ctx->context_id == EFX_EF10_RSS_CONTEXT_INVALID) {
+			rc = -EOPNOTSUPP;
+			goto out_unlock;
+		}
+	}
+
+	if (spec->flags & EFX_FILTER_FLAG_VPORT_ID) {
+		mutex_lock(&efx->vport_lock);
+		vport_locked = true;
+		if (spec->vport_id == 0)
+			vpx = &efx->vport;
+		else
+			vpx = efx_find_vport_entry(efx, spec->vport_id);
+		if (!vpx) {
+			rc = -ENOENT;
+			goto out_unlock;
+		}
+		if (vpx->vport_id == EVB_PORT_ID_NULL) {
 			rc = -EOPNOTSUPP;
 			goto out_unlock;
 		}
@@ -8643,6 +8651,11 @@ again:
 	nic_data->udp_tunnels_busy = true;
 	spin_unlock_bh(&nic_data->udp_tunnels_lock);
 
+	/* Adding/removing a UDP tunnel can cause an MC reboot. We must
+	 * prevent causing too many reboots in a second.
+	 */
+	efx->reset_count = 0;
+
 	BUILD_BUG_ON((MC_CMD_SET_TUNNEL_ENCAP_UDP_PORTS_IN_NUM_ENTRIES_OFST -
 		      MC_CMD_SET_TUNNEL_ENCAP_UDP_PORTS_IN_FLAGS_OFST) * 8 !=
 		     EFX_WORD_1_LBN);
@@ -8776,6 +8789,7 @@ static void efx_ef10_udp_tnl_add_port(struct efx_nic *efx,
 	struct efx_udp_tunnel *match;
 	char typebuf[8];
 	size_t i;
+	bool possible_reboot = false;
 
 	if (!efx_ef10_has_cap(nic_data->datapath_caps, VXLAN_NVGRE))
 		return;
@@ -8836,6 +8850,7 @@ static void efx_ef10_udp_tnl_add_port(struct efx_nic *efx,
 			match->count = 1;
 			/* schedule an update */
 			efx_ef10_udp_tnl_push_ports_async(efx);
+			possible_reboot = true;
 			goto out_unlock;
 		}
 	}
@@ -8846,6 +8861,8 @@ static void efx_ef10_udp_tnl_add_port(struct efx_nic *efx,
 
 out_unlock:
 	spin_unlock_bh(&nic_data->udp_tunnels_lock);
+	if (possible_reboot)	/* Wait for a reboot to complete */
+		msleep(200);
 	return;
 }
 
@@ -8875,6 +8892,7 @@ static void efx_ef10_udp_tnl_del_port(struct efx_nic *efx,
 	struct efx_ef10_nic_data *nic_data = efx->nic_data;
 	struct efx_udp_tunnel *match;
 	char typebuf[8];
+	bool possible_reboot = false;
 
 	if (!efx_ef10_has_cap(nic_data->datapath_caps, VXLAN_NVGRE))
 		return;
@@ -8909,6 +8927,7 @@ static void efx_ef10_udp_tnl_del_port(struct efx_nic *efx,
 			match->removing = true;
 			/* schedule an update */
 			efx_ef10_udp_tnl_push_ports_async(efx);
+			possible_reboot = true;
 			goto out_unlock;
 		}
 		efx_get_udp_tunnel_type_name(match->type,
@@ -8925,6 +8944,8 @@ static void efx_ef10_udp_tnl_del_port(struct efx_nic *efx,
 
 out_unlock:
 	spin_unlock_bh(&nic_data->udp_tunnels_lock);
+	if (possible_reboot)	/* Wait for a reboot to complete */
+		msleep(200);
 	return;
 }
 

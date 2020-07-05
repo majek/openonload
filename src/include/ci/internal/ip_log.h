@@ -200,7 +200,7 @@
  */
 
 #define CI_TCP_SOCKET_FLAGS_FMT                                        \
-  "%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s"
+  "%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s"
 #define CI_TCP_SOCKET_FLAGS_PRI_ARG(ts)                                \
   ((ts)->tcpflags & CI_TCPT_FLAG_TSO    ? "TSO " :""),                 \
   ((ts)->tcpflags & CI_TCPT_FLAG_WSCL   ? "WSCL ":""),                 \
@@ -220,7 +220,6 @@
   ((ts)->tcpflags & CI_TCPT_FLAG_ACTIVE_WILD      ? "ACTIVE_WILD ":""), \
   ((ts)->tcpflags & CI_TCPT_FLAG_MSG_WARM         ? "MSG_WARM ":""),    \
   ((ts)->tcpflags & CI_TCPT_FLAG_LOOP_FAKE        ? "LOOP_FAKE ":""),   \
-  ((ts)->tcpflags & CI_TCPT_FLAG_TOA              ? "TOA ":""),         \
   ((ts)->tcpflags & CI_TCPT_FLAG_TAIL_DROP_TIMING ? "TLP_TIMER ":""),   \
   ((ts)->tcpflags & CI_TCPT_FLAG_TAIL_DROP_MARKED ? "TLP_SENT ":""),    \
   ((ts)->tcpflags & CI_TCPT_FLAG_FIN_PENDING      ? "FIN_PENDING ":"")

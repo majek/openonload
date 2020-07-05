@@ -63,6 +63,10 @@ extern void tcp_helper_suspend_interface(ci_netif* ni, int intf_i);
 
 extern void tcp_helper_reset_stack(ci_netif* ni, int intf_i);
 
+#if CI_CFG_WANT_BPF_NATIVE && CI_HAVE_BPF_NATIVE
+extern void tcp_helper_xdp_change(ci_netif* ni, int intf_i);
+#endif
+
 extern void tcp_helper_flush_resets(ci_netif* ni);
 
 extern int efab_tcp_helper_rm_mmap(tcp_helper_resource_t*,
@@ -265,7 +269,6 @@ tcp_helper_cluster_from_cluster(tcp_helper_resource_t* thr);
 
 extern int
 tcp_helper_cluster_dump(tcp_helper_resource_t* thr, void* buf, int buf_len);
-
 
 
 extern void tcp_helper_pace(tcp_helper_resource_t*, int pace_val);
@@ -645,5 +648,14 @@ extern void
 tcp_helper_free_ephemeral_ports(struct efab_ephemeral_port_head* table,
                                 ci_uint32 entries);
 
+/*----------------------------------------------------------------------------
+ * eBPF/XDP
+ *---------------------------------------------------------------------------*/
+
+#if CI_CFG_WANT_BPF_NATIVE && CI_HAVE_BPF_NATIVE
+/* returns 1 iff packet is to be kept on rx path */
+extern /* bool */ int
+efab_tcp_helper_xdp_rx_pkt(tcp_helper_resource_t* trs, int intf_i, ci_ip_pkt_fmt* pkt);
+#endif
 #endif /* __CI_DRIVER_EFAB_TCP_HELPER_FNS_H__ */
 /*! \cidoxg_end */

@@ -7,6 +7,9 @@
 
 #if CI_CFG_IPV6
 
+#define TOMBSTONE  -1
+#define EMPTY      -2
+
 int ci_ip6_netif_filter_lookup(ci_netif* netif,
                                ci_addr_t laddr, unsigned lport,
                                ci_addr_t raddr, unsigned rport,
@@ -62,6 +65,129 @@ int ci_ip6_netif_filter_lookup(ci_netif* netif,
 
   return -ENOENT;
 }
+
+
+static inline unsigned laddr_xor(const void* laddr_ptr)
+{
+  ci_assert(laddr_ptr != NULL);
+  return onload_addr_xor(*(ci_addr_t*)laddr_ptr);
+}
+
+static inline unsigned raddr_xor(const void* raddr_ptr)
+{
+  return raddr_ptr == NULL ? 0 : onload_addr_xor(*(ci_addr_t*)raddr_ptr);
+}
+
+/* The following variants of the hashing functions tolerate NULL for the remote
+ * address. */
+static inline unsigned
+ip6_lookup_hash1(unsigned size_mask,
+                 const void* laddr_ptr, unsigned lport,
+                 const void* raddr_ptr, unsigned rport, unsigned protocol)
+{
+  return __onload_hash1(size_mask, laddr_xor(laddr_ptr), lport,
+                        raddr_xor(raddr_ptr), rport, protocol);
+}
+
+static inline unsigned
+ip6_lookup_hash2(const void* laddr_ptr, unsigned lport,
+                 const void* raddr_ptr, unsigned rport, unsigned protocol)
+{
+  return __onload_hash2(laddr_xor(laddr_ptr), lport,
+                        raddr_xor(raddr_ptr), rport, protocol);
+}
+
+static inline unsigned
+ip6_lookup_hash3(const void* laddr_ptr, unsigned lport,
+                 const void* raddr_ptr, unsigned rport, unsigned protocol)
+{
+  return __onload_hash3(laddr_xor(laddr_ptr), lport,
+                        raddr_xor(raddr_ptr), rport, protocol);
+}
+
+
+int
+ci_netif_filter_for_each_match_ip6(ci_netif* ni,
+                                   const ci_addr_t* laddr_ptr, unsigned lport,
+                                   /* raddr_ptr==NULL means [::] */
+                                   const ci_addr_t* raddr_ptr, unsigned rport,
+                                   unsigned protocol, int intf_i, int vlan,
+                                   int (*callback)(ci_sock_cmn*, void*),
+                                   void* callback_arg, ci_uint32* hash_out)
+{
+  ci_ip6_netif_filter_table* ip6_tbl = NULL;
+  unsigned hash1, hash2 = 0;
+  unsigned first, table_size_mask;
+
+#ifndef NDEBUG
+  ci_addr_t laddr = *((ci_addr_t*)laddr_ptr);
+  ci_addr_t raddr = raddr_ptr == NULL ? addr_any : *((ci_addr_t*)raddr_ptr);
+#endif
+
+  ip6_tbl = ni->ip6_filter_table;
+  table_size_mask = ip6_tbl->table_size_mask;
+
+  if( hash_out != NULL )
+    *hash_out = ip6_lookup_hash3(laddr_ptr, lport, raddr_ptr, rport, protocol);
+  hash1 = ip6_lookup_hash1(table_size_mask, laddr_ptr, lport, raddr_ptr, rport,
+                           protocol);
+  first = hash1;
+
+  LOG_NV(log("%s: %s " IPX_PORT_FMT "->" IPX_PORT_FMT " hash=%u:%u at=%u",
+             __FUNCTION__, CI_IP_PROTOCOL_STR(protocol),
+	     IPX_ARG(AF_IP(laddr)), (unsigned) CI_BSWAP_BE16(lport),
+	     IPX_ARG(AF_IP(raddr)), (unsigned) CI_BSWAP_BE16(rport),
+             first, ip6_lookup_hash2(laddr_ptr, lport, raddr_ptr, rport,
+                                     protocol), hash1));
+
+  while( 1 ) {
+    int id = ip6_tbl->table[hash1].id;
+    if( CI_LIKELY(id >= 0) ) {
+      int is_match = 0;
+
+      ci_sock_cmn* s = ID_TO_SOCK(ni, id);
+      if( memcmp(laddr_ptr, ip6_tbl->table[hash1].laddr,
+                 sizeof(ci_ip6_addr_t)) == 0 &&
+          lport == sock_lport_be16(s) &&
+          protocol == sock_protocol(s) &&
+          ( (raddr_ptr == NULL && !(s->s_flags & CI_SOCK_FLAG_CONNECTED)) ||
+            (raddr_ptr != NULL &&
+             memcmp(raddr_ptr, sock_ip6_raddr(s),
+                    sizeof(ci_ip6_addr_t)) == 0 &&
+             rport == sock_rport_be16(s)) )
+        )
+        is_match = 1;
+      LOG_NV(ci_log("%s match=%d: %s " IPX_PORT_FMT "->"
+                    IPX_PORT_FMT " hash=%u:%u at=%u",
+                    __FUNCTION__, is_match, CI_IP_PROTOCOL_STR(protocol),
+                    IPX_ARG(AF_IP(laddr)), (unsigned) CI_BSWAP_BE16(lport),
+                    IPX_ARG(AF_IP(raddr)), (unsigned) CI_BSWAP_BE16(rport),
+                    first, ip6_lookup_hash2(laddr_ptr, lport, raddr_ptr,
+                                            rport, protocol), hash1));
+
+      if( is_match && CI_LIKELY((s->rx_bind2dev_ifindex == CI_IFID_BAD ||
+                                 ci_sock_intf_check(ni, s, intf_i, vlan))) )
+        if( callback(s, callback_arg) != 0 )
+          return 1;
+    }
+    else if( id == EMPTY )
+      break;
+    /* We defer calculating hash2 until it's needed, just to make the fast
+    ** case that little bit faster. */
+    if( hash1 == first )
+      hash2 = ip6_lookup_hash2(laddr_ptr, lport, raddr_ptr, rport, protocol);
+    hash1 = (hash1 + hash2) & table_size_mask;
+    if( hash1 == first ) {
+      LOG_NV(ci_log(FN_FMT "ITERATE FULL " IPX_PORT_FMT "->"
+                    IPX_PORT_FMT " hash=%u:%u",
+                    FN_PRI_ARGS(ni), IPX_ARG(AF_IP(laddr)), lport,
+                    IPX_ARG(AF_IP(raddr)), rport, hash1, hash2));
+      break;
+    }
+  }
+  return 0;
+}
+
 
 int
 ci_ip6_netif_filter_insert(ci_ip6_netif_filter_table* tbl,

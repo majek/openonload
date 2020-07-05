@@ -504,6 +504,22 @@ static int citp_tcp_bind(citp_fdinfo* fdinfo, const struct sockaddr* sa,
   return rc;
 }
 
+static bool
+tcp_rc_means_handover(int rc)
+{
+  /* ENOMEM or EBUSY means we are out of some sort of resource, so hand
+   * this socket over to the OS.
+   * ENOENT comes from the filtering system when the local address is not
+   * accounted as a local one.
+   * ERFKILL means that we couldn't insert filters on any interface due to
+   * Onload iptables so traffic should go via the OS.  The case of Onload
+   * iptables preventing filter insertion on only some interfaces is already
+   * handled correctly in ci_tcp_listen(). */
+  return rc == CI_SOCKET_HANDOVER
+         || ( (rc < 0) && CITP_OPTS.no_fail &&
+              ( errno == ENOMEM || errno == EBUSY || errno == ENOBUFS ||
+                errno == ERFKILL || errno == ENOENT ) );
+}
 
 static int citp_tcp_listen(citp_fdinfo* fdinfo, int backlog)
 {
@@ -535,17 +551,8 @@ static int citp_tcp_listen(citp_fdinfo* fdinfo, int backlog)
     rc = ci_tcp_listen(&(epi->sock), fdinfo->fd, backlog);
   }
 
-  if( rc == CI_SOCKET_HANDOVER ||
-      ( (rc < 0) && CITP_OPTS.no_fail &&
-        (errno == ENOMEM || errno == EBUSY || errno == ENOBUFS ||
-         errno == ERFKILL) ) ) {
-    /* ENOMEM or EBUSY means we are out of some sort of resource, so hand
-     * this socket over to the OS.
-     * ERFKILL means that we couldn't insert filters on any interface due to
-     * Onload iptables so traffic should go via the OS.  The case of Onload
-     * iptables preventing filter insertion on only some interfaces is already
-     * handled correctly in ci_tcp_listen().
-     * We need to listen on the OS socket first (that's the very last thing
+  if( tcp_rc_means_handover(rc) ) {
+    /* We need to listen on the OS socket first (that's the very last thing
      * that ci_tcp_listen() does, so it won't have happened yet).
      */
     ci_netif_lock_fdi(epi);
@@ -1104,10 +1111,7 @@ static int citp_tcp_connect(citp_fdinfo* fdinfo,
     s = epi->sock.s;
   }
 
-  if (rc == CI_SOCKET_HANDOVER
-      || ((rc < 0) && CITP_OPTS.no_fail &&
-          (errno == ENOMEM || errno == EBUSY || errno == ENOBUFS ||
-           errno == ERFKILL))) {
+  if( tcp_rc_means_handover(rc) ) {
     /* We try to connect the OS socket if we have one, or it's valid to create
      * one.  That means non-tproxy sockets, or tproxy sockets that have not
      * been bound (ie they wouldn't have an os socket even if they weren't
@@ -1360,6 +1364,13 @@ static int citp_tcp_cache(citp_fdinfo* fdinfo)
   if( s->b.sb_aflags & (CI_SB_AFLAG_O_ASYNC | CI_SB_AFLAG_O_APPEND) ) {
     Log_EP(ci_log("FD %d not cached - invalid flags set 0x%x", fdinfo->fd,
            s->b.sb_aflags & (CI_SB_AFLAG_O_ASYNC | CI_SB_AFLAG_O_APPEND)));
+    return 0;
+  }
+
+  /* We'd need to go into the kernel to reset sigown - shouldn't cache */
+  if( s->b.sigown != 0 ) {
+    Log_EP(ci_log("FD %d not cached - owner's PID is set to %d", fdinfo->fd,
+                  s->b.sigown));
     return 0;
   }
 

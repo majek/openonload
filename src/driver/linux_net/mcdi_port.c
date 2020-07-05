@@ -606,8 +606,8 @@ static u8 mcdi_to_ethtool_media(u32 media)
 
 static u8 efx_mcdi_link_state_flags(struct efx_link_state *link_state)
 {
-	return (link_state->up ? MC_CMD_GET_LINK_OUT_LINK_UP_LBN : 0) |
-	       (link_state->fd ? MC_CMD_GET_LINK_OUT_FULL_DUPLEX_LBN : 0);
+	return (link_state->up ? (1 << MC_CMD_GET_LINK_OUT_LINK_UP_LBN) : 0) |
+	       (link_state->fd ? (1 << MC_CMD_GET_LINK_OUT_FULL_DUPLEX_LBN) : 0);
 }
 
 static u8 efx_mcdi_link_state_fcntl(struct efx_link_state *link_state)

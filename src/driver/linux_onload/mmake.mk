@@ -18,19 +18,12 @@ ONLOAD_SRCS	:= driver.c timesync.c \
 
 # This is a kernel makefile, so gets re-called by kbuild with 'src' set
 src ?= .
-ifeq ($(KBUILD_BPF_SUPPORTED),1)
-ONLOAD_OBJS_BPF := $(BUILD)/lib/bpf/bpfimpl/bpf_lib.o
-ONLOAD_SRCS += bpf_init.c
-else
-ONLOAD_OBJS_BPF :=
-EXTRA_CFLAGS += -DNO_BPF
-endif
 
 EFTHRM_SRCS	:= eplock_resource_manager.c \
 		tcp_helper_endpoint.c tcp_helper_resource.c \
 		tcp_helper_ioctl.c tcp_helper_mmap.c tcp_helper_sleep.c \
 		tcp_helper_endpoint_move.c \
-		tcp_filters.c oof_filters.c oof_onload.c \
+		tcp_filters.c oof_filters.c oof_onload.c oof_nat.c \
 		driverlink_filter.c ip_prot_rx.c ip_protocols.c \
 		onload_nic.c id_pool.c dump_to_user.c iobufset.c \
 		tcp_helper_cluster.c oof_interface.c tcp_helper_stats_dump.c
@@ -77,29 +70,17 @@ arm64_TARGET_SRCS := aarch64_linux_trampoline.o aarch64_linux_trampoline_asm.o
 # linux kbuild support
 #
 
-all: $(BUILDPATH)/driver/linux_onload/Module.symvers \
-	$(KBUILD_EXTRA_SYMBOLS)
-	$(MMAKE_KBUILD_PRE_COMMAND)
-ifdef OFE_TREE
-ifdef CONFIG_X86_64
-	cp $(OFE_TREE)/solsec_ofe/binary_k.o $(BUILDPATH)/driver/linux_onload/ofe.o
-endif
-endif
+KBUILD_EXTRA_SYMBOLS := $(BUILDPATH)/driver/linux_char/Module.symvers
+
+all: $(KBUILD_EXTRA_SYMBOLS)
 	$(MAKE) $(MMAKE_KBUILD_ARGS) M=$(CURDIR) \
 		DO_EFAB_IP=1
-	$(MMAKE_KBUILD_POST_COMMAND)
 	cp -f onload.ko $(DESTPATH)/driver/linux
 
 
-
-PREVIOUS_KSYM=$(BUILDPATH)/driver/linux_char/Module.symvers
-
-$(BUILDPATH)/driver/linux_onload/Module.symvers: $(PREVIOUS_KSYM)
-	cp $< $@
-
 clean:
 	@$(MakeClean)
-	rm -rf *.ko Module.symvers .tmp_versions .*.cmd
+	rm -rf *.ko Module.symvers .*.cmd
 
 
 ifdef MMAKE_IN_KBUILD
@@ -122,8 +103,7 @@ onload-objs  := $(IP_TARGET_SRCS:%.c=%.o) $($(ARCH)_TARGET_SRCS:%.c=%.o)
 onload-objs  += $(BUILD)/lib/transport/ip/ci_ip_lib.o	\
 		$(BUILD)/lib/cplane/cplane_lib.o \
 		$(BUILD)/lib/citools/citools_lib.o	\
-		$(BUILD)/lib/ciul/ci_ul_lib.o	\
-		$(ONLOAD_OBJS_BPF)
+		$(BUILD)/lib/ciul/ci_ul_lib.o
 
 ifdef OFE_TREE
 ifdef CONFIG_X86_64

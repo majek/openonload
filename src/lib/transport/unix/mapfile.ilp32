@@ -33,6 +33,7 @@ L5 {
     write;
     close;
     fcntl;
+    fcntl64;
     vfork;
     poll;
     select;

@@ -109,13 +109,14 @@ ZF_LIBENTRY int zf_attr_set_str(struct zf_attr* attr,
 **
 ** \param attr       The attribute object.
 ** \param name       Name of the attribute.
-** \param val        Value of the attribute (output). This is
-**                   allocated with strdup() and must be free()ed
-**                   by the caller.
+** \param val        Value of the attribute (output). This may be NULL.
+**                   This is allocated with strdup() and must be free()ed by
+**                   the caller.
 **
 ** \return 0 on success, or a negative error code:
 **         -ENOENT if @p name is not a valid attribute name
 **         -EINVAL if @p name does not have a string type
+**         -ENOMEM if strdup failed to duplicate the string value
 */
 ZF_LIBENTRY int zf_attr_get_str(struct zf_attr* attr,
                            const char* name, char** val);

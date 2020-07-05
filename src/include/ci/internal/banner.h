@@ -11,39 +11,33 @@
 *//*
 \**************************************************************************/
 
+#ifndef __KERNEL__
+#include <stdlib.h>
+#include <string.h>
+
 #include <ci/internal/ip.h>
 #include <onload/version.h>
+#include <cplane/mib.h>
 
-#ifndef __KERNEL__
-static inline void ci_netif_log_startup_banner(ci_netif* ni, const char* verb,
-                                               int check_expiry) {
-  char license_msg[CP_STRING_LEN + 16] = "";
-  char renewal_msg[CP_STRING_LEN + 16] = "";
+static inline void ci_netif_log_startup_banner(ci_netif* ni, const char* verb)
+{
+  struct cp_mibs* mib;
+  cp_version_t version;
+  char* sku;
 
-  if( strlen(ni->cplane->mib->act_licensee->value) > 0 ) {
-    snprintf(license_msg, sizeof(license_msg), ", licensed to %s",
-             ni->cplane->mib->act_licensee->value);
-  }
+  CP_VERLOCK_START(version, mib, ni->cplane)
+    /* This is safe even in the event of a race, as the string is always
+     * terminated somewhere. */
+    sku = strdup(mib->sku->value);
+  CP_VERLOCK_STOP(version, mib)
 
-  if( strlen(ni->cplane->mib->act_renewal->value) > 0 ) {
-    snprintf(renewal_msg, sizeof(renewal_msg), ", renewal date %s",
-             ni->cplane->mib->act_renewal->value);
-  }
-
-  NI_LOG(ni, BANNER, "%s %s %s%s%s [%s]",
+  NI_LOG(ni, BANNER, "%s %s %s [%s]",
          verb,
-         ni->cplane->mib->act_sku->value,
+         sku != NULL ? sku : ONLOAD_PRODUCT,
          ONLOAD_VERSION,
-         license_msg,
-         renewal_msg,
          ni->state->pretty_name);
   NI_LOG(ni, BANNER, ONLOAD_COPYRIGHT);
 
-  if( check_expiry ) {
-    if( *ni->cplane->mib->expired_activation_flags & CP_ACTIVATION_FLAG_ONLOAD )
-      NI_LOG(ni, USAGE_WARNINGS,
-             "The activation key has expired.  Please contact your sales "
-             "representative to renew the activation file.");
-  }
+  free(sku);
 }
 #endif

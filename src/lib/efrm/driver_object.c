@@ -45,6 +45,7 @@
 #include <ci/efrm/driver_private.h>
 #include <ci/efrm/pd.h>
 #include <ci/driver/resource/linux_efhw_nic.h>
+#include <linux/nsproxy.h>
 #include "efrm_internal.h"
 
 
@@ -103,7 +104,7 @@ void efrm_driver_dtor(void)
 }
 
 
-int efrm_nic_ctor(struct efrm_nic *efrm_nic, int ifindex,
+int efrm_nic_ctor(struct efrm_nic *efrm_nic,
 		  const struct vi_resource_dimensions *res_dim)
 {
 	unsigned max_vis;
@@ -155,7 +156,6 @@ int efrm_nic_ctor(struct efrm_nic *efrm_nic, int ifindex,
 	}
 
 	spin_lock_init(&efrm_nic->lock);
-	efrm_nic->efhw_nic.ifindex = ifindex;
 	INIT_LIST_HEAD(&efrm_nic->clients);
 	efrm_nic->rx_sniff_rxq = EFRM_PORT_SNIFF_NO_OWNER;
 	efrm_nic->tx_sniff_rxq = EFRM_PORT_SNIFF_NO_OWNER;
@@ -193,7 +193,6 @@ void efrm_nic_dtor(struct efrm_nic *efrm_nic)
 
 	/* Nobble some fields. */
 	efrm_nic->vis = NULL;
-	efrm_nic->efhw_nic.ifindex = -1;
 }
 
 
@@ -338,6 +337,25 @@ int efrm_nic_reset_suspend(struct efhw_nic *nic)
 }
 
 
+#if CI_CFG_WANT_BPF_NATIVE && CI_HAVE_BPF_NATIVE
+int efrm_nic_xdp_change(struct efhw_nic *nic)
+{
+	struct efrm_nic *rnic = efrm_nic(nic);
+	struct efrm_client *client;
+	struct list_head *client_link;
+
+	spin_lock_bh(&efrm_nic_tablep->lock);
+	list_for_each(client_link, &rnic->clients) {
+		client = container_of(client_link, struct efrm_client, link);
+		client->callbacks->xdp_change(client, client->user_data);
+	}
+	spin_unlock_bh(&efrm_nic_tablep->lock);
+
+	return 0;
+}
+#endif
+
+
 static void efrm_client_nullcb(struct efrm_client *client, void *user_data)
 {
 }
@@ -346,6 +364,9 @@ static void efrm_client_nullcb(struct efrm_client *client, void *user_data)
 static struct efrm_client_callbacks efrm_null_callbacks = {
 	efrm_client_nullcb,
 	efrm_client_nullcb,
+#if CI_CFG_WANT_BPF_NATIVE && CI_HAVE_BPF_NATIVE
+	efrm_client_nullcb,
+#endif
 };
 
 static void efrm_client_init_from_nic(struct efrm_nic *rnic,
@@ -358,8 +379,9 @@ static void efrm_client_init_from_nic(struct efrm_nic *rnic,
 	list_add(&client->link, &rnic->clients);
 }
 
-int efrm_client_get(int ifindex, struct efrm_client_callbacks *callbacks,
-		    void *user_data, struct efrm_client **client_out)
+int efrm_client_get_by_dev(const struct net_device *dev,
+                           struct efrm_client_callbacks *callbacks,
+                           void *user_data, struct efrm_client **client_out)
 {
 	struct efrm_nic *n, *rnic = NULL;
 	struct list_head *link;
@@ -375,7 +397,7 @@ int efrm_client_get(int ifindex, struct efrm_client_callbacks *callbacks,
 	spin_lock_bh(&efrm_nic_tablep->lock);
 	list_for_each(link, &efrm_nics) {
 		n = container_of(link, struct efrm_nic, link);
-		if (n->efhw_nic.ifindex == ifindex || ifindex < 0) {
+		if (n->efhw_nic.net_dev == dev || !dev) {
 			rnic = n;
 			break;
 		}
@@ -394,6 +416,25 @@ int efrm_client_get(int ifindex, struct efrm_client_callbacks *callbacks,
 
 	*client_out = client;
 	return 0;
+}
+EXPORT_SYMBOL(efrm_client_get_by_dev);
+
+
+int efrm_client_get(int ifindex, struct efrm_client_callbacks *callbacks,
+		    void *user_data, struct efrm_client **client_out)
+{
+	int rc;
+	struct net_device *dev = NULL;
+
+	if (ifindex >= 0) {
+		dev = dev_get_by_index(current->nsproxy->net_ns, ifindex);
+		if (!dev)
+			return -ENODEV;
+	}
+	rc = efrm_client_get_by_dev(dev, callbacks, user_data, client_out);
+	if (dev)
+		dev_put(dev);
+	return rc;
 }
 EXPORT_SYMBOL(efrm_client_get);
 
@@ -432,27 +473,48 @@ EXPORT_SYMBOL(efrm_client_get_nic);
 
 int efrm_client_get_ifindex(struct efrm_client *client)
 {
-	return client->nic->ifindex;
+	int ifindex = -1;
+	struct efhw_nic* nic = client->nic;
+
+	spin_lock_bh(&nic->pci_dev_lock);
+	if (nic->net_dev)
+		ifindex = nic->net_dev->ifindex;
+	spin_unlock_bh(&nic->pci_dev_lock);
+	return ifindex;
 }
 EXPORT_SYMBOL(efrm_client_get_ifindex);
 
-int efrm_nic_present(int ifindex)
+
+int efrm_client_accel_allowed(struct efrm_client *client)
 {
+	int result;
+	struct efrm_nic* nic = efrm_nic(client->nic);
+
+	spin_lock_bh(&nic->lock);
+	result = (nic->rnic_flags & EFRM_NIC_FLAG_ADMIN_ENABLED) != 0;
+	spin_unlock_bh(&nic->lock);
+	return result;
+}
+EXPORT_SYMBOL(efrm_client_accel_allowed);
+
+
+struct efhw_nic* efhw_nic_find(const struct net_device *dev)
+{
+	struct efhw_nic *result = NULL;
 	struct efrm_nic *nic;
-	int rc = 0;
 
 	spin_lock_bh(&efrm_nic_tablep->lock);
 	list_for_each_entry(nic, &efrm_nics, link) {
-		if (nic->efhw_nic.ifindex == ifindex) {
-			rc = 1;
+		if (nic->efhw_nic.net_dev == dev) {
+			result = &nic->efhw_nic;
 			break;
 		}
 	}
 	spin_unlock_bh(&efrm_nic_tablep->lock);
 
-	return rc;
+	return result;
 }
-EXPORT_SYMBOL(efrm_nic_present);
+EXPORT_SYMBOL(efhw_nic_find);
 
 
 /* Arguably this should be in lib/efhw.  However, right now this function

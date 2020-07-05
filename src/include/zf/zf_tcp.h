@@ -414,7 +414,7 @@ struct zft_msg {
 **
 ** \param ts        TCP zocket.
 ** \param msg       Message structure.
-** \param flags     Reserved.  Must be zero.
+** \param flags     Must be either: zero or one of zf_zc_flags values.
 **
 ** This function completes the supplied @p msg structure and its referenced
 ** iovec array with details of received packet buffers.
@@ -429,6 +429,9 @@ struct zft_msg {
 ** Buffers are 'locked' until zft_zc_recv_done() or zft_zc_recv_done_some() is
 ** performed.  The caller must not modify the contents of @p msg until after it
 ** has been passed to zft_zc_recv_done() or to zft_zc_recv_done_some().
+**
+** The api supports looking into partially received frames.
+** See \ref using_overlapped_receive.
 */
 ZF_LIBENTRY ZF_HOT void
 zft_zc_recv(struct zft *ts,
@@ -489,7 +492,7 @@ zft_zc_recv_done_some(struct zft* ts, struct zft_msg* msg, size_t len);
 ** \param iov       Array with vectors pointing to buffers to fill with packet
 **                  payloads.
 ** \param iovcnt    The maximum number of buffers supplied (i.e. size of @p
-**                  iov)
+**                  iov), must be greater than zero.
 ** \param flags     None yet, must be zero.
 **
 ** \return >0       Number of bytes successfully received

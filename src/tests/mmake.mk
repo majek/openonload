@@ -13,10 +13,6 @@ SUBDIRS		:= ciul \
                    tap \
 		   trade_sim \
 
-ifeq ($(PLATFORM),gnu_x86_64)
-SUBDIRS		+= bpf
-endif
-
 OTHER_SUBDIRS	:=
 
 ifeq ($(ONLOAD_ONLY),1)

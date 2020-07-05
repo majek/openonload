@@ -39,6 +39,23 @@
 struct oo_nic oo_nics[CI_CFG_MAX_HWPORTS];
 int oo_n_nics;
 
+
+static struct oo_nic* oo_nic_find(struct efhw_nic* nic)
+{
+  int i, max = sizeof(oo_nics) / sizeof(oo_nics[0]);
+
+  CI_DEBUG(ASSERT_RTNL());
+  if( ! nic )
+    return NULL;
+
+  for( i = 0; i < max; ++i )
+    if( oo_nics[i].efrm_client &&
+        efrm_client_get_nic(oo_nics[i].efrm_client) == nic )
+      return &oo_nics[i];
+  return NULL;
+}
+
+
 /* Our responses to the pre- and post-reset notifications from the resource
  * driver have much in common with one another.  This function implements the
  * basic pattern. */
@@ -49,11 +66,10 @@ oo_efrm_callback_hook_generic(struct efrm_client* client,
   struct oo_nic* onic;
   ci_netif* ni;
   int hwport, intf_i;
-  int ifindex = efrm_client_get_ifindex(client);
   ci_irqlock_state_t lock_flags;
   ci_dllink *link;
 
-  if( (onic = oo_nic_find_ifindex(ifindex)) != NULL ) {
+  if( (onic = oo_nic_find(efrm_client_get_nic(client))) != NULL ) {
     hwport = onic - oo_nics;
 
     /* First of all, handle non-fully-created stacks.
@@ -83,6 +99,12 @@ static void oo_efrm_reset_callback(struct efrm_client* client, void* arg)
 {
   /* Schedule the reset work for the stack. */
   oo_efrm_callback_hook_generic(client, tcp_helper_reset_stack);
+
+  /* The post-reset hook in the resource driver might have changed the
+   * efhw_nic's flags, so in principle we should re-announce this hwport to all
+   * control plane instances at this point.  However, we don't expect any flags
+   * that the control plane cares about to change across a reset, so this is
+   * unimplemented. */
 }
 
 static void
@@ -92,13 +114,24 @@ oo_efrm_reset_suspend_callback(struct efrm_client* client, void* arg)
   oo_efrm_callback_hook_generic(client, tcp_helper_suspend_interface);
 }
 
+#if CI_CFG_WANT_BPF_NATIVE && CI_HAVE_BPF_NATIVE
+static void
+oo_efrm_xdp_change_callback(struct efrm_client* client, void* arg)
+{
+  oo_efrm_callback_hook_generic(client, tcp_helper_xdp_change);
+}
+#endif
+
 static struct efrm_client_callbacks oo_efrm_client_callbacks = {
   oo_efrm_reset_callback,
   oo_efrm_reset_suspend_callback,
+#if CI_CFG_WANT_BPF_NATIVE && CI_HAVE_BPF_NATIVE
+  oo_efrm_xdp_change_callback,
+#endif
 };
 
 
-struct oo_nic* oo_nic_add(int ifindex)
+struct oo_nic* oo_nic_add(const struct net_device* dev)
 {
   struct oo_nic* onic;
   int i, max = sizeof(oo_nics) / sizeof(oo_nics[0]);
@@ -107,7 +140,8 @@ struct oo_nic* oo_nic_add(int ifindex)
 
   CI_DEBUG(ASSERT_RTNL());
 
-  rc = efrm_client_get(ifindex, &oo_efrm_client_callbacks, NULL, &efrm_client);
+  rc = efrm_client_get_by_dev(dev, &oo_efrm_client_callbacks, NULL,
+                              &efrm_client);
   if( rc != 0 )
     /* Resource driver doesn't know about this ifindex. */
     goto fail1;
@@ -116,7 +150,8 @@ struct oo_nic* oo_nic_add(int ifindex)
     if( (onic = &oo_nics[i])->efrm_client == NULL )
       break;
   if( i == max ) {
-    ci_log("%s: NOT registering ifindex=%d (too many)", __FUNCTION__, ifindex);
+    ci_log("%s: NOT registering ifindex=%d (too many)", __FUNCTION__,
+           dev->ifindex);
     goto fail2;
   }
 
@@ -125,7 +160,15 @@ struct oo_nic* oo_nic_add(int ifindex)
 
   ++oo_n_nics;
 
-  ci_log("%s: ifindex=%d oo_index=%d", __FUNCTION__, ifindex, i);
+  /* Tell cp_server about this hwport */
+  rc = cp_announce_hwport(efrm_client_get_nic(efrm_client), i);
+  if( rc < 0 && rc != -ENOENT ) {
+    /* -ENOENT means there is no cp_server yet; it is OK */
+    ci_log("%s: failed to announce ifindex=%d oo_index=%d to cp_server: %d",
+           __func__, dev->ifindex, i, rc);
+  }
+
+  ci_log("%s: ifindex=%d oo_index=%d", __FUNCTION__, dev->ifindex, i);
 
   return onic;
 
@@ -152,19 +195,48 @@ static void oo_nic_remove(struct oo_nic* onic)
 }
 
 
-struct oo_nic* oo_nic_find_ifindex(int ifindex)
+struct oo_nic* oo_nic_find_dev(const struct net_device* dev)
 {
-  int i, max = sizeof(oo_nics) / sizeof(oo_nics[0]);
+  return oo_nic_find(efhw_nic_find(dev));
+}
+
+int oo_nic_announce(struct oo_cplane_handle* cp, ci_ifid_t ifindex)
+{
+  int i;
+  int rc = -ENOENT;
 
   CI_DEBUG(ASSERT_RTNL());
 
-  for( i = 0; i < max; ++i )
-    if( oo_nics[i].efrm_client != NULL &&
-        efrm_client_get_ifindex(oo_nics[i].efrm_client) == ifindex )
-      return &oo_nics[i];
-  return NULL;
-}
+  for( i = 0; i < CI_CFG_MAX_HWPORTS; ++i ) {
+    struct net_device* dev;
+    struct efhw_nic* nic;
 
+    if( oo_nics[i].efrm_client == NULL )
+      continue;
+    nic = efrm_client_get_nic(oo_nics[i].efrm_client);
+    dev = efhw_nic_get_net_dev(nic);
+    if( dev == NULL)
+      continue;
+    if( dev_net(dev) != cp->cp_netns || 
+        (ifindex != CI_IFID_BAD && dev->ifindex != ifindex) ) {
+      dev_put(dev);
+      continue;
+    }
+
+    rc = __cp_announce_hwport(cp, dev->ifindex, i, nic->flags);
+    dev_put(dev);
+    if( rc < 0 ) {
+      ci_log("%s: ERROR: failed to announce hwport=%d", __func__, i);
+      return rc;
+    }
+  }
+
+  /* Tell cplane that it's all */
+  if( ifindex == CI_IFID_BAD )
+    return __cp_announce_hwport(cp, CI_IFID_BAD, CI_HWPORT_ID_BAD, 0);
+  else
+    return rc;
+}
 
 int oo_nic_hwport(struct oo_nic* onic)
 {
@@ -181,6 +253,9 @@ int oo_check_nic_suitable_for_onload(struct oo_nic* onic)
   struct efhw_nic *nic = efrm_client_get_nic(onic->efrm_client);
 
   if( nic->flags & NIC_FLAG_ONLOAD_UNSUPPORTED )
+    return 0;
+
+  if( ! efrm_client_accel_allowed(onic->efrm_client) )
     return 0;
 
   /* Onload does not currently play well with packed stream firmware */

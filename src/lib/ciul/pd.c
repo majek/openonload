@@ -61,6 +61,8 @@ static int __ef_pd_alloc(ef_pd* pd, ef_driver_handle pd_dh,
      * in packed-stream mode.
      */
     ra.u.pd.in_flags |= EFCH_PD_FLAG_RX_PACKED_STREAM;
+  if( flags & EF_PD_IGNORE_BLACKLIST )
+    ra.u.pd.in_flags |= EFCH_PD_FLAG_IGNORE_BLACKLIST;
   ra.u.pd.in_vlan_id = vlan_id;
 
   rc = ci_resource_alloc(pd_dh, &ra);

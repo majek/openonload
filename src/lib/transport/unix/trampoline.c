@@ -33,7 +33,17 @@
  * Note 2: the handler needs to take care not to set errno, and to return errs
  * as -ve return values.  This is because the handler is emulating the system
  * call, not the library call.
+ *
+ * Note 3: Modern x86 ABI requires that stack pointer be 16-byte aligned
+ * on function entry. Not doing so may result in SSE-related memory traps
+ * (see bug 84269/ON-10044 and ON-11561).
+ * For old 64-bit gcc there is some asm code at ci_trampoline_handler_entry
  */
+#if (__GNUC__ >= 6 && defined(__x86_64__)) || defined(i386)
+long
+ci_trampoline_handler(unsigned opcode, unsigned data)
+  __attribute__ ((force_align_arg_pointer));
+#endif
 long
 ci_trampoline_handler(unsigned opcode, unsigned data) {
   int rc = 0;

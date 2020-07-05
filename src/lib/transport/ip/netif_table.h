@@ -7,9 +7,6 @@
 #define LPFU "udp_table: "
 
 
-#define TOMBSTONE  -1
-#define EMPTY      -2
-
 #if CI_CFG_IPV6
 int
 ci_ip6_netif_filter_insert(ci_ip6_netif_filter_table* tbl,
@@ -28,5 +25,15 @@ ci_ip6_netif_filter_remove(ci_ip6_netif_filter_table* tbl,
 void ci_ip6_netif_filter_dump(ci_netif* ni);
 
 #endif
+
+
+ci_inline int ci_sock_intf_check(ci_netif* ni, ci_sock_cmn* s,
+                                 int intf_i, int vlan)
+{
+  ci_hwport_id_t hwport = ni->state->intf_i_to_hwport[intf_i];
+  return ((s->rx_bind2dev_hwports & (1ull << hwport)) != 0 &&
+          s->rx_bind2dev_vlan == vlan);
+}
+
 
 #endif /* __NETIF_TABLE_H__ */
