@@ -244,6 +244,11 @@ int citp_sock_fcntl(citp_sock_fdi *epi, int fd, int cmd, long arg)
   case F_GETLK:
   case F_SETLK:
   case F_SETLKW:
+#if defined F_GETLK64 && F_GETLK64 != F_GETLK
+  case F_GETLK64:
+  case F_SETLK64:
+  case F_SETLKW64:
+#endif
     /* File locks not supported on sockets */
     Log_U(ci_log("%s: "EF_FMT" cmd %d not supported on sockets!",__FUNCTION__,
                  EF_PRI_ARGS(epi, fd), cmd));

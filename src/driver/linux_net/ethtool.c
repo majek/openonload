@@ -67,6 +67,9 @@ static u64 efx_get_atomic_stat(void *field)
 #define EFX_ETHTOOL_UINT_CHANNEL_STAT(field)			\
 	EFX_ETHTOOL_STAT(field, channel, n_##field,		\
 			 unsigned int, efx_get_uint_stat)
+#define EFX_ETHTOOL_UINT_CHANNEL_STAT_NO_N(field)		\
+	EFX_ETHTOOL_STAT(field, channel, field,			\
+			 unsigned int, efx_get_uint_stat)
 
 #define EFX_ETHTOOL_UINT_TXQ_STAT(field)			\
 	EFX_ETHTOOL_STAT(tx_##field, tx_queue, field,		\
@@ -99,6 +102,11 @@ static const struct efx_sw_stat_desc efx_sw_stat_desc[] = {
 	EFX_ETHTOOL_UINT_CHANNEL_STAT(rx_xdp_bad_drops),
 	EFX_ETHTOOL_UINT_CHANNEL_STAT(rx_xdp_tx),
 	EFX_ETHTOOL_UINT_CHANNEL_STAT(rx_xdp_redirect),
+#endif
+#ifdef CONFIG_RFS_ACCEL
+	EFX_ETHTOOL_UINT_CHANNEL_STAT_NO_N(rfs_filter_count),
+	EFX_ETHTOOL_UINT_CHANNEL_STAT(rfs_succeeded),
+	EFX_ETHTOOL_UINT_CHANNEL_STAT(rfs_failed),
 #endif
 };
 
@@ -1019,6 +1027,8 @@ static int efx_ethtool_reset(struct net_device *net_dev, u32 *flags)
 	rc = efx->type->map_reset_flags(&reset_flags);
 	if (rc >= 0) {
 		rc = efx_reset(efx, rc);
+		/* Manual resets can be done as often as you like */
+		efx->reset_count = 0;
 		/* update *flags if reset succeeded */
 		if (!rc)
 			*flags = reset_flags;
@@ -1235,7 +1245,7 @@ efx_ethtool_get_rxnfc(struct net_device *net_dev,
 
 	switch (info->cmd) {
 	case ETHTOOL_GRXRINGS:
-		info->data = efx->n_rx_channels;
+		info->data = efx->n_rss_channels;
 		return 0;
 
 	case ETHTOOL_GRXFH: {

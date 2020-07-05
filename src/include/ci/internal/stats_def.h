@@ -196,6 +196,10 @@ OO_STAT("We came to release the lock and needed to update software filters.",
         ci_uint32, unlock_slow_swf_update, count)
 OO_STAT("We came to release the lock and needed to close sockets/pipes.",
         ci_uint32, unlock_slow_close, count)
+#if CI_CFG_WANT_BPF_NATIVE
+OO_STAT("We came to release the lock and needed to handle change in XDP prog",
+        ci_uint32, unlock_slow_xdp_change, count)
+#endif
 OO_STAT("We came to release the lock and had to make a system call - usually "
         "this will be to wake up another thread.",
         ci_uint32, unlock_slow_syscall, count)
@@ -776,7 +780,6 @@ OO_STAT("Number of times that we rejected a shared local port for any reason.",
 OO_STAT("Number of times that we rejected a shared local port because it "
         "would have resulted in a duplicate four-tuple.",
         ci_uint32, tcp_shared_local_ports_skipped_in_use, count)
-
 OO_STAT("Number of active-opened connections which require at least one "
         "SYN retransmission.",
         ci_uint32, tcp_syn_retrans_once, count)
@@ -854,7 +857,7 @@ OO_STAT("Number of packets not captured by onload_tcpdump because the "
 
 OO_STAT("Lowest recorded number of free packets",
         ci_uint32, lowest_free_pkts, val)
-#if CI_CFG_BPF
+#if CI_CFG_WANT_BPF_NATIVE
 OO_STAT("Number of rx packets accepted by XDP program",
         ci_uint32, rx_xdp_pass, count)
 OO_STAT("Number of rx packets rejected by XDP program with DROP code",
@@ -868,4 +871,3 @@ OO_STAT("Number of rx packets rejected due to XDP program returning ABORTED code
 OO_STAT("Number of rx packets rejected due to XDP program returning unknown code",
         ci_uint32, rx_xdp_unknown, count)
 #endif
-

@@ -16,6 +16,7 @@
 #include <ci/driver/efab/hardware.h>
 #include <ci/driver/driverlink_api.h>
 #include <ci/driver/chrdev.h>
+#include <linux/nsproxy.h>
 
 #include "kernel_compat.h"
 
@@ -43,13 +44,11 @@ MODULE_LICENSE("GPL");
 
 
 struct aff_interface {
-	bool down;
 	struct list_head all_interfaces_link;
 	struct list_head filters;
 	struct efx_dl_device *dl_device;
-	int ifindex;
-	int n_rxqs;
 	int* cpu_to_q;
+	int n_rxqs;
 	char proc_name[12];
 	struct proc_dir_entry *proc_dir;
 };
@@ -75,7 +74,7 @@ struct aff_filter {
 
 static struct efx_dl_driver dl_driver;
 static LIST_HEAD(all_interfaces);
-static DEFINE_SPINLOCK(lock);
+static DEFINE_MUTEX(lock);
 static struct proc_dir_entry *aff_proc_root;
 
 
@@ -113,10 +112,10 @@ static int aff_proc_read_cpu2rxq(struct seq_file *seq, void *s)
 	struct aff_interface *intf = seq->private;
 	int n_cpus = num_online_cpus();
 	int i;
-	spin_lock(&lock);
+	mutex_lock(&lock);
 	for (i = 0; i < n_cpus; ++i)
 		seq_printf(seq, "%s%d", i == 0 ? "":" ", intf->cpu_to_q[i]);
-	spin_unlock(&lock);
+	mutex_unlock(&lock);
 	seq_printf(seq, "\n");
 	return 0;
 }
@@ -137,7 +136,7 @@ static int aff_proc_read_filters(struct seq_file *seq, void *s)
 {
 	struct aff_interface *intf = seq->private;
 	struct aff_filter *f;
-	spin_lock(&lock);
+	mutex_lock(&lock);
 	list_for_each_entry(f, &intf->filters, intf_filters_link) {
 		seq_printf(seq, 
 			   "%s "NIPP_FMT" "NIPP_FMT" %d %d %d\n",
@@ -146,7 +145,7 @@ static int aff_proc_read_filters(struct seq_file *seq, void *s)
 			   NIPP(f->saddr, f->sport),
 			   f->rq_cpu, f->rq_rxq, f->rxq);
 	}
-	spin_unlock(&lock);
+	mutex_unlock(&lock);
 	return 0;
 }
 static int aff_proc_open_filters(struct inode *inode, struct file *file)
@@ -162,22 +161,14 @@ static const struct file_operations aff_proc_fops_filters = {
 };
 
 
-static struct aff_interface *__interface_find(int ifindex)
+static struct aff_interface *interface_find(const struct net_device* dev)
 {
 	/* Caller must hold [lock]. */
 	struct aff_interface *intf;
 	list_for_each_entry(intf, &all_interfaces, all_interfaces_link)
-		if (intf->ifindex == ifindex)
+		if (intf->dl_device->priv == dev)
 			return intf;
 	return NULL;
-}
-
-
-static struct aff_interface *interface_find(int ifindex)
-{
-	/* Caller must hold [lock]. */
-	struct aff_interface *intf = __interface_find(ifindex);
-	return (intf == NULL || intf->down) ? NULL : intf;
 }
 
 
@@ -200,7 +191,8 @@ static void interface_add_proc_entries(struct aff_interface *intf)
 {
 	intf->proc_dir = proc_mkdir(intf->proc_name, aff_proc_root);
 	if (intf->proc_dir != NULL) {
-		interface_add_proc_int(intf, "ifindex", &intf->ifindex);
+		struct net_device* dev = intf->dl_device->priv;
+		interface_add_proc_int(intf, "ifindex", &dev->ifindex);
 		interface_add_proc_int(intf, "n_rxqs", &intf->n_rxqs);
 		interface_add_proc(intf, "cpu2rxq", intf,
 				   &aff_proc_fops_cpu2rxq);
@@ -223,8 +215,9 @@ static void interface_remove_proc_entries(struct aff_interface *intf)
 }
 
 
-static struct aff_interface *interface_up(int ifindex, int n_rxqs,
-					  struct efx_dl_device *dl_dev)
+static struct aff_interface *interface_up(const struct net_device* dev,
+                                          int n_rxqs,
+										  struct efx_dl_device *dl_dev)
 {
 	int i, add_proc = 0, n_cpus = num_possible_cpus();
 	struct aff_interface *new_intf;
@@ -234,19 +227,18 @@ static struct aff_interface *interface_up(int ifindex, int n_rxqs,
 	new_intf = kmalloc(sizeof(*new_intf), GFP_KERNEL);
 	new_cpu_to_q = kmalloc(n_cpus * sizeof(int), GFP_KERNEL);
 
-	spin_lock(&lock);
-	if ((intf = __interface_find(ifindex)) == NULL) {
+	mutex_lock(&lock);
+	if ((intf = interface_find(dev)) == NULL) {
 		printk(KERN_NOTICE "[sfcaffinity] interface_up: %d NEW\n",
-			ifindex);
+		       dev->ifindex);
 		intf = new_intf;
 		new_intf = NULL;
-		intf->ifindex = ifindex;
-		sprintf(intf->proc_name, "%d", ifindex);
+		sprintf(intf->proc_name, "%d", dev->ifindex);
 		INIT_LIST_HEAD(&intf->filters);
 		intf->cpu_to_q = NULL;
 	} else {
 		printk(KERN_NOTICE "[sfcaffinity] interface_up: %d RESURECT\n",
-			ifindex);
+		       dev->ifindex);
 		if (intf->n_rxqs != n_rxqs) {
 			kfree(intf->cpu_to_q);
 			intf->cpu_to_q = NULL;
@@ -258,16 +250,16 @@ static struct aff_interface *interface_up(int ifindex, int n_rxqs,
 		for (i = 0; i < n_cpus; ++i)
 			intf->cpu_to_q[i] = -1;
 	}
-	intf->down = false;
 	intf->dl_device = dl_dev;
 	intf->n_rxqs = n_rxqs;
-	if (__interface_find(ifindex) == NULL) {
+	dl_dev->priv = (void*)dev;
+	if (! new_intf) {
 		list_add(&intf->all_interfaces_link, &all_interfaces);
 		add_proc = 1;
 	}
-	spin_unlock(&lock);
+	mutex_unlock(&lock);
 
-	/* This must be after dropping spin lock as proc_mkdir() can block */
+	/* This must be after dropping mutex as proc_mkdir() can block */
 	if (add_proc)
 		interface_add_proc_entries(intf);
 
@@ -277,30 +269,14 @@ static struct aff_interface *interface_up(int ifindex, int n_rxqs,
 }
 
 
-static void interface_down(int ifindex)
+static struct net_device* dev_get_in_current_netns(int ifindex)
 {
-	struct aff_interface *intf;
-	spin_lock(&lock);
-	if ((intf = __interface_find(ifindex)) != NULL) {
-		intf->down = true;
-		intf->dl_device = NULL;
-	}
-	spin_unlock(&lock);
+	return dev_get_by_index(current->nsproxy->net_ns, ifindex);
 }
 
 
-static void interface_free(struct aff_interface *intf)
-{
-	/* Caller must hold [lock]. */
-	BUG_ON(! list_empty(&intf->filters));
-	interface_remove_proc_entries(intf);
-	list_del(&intf->all_interfaces_link);
-	kfree(intf->cpu_to_q);
-	kfree(intf);
-}
-
-
-static int interface_configure(int ifindex, int n_rxqs, const int *cpu_to_q)
+static int interface_configure(struct net_device* dev, int n_rxqs,
+                               const int *cpu_to_q)
 {
 	int n_cpus = num_possible_cpus();
 	struct aff_interface *intf;
@@ -311,19 +287,19 @@ static int interface_configure(int ifindex, int n_rxqs, const int *cpu_to_q)
 		if (cpu_to_q[i] < 0 || cpu_to_q[i] >= n_rxqs)
 			goto fail1;
 
-	spin_lock(&lock);
-	if ((intf = __interface_find(ifindex)) == NULL) {
+	mutex_lock(&lock);
+	if ((intf = interface_find(dev)) == NULL) {
 		printk(KERN_ERR "[sfcaffinity] ERROR: unknown ifindex=%d\n",
-		       ifindex);
+		       dev->ifindex);
 		goto fail2;
 	}
 	intf->n_rxqs = n_rxqs;
 	memcpy(intf->cpu_to_q, cpu_to_q, n_cpus * sizeof(intf->cpu_to_q[0]));
-	spin_unlock(&lock);
+	mutex_unlock(&lock);
 	return 0;
 
 fail2:
-	spin_unlock(&lock);
+	mutex_unlock(&lock);
 fail1:
 	return rc;
 }
@@ -381,8 +357,8 @@ enum sfc_aff_err insert_fail_reason(int rc)
 }
 
 
-static int filter_add(struct aff_fd *aff, int cpu, int rxq, int ifindex,
-		      int protocol,
+static int filter_add(struct aff_fd *aff, int cpu, int rxq,
+		      struct net_device* dev, int protocol,
 		      unsigned daddr, unsigned dport,
 		      unsigned saddr, unsigned sport,
 		      enum sfc_aff_err *err_out)
@@ -452,13 +428,13 @@ static int filter_add(struct aff_fd *aff, int cpu, int rxq, int ifindex,
 	newf->rq_rxq = rxq;
 	newf->rq_cpu = cpu;
 
-	spin_lock(&lock);
+	mutex_lock(&lock);
 
 	rc = -EINVAL;
-	intf = interface_find(ifindex);
+	intf = interface_find(dev);
 	if (intf == NULL) {
 		printk(KERN_ERR "[sfc_affinity] %s: ERROR: ifindex=%d not "
-		       "supported\n", __FUNCTION__, ifindex);
+		       "supported\n", __FUNCTION__, dev->ifindex);
 		*err_out = sfc_aff_intf_not_supported;
 		goto fail2;
 	}
@@ -472,14 +448,14 @@ static int filter_add(struct aff_fd *aff, int cpu, int rxq, int ifindex,
 	}
 	if (rxq < 0) {
 		printk(KERN_ERR "[sfc_affinity] %s: ERROR: ifindex=%d not "
-		       "initialised\n", __FUNCTION__, ifindex);
+		       "initialised\n", __FUNCTION__, dev->ifindex);
 		*err_out = sfc_aff_intf_not_configured;
 		goto fail2;
 	}
 
 	T(printk(KERN_NOTICE "[sfc_affinity] %s: cpu=%d rxq=%d ifindex=%d "
 		 "protocol=%d local="NIPP_FMT" remote="NIPP_FMT"\n",
-		 __FUNCTION__, cpu, rxq, ifindex,
+		 __FUNCTION__, cpu, rxq, dev->ifindex,
 		 protocol, NIPP(daddr, dport), NIPP(saddr, sport)));
 
 	f = filter_find(intf, protocol, daddr, dport, saddr, sport);
@@ -524,7 +500,7 @@ static int filter_add(struct aff_fd *aff, int cpu, int rxq, int ifindex,
 		       sfc_aff_err_msg(*err_out));
 		printk("sfc_affinity: ifindex=%d rxq=%d protocol=%d "
 		       "local="NIPP_FMT" remote="NIPP_FMT"\n",
-		       ifindex, rxq, protocol, NIPP(daddr, dport),
+		       dev->ifindex, rxq, protocol, NIPP(daddr, dport),
 		       NIPP(saddr, sport));
 		goto fail2;
 	}
@@ -534,18 +510,19 @@ static int filter_add(struct aff_fd *aff, int cpu, int rxq, int ifindex,
 		list_add(&newf->fd_filters_link, &aff->filters);
 	}
 
-	spin_unlock(&lock);
+	mutex_unlock(&lock);
 	return 0;
 
 fail2:
-	spin_unlock(&lock);
+	mutex_unlock(&lock);
 	kfree(newf);
 fail1:
 	return rc;
 }
 
 
-static int filter_del(struct aff_fd *aff, int ifindex, int protocol,
+static int filter_del(struct aff_fd *aff, struct net_device* dev,
+		      int protocol,
 		      unsigned daddr, unsigned dport,
 		      unsigned saddr, unsigned sport,
 		      enum sfc_aff_err *err_out)
@@ -555,18 +532,18 @@ static int filter_del(struct aff_fd *aff, int ifindex, int protocol,
 	int rc = -EINVAL;
 	*err_out = sfc_aff_not_found;
 
-	spin_lock(&lock);
+	mutex_lock(&lock);
 	for (l = aff->filters.next; l != &aff->filters; ) {
 		f = list_entry(l, struct aff_filter, fd_filters_link);
 		l = l->next;
 		if (filter_eq(f, protocol, daddr, dport, saddr, sport))
-			if (ifindex < 0 || ifindex == f->intf->ifindex) {
+			if (! dev || dev == f->intf->dl_device->priv) {
 				*err_out = sfc_aff_no_error;
 				rc = 0;
 				filter_remove(f);
 			}
 	}
-	spin_unlock(&lock);
+	mutex_unlock(&lock);
 	return rc;
 }
 
@@ -579,6 +556,7 @@ static ssize_t aff_proc_write_new_interface(struct file *file,
 	int i, rc, ifindex, n_rxqs;
 	int *cpu_to_q;
 	char *buf, *s;
+	struct net_device* dev;
 
 	rc = -E2BIG;
 	if (count > max_cpus * 8 + 20)
@@ -606,7 +584,11 @@ static ssize_t aff_proc_write_new_interface(struct file *file,
 	rc = -EINVAL;
 	if (*s)
 		goto fail3;
-	interface_configure(ifindex, n_rxqs, cpu_to_q);
+	dev = dev_get_in_current_netns(ifindex);
+	if (! dev)
+		goto fail3;
+	interface_configure(dev, n_rxqs, cpu_to_q);
+	dev_put(dev);
 	rc = count;
 fail3:
 	kfree(buf);
@@ -651,11 +633,16 @@ static void aff_proc_fini(void)
 static int sfc_aff_set(struct aff_fd *aff, void __user *user_aff_set)
 {
 	struct sfc_aff_set as;
+	struct net_device* dev;
 	int rc;
 	if (copy_from_user(&as, user_aff_set, sizeof(as)))
 		return -EFAULT;
-	rc = filter_add(aff, as.cpu, as.rxq, as.ifindex, as.protocol,
+	dev = dev_get_in_current_netns(as.ifindex);
+	if (! dev)
+		return -EINVAL;
+	rc = filter_add(aff, as.cpu, as.rxq, dev, as.protocol,
 			as.daddr, as.dport, as.saddr, as.sport, &as.err_out);
+	dev_put(dev);
 	if (rc < 0)
 		if (copy_to_user(user_aff_set, &as, sizeof(as)))
 			return -EFAULT;
@@ -666,12 +653,20 @@ static int sfc_aff_set(struct aff_fd *aff, void __user *user_aff_set)
 static int sfc_aff_clear(struct aff_fd *aff, void __user *user_aff_clear)
 {
 	struct sfc_aff_clear ac;
+	struct net_device* dev = NULL;
 	int rc;
 	if (copy_from_user(&ac, user_aff_clear, sizeof(ac)))
 		return -EFAULT;
-	rc = filter_del(aff, ac.ifindex, ac.protocol,
+	if (ac.ifindex >= 0) {
+		dev = dev_get_in_current_netns(ac.ifindex);
+		if (! dev)
+			return -EINVAL;
+	}
+	rc = filter_del(aff, dev, ac.protocol,
 			ac.daddr, ac.dport, ac.saddr, ac.sport,
 			&ac.err_out);
+	if (dev)
+		dev_put(dev);
 	if (rc < 0)
 		if (copy_to_user(user_aff_clear, &ac, sizeof(ac)))
 			return -EFAULT;
@@ -712,13 +707,13 @@ static int fop_close(struct inode *inode, struct file *filp)
 {
 	struct aff_fd *aff = filp->private_data;
 	struct aff_filter *f;
-	spin_lock(&lock);
+	mutex_lock(&lock);
 	while (! list_empty(&aff->filters)) {
 		f = list_entry(aff->filters.next, struct aff_filter,
 			       fd_filters_link);
 		filter_remove(f);
 	}
-	spin_unlock(&lock);
+	mutex_unlock(&lock);
 	return 0;
 }
 
@@ -730,6 +725,37 @@ struct file_operations fops = {
 	.open = fop_open,
 	.release = fop_close,
 };
+
+
+static struct aff_interface* interface_down(struct net_device *dev)
+{
+	struct aff_interface *intf;
+
+	mutex_lock(&lock);
+	if ((intf = interface_find(dev)) != NULL) {
+		while (! list_empty(&intf->filters)) {
+			struct aff_filter *f;
+			f = list_entry(intf->filters.next, struct aff_filter,
+			               intf_filters_link);
+			filter_remove(f);
+		}
+		list_del(&intf->all_interfaces_link);
+	}
+	mutex_unlock(&lock);
+	return intf;
+}
+
+
+static void interface_free(struct aff_interface *intf)
+{
+	/* NB: assertion is being checked without holding lock. Technically bad,
+	 * but actually harmless because it's only wrong if the assertion was
+	 * going to fail anyway */
+	BUG_ON(! list_empty(&intf->filters));
+	interface_remove_proc_entries(intf);
+	kfree(intf->cpu_to_q);
+	kfree(intf);
+}
 
 
 static int dl_probe(struct efx_dl_device* dl_dev,
@@ -745,9 +771,8 @@ static int dl_probe(struct efx_dl_device* dl_dev,
 		n_rxqs = res->rxq_min;
 	printk(KERN_NOTICE "[sfcaffinity] probe ifindex=%d n_rxqs=%d\n",
 	       net_dev->ifindex, n_rxqs);
-	if (interface_up(net_dev->ifindex, n_rxqs, dl_dev) == NULL)
+	if (interface_up(net_dev, n_rxqs, dl_dev) == NULL)
 		return -1;
-	dl_dev->priv = (void*) net_dev;
 	return 0;
 }
 
@@ -757,7 +782,7 @@ static void dl_remove(struct efx_dl_device* dl_dev)
 	struct net_device *net_dev = dl_dev->priv;
 	printk(KERN_NOTICE "[sfcaffinity] remove ifindex=%d\n",
 	       net_dev->ifindex);
-	interface_down(net_dev->ifindex);
+	interface_free(interface_down(net_dev));
 }
 
 
@@ -821,6 +846,7 @@ static void cleanup_sfc_affinity(void)
 		struct aff_interface *intf;
 		intf = list_entry(all_interfaces.next, struct aff_interface,
 				  all_interfaces_link);
+		list_del(&intf->all_interfaces_link);
 		interface_free(intf);
 	}
 	aff_proc_fini();
@@ -832,15 +858,15 @@ module_init(init_sfc_affinity);
 module_exit(cleanup_sfc_affinity);
 
 
-int sfc_affinity_cpu_to_channel(int ifindex, int cpu)
+int sfc_affinity_cpu_to_channel_dev(const struct net_device* dev, int cpu)
 {
 	struct aff_interface *intf;
 	int rc = -1;
-	spin_lock(&lock);
+	mutex_lock(&lock);
 	if (cpu >= 0 && cpu < num_possible_cpus() &&
-	    (intf = interface_find(ifindex)) != NULL)
+	    (intf = interface_find(dev)) != NULL)
 		rc = intf->cpu_to_q[cpu];
-	spin_unlock(&lock);
+	mutex_unlock(&lock);
 	return rc;
 }
-EXPORT_SYMBOL(sfc_affinity_cpu_to_channel);
+EXPORT_SYMBOL(sfc_affinity_cpu_to_channel_dev);

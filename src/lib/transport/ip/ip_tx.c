@@ -53,7 +53,8 @@ void ci_ip_send_pkt_lookup(ci_netif* ni,
 }
 
 
-void ci_ip_send_pkt_defer(ci_netif *ni, cicpos_retrieve_rc_t retrieve_rc,
+void ci_ip_send_pkt_defer(ci_netif* ni, const struct oo_sock_cplane* sock_cp,
+                          cicpos_retrieve_rc_t retrieve_rc,
                           ci_uerr_t *ref_os_rc, ci_ip_pkt_fmt* pkt,
                           const ci_ip_cached_hdrs *ipcache)
 {
@@ -76,7 +77,6 @@ void ci_ip_send_pkt_defer(ci_netif *ni, cicpos_retrieve_rc_t retrieve_rc,
   }
   lnk = ci_ni_dllist_pop(ni, &ni->state->deferred_list_free);
 
-
   /* Ensure the pkt is ready to send */
   ci_assert_equal(pkt->intf_i, ipcache->intf_i);
 
@@ -84,6 +84,16 @@ void ci_ip_send_pkt_defer(ci_netif *ni, cicpos_retrieve_rc_t retrieve_rc,
   dpkt = CI_CONTAINER(struct oo_deferred_pkt, link, lnk);
   dpkt->pkt_id = pkt->pp;
   dpkt->src = ipcache_laddr(ipcache);
+  if( ni->cplane_init_net != NULL && sock_cp != NULL &&
+      ipcache_protocol(ipcache) == IPPROTO_TCP ) {
+    ci_addr_sh_t laddr = CI_ADDR_SH_FROM_ADDR(dpkt->src);
+    ci_uint16 lport = sock_cp->lport_be16;
+    /* We ignore failure returns from cp_svc_check_dnat().  In the event that
+     * it fails, it leaves the address untranslated, which is the best that
+     * we can do. */
+    if( cp_svc_check_dnat(ni->cplane_init_net, &laddr, &lport) > 0 )
+      dpkt->src = CI_ADDR_FROM_ADDR_SH(laddr);
+  }
   dpkt->nexthop = ipcache->nexthop;
   dpkt->ifindex = ipcache->ifindex;
   dpkt->flag = OO_DEFERRED_FLAG_FIRST;
@@ -115,8 +125,8 @@ void ci_ip_send_pkt_defer(ci_netif *ni, cicpos_retrieve_rc_t retrieve_rc,
 }
 
 
-int ci_ip_send_pkt_send(ci_netif* ni, ci_ip_pkt_fmt* pkt,
-                        const ci_ip_cached_hdrs* ipcache)
+int ci_ip_send_pkt_send(ci_netif* ni, const struct oo_sock_cplane* sock_cp,
+                        ci_ip_pkt_fmt* pkt, const ci_ip_cached_hdrs* ipcache)
 {
   int os_rc = 0;
 
@@ -128,7 +138,7 @@ int ci_ip_send_pkt_send(ci_netif* ni, ci_ip_pkt_fmt* pkt,
     return 0;
   case retrrc_nomac:
     ci_ip_set_mac_and_port(ni, ipcache, pkt);
-    ci_ip_send_pkt_defer(ni, retrrc_nomac, &os_rc, pkt, ipcache);
+    ci_ip_send_pkt_defer(ni, sock_cp, retrrc_nomac, &os_rc, pkt, ipcache);
     return 0;
   case retrrc_noroute:
     return -EHOSTUNREACH;
@@ -154,7 +164,7 @@ int ci_ip_send_pkt(ci_netif* ni, const struct oo_sock_cplane* sock_cp_opt,
   ci_ip_cached_hdrs ipcache;
   ci_ip_cache_init(&ipcache, oo_pkt_af(pkt));
   ci_ip_send_pkt_lookup(ni, sock_cp_opt, pkt, &ipcache);
-  return ci_ip_send_pkt_send(ni, pkt, &ipcache);
+  return ci_ip_send_pkt_send(ni, sock_cp_opt, pkt, &ipcache);
 }
 
 
@@ -202,7 +212,7 @@ void ci_ip_send_tcp_slow(ci_netif* ni, ci_tcp_state* ts, ci_ip_pkt_fmt* pkt)
       }
     }
     ++ts->stats.tx_nomac_defer;
-    ci_ip_send_pkt_defer(ni, ts->s.pkt.status, &rc, pkt, &ts->s.pkt);
+    ci_ip_send_pkt_defer(ni, &ts->s.cp, ts->s.pkt.status, &rc, pkt, &ts->s.pkt);
 
     /* For TCP, we want the ipcache to only be valid when onloadable.
      * But ci_ip_send_pkt_defer() uses ipcache verinfo if available. */

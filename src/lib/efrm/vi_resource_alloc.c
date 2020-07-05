@@ -217,16 +217,28 @@ static int efrm_vi_rm_alloc_instance(struct efrm_pd *pd,
 	efrm_nic = efrm_nic(efrm_pd_to_resource(pd)->rs_client->nic);
 	channel = vi_attr->channel;
 	if (vi_attr->interrupt_core >= 0) {
-		int ifindex = efrm_nic->efhw_nic.ifindex;
-		channel = sfc_affinity_cpu_to_channel(ifindex,
-						      vi_attr->interrupt_core);
-		if (channel < 0 && print_resource_warnings) {
-			EFRM_ERR("%s: ERROR: could not map core_id=%d using "
-				 "ifindex=%d", __FUNCTION__,
-				 (int) vi_attr->interrupt_core, ifindex);
-			EFRM_ERR("%s: ERROR: Perhaps sfc_affinity is not "
-				 "configured?", __FUNCTION__);
-			return -EINVAL;
+		struct net_device *dev = efhw_nic_get_net_dev(&efrm_nic->efhw_nic);
+		if (!dev) {
+			if (print_resource_warnings) {
+				EFRM_ERR("%s: ERROR: NIC was removed since pd allocation",
+				         __FUNCTION__);
+				return -ENETDOWN;
+			}
+			channel = -1;
+		}
+		else {
+			int ifindex = dev->ifindex;
+			channel = sfc_affinity_cpu_to_channel_dev(dev,
+			                                          vi_attr->interrupt_core);
+			dev_put(dev);
+			if (channel < 0 && print_resource_warnings) {
+				EFRM_ERR("%s: ERROR: could not map core_id=%d using "
+					"ifindex=%d", __FUNCTION__,
+					(int) vi_attr->interrupt_core, ifindex);
+				EFRM_ERR("%s: ERROR: Perhaps sfc_affinity is not "
+					"configured?", __FUNCTION__);
+				return -EINVAL;
+			}
 		}
 	}
 	virs->net_drv_wakeup_channel = channel;
@@ -926,12 +938,11 @@ efrm_vi_q_alloc(struct efrm_vi *virs, enum efhw_q_type q_type,
 		return -EINVAL;
 	}
 	if (evq != NULL) {
-		int vi_ifindex = efrm_client_get_ifindex(virs->rs.rs_client);
-		int evq_ifindex = efrm_client_get_ifindex(evq->rs.rs_client);
-		if (vi_ifindex != evq_ifindex) {
+		if (virs->rs.rs_client != evq->rs.rs_client) {
 			EFRM_ERR("%s: ERROR: %s on %d but EVQ on %d",
 				 __FUNCTION__, q_names[q_type],
-				 vi_ifindex, evq_ifindex);
+				 efrm_client_get_ifindex(virs->rs.rs_client),
+				 efrm_client_get_ifindex(evq->rs.rs_client));
 			return -EINVAL;
 		}
 	}
@@ -1270,8 +1281,7 @@ int  efrm_vi_alloc(struct efrm_client *client,
 	if (attr->vi_set != NULL) {
 		struct efrm_resource *rs;
 		rs = efrm_vi_set_to_resource(attr->vi_set);
-		if (efrm_client_get_ifindex(rs->rs_client) !=
-		    efrm_client_get_ifindex(client)) {
+		if (client != rs->rs_client) {
 			EFRM_ERR("%s: ERROR: vi_set ifindex=%d client "
 				 "ifindex=%d", __func__,
 				 efrm_client_get_ifindex(rs->rs_client),

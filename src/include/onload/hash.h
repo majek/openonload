@@ -16,6 +16,7 @@
 
 /* Top-level file must define CI_CFG_IPV6 in some way */
 
+#include <ci/tools.h>
 #include <ci/net/ipvx.h>
 
 /* onload_addr_xor() DOES NOT returns the same result for IPv4 address
@@ -64,6 +65,22 @@ ci_inline unsigned onload_addr_xor(const ci_addr_t addr)
 **  http://uiorean.cluj.astral.ro/cursuri/dsa/6_Sda.pdf
 */
 
+/* These hash functions are used in several places where Onload maintains hash
+ * tables.  The foremost of these is the software filter table, the design of
+ * which, given its critical importance for performance, is the primary
+ * dictator of the functions' characteristics.  For example, they prefer speed
+ * over good mixing, while still avoiding pathological collision-cases arising
+ * from likely patterns in IP addresses and ports.  In fact this limited mixing
+ * turns out to be useful, giving rise to a property that we define now:
+ *
+ * Definition 1.  A hash function h() of an IP-tuple has the Local Port
+ * Recovery Property (LPRP) if, given the value of h(t) for some tuple t, and
+ * also the values of the protocol, remote address, local address and remote
+ * port for t, it is possible to find the value of the local port for t.
+ *
+ * For the cases in which we need it, proofs are given below that particular
+ * functions have the LPRP. */
+
 ci_inline unsigned __onload_hash3(unsigned laddr, unsigned lport,
                                   unsigned raddr, unsigned rport,
                                   unsigned protocol)
@@ -82,6 +99,41 @@ ci_inline unsigned onload_hash3(const ci_addr_t laddr, unsigned lport,
                         onload_addr_xor(raddr), rport, protocol);
 }
 
+/* Lemma 2.  The transformation
+ *
+ *   h ^= h >> 16;
+ *   h ^= h >> 8;
+ *
+ * used at the end of __onload_hash3() is a bijection.
+ *
+ * Proof.  It is equivalent to
+ *
+ *   h = h ^ (h >> 8) ^ (h >> 16) ^ (h >> 24);
+ *
+ * the left-hand side of which, when shifted right by 8 and XORed with itself,
+ * yields h.
+ *
+ * Proposition 3.  __onload_hash3() has the LPRP.
+ *
+ * Proof.  By Lemma 2, __onload_hash3() will have the LPRP if the expression
+ * for the initial value of h in that function (viewed as a function in its own
+ * right) has the LPRP.  We can rewrite the construction of that expression
+ * slightly as
+ *
+ *   tmp = CI_BSWAP_BE32(raddr) ^ CI_BSWAP_LE32(laddr) ^ (rport << 16) ^
+ *         protocol;
+ *   h = tmp ^ lport;
+ *
+ * If the preconditions of the LPRP hold, the values of h and tmp are equal for
+ * both tuples, and hence the values of lport are likewise equal.
+ *
+ * Lemma 4.  The upper 16 bits of __onload_hash3() are independent of lport.
+ *
+ * Proof.  This is true of the initial value of h in that function by
+ * construction.  By the expression given for the transformation applied to h
+ * in the proof of Lemma 2, it is also true of the value of __onload_hash3()
+ * itself. */
+
 ci_inline unsigned __onload_hash1(unsigned size_mask,
                                   unsigned laddr, unsigned lport,
                                   unsigned raddr, unsigned rport,
@@ -98,6 +150,17 @@ ci_inline unsigned onload_hash1(unsigned size_mask,
   return __onload_hash1(size_mask, onload_addr_xor(laddr), lport,
                         onload_addr_xor(raddr), rport, protocol);
 }
+
+/* Proposition 5.  Suppose that the non-zero part of size_mask is at least 16
+ * bits wide.  Then __onload_hash1() has the LPRP.
+ *
+ * Proof.  Let h be the value of __onload_hash1().  By assumption, this gives
+ * us immediately at least the lowest 16 bits of __onload_hash3().  Now assume
+ * the preconditions of the LPRP, so that we know all parameters of the tuple
+ * other than the local port.  By Lemma 4, we have enough information to
+ * construct also the upper 16 bits of __onload_hash3, and thus we know the
+ * full value of that function.  But by Proposition 3, __onload_hash3() has the
+ * LPRP, so we can find the value of the local port, and the result follows. */
 
 ci_inline unsigned __onload_hash2(unsigned laddr, unsigned lport,
                                   unsigned raddr, unsigned rport,

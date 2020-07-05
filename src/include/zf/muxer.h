@@ -89,6 +89,8 @@ zf_muxer_alloc(struct zf_stack* stack, struct zf_muxer_set** muxer_out);
 ZF_LIBENTRY void
 zf_muxer_free(struct zf_muxer_set* muxer);
 
+/*! Proprietary event type enabling overlapped receive - \see zf_muxer_wait */
+#define ZF_EPOLLIN_OVERLAPPED 0x10000
 
 /*! \brief Adds a waitable object to a multiplexer set.
 **
@@ -106,7 +108,8 @@ zf_muxer_free(struct zf_muxer_set* muxer);
 ** Adds a waitable object to a multiplexer set.  Each waitable may belong to at
 ** most one multiplexer set at a time.  The events of interest are specified by
 ** @p event.events, which is a bitfield that should be populated from one or
-** more of `EPOLLIN`, `EPOLLOUT`, `EPOLLHUP` and `EPOLLERR` as desired. @p
+** more of `EPOLLIN`, `EPOLLOUT`, `EPOLLHUP`, `EPOLLERR` or `ZF_EPOLLIN_OVERLAPPED`
+** as desired. @p
 ** event.data specifies the data to be returned to a caller of zf_muxer_wait()
 ** when that waitable is ready.  Note that the waitable itself is not in
 ** general returned to such callers; if this is desired, then @p event.data
@@ -194,6 +197,20 @@ zf_muxer_del(struct zf_waitable* w);
 ** for events.  The amount of time spent polling is controlled by stack
 ** attribute reactor_spin_count.  Setting reactor_spin_count to 1 disables
 ** polling and minimises the cost of zf_muxer_wait(timeout_ns=0).
+**
+**
+** <b>Overlapped receive</b>
+**
+** A zocket added to the muxer with the \ref ZF_EPOLLIN_OVERLAPPED event
+** mask bit set can get access to the packet data while reception is
+** still in progress, before the integrity of the frame is verified.
+** See \ref using_overlapped_receive.
+**
+** \note The \ref ZF_EPOLLIN_OVERLAPPED event will not be reported in
+** conjuction with other events, zf_muxer_wait() will return 1, and
+** \ref ZF_EPOLLIN_OVERLAPPED will be the only flag set.
+**
+** \see `zfur_zc_recv` `zft_zc_recv` `zf_zc_flags`
 */
 ZF_LIBENTRY int
 zf_muxer_wait(struct zf_muxer_set* muxer, struct epoll_event* events,

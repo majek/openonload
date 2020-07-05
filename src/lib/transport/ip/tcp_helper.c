@@ -23,9 +23,6 @@
 #include <ci/internal/ip.h>
 # include <ci/internal/trampoline.h>
 # include <asm/unistd.h>
-#if CI_CFG_BPF
-# include <onload/bpf_ioctl.h>
-#endif
 
 #define VERB(x)
 
@@ -546,7 +543,6 @@ int ci_tcp_helper_alloc_active_wild(ci_netif *ni, ci_addr_t laddr)
 }
 
 
-
 int ci_netif_evq_poll_k(ci_netif* ni, int _n)
 {
   ci_uint32 intf_i = _n;
@@ -555,14 +551,3 @@ int ci_netif_evq_poll_k(ci_netif* ni, int _n)
   return oo_resource_op(ci_netif_get_driver_handle(ni), OO_IOC_EVQ_POLL,
                         &intf_i);
 }
-
-#if CI_CFG_BPF
-int ci_tcp_helper_bpf_bind(ci_netif* ni, int intf_i, int attach_point)
-{
-  oo_bpf_bind_t arg = {
-    .attach_point = attach_point,
-    .intf_i = intf_i,
-  };
-  return oo_resource_op(ci_netif_get_driver_handle(ni), OO_IOC_BPF_BIND, &arg);
-}
-#endif

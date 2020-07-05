@@ -101,16 +101,7 @@ void ci_netif_state_init(ci_netif* ni, int cpu_khz, const char* name)
     ci_ni_dllist_put(ni, &nis->deferred_list_free, &ni->deferred_pkts[i].link);
   }
 
-  /* Endpoint lookup table.
-   * - table must be a power of two in size
-   * - table must be large enough for one filter per connection +
-   *   the extra filters required for wildcards i.e. "listen any" connections
-   *   (so we use double the number of endpoints)
-   *
-   * Fixme: max_ep_bufs includes some space for aux buffers.
-   */
-  ci_netif_filter_init(ni->filter_table,
-                       ci_log2_le(NI_OPTS(ni).max_ep_bufs) + 1);
+  ci_netif_filter_init(ni, ci_log2_le(ci_netif_filter_table_size(ni)));
 #if CI_CFG_IPV6
   ci_ip6_netif_filter_init(ni->ip6_filter_table,
                            ci_log2_le(NI_OPTS(ni).max_ep_bufs) + 1);
@@ -792,7 +783,6 @@ static void ci_netif_config_opts_getenv_ef_log(ci_netif_config_opts* opts)
 static void
 ci_netif_config_opts_getenv_ef_scalable_filters(ci_netif_config_opts* opts);
 
-
 static int
 handle_str_opt(ci_netif_config_opts* opts,
                const char* optname, char* optval_buf, size_t optval_buflen);
@@ -826,20 +816,6 @@ void ci_netif_config_opts_getenv(ci_netif_config_opts* opts)
        * Would be much better to initialise these from the CITP options to
        * avoid potential inconsistency.
        */
-      opts->sock_lock_buzz = 1;
-      opts->stack_lock_buzz = 1;
-      opts->ul_select_spin = 1;
-      opts->ul_poll_spin = 1;
-#if CI_CFG_USERSPACE_EPOLL
-      opts->ul_epoll_spin = 1;
-#endif
-#if CI_CFG_UDP
-      opts->udp_recv_spin = 1;
-      opts->udp_send_spin = 1;
-#endif
-      opts->tcp_recv_spin = 1;
-      opts->tcp_send_spin = 1;
-      opts->pkt_wait_spin = 1;
     }
   }
   if( (s = getenv("EF_SPIN_USEC")) ) {
@@ -853,6 +829,14 @@ void ci_netif_config_opts_getenv(ci_netif_config_opts* opts)
     opts->int_driven = atoi(s);
   if( (s = getenv("EF_POLL_IN_KERNEL")) )
     opts->poll_in_kernel = atoi(s);
+#if CI_CFG_WANT_BPF_NATIVE
+  static const char* const xdp_mode_opts[] = { "disabled", "compatible", 0 };
+  opts->xdp_mode = parse_enum(opts, "EF_XDP_MODE", xdp_mode_opts, "disabled");
+  if( opts->xdp_mode ) {
+    /* for now only in-kernel XDP is supported - enabling in-kernel mode implicitly */
+    opts->poll_in_kernel = 1;
+  }
+#endif
   if( opts->int_driven )
     /* Disable count-down timer when interrupt driven. */
     opts->timer_usec = 0;
@@ -867,17 +851,7 @@ void ci_netif_config_opts_getenv(ci_netif_config_opts* opts)
 
   if( (s = getenv("EF_BUZZ_USEC")) ) {
     opts->buzz_usec = atoi(s);
-    if( opts->buzz_usec != 0 ) {
-      opts->sock_lock_buzz = 1;
-      opts->stack_lock_buzz = 1;
-    }
   }
-  if( (s = getenv("EF_SOCK_LOCK_BUZZ")) )
-    opts->sock_lock_buzz = atoi(s);
-  if( (s = getenv("EF_STACK_LOCK_BUZZ")) )
-    opts->stack_lock_buzz = atoi(s);
-  if( (s = getenv("EF_SO_BUSY_POLL_SPIN")) )
-    opts->so_busy_poll_spin = atoi(s);
 
   /* The options that follow are (at time of writing) not sensitive to the
    * order in which they are read.
@@ -1133,38 +1107,6 @@ void ci_netif_config_opts_getenv(ci_netif_config_opts* opts)
       opts->tcp_rx_log_flags = v;
     }
   }
-  if( (s = getenv("EF_SELECT_SPIN")) )
-    opts->ul_select_spin = atoi(s);
-  if( (s = getenv("EF_POLL_SPIN")) )
-    opts->ul_poll_spin = atoi(s);
-#if CI_CFG_USERSPACE_EPOLL
-  if( (s = getenv("EF_EPOLL_SPIN")) )
-    opts->ul_epoll_spin = atoi(s);
-#endif
-#if CI_CFG_UDP
-  if( (s = getenv("EF_UDP_RECV_SPIN")) )
-    opts->udp_recv_spin = atoi(s);
-  if( (s = getenv("EF_UDP_SEND_SPIN")) )
-    opts->udp_send_spin = atoi(s);
-#endif
-  if( (s = getenv("EF_TCP_RECV_SPIN")) )
-    opts->tcp_recv_spin = atoi(s);
-  if( (s = getenv("EF_TCP_SEND_SPIN")) )
-    opts->tcp_send_spin = atoi(s);
-  if( (s = getenv("EF_TCP_ACCEPT_SPIN")) )
-    opts->tcp_accept_spin = atoi(s);
-  if( (s = getenv("EF_TCP_CONNECT_SPIN")) )
-    opts->tcp_connect_spin = atoi(s);
-  if( (s = getenv("EF_PKT_WAIT_SPIN")) )
-    opts->pkt_wait_spin = atoi(s);
-#if CI_CFG_USERSPACE_PIPE
-  if( (s = getenv("EF_PIPE_RECV_SPIN")) )
-    opts->pipe_recv_spin = atoi(s);
-  if( (s = getenv("EF_PIPE_SEND_SPIN")) )
-    opts->pipe_send_spin = atoi(s);
-  if( (s = getenv("EF_PIPE_SIZE")) )
-    opts->pipe_size = atoi(s);
-#endif
 
   if( (s = getenv("EF_ACCEPTQ_MIN_BACKLOG")) )
     opts->acceptq_min_backlog = atoi(s);
@@ -1773,9 +1715,6 @@ invalid_mode:
   return; /* ideally, exit application */
 }
 
-
-
-
 #endif
 
 
@@ -1797,6 +1736,9 @@ static void netif_tcp_helper_build2(ci_netif* ni)
                                ni->state->deferred_pkts_ofs);
   ni->filter_table =
     (ci_netif_filter_table*) ((char*) ni->state + ni->state->table_ofs);
+  ni->filter_table_ext =
+    (ci_netif_filter_table_entry_ext*) ((char*) ni->state +
+                                        ni->state->table_ext_ofs);
 #if CI_CFG_IPV6
   ni->ip6_filter_table =
     (ci_ip6_netif_filter_table*) ((char*) ni->state + ni->state->ip6_table_ofs);
@@ -2080,11 +2022,9 @@ unsigned ci_netif_build_future_intf_mask(ci_netif* ni)
   OO_STACK_FOR_EACH_INTF_I(ni, nic_i) {
     /* Disable future when there's an XDP prog attached because that prog may
      * alter the destination socket, in which case the future code would be
-     * wrong */
+     * wrong.  XDP-attachment implies poll_in_kernel, which is what we actually
+     * check here. */
     if( ! ni->nic_hw[nic_i].poll_in_kernel &&
-#if CI_CFG_BPF
-        ni->nic_hw[nic_i].xdp_prog_fd < 0 &&
-#endif
         ~ef_vi_flags(&ni->nic_hw[nic_i].vi) & EF_VI_RX_EVENT_MERGE )
       mask |= 1u << nic_i;
   }
@@ -2100,7 +2040,7 @@ static int netif_tcp_helper_build(ci_netif* ni)
   **   ci_netif_get_driver_handle(ni), ni->tcp_mmap (for user builds only)
   */
   ci_netif_state* ns = ni->state;
-  int rc, nic_i, size;
+  int rc, nic_i, size, expected_buf_ofs;
   unsigned vi_io_offset, vi_mem_offset, vi_state_offset;
   int vi_state_bytes;
 #if CI_CFG_SEPARATE_UDP_RXQ
@@ -2136,13 +2076,10 @@ static int netif_tcp_helper_build(ci_netif* ni)
 
   OO_STACK_FOR_EACH_INTF_I(ni, nic_i) {
     ci_netif_state_nic_t* nsn = &ns->nic[nic_i];
-    ci_uint8 pio_len_shift;
-    ci_uint32 ctpio_start_offset;
 
     /* Get interface properties. */
     rc = oo_cp_get_hwport_properties(ni->cplane, ns->intf_i_to_hwport[nic_i],
-                                     NULL, NULL, NULL, &pio_len_shift,
-                                     &ctpio_start_offset);
+                                     NULL, NULL);
     if( rc < 0 )
       goto fail1;
 
@@ -2208,8 +2145,7 @@ static int netif_tcp_helper_build(ci_netif* ni)
 #endif
 #if CI_CFG_CTPIO
     if( ni->nic_hw[nic_i].vi.vi_flags & EF_VI_TX_CTPIO ) {
-      void* ctpio_ptr = ni->ctpio_ptr + ctpio_io_offset +
-                        (ctpio_start_offset << pio_len_shift);
+      void* ctpio_ptr = ni->ctpio_ptr + ctpio_io_offset;
       ci_assert_lt(ctpio_io_offset, ns->ctpio_mmap_bytes);
       ni->nic_hw[nic_i].vi.vi_ctpio_mmap_ptr = ctpio_ptr;
       ctpio_io_offset += CI_PAGE_SIZE;
@@ -2217,11 +2153,6 @@ static int netif_tcp_helper_build(ci_netif* ni)
     }
 #endif
     ni->nic_hw[nic_i].poll_in_kernel = NI_OPTS(ni).poll_in_kernel;
-#if CI_CFG_BPF
-    ni->nic_hw[nic_i].xdp_prog_fd = -1;
-    memset(&ni->nic_hw[nic_i].xdp_jitted, 0,
-           sizeof(ni->nic_hw[nic_i].xdp_jitted));
-#endif
   }
   ni->future_intf_mask = ci_netif_build_future_intf_mask(ni);
 
@@ -2242,8 +2173,12 @@ static int netif_tcp_helper_build(ci_netif* ni)
    */
   size = ns->active_wild_ofs - ns->buf_ofs - sizeof(oo_pktbuf_manager);
 
-  if( ns->buf_ofs != sizeof(ci_netif_state) +
-      ns->vi_state_bytes * oo_stack_intf_max(ni) ||
+  expected_buf_ofs = sizeof(ci_netif_state);
+  expected_buf_ofs = CI_ROUND_UP(expected_buf_ofs, __alignof__(ef_vi_state));
+  expected_buf_ofs += ns->vi_state_bytes * oo_stack_intf_max(ni);
+  expected_buf_ofs = CI_ROUND_UP(expected_buf_ofs,
+                                 __alignof__(oo_pktbuf_manager));
+  if( ns->buf_ofs != expected_buf_ofs ||
       size % sizeof(oo_pktbuf_set) != 0 ||
       ni->packets->sets_max < 1 || 
       size / sizeof(oo_pktbuf_set) < ni->packets->sets_max ) {
@@ -2253,8 +2188,13 @@ static int netif_tcp_helper_build(ci_netif* ni)
      */
     ci_log("ERROR: data structure layout mismatch between kernel and "
            "user level detected!");
-    ci_log("ns->buf_ofs=%d != %zd + %d * %d", ns->buf_ofs,
-           sizeof(ci_netif_state), ns->vi_state_bytes, oo_stack_intf_max(ni));
+    ci_log("ns->buf_ofs=%d (expected %d)", ns->buf_ofs, expected_buf_ofs);
+    ci_log("  sizeof(ci_netif_state) = %zd", sizeof(ci_netif_state));
+    ci_log("  alignof(ef_vi_state) = %zd", __alignof__(ef_vi_state));
+    ci_log("  vi_state_bytes = %d", ns->vi_state_bytes);
+    ci_log("  stack_intf_max = %d", oo_stack_intf_max(ni));
+    ci_log("  alignof(oo_pktbuf_manager) = %zd",
+           __alignof__(oo_pktbuf_manager));
     ci_log("oo_pktbuf_set=%zd, size=%d, sets_max=%d", 
            sizeof(oo_pktbuf_set), size, ni->packets->sets_max);
     ci_log("a: %d != 0", size % sizeof(oo_pktbuf_set) != 0);
@@ -2485,7 +2425,7 @@ netif_tcp_helper_alloc_u(ef_driver_handle fd, ci_netif* ni,
                    "This error can occur if no Solarflare network interfaces\n"
                    "are active/UP, or they are running packed stream\n"
                    "firmware, are disabled or lack Onload activation keys.\n"
-                   "Please check your configuration.  To obtain activation\n"
+                   "Please check your configuration. To obtain activation\n"
                    "keys, please contact your sales representative.",
                    __FUNCTION__));
       break;
@@ -2865,7 +2805,7 @@ int ci_netif_ctor(ci_netif* ni, ef_driver_handle fd, const char* stack_name,
   ci_netif_pkt_prefault_reserve(ni);
   ci_netif_pkt_prefault(ni);
 
-  ci_netif_log_startup_banner(ni, "Using", /* check_expiry*/ 1);
+  ci_netif_log_startup_banner(ni, "Using");
 
   return 0;
 }
@@ -3153,7 +3093,7 @@ int ci_netif_restore_name(ci_netif* ni, const char* name)
     goto fail4;
   ef_onload_driver_close(fd2);
 
-  ci_netif_log_startup_banner(ni, "Sharing", /* check_expiry*/ 1);
+  ci_netif_log_startup_banner(ni, "Sharing");
 
   return 0;
 

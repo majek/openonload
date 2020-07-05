@@ -359,7 +359,8 @@ static int efrm_consume_ip_mask( const char** src, size_t* length,
 		return 0;
 
 	if ( efrm_compare_and_skip( src, length, "/" ) ) {
-		*mask = 0;
+		/* IP without mask, default to /32. */
+		*mask = 0xffffffff;
 	}
 	else if ( !efrm_consume_ip( src, length, mask_ptr ) )
 	{

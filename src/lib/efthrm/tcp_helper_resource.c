@@ -46,9 +46,6 @@
 #endif
 #include "tcp_helper_resource.h"
 #include "tcp_helper_stats_dump.h"
-#if CI_CFG_BPF && ! defined NO_BPF
-#include <onload/bpf_internal.h>
-#endif
 
 #ifdef NDEBUG
 # define DEBUG_STR  ""
@@ -289,6 +286,10 @@ oo_trusted_lock_drop(tcp_helper_resource_t* trs, int in_dl_context)
     sl_flags |= CI_EPLOCK_NETIF_SWF_UPDATE;
   if( l & OO_TRUSTED_LOCK_PURGE_TXQS )
     sl_flags |= CI_EPLOCK_NETIF_PURGE_TXQS;
+#if CI_CFG_WANT_BPF_NATIVE && CI_HAVE_BPF_NATIVE
+  if( l & OO_TRUSTED_LOCK_XDP_CHANGE )
+    sl_flags |= CI_EPLOCK_NETIF_XDP_CHANGE;
+#endif
   ci_assert(sl_flags != 0);
   if( ci_cas32_succeed(&trs->trusted_lock, l, OO_TRUSTED_LOCK_LOCKED) &&
       ef_eplock_trylock_and_set_flags(&trs->netif.state->lock, sl_flags) ) {
@@ -882,7 +883,7 @@ int tcp_helper_vi_hw_rx_loopback_supported(tcp_helper_resource_t* trs,
  */ 
 static int allocate_pio(tcp_helper_resource_t* trs, int intf_i, 
                         struct efrm_pd *pd, struct efhw_nic* nic,
-                        unsigned *pio_buf_offset, ci_uint8 pio_len_shift)
+                        unsigned *pio_buf_offset)
 {
   ci_netif* ni = &trs->netif;
   int rc;
@@ -909,7 +910,7 @@ static int allocate_pio(tcp_helper_resource_t* trs, int intf_i,
 
 static int allocate_pio(tcp_helper_resource_t* trs, int intf_i, 
                         struct efrm_pd *pd, struct efhw_nic* nic,
-                        unsigned *pio_buf_offset, ci_uint8 pio_len_shift)
+                        unsigned *pio_buf_offset)
 {
   ci_netif* ni = &trs->netif;
   ci_netif_state* ns = ni->state;
@@ -918,23 +919,29 @@ static int allocate_pio(tcp_helper_resource_t* trs, int intf_i,
   struct tcp_helper_nic* trs_nic = &trs->nic[intf_i];
   int rc = 0;
 
+  if( nic->pio_num == 0 )
+      return 0;
+
   if( trs_nic->thn_pio_rs == NULL ) {
     rc = efrm_pio_alloc(pd, &trs_nic->thn_pio_rs);
     if( rc < 0 ) {
       if( NI_OPTS(ni).pio == 1 ) {
         if( rc == -ENOSPC ) {
-          ci_log("[%s]: WARNING: all PIO bufs allocated to other stacks. "
+          NI_LOG(ni, RESOURCE_WARNINGS,
+                 "[%s]: WARNING: all PIO bufs allocated to other stacks. "
                  "Continuing without PIO.  Use EF_PIO to control this.",
                  ns->pretty_name);
           return 0;
         }
         else {
-          CI_NDEBUG( if( rc != -ENETDOWN ) )
+          CI_NDEBUG( if( rc != -ENETDOWN && rc != -EPERM ) )
             /* ENETDOWN means absent hardware, so this failure is
              * expected, and we should not warn about it in NDEBUG
-             * builds 
+             * builds.  EPERM is expected on NICs that don't
+             * support PIO.
              */
-            ci_log("[%s]: Unable to alloc PIO (%d), will continue without it",
+            NI_LOG(ni, RESOURCE_WARNINGS,
+                   "[%s]: Unable to alloc PIO (%d), will continue without it",
                    ns->pretty_name, rc);
           return 0;
         }
@@ -953,7 +960,8 @@ static int allocate_pio(tcp_helper_resource_t* trs, int intf_i,
     efrm_pio_release(trs_nic->thn_pio_rs, true);
     trs_nic->thn_pio_rs = NULL;
     if( NI_OPTS(ni).pio == 1 ) {
-      ci_log("[%s]: Unable to link PIO (%d), will continue without it", 
+      NI_LOG(ni, RESOURCE_WARNINGS,
+             "[%s]: Unable to link PIO (%d), will continue without it",
              ns->pretty_name, rc);
       return 0;
     }
@@ -971,7 +979,8 @@ static int allocate_pio(tcp_helper_resource_t* trs, int intf_i,
     efrm_pio_release(trs_nic->thn_pio_rs, true);
     trs_nic->thn_pio_rs = NULL;
     if( NI_OPTS(ni).pio == 1 ) {
-      ci_log("[%s]: Unable to kmap PIO (%d), will continue without it", 
+      NI_LOG(ni, RESOURCE_WARNINGS,
+             "[%s]: Unable to kmap PIO (%d), will continue without it",
              ns->pretty_name, rc);
       return 0;
     }
@@ -1002,7 +1011,7 @@ static int allocate_pio(tcp_helper_resource_t* trs, int intf_i,
   /* Drop original ref to PIO region as linked VI now holds it */ 
   efrm_pio_release(trs_nic->thn_pio_rs, true);
   /* Initialise the buddy allocator for the PIO region. */
-  ci_pio_buddy_ctor(ni, &nsn->pio_buddy, nsn->pio_io_len << pio_len_shift);
+  ci_pio_buddy_ctor(ni, &nsn->pio_buddy, nsn->pio_io_len);
 
   return 0;
 }
@@ -1127,8 +1136,6 @@ static int /*bool*/ should_try_ctpio(ci_netif* ni, struct efhw_nic* nic,
     NI_OPTS(ni).ctpio > 0 &&
     /* NIC claims support for CTPIO. */
     (nic->flags & NIC_FLAG_TX_CTPIO) != 0 &&
-    /* NIC licensed for ultra-low-latency features. */
-    info->hwport_flags & CP_LLAP_LICENSED_ONLOAD_ULL &&
     /* CTPIO bypasses the NIC's switch.  When the switch is enabled, don't use
      * CTPIO unless we've been told to do so explicitly. */
     (~nic->flags & NIC_FLAG_MCAST_LOOP_HW || NI_OPTS(ni).ctpio_switch_bypass);
@@ -1149,6 +1156,15 @@ get_vi_settings(ci_netif* ni, struct efhw_nic* nic,
     info->wakeup_cpu_core = raw_smp_processor_id();
     info->log_resource_warnings = 0;
   }
+  /* NICs that do not have the low-latency licensed feature (e.g. those with
+   * a ScaleOut key) claim incorrectly that they support event cut-through.
+   * They report correctly, however, that they do not support RX cut-through,
+   * so we check for this here. */
+  if( NI_OPTS(ni).rx_merge_mode || ! (nic->flags & NIC_FLAG_RX_CUT_THROUGH) ) {
+    info->efhw_flags |= HIGH_THROUGHPUT_EFHW_VI_FLAGS;
+    info->ef_vi_flags |= EF_VI_RX_EVENT_MERGE;
+  }
+
 
 #if CI_CFG_UDP
   if( (nic->flags & NIC_FLAG_MCAST_LOOP_HW) &&
@@ -1183,7 +1199,7 @@ get_vi_settings(ci_netif* ni, struct efhw_nic* nic,
 
     if( NI_OPTS(ni).ctpio_mode == EF_CTPIO_MODE_SF_NP ) {
       info->ef_vi_flags |= EF_VI_TX_CTPIO_NO_POISON;
-      info->efhw_flags_extra |= EFHW_VI_TX_CTPIO_NO_POISON;
+      info->efhw_flags |= EFHW_VI_TX_CTPIO_NO_POISON;
     }
     if( NI_OPTS(ni).ctpio_mode == EF_CTPIO_MODE_CT )
       info->ctpio_threshold = NI_OPTS(ni).ctpio_ct_thresh;
@@ -1326,7 +1342,7 @@ static int allocate_vi(ci_netif* ni, struct vi_allocate_info* info)
     for( i = 0; i < 2; ++i ) {
       rc = efrm_vi_resource_alloc(info->client, NULL, info->vi_set, -1,
                                   info->pd, info->name,
-                                  info->efhw_flags | info->efhw_flags_extra,
+                                  info->efhw_flags,
                                   info->evq_capacity, info->txq_capacity,
                                   info->rxq_capacity, 0, 0,
                                   info->wakeup_cpu_core,
@@ -1436,6 +1452,14 @@ static void initialise_vi(ci_netif* ni, struct ef_vi* vi, struct efrm_vi* vi_rs,
   ef_vi_init_tx_timestamping(vi, vm->tx_ts_correction);
 }
 
+#if CI_CFG_WANT_BPF_NATIVE && CI_HAVE_BPF_NATIVE
+typedef uint32_t ci_xdp_prog_id_t;
+static void tcp_helper_nic_detach_xdp(struct tcp_helper_nic* trs_nic,
+                                      struct efhw_nic* nic);
+static int tcp_helper_nic_attach_xdp(ci_netif* ni,
+                                     struct tcp_helper_nic* trs_nic,
+                                     struct efhw_nic* nic);
+#endif
 
 static int allocate_vis(tcp_helper_resource_t* trs,
                         ci_resource_onload_alloc_t* alloc,
@@ -1512,28 +1536,20 @@ static int allocate_vis(tcp_helper_resource_t* trs,
     struct efrm_vi_mappings* vm = (void*) ni->vi_data;
     unsigned vi_out_flags = 0;
     struct pci_dev* dev;
-    ci_uint32 oo_vi_flags_mask = 0; /* Placate compiler. */
-    ci_uint8 pio_len_shift = 0;     /* Placate compiler. */
 
     BUILD_BUG_ON(sizeof(ni->vi_data) < sizeof(struct efrm_vi_mappings));
 
     alloc_info.hwport_flags = 0;        /* Placate compiler. */
-    nsn->xdp_current_gen = 1;     /* So that polls always check for
-                                   * updates on first use */
 
     /* Get interface properties. */
     rc = oo_cp_get_hwport_properties(ni->cplane, ns->intf_i_to_hwport[intf_i],
-                                     &alloc_info.hwport_flags,
-                                     &oo_vi_flags_mask,
-                                     &alloc_info.efhw_flags_extra,
-                                     &pio_len_shift,
-                                     NULL /* ctpio_start_offset */);
+                                     &alloc_info.hwport_flags, NULL);
     if( rc < 0 )
       goto error_out;
 
     /* As soon as we have one VI that supports UDP, mark the stack as
      * supporting UDP. */
-    if( alloc_info.hwport_flags & CP_LLAP_ONLOAD_UDP_ACCEL_LICENCES )
+    if( alloc_info.hwport_flags & CP_HWPORT_FLAG_UDP )
       ns->flags |= CI_NETIF_FLAG_UDP_SUPPORTED;
 
     alloc_info.client = trs_nic->thn_oo_nic->efrm_client;
@@ -1549,12 +1565,6 @@ static int allocate_vis(tcp_helper_resource_t* trs,
     ci_assert(trs_nic->thn_vi_rs == NULL);
     ci_assert(trs_nic->thn_oo_nic != NULL);
     ci_assert(alloc_info.client != NULL);
-
-    if( NI_OPTS(ni).rx_merge_mode ||
-        ~alloc_info.hwport_flags & CP_LLAP_LICENSED_ONLOAD_ULL ) {
-      alloc_info.efhw_flags |= HIGH_THROUGHPUT_EFHW_VI_FLAGS;
-      alloc_info.ef_vi_flags |= EF_VI_RX_EVENT_MERGE;
-    }
 
     snprintf(vf_name, sizeof(vf_name), "onload:%s-%d",
              ns->pretty_name, intf_i);
@@ -1701,10 +1711,8 @@ static int allocate_vis(tcp_helper_resource_t* trs,
 
 
 #if CI_CFG_PIO
-    if( NI_OPTS(ni).pio && (nic->devtype.arch == EFHW_ARCH_EF10) &&
-        alloc_info.hwport_flags & CP_LLAP_LICENSED_ONLOAD_ULL ) {
-      rc = allocate_pio(trs, intf_i, alloc_info.pd, nic, &pio_buf_offset,
-                        pio_len_shift);
+    if( NI_OPTS(ni).pio && (nic->devtype.arch == EFHW_ARCH_EF10) ) {
+      rc = allocate_pio(trs, intf_i, alloc_info.pd, nic, &pio_buf_offset);
       if( rc < 0 ) {
         efrm_pd_release(alloc_info.pd);
         goto error_out;
@@ -1712,7 +1720,11 @@ static int allocate_vis(tcp_helper_resource_t* trs,
     }
 #endif
 
-    nsn->oo_vi_flags &= oo_vi_flags_mask;
+#if CI_CFG_WANT_BPF_NATIVE && CI_HAVE_BPF_NATIVE
+    trs_nic->thn_xdp_prog = NULL;
+    if( NI_OPTS(ni).xdp_mode == EF_XDP_MODE_COMPATIBLE )
+      rc = tcp_helper_nic_attach_xdp(ni, trs_nic, nic);
+#endif
 
     if( alloc_info.release_pd )
       efrm_pd_release(alloc_info.pd); /* vi keeps a ref to pd */
@@ -1803,9 +1815,11 @@ static void release_vi(tcp_helper_resource_t* trs)
   /* Now do the rest of vi release */
   OO_STACK_FOR_EACH_INTF_I(&trs->netif, intf_i) {
     struct tcp_helper_nic* trs_nic = &trs->nic[intf_i];
-#if CI_CFG_PIO
+#if CI_CFG_PIO || (CI_CFG_WANT_BPF_NATIVE && CI_HAVE_BPF_NATIVE)
     struct efhw_nic* nic =
       efrm_client_get_nic(trs_nic->thn_oo_nic->efrm_client);
+#endif
+#if CI_CFG_PIO
     ci_netif_nic_t *netif_nic = &trs->netif.nic_hw[intf_i];
     if( NI_OPTS(&trs->netif).pio &&
         (nic->devtype.arch == EFHW_ARCH_EF10) &&
@@ -1819,6 +1833,10 @@ static void release_vi(tcp_helper_resource_t* trs)
     if( trs_nic->thn_ctpio_io_mmap != NULL )
       efrm_ctpio_unmap_kernel(trs_nic->thn_vi_rs, trs_nic->thn_ctpio_io_mmap);
 #endif
+#if CI_CFG_WANT_BPF_NATIVE && CI_HAVE_BPF_NATIVE
+    if( trs_nic->thn_xdp_prog )
+      tcp_helper_nic_detach_xdp(trs_nic, nic);
+#endif
     efrm_vi_resource_release_flushed(trs->nic[intf_i].thn_vi_rs);
     trs->nic[intf_i].thn_vi_rs = NULL;
     CI_DEBUG_ZERO(&trs->netif.nic_hw[intf_i].vi);
@@ -1829,11 +1847,6 @@ static void release_vi(tcp_helper_resource_t* trs)
       trs->nic[intf_i].thn_udp_rxq_vi_rs = NULL;
       CI_DEBUG_ZERO(&trs->netif.nic_hw[intf_i].udp_rxq_vi);
     }
-#endif
-
-#if CI_CFG_BPF && ! defined NO_BPF
-    if( netif_nic->xdp_prog )
-      ook_bpf_prog_decref(netif_nic->xdp_prog);
 #endif
   }
 
@@ -1923,6 +1936,8 @@ static void tcp_helper_leak_check(tcp_helper_resource_t* trs)
 
 #ifndef NDEBUG
   oof_cb_sw_filter_apply(&trs->netif);
+  if( table_n_entries != 0 )
+    ci_netif_filter_dump(&trs->netif);
   ci_assert_equal(table_n_entries, 0);
 #endif
   if( table_n_entries != 0 &&
@@ -1949,6 +1964,7 @@ allocate_netif_resources(ci_resource_onload_alloc_t* alloc,
   unsigned pio_bufs_ofs = 0;
 #endif
   ci_uint32 filter_table_size;
+  ci_uint32 filter_table_ext_size;
 #if CI_CFG_IPV6
   ci_uint32 ip6_filter_table_size;
 #endif
@@ -1965,10 +1981,7 @@ allocate_netif_resources(ci_resource_onload_alloc_t* alloc,
 #endif
   trs->buf_mmap_bytes = 0;
 
-  /* Fixme: max_ep_bufs is the number of ep states including the states
-   * used for aux buffers and pipe endpoints.  How many real sockets are
-   * we going to create?  Do we need a separate option? */
-  no_table_entries = NI_OPTS(ni).max_ep_bufs * 2;
+  no_table_entries = ci_netif_filter_table_size(ni);
 
   if( NI_OPTS(ni).tcp_isn_mode == 1 ) {
     /* FIXME: Reconsider the size of this table. */
@@ -2024,22 +2037,40 @@ allocate_netif_resources(ci_resource_onload_alloc_t* alloc,
   }
 
   filter_table_size = sizeof(ci_netif_filter_table) +
-    sizeof(ci_netif_filter_table_entry) * (no_table_entries - 1);
+    sizeof(ci_netif_filter_table_entry_fast) * (no_table_entries - 1);
+  filter_table_ext_size = sizeof(ci_netif_filter_table_entry_ext) *
+                          no_table_entries;
 #if CI_CFG_IPV6
   ip6_filter_table_size = sizeof(ci_ip6_netif_filter_table) +
     sizeof(ci_ip6_netif_filter_table_entry) * (no_table_entries - 1);
 #endif
 
-  /* allocate shmbuf for netif state */
+  /* Allocate shmbuf for netif state.  When calculating the size, it's
+   * important that the sizes of the sub-buffers are accumulated in the order
+   * in which they will be laid out in memory, or else the alignment
+   * calculations will be invalid. */
   ci_assert_le(NI_OPTS(ni).max_ep_bufs, CI_CFG_NETIF_MAX_ENDPOINTS_MAX);
-  sz = sizeof(ci_netif_state) + vi_state_bytes * trs->netif.nic_n +
-    sizeof(oo_pktbuf_manager) + sizeof(oo_pktbuf_set) * ni->pkt_sets_max +
-    sizeof(ci_ni_dllist_t) * no_active_wild_table_entries *
-                             no_active_wild_pools +
-    sizeof(ci_tcp_prev_seq_t) * no_seq_table_entries + filter_table_size +
-    sizeof(struct oo_deferred_pkt) * NI_OPTS(ni).defer_arp_pkts;
+  sz = sizeof(ci_netif_state);
+  sz = CI_ROUND_UP(sz, __alignof__(ef_vi_state));
+  sz += vi_state_bytes * trs->netif.nic_n;
+  sz = CI_ROUND_UP(sz, __alignof__(oo_pktbuf_manager));
+  sz += sizeof(oo_pktbuf_manager);
+  sz = CI_ROUND_UP(sz, __alignof__(oo_pktbuf_set));
+  sz += sizeof(oo_pktbuf_set) * ni->pkt_sets_max;
+  sz = CI_ROUND_UP(sz, __alignof__(ci_ni_dllist_t));
+  sz += sizeof(ci_ni_dllist_t) * no_active_wild_table_entries *
+        no_active_wild_pools;
+  sz = CI_ROUND_UP(sz, __alignof__(ci_tcp_prev_seq_t));
+  sz += sizeof(ci_tcp_prev_seq_t) * no_seq_table_entries;
+  sz = CI_ROUND_UP(sz, __alignof__(struct oo_deferred_pkt));
+  sz += sizeof(struct oo_deferred_pkt) * NI_OPTS(ni).defer_arp_pkts;
+  sz = CI_ROUND_UP(sz, __alignof__(ci_netif_filter_table));
+  sz += filter_table_size;
+  sz = CI_ROUND_UP(sz, __alignof__(ci_netif_filter_table_entry_ext));
+  sz += filter_table_ext_size;
 
 #if CI_CFG_IPV6
+  sz = CI_ROUND_UP(sz, __alignof__(ci_ip6_netif_filter_table));
   sz += ip6_filter_table_size;
 #endif
 
@@ -2050,8 +2081,10 @@ allocate_netif_resources(ci_resource_onload_alloc_t* alloc,
    * remainder of the memory.
    */
   if( NI_OPTS(ni).pio ) {
+    const int pio_max_buf_size = 4096;
+    sz = CI_ROUND_UP(sz, pio_max_buf_size);
     pio_bufs_ofs = sz;
-    sz += 4096 * oo_stack_intf_max(ni);
+    sz += pio_max_buf_size * oo_stack_intf_max(ni);
   }
 #endif
 
@@ -2098,30 +2131,55 @@ allocate_netif_resources(ci_resource_onload_alloc_t* alloc,
     if( ns->hwport_to_intf_i[i] >= 0 )
       ns->intf_i_to_hwport[(int) ns->hwport_to_intf_i[i]] = i;
 
-  ns->buf_ofs = sizeof(ci_netif_state) + vi_state_bytes * trs->netif.nic_n;
-  ns->active_wild_ofs = ns->buf_ofs + sizeof(oo_pktbuf_manager) +
-                        sizeof(oo_pktbuf_set) * ni->pkt_sets_max;
+  ns->buf_ofs = sizeof(ci_netif_state);
+  ns->buf_ofs = CI_ROUND_UP(ns->buf_ofs, __alignof__(ef_vi_state));
+  ns->buf_ofs += vi_state_bytes * trs->netif.nic_n;
+  ns->buf_ofs = CI_ROUND_UP(ns->buf_ofs, __alignof__(oo_pktbuf_manager));
+
+  ns->active_wild_ofs = ns->buf_ofs + sizeof(oo_pktbuf_manager);
+  ns->active_wild_ofs = CI_ROUND_UP(ns->active_wild_ofs,
+                                    __alignof__(oo_pktbuf_set));
+  ns->active_wild_ofs += sizeof(oo_pktbuf_set) * ni->pkt_sets_max;
+  ns->active_wild_ofs = CI_ROUND_UP(ns->active_wild_ofs,
+                                    __alignof__(ci_ni_dllist_t));
   ns->active_wild_table_entries_n = no_active_wild_table_entries;
   ns->active_wild_pools_n = no_active_wild_pools;
+
   ns->seq_table_ofs = ns->active_wild_ofs + (sizeof(ci_ni_dllist_t) *
                                              ns->active_wild_table_entries_n *
                                              ns->active_wild_pools_n);
+  ns->seq_table_ofs = CI_ROUND_UP(ns->seq_table_ofs,
+                                  __alignof__(ci_tcp_prev_seq_t));
   ns->seq_table_entries_n = no_seq_table_entries;
-  ns->deferred_pkts_ofs = ns->seq_table_ofs + 
-                          (sizeof(ci_tcp_prev_seq_t) * ns->seq_table_entries_n);
+
+  ns->deferred_pkts_ofs = ns->seq_table_ofs +
+                          sizeof(ci_tcp_prev_seq_t) * ns->seq_table_entries_n;
+  ns->deferred_pkts_ofs = CI_ROUND_UP(ns->deferred_pkts_ofs,
+                                      __alignof__(struct oo_deferred_pkt));
+
   ns->table_ofs = ns->deferred_pkts_ofs +
-                  (sizeof(struct oo_deferred_pkt) * NI_OPTS(ni).defer_arp_pkts);
-  ns->vi_state_bytes = vi_state_bytes;
+                  sizeof(struct oo_deferred_pkt) * NI_OPTS(ni).defer_arp_pkts;
+  ns->table_ofs = CI_ROUND_UP(ns->table_ofs,
+                              __alignof__(ci_netif_filter_table));
+
+  ns->table_ext_ofs = ns->table_ofs + filter_table_size;
+  ns->table_ext_ofs = CI_ROUND_UP(ns->table_ext_ofs,
+                                  __alignof__(ci_netif_filter_table_entry_ext));
 
 #if CI_CFG_IPV6
-  ns->ip6_table_ofs = ns->table_ofs + filter_table_size;
+  ns->ip6_table_ofs = ns->table_ext_ofs + filter_table_ext_size;
+  ns->ip6_table_ofs = CI_ROUND_UP(ns->ip6_table_ofs,
+                              __alignof__(ci_ip6_netif_filter_table));
 #endif
+
+  ns->vi_state_bytes = vi_state_bytes;
 
   ni->packets = (void*) ((char*) ns + ns->buf_ofs);
   ni->active_wild_table = (void*) ((char*) ns + ns->active_wild_ofs);
   ni->seq_table = (void*) ((char*) ns + ns->seq_table_ofs);
   ni->deferred_pkts = (void*) ((char*) ns + ns->deferred_pkts_ofs);
   ni->filter_table = (void*) ((char*) ns + ns->table_ofs);
+  ni->filter_table_ext = (void*) ((char*) ns + ns->table_ext_ofs);
 
 #if CI_CFG_IPV6
   ni->ip6_filter_table = (void*) ((char*) ns + ns->ip6_table_ofs);
@@ -2209,11 +2267,8 @@ allocate_netif_hw_resources(ci_resource_onload_alloc_t* alloc,
   }
   memset(ni->pkt_bufs, 0, sz);
 
-  OO_STACK_FOR_EACH_INTF_I(ni, intf_i) {
+  OO_STACK_FOR_EACH_INTF_I(ni, intf_i)
     ni->nic_hw[intf_i].pkt_rs = NULL;
-    ni->nic_hw[intf_i].xdp_prog = NULL;
-    ni->nic_hw[intf_i].xdp_active_gen = 0;
-  }
 
   OO_STACK_FOR_EACH_INTF_I(ni, intf_i) {
     if( (ni->nic_hw[intf_i].pkt_rs = ci_alloc(sz)) == NULL ) {
@@ -2442,13 +2497,7 @@ static int oo_get_nics(tcp_helper_resource_t* trs, int ifindices_len)
   for( i = 0; i < CI_CFG_MAX_INTERFACES; ++i )
     ni->intf_i_to_hwport[i] = (ci_int8) -1;
 
-  hwport_mask = oo_cp_get_licensed_hwports(ni->cplane);
-  if( hwport_mask == 0 ) {
-    ci_log("%s: ERROR: No network interfaces have activation keys that allow "
-           "the creation of an Onload stack.  Please contact your sales "
-           "representative.", __FUNCTION__);
-    return -ENODEV;
-  }
+  hwport_mask = oo_cp_get_hwports(ni->cplane);
 
   if( oo_get_listed_hwports(trs, NI_OPTS(ni).iface_whitelist,
                             &whitelist_mask, "whitelist") == 0 )
@@ -3412,13 +3461,7 @@ static inline void netns_get_identifiers(ci_netif_state* state,
 {
   struct oo_cplane_handle* cp = cp_acquire_from_netns_if_exists(ns);
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 19, 0)
-  state->netns_id = ns->ns.inum;
-#elif defined(EFRM_NET_HAS_PROC_INUM)
-  state->netns_id = ns->proc_inum;
-#else
-  state->netns_id = 0;
-#endif
+  state->netns_id = get_netns_id(ns);
 
   if( cp != NULL ) {
     state->cplane_pid = oo_cp_get_server_pid(cp);
@@ -3769,6 +3812,8 @@ int tcp_helper_rm_alloc(ci_resource_onload_alloc_t* alloc,
     if( nic->resetting )
       tcp_helper_suspend_interface(ni, intf_i);
   }
+  if( oof_use_all_local_ip_addresses || cplane_use_prefsrc_as_local )
+    ni->state->flags |= CI_NETIF_FLAG_USE_ALIEN_LADDRS;
 
   tcp_helper_init_max_mss(rs);
 
@@ -3889,12 +3934,12 @@ int tcp_helper_rm_alloc(ci_resource_onload_alloc_t* alloc,
     tcp_helper_alloc_list_to_aw_pool(rs, addr_any, ephemeral_ports);
   }
 
-  efab_tcp_helper_netif_unlock(rs, 0);
-
-  efab_notify_stacklist_change(rs);
-
   /* We deliberately avoid starting periodic timer and callback until now,
    * so we don't have to worry about stopping them if we bomb out early.
+   *
+   * Although the stack is visible before this point, it's only once we unlock
+   * it that other users can start to do things that require these to have
+   * been initialised.
    */
   OO_STACK_FOR_EACH_INTF_I(&rs->netif, intf_i) {
     if( NI_OPTS(ni).int_driven )
@@ -3909,6 +3954,10 @@ int tcp_helper_rm_alloc(ci_resource_onload_alloc_t* alloc,
   tcp_helper_initialize_and_start_periodic_timer(rs);
   if( NI_OPTS(ni).int_driven )
     tcp_helper_request_wakeup(netif2tcp_helper_resource(ni));
+
+  efab_tcp_helper_netif_unlock(rs, 0);
+
+  efab_notify_stacklist_change(rs);
 
 #ifdef ONLOAD_OFE
 #endif
@@ -4354,6 +4403,56 @@ void tcp_helper_reset_stack(ci_netif* ni, int intf_i)
    * todo: net driver should tell us if it is dl context */
   queue_work(thr->reset_wq, &thr->reset_work);
 }
+
+#if CI_CFG_WANT_BPF_NATIVE && CI_HAVE_BPF_NATIVE
+/* This callback from efrm occurs with a spinlock held, so we cannot handle
+ * the change directly here, but must defer it.  The actual update is handled
+ * by tcp_helper_handle_xdp_change().
+ */
+void tcp_helper_xdp_change(ci_netif *ni, int intf_i)
+{
+  tcp_helper_resource_t *thr = CI_CONTAINER(tcp_helper_resource_t, netif, ni);
+  ci_irqlock_state_t lock_flags;
+
+  /* Remember which interface needs the update */
+  ci_irqlock_lock(&thr->lock, &lock_flags);
+  thr->intfs_to_xdp_update |= (1 << intf_i);
+  ci_irqlock_unlock(&thr->lock, &lock_flags);
+
+  if( efab_tcp_helper_netif_lock_or_set_flags(thr, OO_TRUSTED_LOCK_XDP_CHANGE,
+                                              CI_EPLOCK_NETIF_XDP_CHANGE,
+                                              1) ) {
+    ef_eplock_holder_set_flag(&ni->state->lock, CI_EPLOCK_NETIF_XDP_CHANGE);
+    efab_tcp_helper_netif_unlock(thr, 1);
+  }
+}
+
+void tcp_helper_handle_xdp_change(tcp_helper_resource_t *thr)
+{
+  int intf_i;
+  unsigned intfs_to_update;
+  ci_irqlock_state_t lock_flags;
+
+  ci_irqlock_lock(&thr->lock, &lock_flags);
+  intfs_to_update = thr->intfs_to_xdp_update;
+  thr->intfs_to_xdp_update = 0;
+  ci_irqlock_unlock(&thr->lock, &lock_flags);
+
+  for( intf_i = 0; intf_i < CI_CFG_MAX_INTERFACES; ++intf_i ) {
+    if( intfs_to_update & (1 << intf_i) ) {
+      struct tcp_helper_nic* trs_nic = &thr->nic[intf_i];
+      struct efhw_nic* nic =
+        efrm_client_get_nic(trs_nic->thn_oo_nic->efrm_client);
+
+      if( NI_OPTS(&thr->netif).xdp_mode == EF_XDP_MODE_COMPATIBLE ) {
+        if( trs_nic->thn_xdp_prog )
+          tcp_helper_nic_detach_xdp(trs_nic, nic);
+        tcp_helper_nic_attach_xdp(&thr->netif, trs_nic, nic);
+      }
+    }
+  }
+}
+#endif
 
 
 static void tcp_helper_purge_txq_work(struct work_struct *data)
@@ -6956,6 +7055,24 @@ efab_tcp_helper_netif_lock_callback(eplock_helper_t* epl, ci_uint64 lock_val,
       flags_set &=~ CI_EPLOCK_NETIF_NEED_PKT_SET;
     }
 
+#if CI_CFG_WANT_BPF_NATIVE && CI_HAVE_BPF_NATIVE
+    if( flags_set & CI_EPLOCK_NETIF_XDP_CHANGE ) {
+      if( in_dl_context ) {
+        OO_DEBUG_TCPH(ci_log("%s: [%u] defer XDP change handling to workitem",
+                             __FUNCTION__, thr->id));
+        ef_eplock_holder_set_flags(&ni->state->lock,
+                                   after_unlock_flags | flags_set);
+        tcp_helper_defer_dl2work(thr, OO_THR_AFLAG_UNLOCK_UNTRUSTED);
+        return 0;
+      }
+      OO_DEBUG_TCPH(ci_log("%s: [%u] handling XDP change now",
+                           __FUNCTION__, thr->id));
+      tcp_helper_handle_xdp_change(thr);
+      CITP_STATS_NETIF(++ni->state->stats.unlock_slow_xdp_change);
+      flags_set &=~ CI_EPLOCK_NETIF_XDP_CHANGE;
+    }
+#endif
+
     if( flags_set & CI_EPLOCK_NETIF_PURGE_TXQS ) {
       tcp_helper_purge_txq_locked(thr);
       flags_set &= ~CI_EPLOCK_NETIF_PURGE_TXQS;
@@ -7408,31 +7525,236 @@ static void oo_inject_packets_kernel(tcp_helper_resource_t* trs, int sync)
 }
 
 
-void tcp_helper_xdp_prog_changed(const char* stack_name,
-                                 ci_hwport_id_t hwport)
-{
-#if CI_CFG_BPF
-  tcp_helpers_table_t* table = &THR_TABLE;
-  ci_irqlock_state_t lock_flags;
-  ci_dllink *link;
+#if CI_CFG_WANT_BPF_NATIVE && CI_HAVE_BPF_NATIVE
+#include <linux/syscalls.h>
+#include <uapi/linux/bpf.h>
+#include <linux/bpf.h>
 
-  ci_irqlock_lock(&table->lock, &lock_flags);
-  CI_DLLIST_FOR_EACH(link, &table->all_stacks) {
-    tcp_helper_resource_t *thr;
-    thr = CI_CONTAINER(tcp_helper_resource_t, all_stacks_link, link);
-    if( stack_name[0] == '\0' ||
-        ! strncmp(stack_name, thr->name, CI_CFG_STACK_NAME_LEN) ) {
-      int i;
-      for( i = 0; i < CI_CFG_MAX_INTERFACES; ++i ) {
-        if( hwport == CI_HWPORT_ID_BAD ||
-            hwport == thr->netif.intf_i_to_hwport[i] )
-          ++thr->netif.state->nic[i].xdp_current_gen;
-      }
-    }
+static int ci_bpf_prog_get_fd_by_id(ci_xdp_prog_id_t id)
+{
+  int rc;
+  mm_segment_t old_fs;
+  union bpf_attr attr = {};
+  const struct cred *orig_creds = NULL;
+  attr.prog_id = id;
+
+  if( ! capable(CAP_SYS_ADMIN) ) {
+    /* we need CAP_SYS_ADMIN to call sys_bpf and obtain program */
+    struct cred *creds = prepare_creds();
+    if( creds == NULL )
+      goto fail_enomem;
+    creds->cap_effective.cap[0] |= 1 << CAP_SYS_ADMIN;
+    orig_creds = override_creds(creds);
   }
-  ci_irqlock_unlock(&table->lock, &lock_flags);
-#endif
+
+  old_fs = get_fs();
+  set_fs(KERNEL_DS);
+
+  rc = efab_linux_sys_bpf(BPF_PROG_GET_FD_BY_ID, &attr, sizeof(attr));
+
+  set_fs(old_fs);
+
+  if( orig_creds != NULL )
+    revert_creds(orig_creds);
+
+  return rc;
+
+fail_enomem:
+  return -ENOMEM;
 }
+
+
+static struct bpf_prog* ci_bpf_prog_get(int fd)
+{
+  return bpf_prog_get_type_dev(fd, BPF_PROG_TYPE_XDP, 1);
+}
+
+
+static void ci_bpf_prog_put(struct bpf_prog* prog)
+{
+  bpf_prog_put(prog);
+}
+
+
+static int ci_bpf_prog_get_by_id(ci_xdp_prog_id_t id, struct bpf_prog** prog_out)
+{
+  int fd = ci_bpf_prog_get_fd_by_id(id);
+  struct bpf_prog* prog;
+  if( fd < 0 )
+    return fd;
+  prog = ci_bpf_prog_get(fd);
+  efab_linux_sys_close(fd);
+  if( IS_ERR_OR_NULL(prog) )
+    return -ENOENT;
+  if( prog->aux->id != id ) {
+    /* fd was overwritten in the meantime with some other program */
+    ci_bpf_prog_put(prog);
+    return -ENOENT;
+  }
+  *prog_out = prog;
+  return 0;
+}
+
+static void tcp_helper_nic_detach_xdp(struct tcp_helper_nic* trs_nic,
+                                      struct efhw_nic* nic)
+{
+  ci_bpf_prog_put(trs_nic->thn_xdp_prog);
+  trs_nic->thn_xdp_prog = NULL;
+}
+
+static int tcp_helper_nic_attach_xdp(ci_netif* ni,
+                                     struct tcp_helper_nic* trs_nic,
+                                     struct efhw_nic* nic)
+{
+  struct net_device* netdev = efhw_nic_get_net_dev(nic);
+  struct netdev_bpf xdp = {};
+  ci_xdp_prog_id_t xdp_prog_id = 0;
+  int rc = 0;
+
+  /* Caller is responsible for ensuring that any previously attached prog
+   * has been safely detached.
+   */
+  ci_assert_equal(trs_nic->thn_xdp_prog, NULL);
+
+  /* XDP prog is protected by netif lock, which is also needed to assert on
+   * CI_NETIF_FLAG_IN_DL_CONTEXT flag.
+   */
+  ci_assert( ci_netif_is_locked(ni) );
+
+  /* We need to take the rtnl lock to query the attached prog, so we better
+   * not be in dl context, where we may already hold the lock.
+   */
+  ci_assert_nflags(ni->flags, CI_NETIF_FLAG_IN_DL_CONTEXT);
+
+  xdp.command = XDP_QUERY_PROG;
+  if( netdev ) {
+    if( netdev->netdev_ops->ndo_bpf ) {
+      rtnl_lock();
+      rc = netdev->netdev_ops->ndo_bpf(netdev, &xdp);
+      rtnl_unlock();
+      if( rc == 0 )
+        xdp_prog_id = xdp.prog_id;
+    }
+    dev_put(netdev);
+  }
+
+  if( xdp_prog_id != 0 ) {
+    struct bpf_prog* prog = NULL;
+    rc = ci_bpf_prog_get_by_id(xdp_prog_id, &prog);
+    if( rc ) {
+      NI_LOG(ni, RESOURCE_WARNINGS,
+             FN_FMT "Failed obtain xdp program %d (%d)",
+             FN_PRI_ARGS(ni), xdp_prog_id, rc);
+    }
+    trs_nic->thn_xdp_prog = prog;
+  }
+
+  return rc;
+}
+
+ci_inline int oo_xdp_rx_pkt_locked(ci_netif* ni,
+                                   struct net_device* dev,
+                                   struct bpf_prog* xdp_prog,
+                                   ci_ip_pkt_fmt* pkt)
+{
+  /* TODO: ensure that packet:
+   *  * is linear
+   *  * has enough headroom (256 bytes)
+   *  see netif_receive_generic_xdp in kernel */
+  struct xdp_buff _xdp;
+  struct xdp_buff* xdp = &_xdp;
+  void *orig_data, *orig_data_end;
+  struct xdp_rxq_info xdp_rx_queue = {
+    .dev = dev,
+  };
+  int act;
+
+  /* The XDP program wants to see the packet starting at the MAC
+   * header.
+   */
+  xdp->data = oo_ether_hdr(pkt);
+  xdp->data_meta = xdp->data; /* note: netdriver does not support metadata at all, we could do the same */
+
+  /* There are two commonly-discussed behaviours for jumbograms:
+   * 1) Drop the packet here (it would be bad to bypass XDP without dropping
+   *    because that's a firewall bypass)
+   * 2) Pass only the first fragment to the XDP
+   * This code implements option (2), which is not what most kernel drivers
+   * do at time of writing but is likely to be the future. See discussion at
+   * https://github.com/xdp-project/xdp-project/blob/master/areas/core/xdp-multi-buffer01-design.org
+   */
+  xdp->data_end = xdp->data + oo_offbuf_left(&pkt->buf);
+  xdp->data_hard_start = xdp->data; /* no headroom, should be 256 bytes at least */
+  orig_data_end = xdp->data_end;
+  orig_data = xdp->data;
+
+  xdp->rxq = &xdp_rx_queue; /* TODO: would that do? */
+
+  act = bpf_prog_run_xdp(xdp_prog, xdp);
+
+
+  return act;
+}
+
+
+/* bool */ int
+efab_tcp_helper_xdp_rx_pkt(tcp_helper_resource_t* trs, int intf_i, ci_ip_pkt_fmt* pkt)
+{
+  struct bpf_prog* xdp_prog;
+  int ret = XDP_PASS;
+  struct tcp_helper_nic* trs_nic = &trs->nic[intf_i];
+  struct efhw_nic* nic;
+  struct net_device* dev;
+  ci_netif* ni = &trs->netif;
+
+  xdp_prog = trs_nic->thn_xdp_prog;
+  if( xdp_prog == NULL )
+    return 1;
+
+  nic = efrm_client_get_nic(trs_nic->thn_oo_nic->efrm_client);
+  dev = efhw_nic_get_net_dev(nic);
+  if( ! dev ) {
+    /* We can't let a NULL value into bpf_run() because some helper functions
+     * can crash the kernel with that. We don't really want to accept these
+     * packets blindly either, so I suppose this will have to do */
+    CITP_STATS_NETIF_INC(ni, rx_xdp_aborted);
+    return 0;
+  }
+
+  /* As kernel stack disable preemption and start read lock critical section
+   * seperately for each pkt */
+  preempt_disable();
+  rcu_read_lock();
+  ret = oo_xdp_rx_pkt_locked(ni, dev, xdp_prog, pkt);
+  rcu_read_unlock();
+  preempt_enable();
+
+  dev_put(dev);
+
+  switch( ret ) {
+    case XDP_PASS:
+      CITP_STATS_NETIF_INC(ni, rx_xdp_pass);
+      break;
+    case XDP_DROP:
+      CITP_STATS_NETIF_INC(ni, rx_xdp_drop);
+      break;
+    case XDP_TX:
+      CITP_STATS_NETIF_INC(ni, rx_xdp_tx);
+      break;
+    case XDP_REDIRECT:
+      CITP_STATS_NETIF_INC(ni, rx_xdp_redirect);
+      break;
+    case XDP_ABORTED:
+      CITP_STATS_NETIF_INC(ni, rx_xdp_aborted);
+      break;
+    default:
+      CITP_STATS_NETIF_INC(ni, rx_xdp_unknown);
+      /* drop */
+      break;
+  };
+  return ret == XDP_PASS;
+}
+#endif
 
 
 /*! \cidoxg_end */

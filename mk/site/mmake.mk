@@ -20,6 +20,5 @@ include $(TOP)/mk/site/efthrm.mk
 include $(TOP)/mk/site/libs.mk
 include $(TOP)/mk/site/sfgpxe.mk
 include $(TOP)/mk/site/efhw.mk
-include $(TOP)/mk/site/tests.mk
 endif
 include $(TOP)/mk/middle.mk

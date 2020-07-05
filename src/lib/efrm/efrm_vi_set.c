@@ -84,12 +84,6 @@ efrm_rss_context_alloc_and_init(struct efrm_pd *pd,
 	if (CI_IS_POW2(num_qs) &&
 	    !(efrm_client_get_nic(client)->flags & NIC_FLAG_RX_RSS_LIMITED) &&
 	    rss_mode == EFRM_RSS_MODE_DEFAULT) {
-		/* Shared rss contexts are only valid up to 64 queues - we
-		 * don't allow min_n_vis any bigger anyway, so this has already
-		 * been checked.
-		 */
-		EFRM_ASSERT(num_qs <= 64);
-
 		shared = 1;
 	}
 
@@ -111,8 +105,11 @@ efrm_rss_context_alloc_and_init(struct efrm_pd *pd,
 	memcpy(rss_context->rss_hash_key, rx_hash_key_default,
 	       sizeof(rss_context->rss_hash_key));
 
+	/* The maximum number of queues can't be larger than 64 */
+	EFRM_ASSERT(num_qs <= 64);
+
 	/* All queues in the set are used in the table initially. */
-	rss_context->indirected_vis = (1ull << num_qs) - 1;
+	rss_context->indirected_vis = (( num_qs < 64 ) ? (1ull << num_qs) : 0) - 1;
 
 	/* If we have an exclusive context we need to set up the key and
 	 * indirection table.

@@ -50,6 +50,9 @@ struct oof_local_port_addr {
    */
   ci_dllist lpa_full_socks;
 
+  /* List of [oof_nat_filter]s for this addr/port/protocol. */
+  ci_dllist lpa_nat_filters;
+
   /* Number of full-match sockets sharing [lpa_filter].
    * When flag OOF_LPA_REMOVED is set no hw/sw filter insertions
    * or filter sharing is allowed. */
@@ -282,6 +285,69 @@ struct oof_mcast_member {
   /* The vlan id of [mm_ifindex]. */
   ci_uint16                mm_vlan_id;
 
+};
+
+
+struct oof_nat_table {
+  ci_uint32    nattbl_size;
+  ci_dllist*   nattbl_buckets;
+  spinlock_t   nattbl_lock;
+
+  /* This is the logical number of entries in the table: that is, even NAT
+   * mappings that require two insertions in the table (which is the common
+   * case) are counted as one. */
+  int          nattbl_entries;
+
+  /* To avoid having to allocate memory in atomic context, we allocate storage
+   * for an oof_nat_filter at the point at which an entry is added to the NAT
+   * table, and stash it in this list.  When an OOF instance decides it needs
+   * to install a filter for a NAT entry, it grabs an entry from the list. */
+  ci_dllist    nattbl_filter_storage_list;
+  int          nattbl_filter_storage_count;
+};
+
+
+struct oof_nat_table_entry {
+  ci_dllink link;
+  ci_addr_t orig_addr;
+  ci_addr_t xlated_addr;
+  ci_uint16 orig_port;
+  ci_uint16 xlated_port;
+  /* Each logical entry is added to (at most) two buckets.  This is a link to
+   * the entry in the other bucket, or is NULL in the case where the entry is
+   * in one bucket only. */
+  struct oof_nat_table_entry* dual_entry;
+};
+
+
+/* Arbitrary limit for the number of NAT results that we will report for a
+ * given address:port query. */
+#define OOF_NAT_LOOKUP_RESULTS_MAX 256
+
+struct oof_nat_lookup_result_entry {
+  ci_addr_t orig_addr;
+  ci_uint16 orig_port;
+};
+
+struct oof_nat_lookup_result {
+  /* The idea here is to avoid kmalloc() calls in atomic context.  We embed a
+   * little bit of scratch space in the structure itself, which we expect
+   * callers to have allocated on the stack.  The results member can point
+   * either to scratch_space to a kmalloc()ed blob.  oof_nat_table_lookup()
+   * will try to use the scratch space first, and will fall back to dynamic
+   * allocation if there's not enough room.  In practice, we almost always
+   * expect at most one result, so the size of 4 for the scratch space should
+   * only be exceeded in deliberately perverse configurations. */
+  struct oof_nat_lookup_result_entry scratch_space[4], *results;
+  int n_results;
+};
+
+
+struct oof_nat_filter {
+  ci_dllink link;
+  struct oo_hw_filter natf_hwfilter;
+  ci_addr_t orig_addr;
+  ci_uint16 orig_port;
 };
 
 

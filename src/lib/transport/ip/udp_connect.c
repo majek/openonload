@@ -178,7 +178,8 @@ static int ci_udp_should_handover(citp_socket* ep, ci_addr_t laddr,
     goto handover;
   }
 
-  if( ! CI_IPX_ADDR_IS_ANY(laddr) &&
+  if( ~ep->netif->state->flags & CI_NETIF_FLAG_USE_ALIEN_LADDRS &&
+      ! CI_IPX_ADDR_IS_ANY(laddr) &&
       ! cicp_user_addr_is_local_efab(ep->netif, laddr) && 
       ! CI_IPX_IS_MULTICAST(laddr) ) {
     /* Either the bind/getsockname indicated that we need to let the OS
@@ -486,6 +487,13 @@ int ci_udp_connect_conclude(citp_socket* ep, ci_fd_t fd,
     goto out;
   }
 
+  if( NI_OPTS(ep->netif).udp_connect_handover == 2 ) {
+    LOG_UC(log(FNT_FMT "HANDOVER (udp_connect_handover == 2)" IPX_PORT_FMT,
+               FNT_PRI_ARGS(ep->netif, us), IPX_ARG(AF_IP(dst)),
+               CI_BSWAP_BE16(serv_sin->sin_port)));
+    goto handover;
+  }
+
 #if CI_CFG_FAKE_IPV6 && !CI_CFG_IPV6
   if( us->s.domain == PF_INET6 && !ci_tcp_ipv6_is_ipv4(serv_addr) ) {
     LOG_UC(log(FNT_FMT "HANDOVER not IPv4", FNT_PRI_ARGS(ep->netif, us)));
@@ -494,6 +502,11 @@ int ci_udp_connect_conclude(citp_socket* ep, ci_fd_t fd,
 #endif
 
   dst = ci_get_addr(serv_addr);
+
+  /* When performing UDP connected send with destination address any, data is
+   * really sent to linklocal destination. Make OS to take care of it. */
+  if( CI_IPX_ADDR_IS_ANY(dst) )
+    goto handover;
 
 #if CI_CFG_IPV6
   /* RHEL7 allows to connect from IPv4 address to IPv6 address.  For all

@@ -15,7 +15,6 @@
   
 #include "ip_internal.h"
 #include "udp_internal.h"
-#include "l3xudp_encap.h"
 #include <onload/sleep.h>
 
 #ifdef ONLOAD_OFE
@@ -274,7 +273,6 @@ void ci_udp_handle_rx(ci_netif* ni, ci_ip_pkt_fmt* pkt, ci_udp_hdr* udp,
   state.pkt = pkt;
   state.queued = 0;
   state.delivered = 0;
-
 
 #if CI_CFG_IPV6
   if( IS_AF_INET6(af) ) {

@@ -77,10 +77,10 @@ static int oo_nf_skb_get_payload(struct sk_buff* skb, void** pdata, int* plen)
     unsigned head_len = skb_headlen(skb);
     skb_frag_t* frag = &skb_shinfo(skb)->frags[0];
 
-    if( skb_shinfo(skb)->frag_list || frag->page_offset < head_len )
+    if( skb_shinfo(skb)->frag_list || skb_frag_off(frag) < head_len )
       return 0;
     *pdata = skb_frag_address(frag) - head_len;
-    *plen = frag->size + head_len;
+    *plen = skb_frag_size(frag) + head_len;
     return 1;
   } else {
     *pdata = skb->data;
@@ -243,9 +243,9 @@ static struct oo_nic *oo_netdev_may_add(const struct net_device *net_dev)
   struct efhw_nic* efhw_nic;
   struct oo_nic* onic;
 
-  onic = oo_nic_find_ifindex(net_dev->ifindex);
+  onic = oo_nic_find_dev(net_dev);
   if( onic == NULL )
-    onic = oo_nic_add(net_dev->ifindex);
+    onic = oo_nic_add(net_dev);
 
   if( onic != NULL ) {
     int up = net_dev->flags & IFF_UP;
@@ -257,11 +257,17 @@ static struct oo_nic *oo_netdev_may_add(const struct net_device *net_dev)
       onic->oo_nic_flags |= OO_NIC_UP;
     else
       onic->oo_nic_flags &= ~OO_NIC_UP;
+
     /* Remove OO_NIC_UNPLUGGED regardless of whether the interface is IFF_UP,
      * as we don't want to attempt to create ghost VIs now that the hardware is
      * back.
      */
-    onic->oo_nic_flags &= ~OO_NIC_UNPLUGGED;
+    if( onic->oo_nic_flags & OO_NIC_UNPLUGGED ) {
+      ci_log("%s: Rediscovered %s ifindex %d hwport %d", __func__,
+             net_dev->name, net_dev->ifindex, (int)(onic - oo_nics));
+      cp_announce_hwport(efhw_nic, onic - oo_nics);
+      onic->oo_nic_flags &= ~OO_NIC_UNPLUGGED;
+    }
   }
 
   return onic;
@@ -286,7 +292,7 @@ static int oo_dl_probe(struct efx_dl_device* dl_dev,
   }
 
   if( ! netif_running(net_dev) ) {
-    onic = oo_nic_find_ifindex(net_dev->ifindex);
+    onic = oo_nic_find_dev(net_dev);
     if( onic != NULL ) {
       /* We are dealing here with hotplug.  We block kernel traffic using drop
        * filters to prevent it hitting kernel and causing connection resets.
@@ -330,7 +336,7 @@ static void oo_dl_remove(struct efx_dl_device* dl_dev)
   ci_netif* ni = NULL;
   struct net_device* netdev = dl_dev->priv;
   struct oo_nic* onic;
-  if( (onic = oo_nic_find_ifindex(netdev->ifindex)) != NULL ) {
+  if( (onic = oo_nic_find_dev(netdev)) != NULL ) {
     /* Filter status need to be synced as after this function is finished
      * no further operations will be allowed.
      * Also note on polite hotplug oo_dl_remove() is called before
@@ -368,7 +374,7 @@ static void oo_dl_reset_resume(struct efx_dl_device* dl_dev, int ok)
 }
 
 
-static void oo_fixup_wakeup_breakage(int ifindex)
+static void oo_fixup_wakeup_breakage(struct net_device* dev)
 {
   /* This is needed after a hardware interface is brought up, and after an
    * MTU change.  When a netdev goes down, or the MTU is changed, the net
@@ -381,7 +387,7 @@ static void oo_fixup_wakeup_breakage(int ifindex)
   struct oo_nic* onic;
   ci_netif* ni = NULL;
   int hwport, intf_i;
-  if( (onic = oo_nic_find_ifindex(ifindex)) != NULL ) {
+  if( (onic = oo_nic_find_dev(dev)) != NULL ) {
     hwport = onic - oo_nics;
     while( iterate_netifs_unlocked(&ni, 0, 0) == 0 )
       if( (intf_i = ni->hwport_to_intf_i[hwport]) >= 0 )
@@ -395,12 +401,12 @@ static void oo_netdev_up(struct net_device* netdev)
   struct oo_nic *onic;
   struct efhw_nic* efhw_nic;
   /* Does efrm own this device? */
-  if( efrm_nic_present(netdev->ifindex) ) {
+  if( efhw_nic_find(netdev) ) {
     /* oo_netdev_may_add may trigger oof_hwport_up_down only
      * once on probe time */
     onic = oo_netdev_may_add(netdev);
     if( onic != NULL ) {
-      oo_fixup_wakeup_breakage(netdev->ifindex);
+      oo_fixup_wakeup_breakage(netdev);
       onic->oo_nic_flags |= OO_NIC_UP;
       efhw_nic = efrm_client_get_nic(onic->efrm_client);
       oof_onload_hwport_up_down(&efab_tcp_driver,oo_nic_hwport(onic), 1,
@@ -415,7 +421,7 @@ static void oo_netdev_going_down(struct net_device* netdev)
 {
   struct oo_nic *onic;
 
-  onic = oo_nic_find_ifindex(netdev->ifindex);
+  onic = oo_nic_find_dev(netdev);
   if( onic != NULL ) {
       oof_onload_hwport_up_down(&efab_tcp_driver,
                                 oo_nic_hwport(onic), 0, 0, 0, 0);
@@ -440,7 +446,7 @@ static int oo_netdev_event(struct notifier_block *this,
     break;
 
   case NETDEV_CHANGEMTU:
-    oo_fixup_wakeup_breakage(netdev->ifindex);
+    oo_fixup_wakeup_breakage(netdev);
 
 #ifdef EFRM_RTMSG_IFINFO_EXPORTED
     /* The control plane has to know about the new MTU value.

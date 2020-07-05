@@ -58,7 +58,7 @@
   #ifdef __GNUC__
     #if __GNUC__
       /* Flexible array is a GCC extension for C++ */
-      #define ZF_FLEXIBLE_ARRAY_COUNT
+      #define ZF_FLEXIBLE_ARRAY_COUNT 0
     #endif
   #endif
 #else

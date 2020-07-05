@@ -1,38 +1,9 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /* X-SPDX-Copyright-Text: (c) Solarflare Communications Inc */
-/****************************************************************************
- * Copyright 2004-2005: Level 5 Networks Inc.
- * Copyright 2005-2018: Solarflare Communications Inc,
- *                      7505 Irvine Center Drive, Suite 100
- *                      Irvine, CA 92618, USA
- *
- * Maintained by Solarflare Communications
- *  <linux-xen-drivers@solarflare.com>
- *  <onload-dev@solarflare.com>
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published
- * by the Free Software Foundation, incorporated herein by reference.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
- ****************************************************************************
- */
 
 /**************************************************************************\
 *//*! \file
-** \author    Solarflare Communications, Inc.
 ** \brief     Additional Doxygen-format documentation for ef_vi.
-** \date      2018/11/06
-** \copyright Copyright &copy; 2018 Solarflare Communications, Inc. All
-**            rights reserved. Solarflare, OpenOnload and EnterpriseOnload
-**            are trademarks of Solarflare Communications, Inc.
 *//*
 \**************************************************************************/
 
@@ -647,8 +618,9 @@ direct received packets to a given virtual interface.
   and listen filters.
 
 - The SFN7000 and SFN8000 series NICs are not subject to this restriction.
-  If two applications insert the same filter, a copy of the packets is
-  delivered to each application and applications remain unaware of each other.
+  If two applications insert the same multicast filter, a copy of the packets
+  is delivered to each application and applications remain unaware of each
+  other.
 
 - IP filters do not match IP fragments, which are therefore received by
   the kernel stack. If this is an issue, layer 2 filters should be

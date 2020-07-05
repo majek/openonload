@@ -272,7 +272,7 @@ citp_fdtable_probe_restore(int fd, ci_ep_info_t * info, int print_banner)
     }
 
     if( print_banner ) {
-      ci_netif_log_startup_banner(ni, "Importing", /* check_expiry*/ 0);
+      ci_netif_log_startup_banner(ni, "Importing");
     }
   }
   else

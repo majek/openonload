@@ -224,7 +224,7 @@ struct citp_ordering_info {
 struct citp_ordered_wait {
   struct citp_ordering_info* ordering_info;
   int poll_again;
-  int next_timeout;
+  ci_int64 next_timeout_hr;
   ci_netif* ordering_stack;
 };
 
@@ -263,12 +263,26 @@ struct oo_ul_epoll_state {
 };
 
 
+/* Maximum timeout_hr we can handle.
+ * timeout=-1 is converted to this value.
+ * See timeout_hr_to_us() to understand why "/1000". */
+#define OO_EPOLL_MAX_TIMEOUT_HR (0x7fffffffffffffffULL / 1000)
+
+static inline ci_int64 oo_epoll_ms_to_frc(int ms_timeout)
+{
+  if( ms_timeout < 0 )
+    return OO_EPOLL_MAX_TIMEOUT_HR;
+  else
+    return (ci_int64)ms_timeout * citp.cpu_khz;
+}
+
+
 extern int citp_epoll_create(int size, int flags) CI_HF;
 extern int citp_epoll_ctl(citp_fdinfo* fdi, int op, int fd,
                           struct epoll_event *event) CI_HF;
 extern int citp_epoll_wait(citp_fdinfo*, struct epoll_event*,
-                           struct citp_ordered_wait* ordering,
-                           int maxev, int timeout, const sigset_t *sigmask,
+                           struct citp_ordered_wait* ordering, int maxev,
+                           ci_int64 timeout_hr, const sigset_t *sigmask,
                            citp_lib_context_t*) CI_HF;
 extern void citp_epoll_on_move(citp_fdinfo*, citp_fdinfo*, citp_fdinfo*,
                                int fdt_locked) CI_HF;

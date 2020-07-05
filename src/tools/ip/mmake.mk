@@ -10,14 +10,8 @@ endif
 
 ifneq ($(ONLOAD_ONLY),1)
 
-ifeq ($(WINDOWS),1)
-APPS	+= locktest           
-endif
-
 ifeq ($(GNU),1)
-APPS	+= routedump \
-           pio_buddy_test \
-           locktest
+APPS	+= pio_buddy_test
 endif
 
 endif  # ONLOAD_ONLY
@@ -40,7 +34,7 @@ endif
 MMAKE_LIBS	:= $(LINK_CIIP_LIB) $(LINK_CIAPP_LIB) \
 		   $(LINK_CITOOLS_LIB) $(LINK_CIUL_LIB) \
 		   $(LINK_CPLANE_LIB) $(MMAKE_LIBS_LIBPCAP)
-MMAKE_LIB_DEPS	:= bpf_stub.o $(CIIP_LIB_DEPEND) $(CIAPP_LIB_DEPEND) \
+MMAKE_LIB_DEPS	:= $(CIIP_LIB_DEPEND) $(CIAPP_LIB_DEPEND) \
 		   $(CITOOLS_LIB_DEPEND) $(CIUL_LIB_DEPEND) \
 		   $(CPLANE_LIB_DEPEND)
 
@@ -80,19 +74,3 @@ onload.config.o: onload.config
 
 clean:
 	@$(MakeClean)
-
-ifeq ($(WINDOWS),1)
-onload_stackdump.exe : stackdump.res
-locktest.exe : locktest.res
-
-## TODO - Wildcard out resource compilation into a generic rule.
-stackdump.res : stackdump.rc
-	rc /i $(TOP)/src/include /fo $@ /r $?
-
-istack.res : istack.rc
-	rc /i $(TOP)/src/include /fo $@ /r $?
-
-locktest.res : locktest.rc
-	rc /i $(TOP)/src/include /fo $@ /r $?
-
-endif

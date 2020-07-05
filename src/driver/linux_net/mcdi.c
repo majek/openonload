@@ -2712,8 +2712,9 @@ int efx_mcdi_mtd_read(struct mtd_info *mtd, loff_t start,
 
 	while (offset < end) {
 		chunk = min_t(size_t, end - offset, EFX_MCDI_NVRAM_LEN_MAX);
-		rc = efx_mcdi_nvram_read(part->efx, part->nvram_type, offset,
-					 buffer, chunk);
+		rc = efx_mcdi_nvram_read(part->mtd_struct->efx,
+					 part->nvram_type,
+		offset, buffer, chunk);
 		if (rc)
 			goto out;
 		offset += chunk;
@@ -2729,11 +2730,12 @@ int efx_mcdi_mtd_erase(struct mtd_info *mtd, loff_t start, size_t len)
 	struct efx_mtd_partition *part = mtd->priv;
 	loff_t offset = start & ~((loff_t)(mtd->erasesize - 1));
 	loff_t end = min_t(loff_t, start + len, mtd->size);
+	struct efx_nic *efx = part->mtd_struct->efx;
 	size_t chunk = part->mtd.erasesize;
 	int rc = 0;
 
 	if (!part->updating) {
-		rc = efx_mcdi_nvram_update_start(part->efx, part->nvram_type);
+		rc = efx_mcdi_nvram_update_start(efx, part->nvram_type);
 		if (rc)
 			goto out;
 		part->updating = true;
@@ -2743,7 +2745,7 @@ int efx_mcdi_mtd_erase(struct mtd_info *mtd, loff_t start, size_t len)
 	 * but erasing may be slow, so we make multiple calls here to avoid
 	 * tripping the MCDI RPC timeout. */
 	while (offset < end) {
-		rc = efx_mcdi_nvram_erase(part->efx, part->nvram_type, offset,
+		rc = efx_mcdi_nvram_erase(efx, part->nvram_type, offset,
 					  chunk);
 		if (rc)
 			goto out;
@@ -2757,13 +2759,14 @@ int efx_mcdi_mtd_write(struct mtd_info *mtd, loff_t start,
 		       size_t len, size_t *retlen, const u8 *buffer)
 {
 	struct efx_mtd_partition *part = mtd->priv;
+	struct efx_nic *efx = part->mtd_struct->efx;
 	loff_t offset = start;
 	loff_t end = min_t(loff_t, start + len, mtd->size);
 	size_t chunk;
 	int rc = 0;
 
 	if (!part->updating) {
-		rc = efx_mcdi_nvram_update_start(part->efx, part->nvram_type);
+		rc = efx_mcdi_nvram_update_start(efx, part->nvram_type);
 		if (rc)
 			goto out;
 		part->updating = true;
@@ -2775,7 +2778,7 @@ int efx_mcdi_mtd_write(struct mtd_info *mtd, loff_t start,
 #else
 		chunk = min_t(size_t, end - offset, part->common.writesize);
 #endif
-		rc = efx_mcdi_nvram_write(part->efx, part->nvram_type, offset,
+		rc = efx_mcdi_nvram_write(efx, part->nvram_type, offset,
 					  buffer, chunk);
 		if (rc)
 			goto out;
@@ -2794,7 +2797,8 @@ int efx_mcdi_mtd_sync(struct mtd_info *mtd)
 
 	if (part->updating) {
 		part->updating = false;
-		rc = efx_mcdi_nvram_update_finish(part->efx, part->nvram_type);
+		rc = efx_mcdi_nvram_update_finish(part->mtd_struct->efx,
+						  part->nvram_type);
 	}
 
 	return rc;
@@ -2802,7 +2806,7 @@ int efx_mcdi_mtd_sync(struct mtd_info *mtd)
 
 void efx_mcdi_mtd_rename(struct efx_mtd_partition *part)
 {
-	struct efx_nic *efx = part->efx;
+	struct efx_nic *efx = part->mtd_struct->efx;
 
 	if (!efx)
 		return;

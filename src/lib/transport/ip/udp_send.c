@@ -151,8 +151,9 @@ ci_noinline void ci_udp_sendmsg_chksum(ci_netif* ni, ci_ip_pkt_fmt* pkt,
 }
 
 
-static void ci_ip_send_udp_slow(ci_netif* ni, ci_ip_pkt_fmt* pkt,
-                                ci_ip_cached_hdrs* ipcache)
+static void
+ci_ip_send_udp_slow(ci_netif* ni, struct oo_sock_cplane* sock_cp,
+                    ci_ip_pkt_fmt* pkt, ci_ip_cached_hdrs* ipcache)
 {
   int os_rc = 0;
 
@@ -162,7 +163,7 @@ static void ci_ip_send_udp_slow(ci_netif* ni, ci_ip_pkt_fmt* pkt,
   ci_assert_gt(pkt->refcount, 1);
   --pkt->refcount;
 
-  ci_ip_send_pkt_defer(ni, retrrc_nomac, &os_rc, pkt, ipcache);
+  ci_ip_send_pkt_defer(ni, sock_cp, retrrc_nomac, &os_rc, pkt, ipcache);
 }
 
 
@@ -494,8 +495,9 @@ static int ci_udp_sendmsg_os_get_binding(citp_socket *ep, ci_fd_t fd,
     ci_sock_cmn_set_laddr(ep->s, laddr, lport);
 
     /* Add a filter if the local addressing is appropriate. */
-    if( lport != 0 && (CI_IPX_ADDR_IS_ANY(laddr) ||
-         cicp_user_addr_is_local_efab(ni, laddr)) ) {
+    if( ~ni->state->flags & CI_NETIF_FLAG_USE_ALIEN_LADDRS &&
+        lport != 0 && (CI_IPX_ADDR_IS_ANY(laddr) ||
+        cicp_user_addr_is_local_efab(ni, laddr)) ) {
       ci_assert( ! (us->udpflags & CI_UDPF_FILTERED) );
 
 #ifdef ONLOAD_OFE
@@ -804,7 +806,7 @@ static void ci_udp_sendmsg_send(ci_netif* ni, ci_udp_state* us,
       while( 1 ) {
         oo_pkt_p next = pkt->next;
         prep_send_pkt(ni, us, pkt, ipcache);
-        ci_ip_send_udp_slow(ni, pkt, ipcache);
+        ci_ip_send_udp_slow(ni, &us->s.cp, pkt, ipcache);
         if( OO_PP_IS_NULL(next) )
           break;
         pkt = PKT_CHK(ni, next);
@@ -1383,7 +1385,7 @@ void ci_udp_sendmsg_onload(ci_netif* ni, ci_udp_state* us,
   pf.alloc_pkt = NULL;
 
   if( ! UDP_HAS_SENDQ_SPACE(us, bytes_to_send)         |
-      (bytes_to_send > (unsigned long) CI_UDP_MAX_PAYLOAD_BYTES) )
+      (bytes_to_send > (unsigned long) CI_UDP_MAX_PAYLOAD_BYTES(af)) )
     goto no_space_or_too_big;
 
  back_to_fast_path:
@@ -1472,7 +1474,7 @@ void ci_udp_sendmsg_onload(ci_netif* ni, ci_udp_state* us,
   /* TODO: If we implement IP options we'll have to calculate
    * CI_UDP_MAX_PAYLOAD_BYTES depending on them.
    */
-  if( bytes_to_send > CI_UDP_MAX_PAYLOAD_BYTES ) {
+  if( bytes_to_send > CI_UDP_MAX_PAYLOAD_BYTES(af) ) {
     sinf->rc = -EMSGSIZE;
     return;
   }
@@ -1511,7 +1513,7 @@ int ci_udp_sendmsg(ci_udp_iomsg_args *a,
 #if defined(__linux__) && !defined(__KERNEL__)
   /* TODO: should be done for sun too? */
   if(CI_UNLIKELY( CMSG_FIRSTHDR(msg) != NULL )) {
-    struct in_pktinfo* info = NULL;
+    void* info = NULL;
     if( ci_ip_cmsg_send(msg, &info) != 0 || info != NULL )
       goto send_via_os;
   }
@@ -1558,10 +1560,9 @@ int ci_udp_sendmsg(ci_udp_iomsg_args *a,
     /**********************************************************************
      * Connected send.
      */
-    if( CI_IPX_ADDR_IS_ANY(udp_ipx_raddr(us)) ) {
-      /* Linux kernel <= 2.4.20 returns ENOTCONN in this case, but we don't
-       * care about such old kernels.
-       */
+
+    /* Don't allow UDP connected send when in not connected socket state */
+    if( ! (us->s.s_flags & CI_SOCK_FLAG_CONNECTED) ) {
       rc = -EDESTADDRREQ;
       goto error;
     }
@@ -1586,6 +1587,7 @@ int ci_udp_sendmsg(ci_udp_iomsg_args *a,
         if( si_trylock_and_inc(ni, &sinf, us->stats.n_tx_lock_cp) ) {
           ++us->stats.n_tx_cp_c_lookup;
           cicp_user_retrieve(ni, &us->s.pkt, &us->s.cp);
+          sinf.old_ipcache_updated = 1;
         }
       }
       if( us->s.pkt.status != retrrc_success &&

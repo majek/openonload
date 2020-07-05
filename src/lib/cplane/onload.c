@@ -247,10 +247,7 @@ int __oo_cp_route_resolve(struct oo_cplane_handle* cp,
 int
 oo_cp_get_hwport_properties(struct oo_cplane_handle* cp, ci_hwport_id_t hwport,
                             cp_hwport_flags_t* out_mib_flags,
-                            ci_uint32* out_oo_vi_flags_mask,
-                            ci_uint32* out_efhw_flags_extra,
-                            ci_uint8* out_pio_len_shift,
-                            ci_uint32* out_ctpio_start_offset)
+                            cp_nic_flags_t* out_nic_flags)
 {
   struct cp_mibs* mib;
   cp_version_t version;
@@ -267,14 +264,8 @@ oo_cp_get_hwport_properties(struct oo_cplane_handle* cp, ci_hwport_id_t hwport,
 
   if( out_mib_flags != NULL )
     *out_mib_flags = mib->hwport[hwport].flags;
-  if( out_oo_vi_flags_mask != NULL )
-    *out_oo_vi_flags_mask = mib->hwport[hwport].oo_vi_flags_mask;
-  if( out_efhw_flags_extra != NULL )
-    *out_efhw_flags_extra = mib->hwport[hwport].efhw_flags_extra;
-  if( out_pio_len_shift != NULL )
-    *out_pio_len_shift = mib->hwport[hwport].pio_len_shift;
-  if( out_ctpio_start_offset != NULL )
-    *out_ctpio_start_offset = mib->hwport[hwport].ctpio_start_offset;
+  if( out_nic_flags != NULL )
+    *out_nic_flags = mib->hwport[hwport].nic_flags;
 
  out:
   CP_VERLOCK_STOP(version, mib)
@@ -301,26 +292,25 @@ oo_cp_get_hwport_ifindex(struct oo_cplane_handle* cp, ci_hwport_id_t hwport)
 
 #ifdef __KERNEL__
 
-/* Retrieves all hwports with a licence that allows Onload to run.  The return
- * value is a bitmap of licensed hwports. */
-cicp_hwport_mask_t oo_cp_get_licensed_hwports(struct oo_cplane_handle* cp)
+/* Retrieves all hwports that allows Onload to run.  The return
+ * value is a bitmap of hwports. */
+cicp_hwport_mask_t oo_cp_get_hwports(struct oo_cplane_handle* cp)
 {
   struct cp_mibs* mib;
   cp_version_t version;
-  cicp_hwport_mask_t licensed_hwports = 0;
+  cicp_hwport_mask_t all_hwports = 0;
 
   ci_assert(cp);
 
   CP_VERLOCK_START(version, mib, cp)
 
-  licensed_hwports =
-    cp_get_licensed_hwports(mib,
-                            cp_hwport_make_mask(mib->dim->hwport_max) - 1,
-                            CP_LLAP_ALL_ONLOAD_LICENCES);
+  all_hwports =
+    cp_get_hwports(mib,
+                   cp_hwport_make_mask(mib->dim->hwport_max) - 1);
 
   CP_VERLOCK_STOP(version, mib)
 
-  return licensed_hwports;
+  return all_hwports;
 }
 
 

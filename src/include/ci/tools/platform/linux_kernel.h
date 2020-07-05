@@ -475,17 +475,5 @@ ci_inline uid_t ci_make_kuid(struct user_namespace*ns, uid_t uid)
 #endif
 }
 
-#ifndef EFRM_HAVE_REMAP_VMALLOC_RANGE_PARTIAL
-static inline int remap_vmalloc_range_partial(struct vm_area_struct* vma,
-                       unsigned long uaddr, void* kaddr, unsigned long size)
-{
-  struct vm_area_struct fake;
-  memcpy(&fake, vma, sizeof(fake));
-  fake.vm_start = uaddr;
-  fake.vm_end = uaddr + size;
-  return remap_vmalloc_range(&fake, kaddr, 0);
-}
-#endif
-
 #endif  /* __CI_TOOLS_LINUX_KERNEL_H__ */
 /*! \cidoxg_end */

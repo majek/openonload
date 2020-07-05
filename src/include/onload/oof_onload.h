@@ -48,6 +48,16 @@ extern void oof_onload_hwport_up_down(struct efab_tcp_driver_s*, int hwport,
                                       int up, int mcast_replicate_capable,
                                       int vlan_filters, int sync);
 
+extern int
+oof_onload_dnat_add(struct efab_tcp_driver_s*, const ci_addr_t orig_addr,
+                    ci_uint16 orig_port, const ci_addr_t xlated_addr,
+                    ci_uint16 xlated_port);
+
+extern void
+oof_onload_dnat_del(struct efab_tcp_driver_s*, const ci_addr_t orig_addr,
+                    ci_uint16 orig_port);
+
+extern void oof_onload_dnat_reset(struct efab_tcp_driver_s*);
 
 extern void oof_onload_manager_dump(struct efab_tcp_driver_s*,
                                     oo_dump_log_fn_t log, void* log_arg);

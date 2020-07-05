@@ -95,7 +95,7 @@ extern int
 __oo_cp_arp_resolve(struct oo_cplane_handle* cp, cicp_verinfo_t* verinfo,
                     cp_fwd_table_id fwd_table_id);
 extern cicp_hwport_mask_t
-oo_cp_get_licensed_hwports(struct oo_cplane_handle*);
+oo_cp_get_hwports(struct oo_cplane_handle*);
 extern int oo_cp_get_acceleratable_llap_count(struct oo_cplane_handle*);
 extern int oo_cp_get_acceleratable_ifindices(struct oo_cplane_handle*,
                                              ci_ifid_t* ifindices,
@@ -103,11 +103,9 @@ extern int oo_cp_get_acceleratable_ifindices(struct oo_cplane_handle*,
 #endif
 
 
-#ifndef __KERNEL__
 extern int
 cp_svc_check_dnat(struct oo_cplane_handle* cp,
                   ci_addr_sh_t* dst_addr, ci_uint16* dst_port);
-#endif
 
 
 extern ci_ifid_t
@@ -116,10 +114,7 @@ oo_cp_get_hwport_ifindex(struct oo_cplane_handle* cp, ci_hwport_id_t hwport);
 extern int
 oo_cp_get_hwport_properties(struct oo_cplane_handle*, ci_hwport_id_t hwport,
                             cp_hwport_flags_t* out_mib_flags,
-                            ci_uint32* out_oo_vi_flags_mask,
-                            ci_uint32* out_efhw_flags_extra,
-                            ci_uint8* out_pio_len_shift,
-                            ci_uint32* out_ctpio_start_offset);
+                            cp_nic_flags_t* out_nic_flags);
 
 
 /* Initialize verinfo before the first use */

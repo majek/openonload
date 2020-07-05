@@ -91,14 +91,16 @@ oo_dshm_register_impl(ci_int32 shm_class, ci_user_ptr_t user_addr,
     rc = -EINVAL;
     goto fail1;
   }
-  buffer->pages = ci_alloc(sizeof(struct page*) * buffer->num_pages);
+  buffer->pages = vmalloc(sizeof(struct page*) * buffer->num_pages);
   if( buffer->pages == NULL ) {
     rc = -ENOMEM;
     goto fail1;
   }
 
   /* Allocate an ID for the buffer. */
+  ci_irqlock_lock(&oo_dshm_state.lock, &lock_flags);
   *buffer_id_out = ci_id_pool_alloc(&oo_dshm_state.ids[shm_class]);
+  ci_irqlock_unlock(&oo_dshm_state.lock, &lock_flags);
   if( *buffer_id_out == CI_ID_POOL_ID_NONE ) {
     rc = -EBUSY;
     goto fail2;
@@ -112,7 +114,7 @@ oo_dshm_register_impl(ci_int32 shm_class, ci_user_ptr_t user_addr,
                       buffer->pages, NULL);
   up_read(&current->mm->mmap_sem);
 
-  if( rc < buffer->num_pages ) {
+  if( rc < (int)buffer->num_pages ) {
     /* We pinned fewer pages than we asked for.  This should never happen, so
      * treat it as fatal. */
     int i;
@@ -134,7 +136,7 @@ oo_dshm_register_impl(ci_int32 shm_class, ci_user_ptr_t user_addr,
   ci_id_pool_free(&oo_dshm_state.ids[shm_class], buffer->buffer_id,
                   &oo_dshm_state.lock);
  fail2:
-  ci_free(buffer->pages);
+  vfree(buffer->pages);
  fail1:
   ci_free(buffer);
   return rc;
@@ -228,7 +230,7 @@ oo_dshm_free_handle_list(ci_dllist* list)
     ci_id_pool_free(&oo_dshm_state.ids[buffer->shm_class], buffer->buffer_id,
                     &oo_dshm_state.lock);
 
-    ci_free(buffer->pages);
+    vfree(buffer->pages);
     ci_free(buffer);
   }
 

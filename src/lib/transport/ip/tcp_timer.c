@@ -348,7 +348,7 @@ void ci_tcp_timeout_zwin(ci_netif* netif, ci_tcp_state* ts)
    * so we can stop probing.  If retrans queue goes empty they will be
    * restarted
    */
-  if( tcp_snd_wnd(ts) >= tcp_eff_mss(ts) ||
+  if( tcp_snd_wnd(ts) > 0 ||
       ! (ts->s.b.state & CI_TCP_STATE_TXQ_ACTIVE) ||
       ci_ip_queue_not_empty(&ts->retrans) ) {
     ts->zwin_probes = 0;
@@ -367,46 +367,7 @@ void ci_tcp_timeout_zwin(ci_netif* netif, ci_tcp_state* ts)
 	     LNTS_PRI_ARGS(netif, ts), ci_tcp_time_now(netif), ts->rto,
 	     tcp_snd_wnd(ts), ts->zwin_probes, ts->zwin_acks));
 
-  if( CI_UNLIKELY(tcp_snd_wnd(ts) > 0) ) {
-    ci_ip_pkt_fmt* first_pkt = PKT_CHK(netif, ts->send.head);
-    /* We consider window < eff_mss to be zero, but it is not always
-     * correct.  First, sometimes we have a short packet in the sendq.
-     * Let's send it.  Next, we really should split the first packet (by
-     * RFC 793) if peer refuses to increase its small window, but we cheat.
-     *
-     * With small non-zero window, we wait for 2 zwin_acks (in hope to get
-     * better window) and, after thet, send the first packet.
-     * Some IP stacks (Linux) accept such packet.  Others will reject and
-     * re-send the correct window, so we'll fix our window back.
-     */
-    if( CI_UNLIKELY(tcp_snd_wnd(ts) + ((1 << ts->snd_wscl) - 1) >=
-                    PKT_TCP_TX_SEQ_SPACE(first_pkt)) ) {
-      /* Window scaling might make the window a bit smaller than
-       * mss, when out peer wanted it to be mss exactly.
-       * We improve things by sending this packet
-       * when zwin timer fires.  If the peer disagree, it'll tell
-       * us in his ACK packet. */
-      if( SEQ_GT(first_pkt->pf.tcp_tx.end_seq, ts->snd_max) )
-        ts->snd_max += (1 << ts->snd_wscl) - 1;
-      ci_tcp_tx_advance(ts, netif);
-      return;
-    }
-    if( ts->zwin_probes == 0 && ts->zwin_acks > 2 ) {
-      /* Cheat and send the full packet.  We do similar thing in
-       * ci_tcp_tx_advance when eff_mss have changed. */
-      ci_tcp_set_snd_max(ts, tcp_rcv_nxt(ts) - 1, ts->snd_max,
-                         tcp_eff_mss(ts) - tcp_snd_wnd(ts));
-      ci_assert_equal(tcp_snd_wnd(ts), tcp_eff_mss(ts));
-      ci_tcp_tx_advance(ts, netif);
-      ts->zwin_acks = 0;
-      /* Count it as zero window probe, so go forward.  Moreover, it IS zero
-       * window probe - a packet with unacceptable sequence numbers. */
-    }
-    else
-      ci_tcp_send_zwin_probe(netif, ts);
-  }
-  else
-    ci_tcp_send_zwin_probe(netif, ts);
+  ci_tcp_send_zwin_probe(netif, ts);
   ci_tcp_zwin_set(netif, ts);
   ts->zwin_probes++;
 }

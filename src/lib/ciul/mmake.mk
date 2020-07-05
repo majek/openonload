@@ -112,7 +112,8 @@ $(objd)$(MMAKE_OBJ_PREFIX)vi_init.o: $(objd)efch_intf_ver.h
 #
 ifdef MMAKE_USE_KBUILD
 all:
-	 $(MAKE) $(MMAKE_KBUILD_ARGS) KBUILD_EXTMOD=$(BUILDPATH)/lib/ciul _module_$(BUILDPATH)/lib/ciul
+	 $(MAKE) $(MMAKE_KBUILD_ARGS) KBUILD_EXTMOD=$(BUILDPATH)/lib/ciul
+	 $(LD) -r $(LIB_SRCS:%.c=%.o) -o ci_ul_lib.o
 clean:
 	@$(MakeClean)
 	rm -f ci_ul_lib.o
@@ -120,6 +121,5 @@ endif
 
 ifdef MMAKE_IN_KBUILD
 LIB_OBJS := $(LIB_SRCS:%.c=%.o)
-ci_ul_lib-y    := $(LIB_OBJS)
-obj-m := ci_ul_lib.o
+obj-y    := $(LIB_OBJS)
 endif

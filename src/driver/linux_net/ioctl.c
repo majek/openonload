@@ -722,6 +722,9 @@ int efx_private_ioctl(struct efx_nic *efx, u16 cmd,
 		size = sizeof(data->ts_read);
 		op = efx_ioctl_ts_read;
 		break;
+#else
+	case EFX_TS_INIT:
+		return -EOPNOTSUPP;
 #endif
 #if defined(EFX_NOT_UPSTREAM)
 	case EFX_GET_TS_CONFIG:

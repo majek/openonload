@@ -799,11 +799,12 @@ efx_rx_packet_gro(struct efx_channel *channel, struct efx_rx_buffer *rx_buf,
 static struct sk_buff *efx_rx_mk_skb(struct efx_channel *channel,
 				     struct efx_rx_buffer **_rx_buf,
 				     unsigned int n_frags,
-				     u8 *eh, int hdr_len)
+				     u8 **ehp, int hdr_len)
 {
 	struct efx_rx_buffer *rx_buf = *_rx_buf;
 	struct efx_nic *efx = channel->efx;
 	struct sk_buff *skb = NULL;
+	u8 *new_eh;
 
 	/* Allocate an SKB to store the headers */
 #if SKB_CACHE_SIZE > 0
@@ -827,9 +828,10 @@ static struct sk_buff *efx_rx_mk_skb(struct efx_channel *channel,
 
 	EFX_WARN_ON_ONCE_PARANOID(rx_buf->len < hdr_len);
 
-	memcpy(skb->data + efx->rx_ip_align, eh - efx->rx_prefix_size,
+	memcpy(skb->data + efx->rx_ip_align, *ehp - efx->rx_prefix_size,
 	       efx->rx_prefix_size + hdr_len);
 	skb_reserve(skb, efx->rx_ip_align + efx->rx_prefix_size);
+	new_eh = skb->data;
 	__skb_put(skb, hdr_len);
 
 	/* Append the remaining page(s) onto the frag list */
@@ -864,6 +866,7 @@ static struct sk_buff *efx_rx_mk_skb(struct efx_channel *channel,
 			*_rx_buf = NULL;
 		}
 #endif
+		*ehp = new_eh;
 		rx_buf->page = NULL;
 		n_frags = 0;
 	}
@@ -970,14 +973,15 @@ static void efx_rx_deliver(struct efx_channel *channel, u8 *eh,
 			   struct efx_rx_buffer *rx_buf,
 			   unsigned int n_frags)
 {
-	struct sk_buff *skb;
 	u16 hdr_len = min_t(u16, rx_buf->len, rx_cb_size);
-	u16 rx_buf_flags = rx_buf->flags;
 #if IS_ENABLED(CONFIG_VLAN_8021Q)
 	u16 rx_buf_vlan_tci = rx_buf->vlan_tci;
 #endif
+	u16 rx_buf_flags = rx_buf->flags;
+	struct sk_buff *skb;
 
-	skb = efx_rx_mk_skb(channel, &rx_buf, n_frags, eh, hdr_len);
+	skb = efx_rx_mk_skb(channel, &rx_buf, n_frags, &eh, hdr_len);
+
 	if (unlikely(skb == NULL)) {
 		struct efx_rx_queue *rx_queue;
 
@@ -1842,7 +1846,7 @@ efx_ssr_merge_page(struct efx_ssr_state *st, struct efx_ssr_conn *c,
 	struct efx_rx_buffer *rx_buf = &c->next_buf;
 	struct efx_channel *channel;
 	size_t rx_prefix_size;
-	char *eh = c->next_eh;
+	u8 *eh = c->next_eh;
 
 	if (likely(c->skb)) {
 		skb_fill_page_desc(c->skb, skb_shinfo(c->skb)->nr_frags,
@@ -1859,7 +1863,7 @@ efx_ssr_merge_page(struct efx_ssr_state *st, struct efx_ssr_conn *c,
 	} else {
 		channel = container_of(st, struct efx_channel, ssr);
 
-		c->skb = efx_rx_mk_skb(channel, &rx_buf, 1, eh, hdr_length);
+		c->skb = efx_rx_mk_skb(channel, &rx_buf, 1, &eh, hdr_length);
 		if (unlikely(c->skb == NULL))
 			return 0;
 
@@ -2281,6 +2285,7 @@ static void efx_filter_rfs_work(struct work_struct *data)
 
 	rc = efx->type->filter_insert(efx, &req->spec, true);
 	if (rc >= 0)
+		/* Discard 'priority' part of EF10+ filter ID (mcdi_filters) */
 		rc %= efx->type->max_rx_ip_filters;
 	if (efx->rps_hash_table) {
 		spin_lock_bh(&efx->rps_hash_lock);
@@ -2305,8 +2310,9 @@ static void efx_filter_rfs_work(struct work_struct *data)
 		 * later.
 		 */
 		mutex_lock(&efx->rps_mutex);
+		if (channel->rps_flow_id[rc] == RPS_FLOW_ID_INVALID)
+			channel->rfs_filter_count++;
 		channel->rps_flow_id[rc] = req->flow_id;
-		++channel->rfs_filters_added;
 		mutex_unlock(&efx->rps_mutex);
 
 		if (req->spec.ether_type == htons(ETH_P_IP))
@@ -2323,6 +2329,28 @@ static void efx_filter_rfs_work(struct work_struct *data)
 				   req->spec.rem_host, ntohs(req->spec.rem_port),
 				   req->spec.loc_host, ntohs(req->spec.loc_port),
 				   req->rxq_index, req->flow_id, rc, arfs_id);
+		channel->n_rfs_succeeded++;
+	} else {
+		if (req->spec.ether_type == htons(ETH_P_IP))
+			netif_dbg(efx, rx_status, efx->net_dev,
+				  "failed to steer %s %pI4:%u:%pI4:%u to queue %u [flow %u rc %d id %u]\n",
+				  (req->spec.ip_proto == IPPROTO_TCP) ? "TCP" : "UDP",
+				  req->spec.rem_host, ntohs(req->spec.rem_port),
+				  req->spec.loc_host, ntohs(req->spec.loc_port),
+				  req->rxq_index, req->flow_id, rc, arfs_id);
+		else
+			netif_dbg(efx, rx_status, efx->net_dev,
+				  "failed to steer %s [%pI6]:%u:[%pI6]:%u to queue %u [flow %u rc %d id %u]\n",
+				  (req->spec.ip_proto == IPPROTO_TCP) ? "TCP" : "UDP",
+				  req->spec.rem_host, ntohs(req->spec.rem_port),
+				  req->spec.loc_host, ntohs(req->spec.loc_port),
+				  req->rxq_index, req->flow_id, rc, arfs_id);
+		channel->n_rfs_failed++;
+		/* We're overloading the NIC's filter tables, so let's do a
+		 * chunk of extra expiry work.
+		 */
+		__efx_filter_rfs_expire(channel, min(channel->rfs_filter_count,
+						     100u));
 	}
 
 	/* Release references */
@@ -2401,37 +2429,43 @@ out_clear:
 	return rc;
 }
 
-bool __efx_filter_rfs_expire(struct efx_nic *efx, unsigned int quota)
+bool __efx_filter_rfs_expire(struct efx_channel *channel, unsigned int quota)
 {
 	bool (*expire_one)(struct efx_nic *efx, u32 flow_id, unsigned int index);
-	unsigned int channel_idx, index, size;
+	struct efx_nic *efx = channel->efx;
+	unsigned int index, size, start;
 	u32 flow_id;
 
 	if (!mutex_trylock(&efx->rps_mutex))
 		return false;
 	expire_one = efx->type->filter_rfs_expire_one;
-	channel_idx = efx->rps_expire_channel;
-	index = efx->rps_expire_index;
+	index = channel->rfs_expire_index;
+	start = index;
 	size = efx->type->max_rx_ip_filters;
-	while (quota--) {
-		struct efx_channel *channel = efx_get_channel(efx, channel_idx);
+	while (quota) {
 		flow_id = channel->rps_flow_id[index];
 
-		if (flow_id != RPS_FLOW_ID_INVALID &&
-		    expire_one(efx, flow_id, index)) {
-			netif_info(efx, rx_status, efx->net_dev,
-				   "expired filter %d [queue %u flow %u]\n",
-				   index, channel_idx, flow_id);
-			channel->rps_flow_id[index] = RPS_FLOW_ID_INVALID;
-		}
-		if (++index == size) {
-			if (++channel_idx == efx->n_channels)
-				channel_idx = 0;
+		if (flow_id != RPS_FLOW_ID_INVALID) {
+			quota--;
+			if (expire_one(efx, flow_id, index)) {
+				netif_info(efx, rx_status, efx->net_dev,
+					   "expired filter %d [queue %u flow %u]\n",
+					   index, channel->channel, flow_id);
+				channel->rps_flow_id[index] = RPS_FLOW_ID_INVALID;
+				channel->rfs_filter_count--;
+			}
+ 		}
+		if (++index == size)
 			index = 0;
-		}
+		/* If we were called with a quota that exceeds the total number
+		 * of filters in the table (which shouldn't happen, but could
+		 * if two callers race), ensure that we don't loop forever -
+		 * stop when we've examined every row of the table.
+		 */
+		if (index == start)
+			break;
 	}
-	efx->rps_expire_channel = channel_idx;
-	efx->rps_expire_index = index;
+	channel->rfs_expire_index = index;
 
 	mutex_unlock(&efx->rps_mutex);
 	return true;

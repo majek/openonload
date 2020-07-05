@@ -112,7 +112,7 @@ static void ip_cmsg_recv_pktinfo(ci_netif* netif, ci_udp_state* us,
   /* If the last packet was the same, then we can use the caches info */
   if( pkt->intf_i == us->ip_pktinfo_cache.intf_i &&
       pkt->vlan == us->ip_pktinfo_cache.vlan &&
-      af_info == CI_ADDR_AF(us->ip_pktinfo_cache.daddr) &&
+      af_info == us->ip_pktinfo_cache.af &&
       CI_IPX_ADDR_EQ(addr, us->ip_pktinfo_cache.daddr) &&
       memcmp(dst_mac, us->ip_pktinfo_cache.dmac, ETH_ALEN) == 0) {
     if( af_info == AF_INET )
@@ -180,6 +180,7 @@ static void ip_cmsg_recv_pktinfo(ci_netif* netif, ci_udp_state* us,
   us->ip_pktinfo_cache.intf_i = pkt->intf_i;
   us->ip_pktinfo_cache.vlan = pkt->vlan;
   us->ip_pktinfo_cache.daddr = addr;
+  us->ip_pktinfo_cache.af = af_info;
   memcpy(&us->ip_pktinfo_cache.dmac, oo_ether_hdr_const(pkt)->ether_dhost,
          ETH_ALEN);
 }
@@ -365,9 +366,10 @@ void ci_ip_cmsg_recv(ci_netif* ni, ci_udp_state* us, const ci_ip_pkt_fmt *pkt,
 /**
  * Find out all control messages the user has provided with msg.
  *
- * \param info_out    Must be a valid pointer.
+ * \param info_out    Must be a valid pointer. Contains a pointer to
+ * struct in_pktinfo or struct in6_pktinfo.
  */
-int ci_ip_cmsg_send(const struct msghdr* msg, struct in_pktinfo** info_out)
+int ci_ip_cmsg_send(const struct msghdr* msg, void** info_out)
 {
   struct cmsghdr *cmsg;
 
@@ -382,22 +384,29 @@ int ci_ip_cmsg_send(const struct msghdr* msg, struct in_pktinfo** info_out)
                     + cmsg->cmsg_len) > msg->msg_controllen )
       return -EINVAL;
 
-    if( cmsg->cmsg_level != IPPROTO_IP )
-      continue;
-
-    switch( cmsg->cmsg_type ) {
-    case IP_RETOPTS:
-      /* TODO: implementation required */
-      return -ENOPROTOOPT;
-
-    case IP_PKTINFO:
-      if (cmsg->cmsg_len != CMSG_LEN(sizeof(struct in_pktinfo)))
+#if CI_CFG_IPV6
+    if( cmsg->cmsg_level == IPPROTO_IPV6 ) {
+      if( cmsg->cmsg_type == IPV6_PKTINFO ) {
+        if( cmsg->cmsg_len != CMSG_LEN(sizeof(struct ci_in6_pktinfo)) )
+          return -EINVAL;
+        *info_out = CMSG_DATA(cmsg);
+      }
+      else
         return -EINVAL;
-      *info_out = (struct in_pktinfo *)CMSG_DATA(cmsg);
-      break;
-
-    default:
-      return -EINVAL;
+    }
+    else
+#endif
+    if( cmsg->cmsg_level == IPPROTO_IP ) {
+      if( cmsg->cmsg_type == IP_RETOPTS )
+        /* TODO: implementation required */
+        return -ENOPROTOOPT;
+      if( cmsg->cmsg_type == IP_PKTINFO ) {
+        if (cmsg->cmsg_len != CMSG_LEN(sizeof(struct in_pktinfo)))
+          return -EINVAL;
+        *info_out = CMSG_DATA(cmsg);
+      }
+      else
+        return -EINVAL;
     }
   }
 

@@ -992,7 +992,8 @@ static int ci_tcp_connect_ul_start(ci_netif *ni, ci_tcp_state* ts, ci_fd_t fd,
    * acceleratable interfaces, and so if the socket is bound to an alien
    * address, we can't accelerate it.  Using a MAC filter overcomes this
    * limitation, however. */
-  if( (ts->s.s_flags & CI_SOCK_FLAG_BOUND_ALIEN) &&
+  if( ~ni->state->flags & CI_NETIF_FLAG_USE_ALIEN_LADDRS &&
+      (ts->s.s_flags & CI_SOCK_FLAG_BOUND_ALIEN) &&
       ! (ts->s.pkt.flags & CI_IP_CACHE_IS_LOCALROUTE ||
          ts->s.s_flags & (CI_SOCK_FLAG_TPROXY | CI_SOCK_FLAG_SCALACTIVE)) ) {
     ci_assert_equal(active_wild, OO_SP_NULL);
@@ -1565,7 +1566,6 @@ int ci_tcp_connect(citp_socket* ep, const struct sockaddr* serv_addr,
     ts->pre_nat.dport_be16 = ((struct sockaddr_in*) serv_addr)->sin_port;
   }
 
-
   crc = ci_tcp_connect_ul_start(ep->netif, ts, fd, dst_addr, dst_port,
                                 &rc);
   if( crc != CI_CONNECT_UL_OK ) {
@@ -1606,6 +1606,15 @@ int ci_tcp_listen_init(ci_netif *ni, ci_tcp_socket_listen *tls)
 {
   int i;
   oo_p sp;
+
+  /* In theory, we can avoid listenq_tid timer for loopback-only listening
+   * socket, but then it becomes complicated to distinguish different kind
+   * of sockets and clear the timer when needed only. */
+  sp = TS_OFF(ni, tls);
+  OO_P_ADD(sp, CI_MEMBER_OFFSET(ci_tcp_socket_listen, listenq_tid));
+  ci_ip_timer_init(ni, &tls->listenq_tid, sp, "lstq");
+  tls->listenq_tid.param1 = S_SP(tls);
+  tls->listenq_tid.fn = CI_IP_TIMER_TCP_LISTEN;
 
   tls->acceptq_n_in = tls->acceptq_n_out = 0;
   tls->acceptq_put = CI_ILL_END;
@@ -2058,7 +2067,6 @@ int ci_tcp_listen(citp_socket* ep, ci_fd_t fd, int backlog)
   ci_sock_cmn* s = ep->s;
   unsigned ul_backlog = backlog;
   int rc;
-  oo_p sp;
   int scalable;
   int will_accelerate;
 
@@ -2073,11 +2081,13 @@ int ci_tcp_listen(citp_socket* ep, ci_fd_t fd, int backlog)
 
   if( NI_OPTS(netif).tcp_listen_handover )
     return CI_SOCKET_HANDOVER;
-  if( !NI_OPTS(netif).tcp_server_loopback && ! scalable ) {
-    /* We should handover if the socket is bound to alien address. */
-    if( s->s_flags & CI_SOCK_FLAG_BOUND_ALIEN )
-      return CI_SOCKET_HANDOVER;
-  }
+
+  /* We should handover if the socket is bound to alien address. */
+  will_accelerate = ~s->s_flags & CI_SOCK_FLAG_BOUND_ALIEN || scalable ||
+      ( netif->state->flags & CI_NETIF_FLAG_USE_ALIEN_LADDRS &&
+        ! CI_IPX_IS_LOOPBACK(sock_ipx_laddr(s)) );
+  if( !NI_OPTS(netif).tcp_server_loopback && ! will_accelerate )
+    return CI_SOCKET_HANDOVER;
 
   if( ul_backlog < 0 )
     ul_backlog = NI_OPTS(netif).max_ep_bufs;
@@ -2120,7 +2130,12 @@ int ci_tcp_listen(citp_socket* ep, ci_fd_t fd, int backlog)
     ci_uint16 source_be16;
 
     /* They haven't previously done a bind, so we need to choose 
-     * a port.  As we haven't been given a hint we let the OS choose. */
+     * a port.  As we haven't been given a hint we let the OS choose.
+     *
+     * NB The previously-calculated will_accelerate variable remains valid,
+     * because this call __ci_tcp_bind() never results in
+     * CI_SOCK_FLAG_BOUND_ALIEN flag being set.
+     */
 
     source_be16 = 0;
     rc = __ci_tcp_bind(ep->netif, ep->s, fd, ts->s.laddr, &source_be16, 0);
@@ -2150,17 +2165,8 @@ int ci_tcp_listen(citp_socket* ep, ci_fd_t fd, int backlog)
 
   ci_assert_equal(tls->s.rx_errno, ENOTCONN);
 
-  /* setup listen timer - do it before the first return statement,
+  /* Listen timer should be initialized before the first return statement,
    * because __ci_tcp_listen_to_normal() will be called on error path. */
-  will_accelerate = ~tls->s.s_flags & CI_SOCK_FLAG_BOUND_ALIEN || scalable;
-  if( will_accelerate ) {
-    sp = TS_OFF(netif, tls);
-    OO_P_ADD(sp, CI_MEMBER_OFFSET(ci_tcp_socket_listen, listenq_tid));
-    ci_ip_timer_init(netif, &tls->listenq_tid, sp, "lstq");
-    tls->listenq_tid.param1 = S_SP(tls);
-    tls->listenq_tid.fn = CI_IP_TIMER_TCP_LISTEN;
-  }
-
   rc = ci_tcp_listen_init(netif, tls);
 
   /* Drop the socket lock */
@@ -2216,8 +2222,18 @@ int ci_tcp_listen(citp_socket* ep, ci_fd_t fd, int backlog)
     ci_assert_nequal(rc, -EFILTERSSOME);
     VERB(ci_log("%s: set_filters  returned %d", __FUNCTION__, rc));
     if (rc < 0) {
-      CI_SET_ERROR(rc, -rc);
-      goto post_listen_fail;
+      if( s->s_flags & CI_SOCK_FLAG_BOUND_ALIEN &&
+          NI_OPTS(netif).tcp_server_loopback ) {
+        /* That alien address can't be served by filters despite
+         * CI_NETIF_FLAG_USE_ALIEN_LADDRS.  We'll accelerate loopback in
+         * any case.
+         */
+        rc = 0;
+      }
+      else {
+        CI_SET_ERROR(rc, -rc);
+        goto post_listen_fail;
+      }
     }
   }
 
@@ -2336,14 +2352,12 @@ void ci_tcp_get_peer_addr(ci_tcp_state* ts, struct sockaddr* name,
                           socklen_t* namelen)
 {
   int af = ipcache_af(&ts->s.pkt);
-  {
-    int /*bool*/ dnat = ts->s.s_flags & CI_SOCK_FLAG_DNAT;
-    ci_addr_t raddr = dnat ? ts->pre_nat.daddr_be32 : tcp_ipx_raddr(ts);
-    ci_uint16 port = dnat ? ts->pre_nat.dport_be16 :
-                            TS_IPX_TCP(ts)->tcp_dest_be16;
-    ci_addr_to_user(name, namelen, af, ts->s.domain, port,
-                    CI_IPX_ADDR_PTR(af, raddr), ts->s.cp.so_bindtodevice);
-  }
+  int /*bool*/ dnat = ts->s.s_flags & CI_SOCK_FLAG_DNAT;
+  ci_addr_t raddr = dnat ? ts->pre_nat.daddr_be32 : tcp_ipx_raddr(ts);
+  ci_uint16 port = dnat ? ts->pre_nat.dport_be16 :
+                          TS_IPX_TCP(ts)->tcp_dest_be16;
+  ci_addr_to_user(name, namelen, af, ts->s.domain, port,
+                  CI_IPX_ADDR_PTR(af, raddr), ts->s.cp.so_bindtodevice);
 }
 
 int ci_tcp_getpeername(citp_socket* ep, struct sockaddr* name,

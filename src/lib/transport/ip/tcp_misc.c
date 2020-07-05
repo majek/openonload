@@ -1681,9 +1681,12 @@ int ci_tcp_sync_sockopts_to_os_sock(ci_netif* ni, oo_sp sock_id,
     return rc;
 
 #if CI_CFG_IPV6
-  rc = ci_tcp_sync_ip6_sockopts(ni, ts, sock);
-  if( rc < 0 )
-    return rc;
+  /* AF_INET socket doesn't support SOL_IPV6 level options */
+  if( IS_AF_INET6(ts->s.domain) ) {
+    rc = ci_tcp_sync_ip6_sockopts(ni, ts, sock);
+    if( rc < 0 )
+      return rc;
+  }
 #endif
 
   rc = ci_tcp_sync_tcp_sockopts(ni, ts, sock);
@@ -1771,8 +1774,9 @@ ci_int32 ci_tcp_max_rcvbuf(ci_netif* ni, ci_uint16 amss)
 {
   /* estimate the largest rcvbuf we could allocate in
    * ci_tcp_rcvbuf_drs() */
-  return ( NI_OPTS(ni).max_rx_packets >>
-           NI_OPTS(ni).tcp_sockbuf_max_fraction ) * amss;
+  ci_uint64 res = ( (ci_uint64)NI_OPTS(ni).max_rx_packets >>
+                    NI_OPTS(ni).tcp_sockbuf_max_fraction ) * amss;
+  return CI_MIN(res, 0x7fffffff);
 }
 
 

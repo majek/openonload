@@ -14,7 +14,7 @@ struct ci_chrdev_registration {
   dev_t devid;
   int count;
   struct class* class;
-  struct cdev cdevs[0];
+  struct cdev* cdevs[0];
 };
 
 struct ci_chrdev_node_params {
@@ -31,7 +31,8 @@ ci_inline void destroy_chrdev_and_mknod(struct ci_chrdev_registration* reg)
   for( i = reg->count - 1; i >= 0; --i ) {
     dev_t devid = MKDEV(MAJOR(reg->devid), MINOR(reg->devid) + i);
     device_destroy(reg->class, devid);
-    cdev_del(&reg->cdevs[i]);
+    if( reg->cdevs[i] )
+      cdev_del(reg->cdevs[i]);
   }
   if( reg->class )
     class_destroy(reg->class);
@@ -100,6 +101,7 @@ ci_inline int create_chrdev_and_mknod(int major, int minor, const char* name,
   reg->class = class_create(THIS_MODULE, name);
   if( IS_ERR(reg->class) ) {
     rc = PTR_ERR(reg->class);
+    reg->class = NULL;
     printk(KERN_ERR "%s: can't allocate %s class (%d)", __func__, name, rc);
     goto fail_free;
   }
@@ -110,9 +112,15 @@ ci_inline int create_chrdev_and_mknod(int major, int minor, const char* name,
     dev_t devid = MKDEV(MAJOR(reg->devid), MINOR(reg->devid) + i);
     struct device* dev;
 
-    cdev_init(&reg->cdevs[i], nodes[i].fops);
-    reg->cdevs[i].owner = THIS_MODULE;
-    rc = cdev_add(&reg->cdevs[i], devid, 1);
+    reg->cdevs[i] = cdev_alloc();
+    if( reg->cdevs[i] == NULL ) {
+      printk(KERN_ERR "%s: can't alloc %s char device",
+             __func__, nodes[i].name);
+      goto fail_free;
+    }
+    reg->cdevs[i]->owner = THIS_MODULE;
+    reg->cdevs[i]->ops = nodes[i].fops;
+    rc = cdev_add(reg->cdevs[i], devid, 1);
     if( rc < 0 ) {
       printk(KERN_ERR "%s: can't add %s char device (%d)",
              __func__, nodes[i].name, rc);
@@ -130,7 +138,7 @@ ci_inline int create_chrdev_and_mknod(int major, int minor, const char* name,
       rc = PTR_ERR(dev);
       printk(KERN_ERR "%s: can't allocate %s device (%d)",
              __func__, nodes[i].name, rc);
-      cdev_del(&reg->cdevs[i]);
+      cdev_del(reg->cdevs[i]);
       goto fail_free;
     }
     reg->count = i + 1;

@@ -52,8 +52,7 @@ LIB_SRCS	:=		\
 		common_sockopts.c \
 		tcp_sockopts.c	\
 		tcp_syncookie.c	\
-		active_wild.c	\
-		l3xudp_encap.c
+		active_wild.c
 
 ifneq ($(DRIVER),1)
 LIB_SRCS	+=		\
@@ -167,20 +166,16 @@ $(objd)$(MMAKE_OBJ_PREFIX)netif_debug.o: $(objd)uk_intf_ver.h
 ifdef MMAKE_USE_KBUILD
 
 all:
-	 $(MAKE) $(MMAKE_KBUILD_ARGS) KBUILD_EXTMOD=$(BUILDPATH)/lib/transport/ip _module_$(BUILDPATH)/lib/transport/ip
+	 $(MAKE) $(MMAKE_KBUILD_ARGS) KBUILD_EXTMOD=$(BUILDPATH)/lib/transport/ip
+	 $(LD) -r $(LIB_SRCS:%.c=%.o) -o ci_ip_lib.o
 clean:
 	@$(MakeClean)
 	rm -f uk_intf_ver.h ci_ip_lib.o
 endif
 
 ifdef MMAKE_IN_KBUILD
-ifneq ($(KBUILD_BPF_SUPPORTED),1)
-EXTRA_CFLAGS += -DNO_BPF
-endif
-
 LIB_OBJS := $(LIB_SRCS:%.c=%.o)
-ci_ip_lib-y    := $(LIB_OBJS)
-obj-m := ci_ip_lib.o
+obj-y    := $(LIB_OBJS)
 endif
 
 

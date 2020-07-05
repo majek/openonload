@@ -1,4 +1,14 @@
 #!/bin/bash -eu
+
+######################################################################
+#
+# Driver for Solarflare network controllers and boards
+# Copyright 2019 Solarflare Communications Inc.
+#
+# This program is free software; you can redistribute it and/or modify it
+# under the terms of the GNU General Public License version 2 as published
+# by the Free Software Foundation, incorporated herein by reference.
+#
 ######################################################################
 
 me=$(basename "$0")
@@ -62,6 +72,7 @@ EFX_USE_CANCEL_WORK_SYNC		symbol	cancel_work_sync	include/linux/workqueue.h
 EFX_NEED_WQ_SYSFS			nsymbol	WQ_SYSFS		include/linux/workqueue.h
 EFX_HAVE_ALLOC_WORKQUEUE		symbol	alloc_workqueue		include/linux/workqueue.h
 EFX_HAVE_NEW_ALLOC_WORKQUEUE		custom
+EFX_NEED_MOD_DELAYED_WORK		nsymbol	mod_delayed_work	include/linux/workqueue.h
 EFX_USE_ETHTOOL_ETH_TP_MDIX		symbol	eth_tp_mdix		include/linux/ethtool.h
 EFX_USE_ETHTOOL_GET_PERM_ADDR		symbol	get_perm_addr		include/linux/ethtool.h
 EFX_USE_ETHTOOL_FLAGS			symbol	get_flags		include/linux/ethtool.h
@@ -211,6 +222,7 @@ EFX_HAVE_PCI_AER			file				include/linux/aer.h
 EFX_HAVE_EEH_DEV_CHECK_FAILURE		symbol	eeh_dev_check_failure	arch/powerpc/include/asm/eeh.h
 EFX_NEED_PCI_DEV_TO_EEH_DEV		nsymbol	pci_dev_to_eeh_dev	include/linux/pci.h
 EFX_HAVE_IOREMAP_WC			symbol	ioremap_wc		arch/$SRCARCH/include/asm/io.h include/asm-$SRCARCH/io.h include/asm-generic/io.h
+EFX_HAVE_IOREMAP_NOCACHE		symbol	ioremap_nocache		include/asm-generic/io.h
 EFX_NEED_SKB_TRANSPORT_HEADER_WAS_SET	nsymbol	skb_transport_header_was_set include/linux/skbuff.h
 EFX_HAVE_OLD_KMAP_ATOMIC		custom
 EFX_HAVE_DEBUGFS_CREATE_SYMLINK		symbol	debugfs_create_symlink	include/linux/debugfs.h
@@ -325,6 +337,7 @@ EFX_HAVE_LINK_MODE_25_50_100	symbol	ETHTOOL_LINK_MODE_25000baseCR_Full_BIT	inclu
 EFX_HAVE_LINK_MODE_FEC_BITS	symbol	ETHTOOL_LINK_MODE_FEC_BASER_BIT	include/uapi/linux/ethtool.h
 EFX_HAVE_NETDEV_EXT_MTU_LIMITS	member	struct_net_device_extended	max_mtu	include/linux/netdevice.h
 EFX_HAVE_NDO_EXT_CHANGE_MTU	memtype	struct_net_device_ops_extended	ndo_change_mtu	include/linux/netdevice.h	int (*)(struct net_device *, int)
+EFX_HAVE_NDO_TX_TIMEOUT_TXQUEUE	memtype	struct_net_device_ops	ndo_tx_timeout	include/linux/netdevice.h	void (*)(struct net_device *, unsigned int)
 EFX_HAVE_ETHTOOL_FECPARAM	member	struct_ethtool_ops	get_fecparam	include/linux/ethtool.h
 EFX_HAVE_ETHTOOL_RXFH_CONTEXT	member	struct_ethtool_ops	get_rxfh_context	include/linux/ethtool.h
 EFX_HAVE_ETHTOOL_RXNFC_CONTEXT	member	struct_ethtool_rxnfc	rss_context	include/linux/ethtool.h

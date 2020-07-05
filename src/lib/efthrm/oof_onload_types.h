@@ -16,6 +16,7 @@ struct net;
 struct oof_manager;
 struct seq_file;
 struct oo_filter_ns_manager;
+struct oof_nat_table;
 
 
 struct oo_filter_ns {
@@ -74,6 +75,8 @@ struct oo_filter_ns_manager {
   unsigned ofnm_hwports_available;
   unsigned ofnm_hwports_mcast_replicate_capable;
   unsigned ofnm_hwports_vlan_filters;
+
+  struct oof_nat_table* ofnm_nat_table;
 };
 
 

@@ -33,13 +33,20 @@
 #define CP_AGENT_MSG_TYPE_CLIENT_HELLO 1
 #define CP_AGENT_MSG_TYPE_SERVER_HELLO 2
 
+/* OCKA protocol versions:
+ *  1:  Initial version.
+ *  2:  Allows backends to belong to multiple services.
+ */
+#define CP_AGENT_OCKA_MIN_PROTO_VER 1
+#define CP_AGENT_OCKA_MAX_PROTO_VER 2
+
 #define CP_AGENT_MSG_TYPE_OCKA_SERVICE_ADD 3
 #define CP_AGENT_MSG_TYPE_OCKA_SERVICE_DEL 4
 #define CP_AGENT_MSG_TYPE_OCKA_ENDPOINT_ADD 5
 #define CP_AGENT_MSG_TYPE_OCKA_ENDPOINT_DEL 6
 
-
-#define CP_AGENT_PROTO_VER 1
+#define CP_AGENT_KDP_MIN_PROTO_VER 1
+#define CP_AGENT_KDP_MAX_PROTO_VER 1
 
 
 /* These are part of the protocol, so we give them explicit values. */

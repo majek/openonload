@@ -52,6 +52,10 @@ cicp_user_retrieve(ci_netif*                    ni,
                    ci_ip_cached_hdrs*           ipcache,
                    const struct oo_sock_cplane* sock_cp) CI_HF;
 
+extern int
+cicp_user_resolve(ci_netif* ni, struct oo_cplane_handle* cp,
+                  cicp_verinfo_t* verinfo, ci_uint8 sock_cp_flags,
+                  struct cp_fwd_key* key, struct cp_fwd_data* data) CI_HF;
 
 /*! Update forwarding and mac info of [ipcache] from [from_ipcache].
  *
@@ -134,13 +138,6 @@ cicp_user_is_local_addr(struct oo_cplane_handle *cplane, ci_addr_t ip)
   return cicp_find_ifindex_by_ip(cplane, ip, cicp_ipif_check_ok, NULL);
 }
 
-ci_inline int ci_hwport_check_onload(ci_hwport_id_t hwport,
-                                     const cicp_encap_t *encap)
-{
-  return (hwport != CI_HWPORT_ID_BAD);
-}
-
-
 
 /* Try to send one deferred packet.  Returns TRUE if sent. */
 extern int oo_deferred_send_one(ci_netif *ni, struct oo_deferred_pkt* dpkt);
@@ -150,6 +147,29 @@ extern int oo_deferred_send(ci_netif *ni);
 /* Release all the deferred packets */
 void oo_deferred_free(ci_netif *ni);
 #endif
+
+
+extern int
+cicp_user_build_fwd_key(ci_netif* ni, const ci_ip_cached_hdrs* ipcache,
+                        const struct oo_sock_cplane* sock_cp, ci_addr_t daddr,
+                        int af, struct cp_fwd_key* key);
+
+/* Given the result of a route lookup, find the _RX_ hwports associated with
+ * the egress interface.  This is a bizarre thing to want to know on the face
+ * of it, but there are two use-cases:
+ *   - bonds with no active slaves are still acceleratable iff they have a
+ *     non-empty set of RX hwports, and
+ *   - joining a multicast group by doing a route-lookup requires a map to the
+ *     RX hwports as the final step.
+ */
+static inline int
+cicp_user_get_fwd_rx_hwports(ci_netif* ni, const struct cp_fwd_data* data,
+                             cicp_hwport_mask_t* hwports_out)
+{
+  return oo_cp_find_llap(ni->cplane, data->base.ifindex, NULL /*mtu*/,
+                         NULL /*tx_hwports*/, hwports_out /*rx_hwports*/,
+                         NULL /*mac*/, NULL /*encap*/);
+}
 
 
 /*----------------------------------------------------------------------------
@@ -168,6 +188,11 @@ extern int cicp_raw_ip_send(struct oo_cplane_handle* cp, int af,
 #pragma GCC visibility pop
 #endif
 
+#endif
+
+#ifdef __KERNEL__
+/* Tell Onload what kind of addresses are considered to be "local" */
+extern bool cplane_use_prefsrc_as_local;
 #endif
 
 #endif /* __ONLOAD_CPLANE_OPS_H__ */

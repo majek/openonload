@@ -30,6 +30,7 @@
 #define CPLANE_SERVER_IPV6_NO_SOURCE "ipv6-no-source"
 #define CPLANE_SERVER_UID "uid"
 #define CPLANE_SERVER_GID "gid"
+#define CPLANE_SERVER_PREFSRC_AS_LOCAL "preferred-source-as-local"
 #ifndef NDEBUG
 #define CPLANE_SERVER_CORE_SIZE "core_size"
 #endif
@@ -44,6 +45,7 @@
 enum cp_helper_msg_type {
   CP_HMSG_FWD_REQUEST,
   CP_HMSG_VETH_SET_FWD_TABLE_ID,
+  CP_HMSG_SET_HWPORT,
 };
 
 /* message from in-kernel cplane helper to the cplane server */
@@ -59,6 +61,11 @@ struct cp_helper_msg {
       ci_ifid_t veth_ifindex;
       cp_fwd_table_id fwd_table_id;
     } veth_set_fwd_table_id;
+    struct {
+      ci_ifid_t ifindex;
+      ci_hwport_id_t hwport;
+      cp_nic_flags_t nic_flags;
+    } set_hwport;
   } u;
 };
 

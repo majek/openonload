@@ -31,6 +31,7 @@
     pselect;
     poll;
     __poll_chk;
+    __ppoll_chk;
     ppoll;
     splice;
     read;
@@ -40,6 +41,7 @@
     writev;
     close;
     fcntl;
+    fcntl64;
     ioctl;
     dup;
     dup2;

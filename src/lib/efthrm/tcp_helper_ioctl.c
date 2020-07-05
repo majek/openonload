@@ -21,9 +21,6 @@
 #include <onload/version.h>
 #include <onload/dshm.h>
 #include <onload/nic.h>
-#if CI_CFG_BPF && ! defined NO_BPF
-#include <onload/bpf_internal.h>
-#endif
 #ifdef ONLOAD_OFE
 #include "ofe/onload.h"
 #endif
@@ -1308,71 +1305,6 @@ extern int efab_tcp_loopback_connect(ci_private_t *priv, void *arg);
 extern int efab_tcp_helper_reuseport_bind(ci_private_t *priv, void *arg);
 
 
-static int
-efab_tcp_drop_from_acceptq(ci_private_t *priv, void *arg)
-{
-  struct oo_op_tcp_drop_from_acceptq *carg = arg;
-  tcp_helper_resource_t *thr;
-  tcp_helper_endpoint_t *ep;
-  citp_waitable *w;
-  ci_tcp_state *ts;
-  int rc = -EINVAL;
-
-  /* find stack */
-  rc = efab_thr_table_lookup(NULL, NULL, carg->stack_id,
-                                 EFAB_THR_TABLE_LOOKUP_CHECK_USER |
-                                 EFAB_THR_TABLE_LOOKUP_NO_UL,
-                                 &thr);
-
-  if( rc < 0 )
-    return rc;
-  ci_assert( thr->k_ref_count & TCP_HELPER_K_RC_NO_USERLAND );
-
-  /* find endpoint and drop OS socket */
-  ep = ci_trs_get_valid_ep(thr, carg->sock_id);
-  if( ep == NULL ) {
-    rc = -EINVAL;
-    goto fail;
-  }
-
-  w = SP_TO_WAITABLE(&thr->netif, carg->sock_id);
-  if( !(w->state & CI_TCP_STATE_TCP) || w->state == CI_TCP_LISTEN ) {
-    rc = -EINVAL;
-    goto fail;
-  }
-  ts = SP_TO_TCP(&thr->netif, carg->sock_id);
-  ci_assert(ep->os_port_keeper);
-  ci_assert_equal(ep->os_socket, NULL);
-
-  LOG_TV(ci_log("%s: send reset to non-accepted connection", __FUNCTION__));
-
-  /* copy from ci_tcp_listen_shutdown_queues() */
-  ci_assert(ts->s.b.sb_aflags & CI_SB_AFLAG_TCP_IN_ACCEPTQ);
-  rc = ci_netif_lock(&thr->netif);
-  if( rc != 0 ) {
-    ci_assert_equal(rc, -EINTR);
-    rc = -ERESTARTSYS;
-    goto fail;
-  }
-  ci_bit_clear(&ts->s.b.sb_aflags, CI_SB_AFLAG_TCP_IN_ACCEPTQ_BIT);
-  /* We have no way to close this connection from the other side:
-   * there was no RST from peer. */
-  ci_assert_nequal(ts->s.b.state, CI_TCP_CLOSED);
-  ci_assert_nequal(ts->s.b.state, CI_TCP_TIME_WAIT);
-  ci_tcp_send_rst(&thr->netif, ts);
-  ci_tcp_drop(&thr->netif, ts, ECONNRESET);
-  ci_assert_equal(ep->os_port_keeper, NULL);
-  ci_netif_unlock(&thr->netif);
-  efab_tcp_helper_k_ref_count_dec(thr);
-  return 0;
-
-fail:
-  efab_tcp_helper_k_ref_count_dec(thr);
-  ci_log("%s: inconsistent ep %d:%d", __func__, carg->stack_id, carg->sock_id);
-  return rc;
-}
-
-
 static int oo_get_cpu_khz_rsop(ci_private_t *priv, void *arg)
 {
   ci_uint32* cpu_khz = arg;
@@ -1400,7 +1332,6 @@ static int efab_tcp_helper_alloc_active_wild_rsop(ci_private_t *priv,
 }
 
 
-
 static int efab_tcp_helper_evq_poll_rsop(ci_private_t *priv, void* arg)
 {
   tcp_helper_resource_t* trs = priv->thr;
@@ -1412,27 +1343,6 @@ static int efab_tcp_helper_evq_poll_rsop(ci_private_t *priv, void* arg)
   }
 
   return ci_netif_evq_poll(&trs->netif, *vp);
-}
-
-
-static int efab_tcp_helper_bpf_bind_rsop(ci_private_t* priv, void* arg)
-{
-#if CI_CFG_BPF && !defined NO_BPF
-  ci_hwport_id_t hwport;
-  tcp_helper_resource_t* trs = priv->thr;
-  oo_bpf_bind_t* bind = arg;
-  if( bind->intf_i < 0 || bind->intf_i >= CI_CFG_MAX_INTERFACES )
-    return -EINVAL;
-  hwport = trs->netif.intf_i_to_hwport[bind->intf_i];
-  if( hwport == CI_HWPORT_ID_BAD )
-    return -EINVAL;
-  return ook_get_prog_fd_for_onload(bind->attach_point, trs->name, hwport);
-#else
-  /* It's possible to achieve a userspace which thinks it might be BPF-capable
-   * but a kernelspace which knows it isn't. If userspace manages to call
-   * this, therefore, we want to pretend that nothing's attached. */
-  return -ENOENT;
-#endif
 }
 
 
@@ -1453,23 +1363,22 @@ static int oo_dshm_list_rsop(ci_private_t *priv, void *arg)
                            &params->count);
 }
 
-static int oo_ifindex2hwport(ci_private_t *priv, void *arg)
+static int
+oo_cp_dump_hwports(ci_private_t *priv, void *arg)
 {
-  ci_uint32* arg_p = arg;
-  struct oo_nic* nic;
-  int rc = cp_acquire_from_priv_if_server(priv, NULL);
+  ci_ifid_t ifindex = *(ci_ifid_t*)arg;
+  struct oo_cplane_handle* cp;
+  int rc = cp_acquire_from_priv_if_server(priv, &cp);
+
   if( rc < 0 )
     return rc;
 
   rtnl_lock();
-  nic = oo_nic_find_ifindex(*arg_p);
-  if( nic == NULL )
-    *arg_p = CI_HWPORT_ID_BAD;
-  else
-    *arg_p = oo_nic_hwport(nic);
+  rc = oo_nic_announce(cp, ifindex);
   rtnl_unlock();
 
-  return 0;
+  cp_release(cp);
+  return rc;
 }
 
 static int
@@ -1483,73 +1392,18 @@ static int oo_cplane_ipmod(ci_private_t *priv, void *arg)
 {
   struct oo_op_cplane_ipmod* op = arg;
   int rc = cp_acquire_from_priv_if_server(priv, NULL);
-  const int af = op->address_family;
-  const int mib_id = op->mib_id;
-  const cicp_rowid_t row_id = op->row_id;
-  cicp_rowid_t rowid_max;
-  struct cp_mibs *mib;
-  ci_addr_t net_ip;
-  ci_ifid_t ifindex;
 
   if( rc < 0 )
     return rc;
 
-#if CI_CFG_IPV6
-  if( af != AF_INET && af != AF_INET6 )
-#else
-  if( af != AF_INET )
-#endif
-    return -EINVAL;
-
-  if( mib_id < 0 || mib_id > 1)
-    return -EINVAL;
-
-  ci_assert(priv->priv_cp);
-  if( priv->priv_cp == NULL )
-    return -EINVAL;
-
-  mib = &priv->priv_cp->mib[mib_id];
-
-  ci_assert(mib->dim);
-  if( mib->dim == NULL )
-    return -EINVAL;
-
-#if CI_CFG_IPV6
-  rowid_max = (af == AF_INET) ? mib->dim->ipif_max : mib->dim->ip6if_max;
-#else
-  rowid_max = mib->dim->ipif_max;
-#endif
-
-  if( row_id < 0 || row_id >= rowid_max )
-    return -EINVAL;
-
-#if CI_CFG_IPV6
-  if( af == AF_INET6 ) {
-    cicp_ip6if_row_t ip6if = mib->ip6if[row_id];
-
-    if (!memcmp(ip6if.net_ip6, addr_any.ip6, sizeof(addr_any.ip6)))
-      return -EINVAL;
-
-    memcpy(net_ip.ip6, ip6if.net_ip6, sizeof(net_ip.ip6));
-    ifindex = ip6if.ifindex;
-  } else
-#endif
-  {
-    cicp_ipif_row_t ipif = mib->ipif[row_id];
-
-    if( ipif.net_ip == 0 )
-      return -EINVAL;
-
-    net_ip = CI_ADDR_FROM_IP4(ipif.net_ip);
-    ifindex = ipif.ifindex;
-  }
-
   if( op->add )
-    oof_onload_on_cplane_ipadd(af, net_ip, ifindex, priv->priv_cp->cp_netns,
-                               &efab_tcp_driver);
+    oof_onload_on_cplane_ipadd(op->af, CI_ADDR_FROM_ADDR_SH(op->addr),
+                               op->ifindex,
+                               priv->priv_cp->cp_netns, &efab_tcp_driver);
   else
-    oof_onload_on_cplane_ipdel(af, net_ip, ifindex, priv->priv_cp->cp_netns,
-                               &efab_tcp_driver);
+    oof_onload_on_cplane_ipdel(op->af, CI_ADDR_FROM_ADDR_SH(op->addr),
+                               op->ifindex,
+                               priv->priv_cp->cp_netns, &efab_tcp_driver);
   return 0;
 }
 
@@ -1578,6 +1432,48 @@ static int oo_cplane_llap_update_filters(ci_private_t *priv, void *arg)
 
   oof_onload_mcast_update_filters(op->ifindex, priv->priv_cp->cp_netns,
                                   &efab_tcp_driver);
+
+  return 0;
+}
+
+
+static int oo_cplane_dnat_add(ci_private_t *priv, void *arg)
+{
+  struct oo_op_cplane_dnat_add* op = arg;
+  int rc = cp_acquire_from_priv_if_server(priv, NULL);
+  if( rc != 0 )
+    return rc;
+
+  rc = oof_onload_dnat_add(&efab_tcp_driver,
+                           CI_ADDR_FROM_ADDR_SH(op->orig_addr), op->orig_port,
+                           CI_ADDR_FROM_ADDR_SH(op->xlated_addr),
+                           op->xlated_port);
+
+  return rc;
+}
+
+
+static int oo_cplane_dnat_del(ci_private_t *priv, void *arg)
+{
+  struct oo_op_cplane_dnat_del* op = arg;
+  int rc = cp_acquire_from_priv_if_server(priv, NULL);
+  if( rc != 0 )
+    return rc;
+
+  oof_onload_dnat_del(&efab_tcp_driver, CI_ADDR_FROM_ADDR_SH(op->orig_addr),
+                      op->orig_port);
+
+  return 0;
+}
+
+
+static int oo_cplane_dnat_reset(ci_private_t *priv, void *arg)
+{
+  int rc = cp_acquire_from_priv_if_server(priv, NULL);
+  if( rc != 0 )
+    return rc;
+
+  oof_onload_dnat_reset(&efab_tcp_driver);
 
   return 0;
 }
@@ -1653,7 +1549,7 @@ oo_operations_table_t oo_operations[] = {
   /* include/cplane/ioctl.h: */
   op(OO_IOC_GET_CPU_KHZ, oo_get_cpu_khz_rsop),
 
-  op(OO_IOC_IFINDEX_TO_HWPORT, oo_ifindex2hwport),
+  op(OO_IOC_CP_DUMP_HWPORTS,   oo_cp_dump_hwports),
   op(OO_IOC_CP_MIB_SIZE,       oo_cp_get_mib_size),
   op(OO_IOC_CP_FWD_RESOLVE,    oo_cp_fwd_resolve_rsop),
   op(OO_IOC_CP_FWD_RESOLVE_COMPLETE,    oo_cp_fwd_resolve_complete),
@@ -1667,6 +1563,9 @@ oo_operations_table_t oo_operations[] = {
   op(OO_IOC_OOF_CP_IP_MOD,     oo_cplane_ipmod),
   op(OO_IOC_OOF_CP_LLAP_MOD,   oo_cplane_llapmod),
   op(OO_IOC_OOF_CP_LLAP_UPDATE_FILTERS, oo_cplane_llap_update_filters),
+  op(OO_IOC_OOF_CP_DNAT_ADD,   oo_cplane_dnat_add),
+  op(OO_IOC_OOF_CP_DNAT_DEL,   oo_cplane_dnat_del),
+  op(OO_IOC_OOF_CP_DNAT_RESET, oo_cplane_dnat_reset),
   op(OO_IOC_CP_NOTIFY_LLAP_MONITORS,   oo_cp_notify_llap_monitors_rsop),
   op(OO_IOC_CP_CHECK_VETH_ACCELERATION, oo_cp_check_veth_acceleration_rsop),
   op(OO_IOC_CP_SELECT_INSTANCE, oo_cp_select_instance_rsop),
@@ -1744,7 +1643,6 @@ oo_operations_table_t oo_operations[] = {
   op(OO_IOC_RSOP_DUMP, thr_priv_dump),
   op(OO_IOC_GET_ONLOADFS_DEV, onloadfs_get_dev_t),
   op(OO_IOC_TCP_LOOPBACK_CONNECT, efab_tcp_loopback_connect),
-  op(OO_IOC_TCP_DROP_FROM_ACCEPTQ, efab_tcp_drop_from_acceptq),
   op(OO_IOC_MOVE_FD, efab_file_move_to_alien_stack_rsop),
   op(OO_IOC_EP_REUSEPORT_BIND, efab_tcp_helper_reuseport_bind),
   op(OO_IOC_CLUSTER_DUMP,      efab_cluster_dump),
@@ -1757,12 +1655,10 @@ oo_operations_table_t oo_operations[] = {
 
   op(OO_IOC_ALLOC_ACTIVE_WILD, efab_tcp_helper_alloc_active_wild_rsop),
 
-
   op(OO_IOC_VETH_ACCELERATION_ENABLED, oo_veth_acceleration_enabled_rsop),
 
   op(OO_IOC_EVQ_POLL, efab_tcp_helper_evq_poll_rsop),
 
-  op(OO_IOC_BPF_BIND, efab_tcp_helper_bpf_bind_rsop),
 /* Here come non contigous operations only, their position need to match
  * index accoriding to their placeholder */
   op(OO_IOC_CHECK_VERSION, oo_version_check_rsop),

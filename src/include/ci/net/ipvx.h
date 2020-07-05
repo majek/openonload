@@ -290,6 +290,9 @@ fail:
 #define CI_IPX_DFLT_TOS_TCLASS(af) (IS_AF_INET6(af) ? CI_IPV6_DFLT_TCLASS : \
     CI_IP_DFLT_TOS)
 
+#define CI_IPX_DFLT_TTL_HOPLIMIT(af) (IS_AF_INET6(af) ? \
+    CI_IPV6_DFLT_HOPLIMIT : CI_IP_DFLT_TTL)
+
 typedef union ci_ipx_hdr {
   ci_ip4_hdr ip4;
 #if CI_CFG_IPV6

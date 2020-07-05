@@ -187,15 +187,6 @@ typedef long off_t;
 #endif
 
 
-// Stolen from winsock2.h
-#define MSG_OOB         0x1             /* process out-of-band data */
-#define MSG_PEEK        0x2             /* peek at incoming message */
-#define MSG_DONTROUTE   0x4             /* send without using routing tables */
-
-#define MSG_DONTWAIT    0x40
-#define MSG_WAITALL     0x100
-#define MSG_PARTIAL     0x8000
-
 #define KERNEL_VERSION(x,y,z)   0
 #define LINUX_VERSION_CODE      0
 

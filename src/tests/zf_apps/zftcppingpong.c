@@ -28,6 +28,7 @@ static void usage_msg(FILE* f)
   fprintf(f, "  -i number of iterations\n");
   fprintf(f, "  -m use multiplexer\n");
   fprintf(f, "  -t print timestamps (only if using multiplexer)\n");
+  fprintf(f, "  -c enable overlapped reads and specify a time for the overlapped delay in nanoseconds.");
   fprintf(f, "\n");
 }
 
@@ -52,6 +53,8 @@ struct cfg {
   bool ping;
   bool muxer;
   bool timestamps;
+  bool overlapped_mode;
+  int overlapped_delay;
 };
 
 
@@ -208,6 +211,131 @@ static void muxer_ping_pongs(struct zf_stack* stack, struct zft* zock)
   } while( rx_bytes_left || ts_bytes_left );
 }
 
+static void pftf_ping_pong(struct zf_stack *stack, struct zft *zock)
+{
+  char send_buf[cfg.size];
+  struct rx_msg msg;
+  const int max_iov = sizeof(msg.iov) / sizeof(msg.iov[0]);
+  int sends_left = cfg.itercount;
+  int recvs_left = cfg.itercount;
+  size_t rx_bytes_left = cfg.size;
+  size_t ts_bytes_left = 0;
+
+  if( cfg.ping ) {
+    ZF_TEST(zft_send_single(zock, send_buf, cfg.size, 0) == cfg.size);
+    --sends_left;
+    ts_bytes_left = cfg.timestamps ? cfg.size : 0;
+  }
+
+  do {
+    struct epoll_event ev;
+    ZF_TEST(zf_muxer_wait(muxer, &ev, 1, -1) == 1);
+    /* ZF_EPOLLIN_OVERLAPPED event should not occur with any other event. */
+    ZF_TEST( !(ev.events & (EPOLLIN | EPOLLERR )) || !(ev.events & ZF_EPOLLIN_OVERLAPPED) );
+
+    if ( ev.events & EPOLLIN ) {
+      /* zf_muxer_wait() polls the stack until one of the zockets becomes
+       * 'ready'.  Note that muxers are edge-triggered, which is why we
+       * must be careful to block only if we've drained all data from the
+       * zocket.
+       */
+        do {
+          msg.msg.iovcnt = max_iov;
+          zft_zc_recv(zock, &msg.msg, 0);
+          ZF_TEST(msg.msg.iovcnt == 1);
+          ZF_TEST(msg.iov[0].iov_len <= rx_bytes_left);
+          rx_bytes_left -= msg.iov[0].iov_len;
+          if ( cfg.timestamps ) {
+            struct timespec ts;
+            unsigned flags;
+            ZF_TRY(zft_pkt_get_timestamp(zock, &msg.msg, &ts, 0, &flags));
+            fprintf(stderr, "TIME RECV  %ld.%09ld bytes %lu flags %x\n",
+                    ts.tv_sec, ts.tv_nsec, msg.iov[0].iov_len, flags);
+          }
+          /* Receive is done, simulate some market processing for that data. */
+          nanosleep(&(struct timespec){.tv_sec = 0, .tv_nsec = 1000}, NULL);
+          ZF_TEST(zft_zc_recv_done(zock, &msg.msg) == 1 || (recvs_left <= 1 && rx_bytes_left == 0));
+        } while ( msg.msg.pkts_left != 0 );
+    }
+    else if (ev.events & ZF_EPOLLIN_OVERLAPPED) {
+      msg.msg.iovcnt = max_iov;
+      msg.iov[0].iov_len = cfg.size;
+  
+      zft_zc_recv(zock, &msg.msg, ZF_OVERLAPPED_WAIT);
+      if (msg.msg.iovcnt == 0)
+        /* overlapped wait has been abandoned */
+        continue;
+
+      if( cfg.overlapped_delay > 0 && rx_bytes_left == msg.iov[0].iov_len )
+        /* Simulate some heavy cpu processing for the given packet */
+        nanosleep(&(struct timespec){.tv_sec = 0, .tv_nsec = cfg.overlapped_delay}, NULL);
+
+      
+      /* wait for packet completion and verification */
+      zft_zc_recv(zock, &msg.msg, ZF_OVERLAPPED_COMPLETE);
+      if( msg.msg.iovcnt == 0 )
+        /* packet did not pass verification */
+        continue;
+
+      rx_bytes_left -= msg.iov[0].iov_len;
+
+      if ( cfg.timestamps ) {
+        struct timespec ts;
+        unsigned flags;
+        ZF_TRY(zft_pkt_get_timestamp(zock, &msg.msg, &ts, 0, &flags));
+        fprintf(stderr, "TIME RECV  %ld.%09ld bytes %lu flags %x\n",
+                ts.tv_sec, ts.tv_nsec, msg.iov[0].iov_len, flags);
+      }
+      ZF_TEST(zft_zc_recv_done(zock, &msg.msg) == 1 || (recvs_left <= 1 && rx_bytes_left == 0));
+    }
+
+
+    if( ev.events & EPOLLERR ) {
+      /* zf_muxer_wait() polls the stack until one of the zockets becomes
+       * 'ready'.  Note that muxers are edge-triggered, which is why we
+       * must be careful to block only if we've drained all data from the
+       * zocket.
+       */
+      int count = 1;
+      do {
+        struct zf_pkt_report report;
+        int count = 1;
+        ZF_TRY(zft_get_tx_timestamps(zock, &report, &count));
+
+        if( count != 0 ) {
+          ZF_TEST(count == 1);
+          fprintf(stderr, "TIME SENT  %ld.%09ld bytes %u left %lu flags %x\n",
+                  report.timestamp.tv_sec,
+                  report.timestamp.tv_nsec,
+                  report.bytes,
+                  ts_bytes_left,
+                  report.flags);
+          /* Ignore a report about a retransmitted packet.  Should check
+          * report.start and report.bytes in case there were some new
+          * bytes transmitted in this packet */
+          if( !(report.flags & ZF_PKT_REPORT_TCP_RETRANS) ) {
+            ZF_TEST(report.bytes <= ts_bytes_left);
+            ts_bytes_left -= report.bytes;
+          }
+        } 
+      } while( count != 0 );
+    }
+
+
+    if( rx_bytes_left == 0 && ts_bytes_left == 0 ) {
+      if( recvs_left ) {
+          --recvs_left;
+          rx_bytes_left = recvs_left ? cfg.size : 0;
+      }
+      if( sends_left ) {
+        ZF_TEST(zft_send_single(zock, send_buf, cfg.size, 0) == cfg.size);
+        --sends_left;
+        ts_bytes_left = cfg.timestamps ? cfg.size : 0;
+      }
+    }
+  } while( rx_bytes_left || ts_bytes_left );
+}
+
 
 static void pinger(struct zf_stack* stack, struct zft* zock,
                    void (*ping_pongs_fn)(struct zf_stack*, struct zft*),
@@ -235,8 +363,8 @@ static void ponger(struct zf_stack* stack, struct zft* zock,
 int main(int argc, char* argv[])
 {
   int c;
-  while( (c = getopt(argc, argv, "s:i:mt")) != -1 )
-    switch( c ) {
+  while( (c = getopt(argc, argv, "s:i:c:mt")) != -1 )
+    switch (c) {
     case 's':
       cfg.size = atoi(optarg);
       break;
@@ -248,6 +376,10 @@ int main(int argc, char* argv[])
       break;
     case 't':
       cfg.timestamps = true;
+      break;
+    case 'c':
+      cfg.overlapped_mode = true;
+      cfg.overlapped_delay = atoi(optarg);
       break;
     case '?':
       exit(1);
@@ -325,11 +457,18 @@ int main(int argc, char* argv[])
 
   void (*ping_pongs_fn)(struct zf_stack*, struct zft*) = ping_pongs;
 
-  if( cfg.muxer ) {
-    struct epoll_event event = { .events = EPOLLIN | EPOLLERR };
+  if (cfg.muxer) {
     ZF_TRY(zf_muxer_alloc(stack, &muxer));
-    ZF_TRY(zf_muxer_add(muxer, zft_to_waitable(zock), &event));
-    ping_pongs_fn = muxer_ping_pongs;
+    if (cfg.overlapped_mode) {
+      struct epoll_event event = {.events = EPOLLIN | EPOLLERR | ZF_EPOLLIN_OVERLAPPED};
+      ZF_TRY(zf_muxer_add(muxer, zft_to_waitable(zock), &event));
+      ping_pongs_fn = pftf_ping_pong;
+    }
+    else {
+      struct epoll_event event = {.events = EPOLLIN | EPOLLERR};
+      ZF_TRY(zf_muxer_add(muxer, zft_to_waitable(zock), &event));
+      ping_pongs_fn = muxer_ping_pongs;
+    }
   }
 
   if( cfg.ping ) {

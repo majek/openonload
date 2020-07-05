@@ -38,8 +38,7 @@ void __ci_tcp_listen_to_normal(ci_netif* netif, ci_tcp_socket_listen* tls)
   ci_assert_equal(ci_tcp_acceptq_n(tls), 0);
   ci_assert_equal(ci_tcp_acceptq_not_empty(tls), 0);
 
-  if( ci_tcp_listen_has_timer(tls) )
-    ci_ip_timer_clear(netif, &tls->listenq_tid);
+  ci_ip_timer_clear(netif, &tls->listenq_tid);
   ci_ni_dllist_remove_safe(netif, &tls->s.b.post_poll_link);
 
 #if CI_CFG_IPV6
@@ -572,6 +571,13 @@ int ci_tcp_close(ci_netif* netif, ci_tcp_state* ts)
 
     if( ts->s.b.sb_aflags & CI_SB_AFLAG_TCP_IN_ACCEPTQ ) {
       ci_tcp_send_rst(netif, ts);
+      /* set error state to placate ci_tcp_set_slow_state's debug checks */
+      ts->s.so_error = ECONNRESET;
+      ts->s.tx_errno = EPIPE;
+      ts->s.rx_errno = CI_SHUT_RD;
+      /* do managed transition to CLOSED in order to maintain counters and
+       * reserved pkt buffers state */
+      ci_tcp_set_slow_state(netif, ts, CI_TCP_CLOSED);
       ci_tcp_ep_clear_filters(netif, S_SP(ts), 0);
       ci_tcp_state_free(netif, ts);
       return 0;
@@ -623,7 +629,7 @@ void ci_tcp_listen_shutdown_queues(ci_netif* netif, ci_tcp_socket_listen* tls)
   /* clear up synrecv queue */
   LOG_TV(ci_log("%s: %d clear out synrecv queue", __FUNCTION__,
 		S_FMT(tls)));
-  if( tls->n_listenq != 0 && ci_tcp_listen_has_timer(tls) )
+  if( tls->n_listenq != 0 )
     ci_ip_timer_clear(netif, &tls->listenq_tid);
   synrecvs = ci_tcp_listenq_drop_all(netif, tls);
   ci_assert_equal(tls->n_listenq, synrecvs);

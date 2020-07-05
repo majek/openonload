@@ -52,6 +52,18 @@ extern void
 oof_manager_addr_del(struct oof_manager*, int af, ci_addr_t laddr,
                      unsigned ifindex);
 
+extern int
+oof_manager_dnat_add(struct oof_manager* fm, int af, ci_uint16 lp_protocol,
+                     const ci_addr_t orig_addr, ci_uint16 orig_port,
+                     const ci_addr_t xlated_addr, ci_uint16 xlated_port);
+
+extern void
+oof_manager_dnat_del(struct oof_manager* fm, ci_uint16 lp_protocol,
+                     const ci_addr_t orig_addr, ci_uint16 orig_port);
+
+extern void
+oof_manager_dnat_reset(struct oof_manager* fm, ci_uint16 lp_protocol);
+
 extern void
 oof_hwport_up_down(struct oof_manager* fm, int hwport, int up,
                    int mcast_replicate_capable, int vlan_filters, int sync);
@@ -102,7 +114,7 @@ oof_socket_update_sharer_details(struct oof_manager*, struct oof_socket*,
 extern int
 oof_socket_share(struct oof_manager*, struct oof_socket* skf,
                  struct oof_socket* listen_skf, int af_space,
-                 ci_addr_t laddr, ci_addr_t raddr, int rport);
+                 ci_addr_t laddr, ci_addr_t raddr, int lport, int rport);
 
 extern void
 oof_socket_del(struct oof_manager*, struct oof_socket*);
@@ -223,6 +235,8 @@ oof_cb_defer_work(void* owner_private);
 extern struct user_namespace*
 oof_cb_user_ns(void* owner_private);
 #endif
+
+extern struct oof_nat_table* oof_cb_nat_table(void* owner_private);
 
 extern int
 oof_hwports_list(struct oof_manager* fm, struct seq_file* seq);

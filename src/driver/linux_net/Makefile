@@ -1,3 +1,14 @@
+################################################################################
+#
+# Driver for Solarflare network controllers and boards
+# Copyright 2019 Solarflare Communications Inc.
+#
+# This program is free software; you can redistribute it and/or modify it
+# under the terms of the GNU General Public License version 2 as published
+# by the Free Software Foundation, incorporated herein by reference.
+#
+################################################################################
+
 ifndef EFX_UPSTREAM
 
 # The EFX_UPSTREAM variable is never defined.  Sections of the Makefile
@@ -222,7 +233,7 @@ define filechk_autocompat.h
 endef
 endif
 
-$(obj)/autocompat.h: $(obj)/.kpath $(src)/kernel_compat.sh
+$(obj)/autocompat.h: $(obj)/.kpath $(src)/kernel_compat.sh $(src)/kernel_compat_funcs.sh
 	+$(call filechk,autocompat.h)
 	@touch $@
 

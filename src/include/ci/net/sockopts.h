@@ -41,21 +41,6 @@
 #define CI_TCPI_OPT_ECN         8
 
 
-enum ci_tcp_ca_state
-{
-  CI_TCP_CA_Open = 0,
-#define CI_TCPF_CA_Open	(1<<CI_TCP_CA_Open)
-  CI_TCP_CA_Disorder = 1,
-#define CI_TCPF_CA_Disorder (1<<CI_TCP_CA_Disorder)
-  CI_TCP_CA_CWR = 2,
-#define CI_TCPF_CA_CWR	(1<<CI_TCP_CA_CWR)
-  CI_TCP_CA_Recovery = 3,
-#define CI_TCPF_CA_Recovery (1<<CI_TCP_CA_Recovery)
-  CI_TCP_CA_Loss = 4
-#define CI_TCPF_CA_Loss	(1<<CI_TCP_CA_Loss)
-};
-
-
 struct ci_tcp_info
 {
   ci_uint8  tcpi_state;

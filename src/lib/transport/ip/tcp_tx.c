@@ -812,7 +812,7 @@ int ci_tcp_synrecv_send(ci_netif* netif, ci_tcp_socket_listen* tls,
 
   thdr = PKT_IPX_TCP_HDR(af, pkt);
   thdr->tcp_urg_ptr_be16 = 0;
-  thdr->tcp_source_be16 = sock_lport_be16(&tls->s);
+  thdr->tcp_source_be16 = tsr->l_port;
   thdr->tcp_dest_be16   = tsr->r_port;
   thdr->tcp_seq_be32    = CI_BSWAP_BE32(seq);
   thdr->tcp_ack_be32    = CI_BSWAP_BE32(tsr->rcv_nxt);
@@ -878,7 +878,7 @@ int ci_tcp_synrecv_send(ci_netif* netif, ci_tcp_socket_listen* tls,
     rc = 0;
   }
   else {
-    rc = ci_ip_send_pkt_send(netif, pkt, ipcache);
+    rc = ci_ip_send_pkt_send(netif, &tls->s.cp, pkt, ipcache);
     ci_netif_pkt_release(netif, pkt);
   }
   if(CI_UNLIKELY( rc != 0 ))
@@ -1126,9 +1126,8 @@ void ci_tcp_retrans_recover(ci_netif* ni, ci_tcp_state* ts,
    * If the state originally was CONG_RTO the ACK must have been
    * processed already by ci_tcp_try_cwndrecover() and congstate progressed
    * to CONG_RTO_RECOV. */
-  ci_assert((ts->congstate == CI_TCP_CONG_RTO_RECOV) ||
-            (ts->congstate == CI_TCP_CONG_FAST_RECOV &&
-             (ts->tcpflags & CI_TCPT_FLAG_SACK)));
+  ci_assert_impl(ts->congstate - CI_TCP_CONG_RTO_RECOV,
+                 ts->congstate == CI_TCP_CONG_FAST_RECOV);
   /* Check pointers point where they should. */
   ci_assert(SEQ_LE(ts->congrecover, tcp_snd_nxt(ts)));
 
@@ -1350,13 +1349,12 @@ void ci_tcp_tx_advance_to(ci_netif* ni, ci_tcp_state* ts,
        */
       ci_tcp_tx_advance_too_long(ni, ts, pkt);
 
-    if( SEQ_GT(pkt->pf.tcp_tx.end_seq, ts->snd_max) ) {
-      /* Packet won't fit in the receive window.  We'd rather not
-       * split it - big packets are good for efficiency - so only do
-       * so if there is nothing else in flight.
+    if(CI_UNLIKELY( SEQ_GT(pkt->pf.tcp_tx.end_seq, ts->snd_max) )) {
+      /* Packet won't fit in the receive window. Even though big packets are
+       * good for efficiency, we want to split this anyway because
+       * pathological deadlocks are possible with some peers (ON-11312)
        */
-      if( ! CI_CFG_SPLIT_SEND_PACKETS_FOR_SMALL_RECEIVE_WINDOWS ||
-          ci_tcp_inflight(ts) ||
+      if( ci_tcp_inflight(ts) ||
           SEQ_LE(ts->snd_max, pkt->pf.tcp_tx.start_seq) ||
           ci_tcp_tx_split(ni, ts, sendq, pkt,
                           SEQ_SUB(ts->snd_max, pkt->pf.tcp_tx.start_seq), 1) ){
@@ -1685,7 +1683,9 @@ int ci_tcp_reset_untrusted(ci_netif *netif, ci_tcp_state *ts)
 }
 #endif
 
-void ci_tcp_reply_with_rst(ci_netif* netif, ciip_tcp_rx_pkt* rxp)
+void
+ci_tcp_reply_with_rst(ci_netif* netif, const struct oo_sock_cplane* sock_cp,
+                      ciip_tcp_rx_pkt* rxp)
 {
   /* If the incoming seg has an ACK, use that as the seq no, otherwise use
   ** 0.  Calculate a proper ACK from the incoming seg.  A consequence of this
@@ -1782,7 +1782,7 @@ void ci_tcp_reply_with_rst(ci_netif* netif, ciip_tcp_rx_pkt* rxp)
     ci_ip_cached_hdrs ipcache;
     ci_ip_cache_init(&ipcache, af);
     ci_ip_send_pkt_lookup(netif, NULL, pkt, &ipcache);
-    ci_ip_send_pkt_send(netif, pkt, &ipcache);
+    ci_ip_send_pkt_send(netif, sock_cp, pkt, &ipcache);
   }
   CI_TCP_STATS_INC_OUT_SEGS(netif);
   ci_netif_pkt_release(netif, pkt);

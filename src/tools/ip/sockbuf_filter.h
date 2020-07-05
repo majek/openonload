@@ -20,25 +20,33 @@
 #include <stddef.h>
 #include <ci/internal/ip.h>
 
+
 #if CI_HAVE_PCAP
 #include <pcap/pcap.h>
 
-static struct bpf_program sock_filter;
-static pcap_t* sockbuf_pcap;
+typedef struct {
+  struct bpf_program sock_filter;
+  pcap_t* sockbuf_pcap;
+} sockbuf_filter_t;
+#else
+typedef struct { } sockbuf_filter_t; /* dummy entry */
 #endif
 
-static int/*bool*/ sockbuf_filter_prepare(const char* filter)
+
+static int/*bool*/ sockbuf_filter_prepare(sockbuf_filter_t* sft,
+                                          const char* filter)
+
 {
 #if CI_HAVE_PCAP
-  sockbuf_pcap = pcap_open_dead(1 /*LINKTYPE_ETHERNET*/, 64);
-  if( ! sockbuf_pcap ) {
+  sft->sockbuf_pcap = pcap_open_dead(1 /*LINKTYPE_ETHERNET*/, 64);
+  if( ! sft->sockbuf_pcap ) {
     fprintf(stderr, "Unable to open libpcap\n");
     return 0;
   }
-  if( pcap_compile(sockbuf_pcap, &sock_filter, filter, 1,
+  if( pcap_compile(sft->sockbuf_pcap, &sft->sock_filter, filter, 1,
                    PCAP_NETMASK_UNKNOWN) ) {
-    pcap_perror(sockbuf_pcap, "orm_json");
-    pcap_close(sockbuf_pcap);
+    pcap_perror(sft->sockbuf_pcap, "orm_json");
+    pcap_close(sft->sockbuf_pcap);
     return 0;
   }
   return 1;
@@ -53,17 +61,18 @@ static int/*bool*/ sockbuf_filter_prepare(const char* filter)
 #endif
 }
 
-static void sockbuf_filter_free(void)
+static void sockbuf_filter_free(sockbuf_filter_t* sft)
 {
 #if CI_HAVE_PCAP
-  if( sockbuf_pcap ) {
-    pcap_freecode(&sock_filter);
-    pcap_close(sockbuf_pcap);
+  if( sft->sockbuf_pcap ) {
+    pcap_freecode(&sft->sock_filter);
+    pcap_close(sft->sockbuf_pcap);
   }
 #endif
 }
 
-static int/*bool*/ sockbuf_filter_matches(citp_waitable_obj* w)
+static int/*bool*/ sockbuf_filter_matches(const sockbuf_filter_t* sft,
+                                          citp_waitable_obj* w)
 {
 #if !CI_HAVE_PCAP
   (void)w;
@@ -72,7 +81,7 @@ static int/*bool*/ sockbuf_filter_matches(citp_waitable_obj* w)
   struct pcap_pkthdr hdr;
   int offset;
 
-  if( ! sockbuf_pcap )
+  if( ! sft->sockbuf_pcap )
     return 1;
   if( ! (w->waitable.state & (CI_TCP_STATE_TCP | CI_TCP_STATE_UDP)) )
     return 1;
@@ -87,7 +96,9 @@ static int/*bool*/ sockbuf_filter_matches(citp_waitable_obj* w)
                + (w->waitable.state == CI_TCP_STATE_UDP ?
                    sizeof(ci_udp_hdr) : sizeof(ci_tcp_hdr));
   hdr.len = 1024;     /* totally arbitrary value */
-  return pcap_offline_filter(&sock_filter, &hdr,
+  /* Cast to non-const below is for pre-1.4 versions of libpcap, which didn't
+   * have the prototype marked as such */
+  return pcap_offline_filter((struct bpf_program*)&sft->sock_filter, &hdr,
                              w->sock.pkt.ether_header + offset);
 #endif
 }

@@ -145,7 +145,7 @@ struct zfur_msg {
 **
 ** \param us        UDP zocket.
 ** \param msg       Message structure.
-** \param flags     Must be zero.
+** \param flags     Must be either: zero or one of zf_zc_flags values.
 **
 ** This function completes the supplied @p msg structure with details
 ** of a received UDP datagram.
@@ -163,6 +163,9 @@ struct zfur_msg {
 ** Buffers are 'locked' until zfur_zc_recv_done() is performed.  The caller
 ** must not modify the contents of @p msg until after it has been passed to
 ** zfur_zc_recv_done().
+**
+** The api supports looking into partially received frames.
+** See \ref using_overlapped_receive.
 */
 ZF_LIBENTRY ZF_HOT void
 zfur_zc_recv(struct zfur *us,

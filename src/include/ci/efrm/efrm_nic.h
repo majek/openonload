@@ -80,6 +80,8 @@ struct efrm_nic {
 	/* Flags protected by [lock]. */
 	unsigned rnic_flags;
 #define EFRM_NIC_FLAG_DRIVERLINK_PROHIBITED      0x00000001u
+	/* NIC is administratively enabled/disabled for acceleration in procfs */
+#define EFRM_NIC_FLAG_ADMIN_ENABLED              0x00000002u
 
 	/* Counter incrementing with each reset/hotplug, to avoid races between
 	 * failing operations and resets that would fix them. */

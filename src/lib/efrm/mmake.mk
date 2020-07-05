@@ -46,7 +46,7 @@ endif
 #
 ifdef MMAKE_USE_KBUILD
 all:
-	 $(MAKE) $(MMAKE_KBUILD_ARGS) SUBDIRS=$(BUILDPATH)/lib/efrm _module_$(BUILDPATH)/lib/efrm
+	 $(MAKE) $(MMAKE_KBUILD_ARGS) KBUILD_EXTMOD=$(BUILDPATH)/lib/efrm
 clean:
 	@$(MakeClean)
 	rm -f lib.a

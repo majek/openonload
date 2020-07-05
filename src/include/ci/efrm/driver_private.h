@@ -68,7 +68,7 @@ struct vi_resource_dimensions;
 extern void efrm_driver_ctor(void);
 extern void efrm_driver_stop(void);
 extern void efrm_driver_dtor(void);
-extern int  efrm_nic_ctor(struct efrm_nic *, int ifindex,
+extern int  efrm_nic_ctor(struct efrm_nic *,
 			  const struct vi_resource_dimensions *);
 extern void efrm_nic_dtor(struct efrm_nic *);
 extern int  efrm_driver_register_nic(struct efrm_nic *);

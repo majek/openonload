@@ -189,7 +189,8 @@ cicp_raw_sock_send_bindtodev(struct oo_cplane_handle* cp, int ifindex,
   mm_segment_t oldfs;
   int rc;
   char* ifname;
-  const struct cred *orig_creds = NULL;
+  const struct cred *orig_creds;
+  struct cred *my_creds = NULL; /* appease gcc from RHEL6 */
   struct socket* sock;
 
 #if CI_CFG_IPV6
@@ -212,13 +213,13 @@ cicp_raw_sock_send_bindtodev(struct oo_cplane_handle* cp, int ifindex,
       return -EINVAL;
     }
 
-    orig_creds = oo_cplane_empower_cap_net_raw(cp->cp_netns);
+    orig_creds = oo_cplane_empower_cap_net_raw(cp->cp_netns, &my_creds);
     oldfs = get_fs();
     set_fs(KERNEL_DS);
     rc = sock_setsockopt(sock, SOL_SOCKET, SO_BINDTODEVICE,
                          ifname, strlen(ifname));
     set_fs(oldfs);
-    oo_cplane_drop_cap_net_raw(orig_creds);
+    oo_cplane_drop_cap_net_raw(orig_creds, my_creds);
 
     if( dev != NULL )
       dev_put(dev);

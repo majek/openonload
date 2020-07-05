@@ -7,9 +7,6 @@ SUBDIRS		:= ip sfcaffinity solar_clusterd dlopen_no_deepbind \
 ifneq ($(ONLOAD_ONLY),1)
 SUBDIRS		+= cplane unifdef misc onload_mibdump
 endif
-ifeq ($(PLATFORM),gnu_x86_64)
-SUBDIRS		+= onload_bpftool
-endif
 
 endif
 

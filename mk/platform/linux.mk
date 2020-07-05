@@ -35,21 +35,3 @@ endif
 MMAKE_KBUILD_ARGS_CONST := -C $(KPATH) NDEBUG=$(NDEBUG) GCOV=$(GCOV) CC=$(CC)
 MMAKE_KBUILD_ARGS = $(MMAKE_KBUILD_ARGS_CONST) $(MMAKE_KBUILD_ARGS_DBG)
 
-# From Linux 2.6.17 onward, modpost reads and writes symbols for
-# out-of-tree modules in a Module.symvers file in the module build
-# directory.  We then copy this between directories to ensure that our
-# modules that import from each other have version information.  For
-# earlier kernel versions we have to bodge it.
-# Various versions of modpost will crash if we don't:
-# - set the environment variable MODVERDIR
-# - include a slash in object file paths
-# - limit output lines (which include object file paths) to 128 characters
-MMAKE_KBUILD_ARGS += symverfile=$(CURDIR)/Module.symvers
-MMAKE_KBUILD_PRE_COMMAND := \
-	[ -f Module.symvers ] || cp -f $(KPATH)/Module.symvers .
-MMAKE_KBUILD_POST_COMMAND = \
-	MODVERDIR=.tmp_versions $(KPATH)/scripts/mod/modpost \
-		$(if $(CONFIG_MODVERSIONS),-m) \
-		$(if $(CONFIG_MODULE_SRCVERSION_ALL),-a) \
-		-i Module.symvers -o Module.symvers $(addprefix ./,$(TARGETS))
-

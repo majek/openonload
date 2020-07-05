@@ -38,11 +38,14 @@
 #endif
 
 
+struct net_device;
+
 /* Access core-to-queue mapping from other drivers.  Returns -1 if cpu is
  * out of range, or if the ifindex is not known to sfc_affinity, or if the
  * core-to-queue mapping has not been initialised.
  */
-extern int sfc_affinity_cpu_to_channel(int ifindex, int cpu);
+extern int sfc_affinity_cpu_to_channel_dev(const struct net_device* dev,
+                                           int cpu);
 
 
 #endif  /* __CI_AFFINITY_K_DRV_INTF_H__ */

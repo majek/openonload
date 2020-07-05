@@ -22,7 +22,6 @@ usage () {
   err "  -l <directory-path>    - do as local build in directory "
   err "                           (e.g. /scratch/mybuilds )"
   err "  -ltmp                  - do as local build in hosts /tmp directory"
-  err "  -r <remotebuild-host>  - do as remote build using rsync"
   err "  --inplace              - do as non-local build (default)"
   err "useful quick build selections for the current machine:"
   err "  --driver               - make driver tree for this machine"
@@ -95,40 +94,6 @@ do_top_level () {
 	$build_eftest
 	EOF
   fi
-  if [ "$REMOTEBUILDFLAG" = 1 ] ; then
-    if [ ! -z "$remotebuild_host"  ] ; then
-      BUILDHOST=$remotebuild_host
-    fi
-    chmod 600 ${TOPPATH}/mk/site/rsync.key
-    ssh -i ${TOPPATH}/mk/site/rsync.key rsync@${BUILDHOST} \
-      mkdir -p ~${BUILDPATH}
-  elif [ ! -z "$remotebuild_host" ] ; then
-    BUILDHOST=$remotebuild_host
-    REMOTEBUILDFLAG=1
-    chmod 600 ${TOPPATH}/mk/site/rsync.key
-    ssh -i ${TOPPATH}/mk/site/rsync.key rsync@${BUILDHOST} \
-      mkdir -p ~${BUILDPATH}
-  else
-    BUILDHOST=$(uname -n)
-    REMOTEBUILDFLAG=0
-  fi
-
-  have_libelf_line=
-  if [[ ! "$PLATFORM" == *"linux" ]]; then
-    HAVE_LIBELF=$(TOP="$TOP" make -s -f <(cat - <<HERE
-include $TOP/mk/platform/$PLATFORM.mk
-.PHONY: all
-all:
-	@CC="\${CC}" CFLAGS="\${CFLAGS} \${MMAKE_CFLAGS}" check_library_presence libelf.h elf 2>/dev/null
-HERE
-    ))
-    if [ ! -z $require_optional_targets ] && [ "$HAVE_LIBELF" -ne 1 ]; then
-      echo Failed to find libelf with header libelf.h
-      exit -1
-    fi
-    have_libelf_line="HAVE_LIBELF := $HAVE_LIBELF"
-  fi
-
 
   cat <<-EOF >config.mk
 	PLATFORM := $PLATFORM
@@ -137,15 +102,12 @@ HERE
 	DESTPATH := $DESTPATH
 	BUILDFLAG := $BUILDFLAG
 	DESTFLAG := $DESTFLAG
-	REMOTEBUILDFLAG := $REMOTEBUILDFLAG
 	TOPPATH := $TOPPATH
 	BUILDENV := $($mmaketool --distribution)-$(gcc -dumpmachine)
-	BUILDHOST := $BUILDHOST
 	W_NO_UNUSED_RESULT := $W_NO_UNUSED_RESULT
 	W_NO_STRING_TRUNCATION := $W_NO_STRING_TRUNCATION
 	W_IMPLICIT_FALLTHROUGH := $W_IMPLICIT_FALLTHROUGH
 	W_NO_IGNORED_ATTRIBUTES := $W_NO_IGNORED_ATTRIBUTES
-	$have_libelf_line
 	$nt
 	$kpath
 EOF
@@ -189,16 +151,6 @@ do_build_tree () {
 
   [ "$CURRENT" = src ] && do_top_level
   export MMAKE_NO_DEPS=1
-
-  if [ "$REMOTEBUILDFLAG" = 1 ] ; then
-     if [ "$THISDIR" = "." ] ; then
-        ssh -i ${TOPPATH}/mk/site/rsync.key rsync@${BUILDHOST} \
-          rm -rf ~${BUILDPATH}  &>/dev/null
-     else
-        ssh -i ${TOPPATH}/mk/site/rsync.key rsync@${BUILDHOST} \
-          rm -rf ~${BUILDPATH}/$THISDIR &>/dev/null
-     fi
-  fi
 
   [ "$DESTFLAG" = 1 ] && recurse
 }
@@ -340,7 +292,6 @@ SRCPATH=
 DESTPATH=
 BUILDFLAG=
 DESTFLAG=
-REMOTEBUILDFLAG=
 BUILDENV=
 TOPPATH=
 RELATIVE_TOP=
@@ -353,7 +304,6 @@ what="--platforms"
 host=
 builddir=
 usetemp=0
-remotebuild_host=
 custom=0
 gnu=
 localhost=$(hostname)
@@ -367,7 +317,6 @@ while [ $# -gt 0 ]; do
     -h)	if [ -z "$2" ]; then usage; fi; host="$2"; shift;;
     -l) if [ -z "$2" ]; then usage; fi; builddir="$2";  shift;;
     -ltmp) builddir="mmakeltmp_${USER}_$(date '+%Y%m%d%H%M%S')"; usetemp=1;;
-    -r)	if [ -z "$2" ]; then usage; fi; remotebuild_host="$2"; shift;;
     --inplace) builddir="";  shift;;
     --driver) host="$localhost";;
     --gnu|--user) gnu=1;;
@@ -387,13 +336,6 @@ esac
 if [ -n "$gnu" ]; then
   PLATFORM=`mmaketool --userbuild_base`; 
   [ -z "$dest" ] && dest=`mmaketool --userbuild`
-fi
-
-######################################################################
-#check not local build and remote build selected
-if [ ! -z "$builddir" -a ! -z "$remotebuild_host" ] ; then
-  log "ERROR: cannot specify local and remote (rsync build) at the same time"
-  exit -1
 fi
 
 [ "$usetemp" = 1 ] && do_use_tmp

@@ -1,3 +1,14 @@
+######################################################################
+#
+# Driver for Solarflare network controllers and boards
+# Copyright 2019 Solarflare Communications Inc.
+#
+# This program is free software; you can redistribute it and/or modify it
+# under the terms of the GNU General Public License version 2 as published
+# by the Free Software Foundation, incorporated herein by reference.
+#
+######################################################################
+
 err  () { echo >&2 "$*";    }
 log  () { err "$me: $*";    }
 vlog () { $efx_verbose && err "$me: $*"; }
@@ -518,12 +529,14 @@ vmsg "KPATH      := $KPATH"
 #  CONFIG_X86_{32,64}:    Work around ARCH = x86 madness
 #  CONFIG_PTP_1588_CLOCK: PTP clock support
 [ -n "$ARCH" ] && export ARCH
-eval $(read_make_variables KBUILD_SRC ARCH SRCARCH CONFIG_X86_32 CONFIG_X86_64 CONFIG_PTP_1588_CLOCK)
+eval $(read_make_variables KBUILD_SRC ARCH SRCARCH CONFIG_X86_32 CONFIG_X86_64 CONFIG_PTP_1588_CLOCK abs_srctree)
 
 # Define:
+#     KBUILD_SRC:         Was renamed into abs_srctree in linux-5.3
 #     KBUILD_SRC:         If not already set, same as KPATH
 #     SRCARCH:            If not already set, same as ARCH
 #     WORDSUFFIX:         Suffix added to some filenames by the i386/amd64 merge
+[ -n "${KBUILD_SRC:-}" ] || KBUILD_SRC=${abs_srctree:-}
 [ -n "${KBUILD_SRC:-}" ] || KBUILD_SRC=$KPATH
 [ -n "${SRCARCH:-}" ] || SRCARCH=$ARCH
 if [ "$ARCH" = "i386" ] || [ "${CONFIG_X86_32:-}" = "y" ]; then

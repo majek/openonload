@@ -18,7 +18,6 @@
 
 #include <ci/internal/ip.h>
 #include "netif_tx.h"
-#include "l3xudp_encap.h"
 
 
 /* Send packet to the IP layer.
@@ -42,10 +41,10 @@ extern int ci_ip_send_pkt(ci_netif* ni,
  * This function is used when onload is missing the necessary information
  * to send this packet.
  */
-extern void ci_ip_send_pkt_defer(ci_netif *ni,
-                                 cicpos_retrieve_rc_t retrieve_rc,
-                                 ci_uerr_t *ref_os_rc, ci_ip_pkt_fmt* pkt,
-                                 const ci_ip_cached_hdrs *ipcache);
+extern void
+ci_ip_send_pkt_defer(ci_netif* ni, const struct oo_sock_cplane* sock_cp,
+                     cicpos_retrieve_rc_t retrieve_rc, ci_uerr_t* ref_os_rc,
+                     ci_ip_pkt_fmt* pkt, const ci_ip_cached_hdrs* ipcache);
 
 
 /* Do control plane lookup to send [pkt], but don't actually send it.  This
@@ -62,8 +61,9 @@ extern void ci_ip_send_pkt_lookup(ci_netif* ni,
                                   ci_ip_cached_hdrs* ipcache) CI_HF;
 
 /* Second half of split version of ci_ip_send_pkt(). */
-extern int ci_ip_send_pkt_send(ci_netif* ni, ci_ip_pkt_fmt* pkt,
-                               const ci_ip_cached_hdrs* ipcache) CI_HF;
+extern int
+ci_ip_send_pkt_send(ci_netif* ni, const struct oo_sock_cplane* sock_cp_opt,
+                    ci_ip_pkt_fmt* pkt, const ci_ip_cached_hdrs* ipcache) CI_HF;
 
 /* Send the [pkt] via loopback from socket [s] to socket [dst].
  */

@@ -258,13 +258,16 @@
 #define CI_IP_DFLT_TTL 64
 #define CI_IP_MAX_TTL 255 
 
-/* IP TOS setting */
+/* IP TOS default */
 #define CI_IP_DFLT_TOS 0
-#define CI_IP_MAX_TOS 255
 /* 8-bit field - but individual bits have (ignored) meaning */
 
 /* IPv6 Traffic Class default */
 #define CI_IPV6_DFLT_TCLASS 0
+
+/* IPv6 hop limit defaults. Both are equal to corresponding Linux ones. */
+#define CI_IPV6_DFLT_HOPLIMIT  64
+#define CI_IPV6_DFLT_MCASTHOPS 1
 
 /* Should we generate code that protects us against invalid shared state?
 ** By default we want the kernel to be robust to arbitrary shared state,
@@ -387,11 +390,10 @@
  * in ms, same as of linux-4.19 */
 #define CI_CFG_TCP_OUT_OF_WINDOW_ACK_RATELIMIT 500
 
-/* Path to the /proc/sys/ */
 #define CI_CFG_PROC_PATH		"/proc/sys/"
 /* The real max is 30, but let's use larger value. */
 #define CI_CFG_PROC_PATH_LEN_MAX	70
-/* Stolen from procps/sysctl.c */
+/* Match procfs/sysctl line limits. */
 #define CI_CFG_PROC_LINE_LEN_MAX	1025
 
 /*
@@ -668,11 +670,6 @@
 /* How many ready lists are maintained */
 #define CI_CFG_N_READY_LISTS CI_CFG_EPOLL1_SETS_PER_STACK
 
-/* Control behaviour of Onload sender when receiver advertises window
- * below 1 MSS
- */
-#define CI_CFG_SPLIT_SEND_PACKETS_FOR_SMALL_RECEIVE_WINDOWS 0
-
 #define CI_CFG_MAX_SUPPORTED_INTERFACES 16
 
 /* Do we need SO_TIMESTAMPING, WODA, ...? */
@@ -685,6 +682,28 @@
 #define CI_CFG_PROC_DELAY_BUCKETS       20
 #define CI_CFG_PROC_DELAY_NS_SHIFT      10
 
+/* Enable native kernel BPF program functionality
+ * (subject to kernel support see CI_HAVE_BPF_NATIVE) */
+#define CI_CFG_WANT_BPF_NATIVE          1
+
+
+#ifdef __KERNEL__
+#include <linux/version.h>
+/* Enable Berkeley Packet Filter program functionality
+ * with kernel native implementation on supporting kernel
+ * version.
+ *  * required functionality
+ *       bpf_prog_get_type_dev 4.15+
+ *       BPF_PROG_GET_FD_BY_ID 4.13+
+ *       IFLA_XDP_PROG_ID      4.13+
+ *  * testing done on 4.18 (Ubuntu 18.10 and RHEL8)
+ */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,18,0)
+#define CI_HAVE_BPF_NATIVE 1
+#else
+#define CI_HAVE_BPF_NATIVE 0
+#endif
+#endif
 /* Include "extra" transport_config_opt to allow build-time profiles */
 #include TRANSPORT_CONFIG_OPT_HDR
 

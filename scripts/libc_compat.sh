@@ -29,7 +29,8 @@ cat >"$header" <<EOF
 EOF
 
 for sym in __read_chk __recv_chk __recvfrom_chk __poll_chk \
-           accept4 pipe2 dup3  epoll_pwait ppoll sendmmsg splice; do
+           accept4 pipe2 dup3  epoll_pwait ppoll __ppoll_chk sendmmsg \
+           splice fcntl64; do
     find_sym "$libc_path" "$sym" "$header"
 done
 

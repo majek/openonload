@@ -14,11 +14,8 @@
 /*! \cidoxg_lib_transport_ip */
 
 #include "ip_internal.h"
-#include "l3xudp_encap.h"
 #include <ci/internal/ip_stats.h>
 #include <ci/net/sockopts.h>
-
-
 
 
 /* 
@@ -370,7 +367,6 @@ int ci_get_sol_ip( ci_netif* ni, ci_sock_cmn* s, ci_fd_t fd,
   case IP_PKTINFO:
     u = !!(s->cmsg_flags & CI_IP_CMSG_PKTINFO);
     break;
-
 
 
   default:
@@ -737,12 +733,28 @@ int ci_set_sol_ip( ci_netif* netif, ci_sock_cmn* s,
                    int optname, const void *optval, socklen_t optlen)
 {
   int rc = 0; /* Shut up compiler warning */
+  int zeroval = 0;
 
   ci_assert(netif);
+
+  /* Match kernel behaviour: if length is 0, it treats the value as 0;
+   * For other cases NULL for optval is unacceptable. */
+  if( optval == NULL ) {
+    if( optlen == 0 ) {
+      optval = &zeroval;
+    }
+    else {
+      rc = -EFAULT;
+      goto fail_fault;
+    }
+  }
 
   /* IP level options valid for TCP */
   switch(optname) {
   case IP_OPTIONS:
+    /* 40 is max size for options in IPv4 packet header */
+    if( optlen > 40 )
+      goto fail_fault;
     /* sets the IP options to be sent with every packet from this socket */
     /*! ?? \TODO is this possible ? */
     LOG_U(ci_log("%s: "NS_FMT" unhandled IP_OPTIONS", __FUNCTION__,
@@ -751,30 +763,28 @@ int ci_set_sol_ip( ci_netif* netif, ci_sock_cmn* s,
 
   case IP_TOS:
   {
-    unsigned val;
+    ci_uint8 val;
 
     /* sets the IP ToS options sent with every packet from this socket   */
     /* Note: currently we do not interpret this value in determining our */
     /*       delivery strategy                                           */
-    if( (rc = opt_not_ok( optval, optlen, char)) ) {
-      if( optlen == 0 )
+    if( optlen == 0 )
         return 0;
-      goto fail_fault;
-    }
-    val = ci_get_optval(optval, optlen);
 
+    /* Linux does not fail with large values of TOS, the value is just
+     * implicitly converted into unsigned char type. */
+    val = (ci_uint8)ci_get_optval(optval, optlen);
 
     if( s->b.state & CI_TCP_STATE_TCP ) {
       /* Bug3172: do not allow to change 2 and 1 bits of TOS for TCP socket. */
       val &= ~3;
       val |= s->cp.ip_tos & 3;
     }
-    val = CI_MIN(val, CI_IP_MAX_TOS);
-    s->cp.ip_tos = (ci_uint8)val;
+    s->cp.ip_tos = val;
     if( ! ipcache_is_ipv6(&s->pkt) ) {
-      s->pkt.ipx.ip4.ip_tos = (ci_uint8)val;
+      s->pkt.ipx.ip4.ip_tos = val;
       if( s->b.state == CI_TCP_STATE_UDP )
-        SOCK_TO_UDP(s)->ephemeral_pkt.ipx.ip4.ip_tos = (ci_uint8)val;
+        SOCK_TO_UDP(s)->ephemeral_pkt.ipx.ip4.ip_tos = val;
     }
 
     LOG_TV(log("%s: "NS_FMT" TCP IP_TOS = %u", __FUNCTION__,
@@ -815,11 +825,8 @@ int ci_set_sol_ip( ci_netif* netif, ci_sock_cmn* s,
 
     /* Bug 5644 */
   case IP_PKTINFO:
-    if( (rc = opt_not_ok(optval, optlen, char)) ) {
-      if( optlen == 0 )
-        return 0;
-      goto fail_fault;
-    }
+    if( optlen == 0 )
+      return 0;
 
     if (ci_get_optval(optval, optlen))
       s->cmsg_flags |= CI_IP_CMSG_PKTINFO;
@@ -959,19 +966,63 @@ int ci_set_sol_ip( ci_netif* netif, ci_sock_cmn* s,
     break;
 
 
-  REPORT_CASE(IP_ADD_MEMBERSHIP)
-  REPORT_CASE(IP_DROP_MEMBERSHIP)
-#ifdef MCAST_JOIN_GROUP
-  REPORT_CASE(MCAST_JOIN_GROUP)
-  REPORT_CASE(MCAST_LEAVE_GROUP)
+#ifdef IP_RECVFRAGSIZE
+  /* This option is only for RAW sockets */
+  case IP_RECVFRAGSIZE:
+    rc = -EINVAL;
+    goto fail_fault;
 #endif
-  REPORT_CASE(IP_MULTICAST_IF)
-  REPORT_CASE(IP_MULTICAST_LOOP)
-  REPORT_CASE(IP_MULTICAST_TTL)
+
+  case IP_MINTTL: {
+    int v;
+
+    if( (rc = opt_not_ok(optval, optlen, int)) )
+      goto fail_fault;
+    v = ci_get_optval(optval, optlen);
+    if( v < 0 || v > 255 )
+      goto fail_fault;
+    goto fail_noopt;
+  }
+
+  case IP_ADD_MEMBERSHIP:
+  case IP_DROP_MEMBERSHIP:
+    if( s->b.state & CI_TCP_STATE_TCP ) {
+      rc = -EPROTO;
+      goto fail_bad;
+    }
+    break;
+#ifdef IP_UNICAST_IF
+  case IP_UNICAST_IF:
+    if( (rc = opt_not_ok(optval, optlen, int)) )
+      goto fail_fault;
+    goto fail_noopt;
+#endif
+
+#ifdef MCAST_JOIN_GROUP
+  case MCAST_JOIN_GROUP:
+  case MCAST_LEAVE_GROUP:
+    if( s->b.state & CI_TCP_STATE_TCP )
+      goto fail_unhan;
+    break;
+#endif
+
+  case IP_BLOCK_SOURCE:
+  case IP_UNBLOCK_SOURCE:
+  case IP_DROP_SOURCE_MEMBERSHIP:
+  case IP_MULTICAST_TTL:
+  case IP_MULTICAST_IF:
+    if( s->b.state & CI_TCP_STATE_TCP ) {
+      rc = -EINVAL;
+      goto fail_fault;
+    }
+    if( optname == IP_BLOCK_SOURCE || optname == IP_UNBLOCK_SOURCE )
+      goto fail_noopt;
+    break;
+
+  REPORT_CASE(IP_MULTICAST_LOOP);
     /* When real work is necessary, it is already done in UDP-specific
      * functions or by OS . */
     break;
-
 
 
   default:
@@ -990,6 +1041,11 @@ int ci_set_sol_ip( ci_netif* netif, ci_sock_cmn* s,
              __FUNCTION__, NS_PRI_ARGS(netif, s), optname));
  fail_unhan:
   RET_WITH_ERRNO( ENOPROTOOPT );
+
+ fail_bad:
+   LOG_SC(log("%s: "NS_FMT" bad option %i value",
+             __FUNCTION__, NS_PRI_ARGS(netif, s), optname));
+   RET_WITH_ERRNO( -rc );
 
 #ifdef IP_TRANSPARENT
  handover:
@@ -1035,10 +1091,17 @@ int ci_set_sol_ip6( ci_netif* netif, ci_sock_cmn* s,
                     int optname, const void *optval, socklen_t optlen )
 {
   int rc = 0; /* Shut up compiler warning */
+  int zeroval = 0;
+
+  /* Match kernel behaviour: if optval is NULL, it treats the value as 0 */
+  if( optval == NULL )
+    optval = &zeroval;
 
   switch( optname ) {
   case IPV6_V6ONLY:
   {
+    if( (rc = opt_not_ok(optval, optlen, int)) )
+      goto fail_inval;
     int val = ci_get_optval(optval, optlen);
 #if CI_CFG_IPV6
     if( val && ! CI_IS_ADDR_IP6(s->laddr) )
@@ -1056,7 +1119,7 @@ int ci_set_sol_ip6( ci_netif* netif, ci_sock_cmn* s,
 
 #if CI_CFG_IPV6
   case IPV6_RECVPKTINFO:
-    if( (rc = opt_not_ok(optval, optlen, char)) )
+    if( (rc = opt_not_ok(optval, optlen, int)) )
       goto fail_inval;
 
     if ( ci_get_optval(optval, optlen) )
@@ -1089,6 +1152,50 @@ int ci_set_sol_ip6( ci_netif* netif, ci_sock_cmn* s,
     break;
   }
 
+  case IPV6_MULTICAST_HOPS: {
+    int val;
+
+    if( s->b.state & CI_TCP_STATE_TCP ) {
+      goto fail_noopt;
+    }
+    if( (rc = opt_not_ok( optval, optlen, int)) )
+      goto fail_inval;
+
+    val = ci_get_optval(optval, optlen);
+    if(val > 255 || val < -1) {
+      rc = -EINVAL;
+      goto fail_bad;
+    }
+
+    break;
+  }
+
+#ifdef IPV6_MINHOPCOUNT
+  case IPV6_MINHOPCOUNT: {
+    int val;
+
+    if( (rc = opt_not_ok( optval, optlen, int)) )
+      goto fail_inval;
+
+    val = ci_get_optval(optval, optlen);
+    if( val < 0 || val > 255 ) {
+      rc = -EINVAL;
+      goto fail_bad;
+    }
+
+     goto fail_noopt;
+   }
+#endif
+
+  case IPV6_MULTICAST_IF:
+    if( s->b.state & CI_TCP_STATE_TCP ) {
+      rc = -ENOPROTOOPT;
+      goto fail_noopt;
+    }
+    if( (rc = opt_not_ok( optval, optlen, int)) )
+      goto fail_inval;
+    break;
+
   case IPV6_RECVERR:
     if( (rc = ci_set_recverr(netif, s, CI_SOCKOPT_FLAG_IPV6_RECVERR, optval,
                              optlen)) )
@@ -1096,24 +1203,149 @@ int ci_set_sol_ip6( ci_netif* netif, ci_sock_cmn* s,
     break;
 
   case IPV6_AUTOFLOWLABEL:
-    if( (rc = opt_not_ok(optval, optlen, char)) )
+    if( (rc = opt_not_ok(optval, optlen, int)) )
       goto fail_inval;
     ci_set_autoflowlabel_flags(netif, s, optval, optlen);
     break;
 
+
+  /* The next options are not implemented but we should
+   * to check bad optlen and optval */
+#ifdef IPV6_ADDR_PREFERENCES
+  case IPV6_ADDR_PREFERENCES:
+#endif
+#ifdef IPV6_RECVORIGDSTADDR
+  case IPV6_RECVORIGDSTADDR:
+#endif
+#ifdef IPV6_MULTICAST_ALL
+  case IPV6_MULTICAST_ALL:
+#endif
+#ifdef IPV6_RECVFRAGSIZE
+  case IPV6_RECVFRAGSIZE:
+#endif
+#ifdef IPV6_RECVPATHMTU
+  case IPV6_RECVPATHMTU:
+#endif
+#ifdef IPV6_TRANSPARENT
+  case IPV6_TRANSPARENT:
+#endif
+#ifdef IPV6_UNICAST_IF
+  case IPV6_UNICAST_IF:
+#endif
+#ifdef IPV6_FREEBIND
+  case IPV6_FREEBIND:
+#endif
+#ifdef IPV6_DONTFRAG
+  case IPV6_DONTFRAG:
+#endif
+  case IPV6_MULTICAST_LOOP:
+  case IPV6_ROUTER_ALERT:
+  case IPV6_RECVDSTOPTS:
+  case IPV6_RECVHOPOPTS:
+  case IPV6_RECVRTHDR:
+  case IPV6_MTU:
+    if( (rc = opt_not_ok( optval, optlen, int)) )
+      goto fail_inval;
+
+    if( !(s->b.sb_aflags & CI_SB_AFLAG_OS_BACKED) )
+      goto fail_noopt;
+    break;
+
+  case IPV6_ADDRFORM: {
+    int val;
+
+    if( (rc = opt_not_ok(optval, optlen, int)) )
+      goto fail_inval;
+
+    val = ci_get_optval(optval, optlen);
+    if( val == PF_INET ) {
+      if( sock_protocol(s) != IPPROTO_UDP &&
+          sock_protocol(s) != IPPROTO_TCP ) {
+        goto fail_noopt;
+      }
+
+      if( s->b.state != CI_TCP_ESTABLISHED ) {
+        rc = -ENOTCONN;
+        goto fail_bad;
+      }
+
+      if( (s->s_flags & CI_SOCK_FLAG_V6ONLY) ) {
+        rc = -EINVAL;
+        goto fail_inval;
+      }
+    } else {
+      rc = -EINVAL;
+      goto fail_inval;
+    }
+    if( !(s->b.sb_aflags & CI_SB_AFLAG_OS_BACKED) )
+      goto fail_noopt;
+    break;
+  }
+
+  /* Use sizeof(int) instead sizeof(struct ipv6_opt_hdr) to
+   * perform a rough check for bad optlen. */
+  case IPV6_HOPOPTS:
+  case IPV6_RTHDRDSTOPTS:
+  case IPV6_RTHDR:
+  case IPV6_DSTOPTS:
+    if( optlen < sizeof(int) ||
+        optlen & 0x7 || optlen > 8 * 255 ) {
+      rc = -EINVAL;
+      goto fail_inval;
+    }
+
+    if( !(s->b.sb_aflags & CI_SB_AFLAG_OS_BACKED) )
+      goto fail_noopt;
+    break;
+
+  case IPV6_ADD_MEMBERSHIP:
+  case IPV6_DROP_MEMBERSHIP:
+    if( s->b.state & CI_TCP_STATE_TCP ) {
+      rc = -EPROTO;
+      goto fail_bad;
+    }
+    break;
+
+  case IPV6_PKTINFO:
+    if( (rc = opt_not_ok(optval, optlen, sizeof(struct ci_in6_pktinfo))) ) {
+      rc = -EINVAL;
+      goto fail_inval;
+    }
+    if( !(s->b.sb_aflags & CI_SB_AFLAG_OS_BACKED) )
+      goto fail_noopt;
+    break;
+
   default:
-    /* Don't fail with error but print the message about unimplemented IPv6
-     * options. Options are set for system socket.*/
-    LOG_U(log("%s: "NS_FMT" unimplemented/bad SOL_IPV6 option %i",
-              __FUNCTION__, NS_PRI_ARGS(netif, s), optname));
+    if( s->b.sb_aflags & CI_SB_AFLAG_OS_BACKED ) {
+      /* Don't fail with error but print the message about unimplemented IPv6
+       * options. Options are set for system socket.*/
+      LOG_U(log("%s: "NS_FMT" unimplemented/bad SOL_IPV6 option %i",
+                __FUNCTION__, NS_PRI_ARGS(netif, s), optname));
+    }
+    else {
+      goto fail_noopt;
+    }
+
+
 #endif
   }
   /* All socket options are already set for system socket, and we do not
    * handle IPv6 option natively. */
   return rc;
-#if CI_CFG_IPV6
+
  fail_inval:
   LOG_SC(log("%s: "NS_FMT" option %i ptr/len error (EINVAL or EFAULT)",
+             __FUNCTION__, NS_PRI_ARGS(netif, s), optname));
+  RET_WITH_ERRNO( -rc );
+
+#if CI_CFG_IPV6
+ fail_noopt:
+  LOG_SC(log("%s: "NS_FMT" unimplemented/bad option %i (ENOPROTOOPT)",
+             __FUNCTION__, NS_PRI_ARGS(netif, s), optname));
+  RET_WITH_ERRNO( ENOPROTOOPT );
+
+ fail_bad:
+  LOG_SC(log("%s: "NS_FMT" bad option %i value",
              __FUNCTION__, NS_PRI_ARGS(netif, s), optname));
   RET_WITH_ERRNO( -rc );
 #endif
@@ -1128,6 +1360,17 @@ int ci_set_sol_socket(ci_netif* netif, ci_sock_cmn* s,
   int rc;
 
   ci_assert(netif);
+
+  if( optname == SO_BINDTODEVICE ) {
+    rc = ci_sock_bindtodevice(netif, s, optval, optlen);
+    if( rc == 0 || rc == CI_SOCKET_HANDOVER )
+      return rc;
+    else
+      goto fail_other;
+  }
+
+  if( (rc = opt_not_ok(optval, optlen, int)) )
+    goto fail_inval;
 
   switch(optname) {
 #if CI_CFG_TCP_SOCK_STATS
@@ -1328,14 +1571,6 @@ int ci_set_sol_socket(ci_netif* netif, ci_sock_cmn* s,
 
       /* Linux stores/returns the precise priority value set */
       s->so_priority = *(ci_pkt_priority_t *)optval;
-      break;
-
-  case SO_BINDTODEVICE:
-      rc = ci_sock_bindtodevice(netif, s, optval, optlen);
-      if( rc == 0 || rc == CI_SOCKET_HANDOVER )
-        return rc;
-      else
-        goto fail_other;
       break;
 
   case SO_DEBUG:
@@ -1542,7 +1777,7 @@ int ci_setsockopt_os_fail_ignore(ci_netif* ni, ci_sock_cmn* s, int err,
  * ordering requirements.
  */
 int ci_set_sol_socket_nolock(ci_netif* ni, ci_sock_cmn* s, int optname,
-			     const void* optval, socklen_t optlen)
+                 const void* optval, socklen_t optlen)
 {
   int rc = 1;  /* This means "not handled". */
 

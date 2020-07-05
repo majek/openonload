@@ -271,6 +271,33 @@ void efrm_vi_rm_may_complete_flushes(struct efrm_nic *efrm_nic)
 	wake_up(&flush_wq);
 }
 
+
+/* Used for logging only - it's quite slow (not to mention the grossly
+ * inefficient double usage of this and ...get_netns_id) */
+static int efhw_nic_get_ifindex(struct efhw_nic* nic)
+{
+	int ifindex = -1;
+	struct net_device* dev = efhw_nic_get_net_dev(nic);
+	if( dev ) {
+		ifindex = dev->ifindex;
+		dev_put(dev);
+	}
+	return ifindex;
+}
+
+
+static unsigned efhw_nic_get_netns_id(struct efhw_nic* nic)
+{
+	unsigned id = 0;
+	struct net_device* dev = efhw_nic_get_net_dev(nic);
+	if( dev ) {
+		id = get_netns_id(dev_net(dev));
+		dev_put(dev);
+	}
+	return id;
+}
+
+
 void efrm_vi_check_flushes(struct work_struct *data)
 {
 	struct efrm_nic_vi *nvi;
@@ -311,9 +338,10 @@ void efrm_vi_check_flushes(struct work_struct *data)
 			 */
                         if (!efrm_nic->efhw_nic.resetting)
 				EFRM_WARN_LIMITED("%s: rx flush outstanding "
-				  "after %d second(s) on ifindex %d",
+				  "after %d second(s) on ifindex %u:%d",
 				  __FUNCTION__, FLUSH_TIMEOUT / HZ,
-				  efrm_nic->efhw_nic.ifindex);
+				  efhw_nic_get_netns_id(&efrm_nic->efhw_nic),
+				  efhw_nic_get_ifindex(&efrm_nic->efhw_nic));
 			efrm_vi_resource_rx_flush_done(virs, &completed);
 			found = true;
 		}
@@ -333,9 +361,10 @@ void efrm_vi_check_flushes(struct work_struct *data)
 			 */
                         if (!efrm_nic->efhw_nic.resetting)
 				EFRM_WARN_LIMITED("%s: tx flush outstanding "
-				  "after %d second(s) on ifindex %d",
+				  "after %d second(s) on ifindex %u:%d",
 				  __FUNCTION__, FLUSH_TIMEOUT / HZ,
-				  efrm_nic->efhw_nic.ifindex);
+				  efhw_nic_get_netns_id(&efrm_nic->efhw_nic),
+				  efhw_nic_get_ifindex(&efrm_nic->efhw_nic));
 			efrm_vi_resource_tx_flush_done(virs, &completed);
 			found = true;
 		}

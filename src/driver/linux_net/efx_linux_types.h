@@ -1,10 +1,13 @@
-/**************************************************************************/
-/*!  \file  efx_linux_types.h
-** \author  bwh
-**  \brief  Wrapper for <linux/types.h>
-**   \date  2008/12/11
-**    \cop  Copyright 2008 Solarflare Communications Inc.
-*//************************************************************************/
+/****************************************************************************
+ * Driver for Solarflare network controllers and boards
+ * Copyright 2019 Solarflare Communications Inc.
+ *
+ * This program is free software; you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License version 2 as published
+ * by the Free Software Foundation, incorporated herein by reference.
+ */
+
+/* Wrapper for <linux/types.h> */
 
 #ifndef EFX_LINUX_TYPES_H
 #define EFX_LINUX_TYPES_H

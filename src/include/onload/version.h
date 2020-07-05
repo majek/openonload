@@ -16,12 +16,12 @@
 
 
 #ifndef ONLOAD_VERSION
-# define ONLOAD_VERSION "7.0.0.176"
+# define ONLOAD_VERSION "7.1.0.265"
 #endif
 
 #define ONLOAD_PRODUCT "Onload"
 
-#define ONLOAD_COPYRIGHT "Copyright 2006-2019 Solarflare Communications, 2002-2005 Level 5 Networks"
+#define ONLOAD_COPYRIGHT "Copyright 2019-2020 Xilinx, 2006-2019 Solarflare Communications, 2002-2005 Level 5 Networks"
 
 /* Max length of version string used for version skew checking. */
 enum { OO_VER_STR_LEN = 40 };

@@ -154,7 +154,6 @@ if $all || $kernel; then
   driver_prebuilt="$("$bin/mmaketool" --processor)_linux"
   if [ -d "$TOP/prebuilt/${driver_prebuilt}" ]; then
     try cp -ad "$TOP/prebuilt/${driver_prebuilt}"/* "$d"
-    echo "PREBUILD_CPLANE := 1" >>"$d/options_config.mk"
   fi
 
   make $parallel -C "$d" ONLOAD_ONLY=1 $nodeps ||
@@ -175,7 +174,6 @@ if $all || $user || $user64; then
     TOP=$("$bin/mmaketool" --toppath)
     if [ -d "$TOP/prebuilt/$userplatform" ]; then
       try cp -ad "$TOP/prebuilt/$userplatform" .
-      echo "PREBUILD_CPLANE := 1" >>"$userplatform/options_config.mk"
     fi
 
     make $parallel -C "$userplatform" ONLOAD_ONLY=1 $nodeps ||
@@ -209,7 +207,6 @@ if $all || $user || $user32; then
   TOP=$("$bin/mmaketool" --toppath)
   if [ -d "$TOP/prebuilt/$userplatform" ]; then
     try cp -ad "$TOP/prebuilt/$userplatform" .
-    echo "PREBUILD_CPLANE := 1" >>"$userplatform/options_config.mk"
   fi
 
   make $parallel -C "$userplatform" ONLOAD_ONLY=1 $nodeps || {

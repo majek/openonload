@@ -49,6 +49,20 @@ struct oof_socket {
   int       sf_rport;
   /* See [sf_local_port] for local port and protocol. */
 
+  /* If this is a socket accepted on a NAT-ed address, and the local port
+   * before NAT is different from the port after NAT, then this is the former.
+   * In all other cases, the field is equal to zero. */
+  int       sf_lport_prenat;
+
+  /* Index of the relevant oof_local_port_addr structure within sf_local_port.
+   * Negative for wild sockets.  For semi-wild and full-match sockets, this is
+   * typically equal to oof_manager_addr_find(..., sf_laddr), but this doesn't
+   * hold true when the socket's local address is subject to NAT.
+   *   Note that this index is stable for a given address as long as there at
+   * least one oof_socket referencing that address, so storing the index here
+   * is valid. */
+  int       sf_la_i;
+
   /* Link for one of:
    * - [oof_local_port::lp_wild_socks]
    * - [oof_local_port_addr::lpa_semi_wild_socks]

@@ -47,7 +47,6 @@
 #endif
 
 
-
 /*********************************************************************
 ***************************** Constants *****************************
 *********************************************************************/
@@ -501,20 +500,33 @@ typedef struct {
 
 
 /*!
-** ci_netif_filter_table_entry  ci_netif_filter_table
+** ci_netif_filter_table
 **
 ** The filter table that demuxes packets to sockets.
 */
+
+/* Fast-path state for filter-table entries. */
 typedef struct {
-  ci_int32  id;
-  ci_int32  route_count;  /* how many lookups pass through this entry? */
+  /* The encoding of this field is explained in the relevant place in the
+   * implementation. */
+  ci_uint32 __id_and_state;
   ci_uint32 laddr;
-} ci_netif_filter_table_entry;
+  /* The explicit alignment specified on this structure prevents entries from
+   * straddling cache lines. */
+} ci_netif_filter_table_entry_fast CI_ALIGN(8);
+
+
+/* Extra state for filter-table entries that we avoid touching on the fastest
+ * paths. */
+typedef struct {
+  ci_int32  route_count;  /* how many lookups pass through this entry? */
+  ci_uint16 lport;
+} ci_netif_filter_table_entry_ext;
 
 
 typedef struct {
-  CI_ULCONST unsigned         table_size_mask;
-  ci_netif_filter_table_entry table[1];
+  CI_ULCONST unsigned              table_size_mask;
+  ci_netif_filter_table_entry_fast table[1];
 } ci_netif_filter_table;
 
 
@@ -848,12 +860,18 @@ typedef struct {
 # define CI_EPLOCK_NETIF_KERNEL_PACKETS    0x0020000000000000ULL
   /* need to finish clearing ready lists */
 # define CI_EPLOCK_NETIF_FREE_READY_LIST   0x0008000000000000ULL
+  /* have some deferred packets to send
+   * (NB it is NOT in UNLOCK_FLAGS below!) */
+#define CI_EPLOCK_NETIF_HAS_DEFERRED_PKTS  0x0004000000000000ULL
+#if CI_CFG_WANT_BPF_NATIVE
   /* need to handle postponed XDP prog update */
-# define CI_EPLOCK_NETIF_XDP_CHANGE        0x0004000000000000ULL
-  /* have some deferred packets to send */
-#define CI_EPLOCK_NETIF_HAS_DEFERRED_PKTS  0x0002000000000000ULL
+# define CI_EPLOCK_NETIF_XDP_CHANGE        0x0002000000000000ULL
   /* mask for the above flags that must be handled before dropping lock */
-# define CI_EPLOCK_NETIF_UNLOCK_FLAGS      0xff3c000000000000ULL
+# define CI_EPLOCK_NETIF_UNLOCK_FLAGS      0xff3a000000000000ULL
+#else
+  /* mask for the above flags that must be handled before dropping lock */
+# define CI_EPLOCK_NETIF_UNLOCK_FLAGS      0xff38000000000000ULL
+#endif
 } ci_eplock_t;
 
 
@@ -920,9 +938,6 @@ typedef struct {
   oo_pkt_p              rx_frags;
   /* Owner of EFRM PD */
   ci_uint32             pd_owner;
-  /* Sequence number of the desired XDP eBPF program config. c.f.
-   * ci_netif_nic_s::xdp_active_gen */
-  ci_uint32             xdp_current_gen;
 #if CI_CFG_TIMESTAMPING
   /* Timestamp of the last packet received with a hardware timestamp. */
   struct oo_timespec    last_rx_timestamp;
@@ -973,6 +988,9 @@ struct ci_netif_state_s {
 #define CI_NETIF_FLAG_PKT_ACCOUNT_PENDING  0x40 /* pending packet account */
 #endif
 # define CI_NETIF_FLAG_NO_INIT_NET_CPLANE  0x80 /* failed to map main cplane */
+  /* oof subsystem is capable to work with some addresses which are blamed
+   * to be non-local by cicp_user_addr_is_local_efab() */
+# define CI_NETIF_FLAG_USE_ALIEN_LADDRS  0x200
 
 
   /* To give insight into runtime errors detected.  See also copy in
@@ -1081,6 +1099,7 @@ struct ci_netif_state_s {
 
   CI_ULCONST ci_uint32  active_wild_ofs; /**< offset of active wild table */
   CI_ULCONST ci_uint32  table_ofs;       /**< offset of s/w filter table */
+  CI_ULCONST ci_uint32  table_ext_ofs;   /**< offset of slow s/w filter state */
 #if CI_CFG_IPV6
   CI_ULCONST ci_uint32  ip6_table_ofs;   /**< offset of IPv6 s/w filter table */
 #endif
@@ -2016,6 +2035,7 @@ struct  ci_udp_state_s {
     ci_int16 vlan;
     ci_addr_t daddr;
     ci_uint8  dmac[ETH_ALEN];
+    ci_uint16 af;
 
     /* User info: */
     union {
@@ -2146,6 +2166,7 @@ typedef struct {
   ci_uint32            rcv_nxt;   /* sequence number one beyond SYN      */
   ci_uint32            snd_isn;   /* initial sequence number for SYN-ACK */
 
+  ci_uint16            l_port;    /* local port                          */
   ci_uint16            r_port;    /* remote port                         */
 
   ci_uint8             rcv_wscl;  /* advertised window scale in SYN-ACK  */
@@ -2164,7 +2185,6 @@ typedef struct {
 
   ci_uint32            hash;        /* hash value for lookup table       */
   oo_p                 bucket_link; /* link used in hash buckets         */
-
 } ci_tcp_state_synrecv;
 
 /* State for maintaining ci_netif_state::ready_eps_list[ready_list_id]
@@ -2308,10 +2328,6 @@ struct ci_tcp_state_s {
   /* this socket is a faked-up loopback connection for
    * EF_TCP_SERVER_LOOPBACK=2 mode */
 #define CI_TCPT_FLAG_LOOP_FAKE          0x20000
-
-/* It should be under "#if CI_CFG_TCP_TOA", but CI_TCP_SOCKET_FLAGS_PRI_ARG
- * becomes too complicated... */
-#define CI_TCPT_FLAG_TOA                0x40000
 
   /* Timer is running (rto timer is used) */
 #define CI_TCPT_FLAG_TAIL_DROP_TIMING   0x80000
@@ -2578,7 +2594,6 @@ struct ci_tcp_state_s {
     ci_uint32          seq;
     ci_iptime_t        time;
   } rcvbuf_drs;
-
 
   /* Destination address before NAT.  Required for getpeername(). */
   struct {

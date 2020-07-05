@@ -205,7 +205,7 @@ void ci_tcp_rcvbuf_drs(ci_netif* netif, ci_tcp_state* ts)
 	rcv_wnd += (rcv_wnd >> 1);
     }
 
-    rcvbuf = CI_MIN(rcv_wnd, max_rcvbuf_packets * ts->amss);
+    rcvbuf = CI_MIN(rcv_wnd, (ci_uint64)max_rcvbuf_packets * ts->amss);
 
     if( rcvbuf > ts->s.so.rcvbuf ) {
       ts->s.so.rcvbuf = rcvbuf;

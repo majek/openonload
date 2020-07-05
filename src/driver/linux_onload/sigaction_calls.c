@@ -536,10 +536,17 @@ efab_linux_trampoline_sigaction32(int sig, const struct sigaction32 *act32,
 
     ci_assert_ge(_COMPAT_NSIG_WORDS, _NSIG_WORDS << 1);
     switch (_NSIG_WORDS) { /* Note: no break */
-    case 4: act.sa_mask.sig[3] = set32.sig[6] | (((long)set32.sig[7]) << 32);
-    case 3: act.sa_mask.sig[2] = set32.sig[4] | (((long)set32.sig[5]) << 32);
-    case 2: act.sa_mask.sig[1] = set32.sig[2] | (((long)set32.sig[3]) << 32);
-    case 1: act.sa_mask.sig[0] = set32.sig[0] | (((long)set32.sig[1]) << 32);
+    case 4:
+      act.sa_mask.sig[3] = set32.sig[6] | (((long)set32.sig[7]) << 32);
+      /* fall-through */
+    case 3:
+      act.sa_mask.sig[2] = set32.sig[4] | (((long)set32.sig[5]) << 32);
+      /* fall-through */
+    case 2:
+      act.sa_mask.sig[1] = set32.sig[2] | (((long)set32.sig[3]) << 32);
+      /* fall-through */
+    case 1:
+      act.sa_mask.sig[0] = set32.sig[0] | (((long)set32.sig[1]) << 32);
     }
   }
 
@@ -556,12 +563,15 @@ efab_linux_trampoline_sigaction32(int sig, const struct sigaction32 *act32,
     case 4:
       set32.sig[7] = (oact.sa_mask.sig[3] >> 32);
       set32.sig[6] = oact.sa_mask.sig[3];
+      /* fall-through */
     case 3:
       set32.sig[5] = (oact.sa_mask.sig[2] >> 32);
       set32.sig[4] = oact.sa_mask.sig[2];
+      /* fall-through */
     case 2:
       set32.sig[3] = (oact.sa_mask.sig[1] >> 32);
       set32.sig[2] = oact.sa_mask.sig[1];
+      /* fall-through */
     case 1:
       set32.sig[1] = (oact.sa_mask.sig[0] >> 32);
       set32.sig[0] = oact.sa_mask.sig[0];

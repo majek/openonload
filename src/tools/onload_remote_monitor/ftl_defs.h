@@ -185,8 +185,6 @@
 #define ON_CI_CFG_PROC_DELAY IGNORE
 #endif
 
-#define ON_CI_CFG_L3XUDP IGNORE
-
 #if CI_CFG_USERSPACE_PIPE
 #define ON_CI_CFG_USERSPACE_PIPE DO
 #else
@@ -548,6 +546,7 @@
   FTL_TFIELD_INT(ctx, ci_uint32, active_wild_ofs, ORM_OUTPUT_STACK)             \
   FTL_TFIELD_INT(ctx, ci_uint16, active_wild_pools_n, ORM_OUTPUT_STACK)             \
   FTL_TFIELD_INT(ctx, ci_uint32, table_ofs, ORM_OUTPUT_STACK)             \
+  FTL_TFIELD_INT(ctx, ci_uint32, table_ext_ofs, ORM_OUTPUT_STACK)             \
   FTL_TFIELD_INT(ctx, ci_uint32, buf_ofs, ORM_OUTPUT_STACK)               \
   FTL_TFIELD_STRUCT(ctx, ci_ip_timer_state, iptimer_state, ORM_OUTPUT_STACK) \
   FTL_TFIELD_STRUCT(ctx, ci_ip_timer, timeout_tid, ORM_OUTPUT_STACK)      \
@@ -775,12 +774,6 @@
     FTL_TFIELD_INT(ctx, cicp_encap_t, encap, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))                \
     FTL_TFIELD_INT(ctx, ci_int16, intf_i, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))            \
     FTL_TFIELD_INT(ctx, ci_ifid_t, iif_ifindex, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))            \
-    ON_CI_CFG_L3XUDP( \
-      FTL_TFIELD_INTBE32(ctx, encap_vni_be32, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))            \
-      FTL_TFIELD_IPADDR(ctx, encap_daddr_be32, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS)) \
-      FTL_TFIELD_PORT(ctx, encap_dport_be16, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))            \
-      FTL_TFIELD_INT(ctx, ci_uint8, encap_flags, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))            \
-    ) \
     FTL_TFIELD_INT(ctx, ci_hwport_id_t, hwport, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))            \
     FTL_TFIELD_INT(ctx, ci_uint8, ether_offset, (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS))            \
     FTL_TFIELD_ARRAYOFINT(ctx, ci_uint8, ether_header,     \
@@ -1248,19 +1241,24 @@ typedef struct oo_tcp_socket_stats oo_tcp_socket_stats;
     FTL_TSTRUCT_END(ctx)
     
 
-#define STRUCT_FILTER_TABLE_ENTRY(ctx)                                        \
-    FTL_TSTRUCT_BEGIN(ctx, ci_netif_filter_table_entry, )                     \
-    FTL_TFIELD_INT(ctx, ci_int32, id, ORM_OUTPUT_STACK)            \
-    FTL_TFIELD_INT(ctx, ci_int32, route_count, ORM_OUTPUT_STACK)   \
-    FTL_TFIELD_INT(ctx, ci_uint32, laddr, ORM_OUTPUT_STACK)        \
+#define STRUCT_FILTER_TABLE_ENTRY_FAST(ctx)                                   \
+    FTL_TSTRUCT_BEGIN(ctx, ci_netif_filter_table_entry_fast, )       \
+    FTL_TFIELD_INT(ctx, ci_uint32, __id_and_state, ORM_OUTPUT_STACK) \
+    FTL_TFIELD_INT(ctx, ci_uint32, laddr, ORM_OUTPUT_STACK)          \
     FTL_TSTRUCT_END(ctx)
-    
+
+
+#define STRUCT_FILTER_TABLE_ENTRY_EXT(ctx)                                    \
+    FTL_TSTRUCT_BEGIN(ctx, ci_netif_filter_table_entry_ext, )      \
+    FTL_TFIELD_INT(ctx, ci_int32, route_count, ORM_OUTPUT_STACK)   \
+    FTL_TSTRUCT_END(ctx)
+
 
 #define STRUCT_FILTER_TABLE(ctx)                                              \
     FTL_TSTRUCT_BEGIN(ctx, ci_netif_filter_table, )                           \
     FTL_TFIELD_INT(ctx, unsigned, table_size_mask, ORM_OUTPUT_STACK)    \
     FTL_TFIELD_ARRAYOFSTRUCT(ctx, \
-			     ci_netif_filter_table_entry, table, 1, ORM_OUTPUT_STACK, 1) \
+			     ci_netif_filter_table_entry_fast, table, 1, ORM_OUTPUT_STACK, 1) \
     FTL_TSTRUCT_END(ctx)
     
 #define STRUCT_OO_PIPE_BUF_LIST_T(ctx)                            \

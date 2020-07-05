@@ -148,8 +148,10 @@ extern int ci_tcp_tx_split(ci_netif* ni, ci_tcp_state* ts, ci_ip_pkt_queue* qu,
                            ci_boolean_t is_sendq)
 {
   int af = ipcache_af(&ts->s.pkt);
+  ci_tcp_hdr* pkt_tcp = TX_PKT_IPX_TCP(af, pkt);
+  ci_tcp_hdr* next_tcp;
   int old_len = PKT_TCP_TX_SEQ_SPACE(pkt)
-     - ((TX_PKT_IPX_TCP(af, pkt)->tcp_flags & CI_TCP_FLAG_FIN) >> CI_TCP_FLAG_FIN_BIT);
+     - ((pkt_tcp->tcp_flags & CI_TCP_FLAG_FIN) >> CI_TCP_FLAG_FIN_BIT);
   int n, old_last_seg_size;
   int hdrlen = ts->outgoing_hdrs_len;
   ci_ip_pkt_fmt *next;
@@ -163,6 +165,7 @@ extern int ci_tcp_tx_split(ci_netif* ni, ci_tcp_state* ts, ci_ip_pkt_queue* qu,
 
   next = ci_tcp_tx_allocate_pkt(ni, ts, qu, pkt, hdrlen, old_len, new_paylen);
   if( next == NULL )  return -1;
+  next_tcp = TX_PKT_IPX_TCP(af, next);
 
   n = new_paylen + hdrlen + oo_tx_pre_l3_len(pkt);
   /* Assume that we have all we need in the first segment */
@@ -198,12 +201,12 @@ extern int ci_tcp_tx_split(ci_netif* ni, ci_tcp_state* ts, ci_ip_pkt_queue* qu,
   if( is_sendq )
     ++ts->send_in;
 
-  /* Move the FIN if necessary */
-  if( TX_PKT_IPX_TCP(af, pkt)->tcp_flags & CI_TCP_FLAG_FIN ) {
-    TX_PKT_IPX_TCP(af, pkt)->tcp_flags &=~ CI_TCP_FLAG_FIN;
-    TX_PKT_IPX_TCP(af, next)->tcp_flags |= CI_TCP_FLAG_FIN;
+  /* Move the flags as necessary */
+  next_tcp->tcp_flags = pkt_tcp->tcp_flags &
+                        (CI_TCP_FLAG_ACK | CI_TCP_FLAG_PSH | CI_TCP_FLAG_FIN);
+  pkt_tcp->tcp_flags &= ~(CI_TCP_FLAG_PSH | CI_TCP_FLAG_FIN);
+  if( next_tcp->tcp_flags & CI_TCP_FLAG_FIN )
     next->pf.tcp_tx.end_seq++;
-  }
 
   ASSERT_VALID_PKT(ni, pkt);
   CITP_DETAILED_CHECKS(ci_tcp_tx_pkt_assert_valid(ni, ts, pkt,
@@ -486,21 +489,4 @@ void ci_tcp_retrans_coalesce_block(ci_netif* ni, ci_tcp_state* ts,
     if( OO_PP_EQ(pkt->next, next_id) )
       pkt = PKT_CHK(ni, pkt->next);
   }
-}
-
-
-void ci_tcp_fill_small_window(ci_netif* netif, ci_tcp_state* ts)
-{
-  ci_ip_pkt_fmt* pkt = PKT_CHK(netif, ts->send.head);
-
-  ASSERT_VALID_PKT(netif, pkt);
-  if (PKT_TCP_TX_SEQ_SPACE(pkt) > tcp_snd_wnd(ts) &&
-      (ci_tcp_tx_split(netif, ts, &ts->send, pkt, tcp_snd_wnd(ts), 1) != 0)) {
-    LOG_U(log(LNTS_FMT "Failed to split packet when trying to fill "
-              "a small window %d",
-              LNTS_PRI_ARGS(netif, ts), tcp_snd_wnd(ts)));
-    return;
-  }
-
-  ci_tcp_tx_advance(ts, netif);
 }

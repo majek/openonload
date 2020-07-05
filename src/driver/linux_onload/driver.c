@@ -126,8 +126,9 @@ module_param(oof_use_all_local_ip_addresses, int, S_IRUGO | S_IWUSR);
 MODULE_PARM_DESC(oof_use_all_local_ip_addresses,
                  "By default Onload only those local IP addresses which are "
                  "assigned to Onloadable network interfaces.  This option "
-                 "allows to tell Onload that it should handle all local IP "
-                 "addresses regardless of the network interface type.");
+                 "allows Onload to handle all local IP addresses regardless "
+                 "of the network interface type.\n"
+                 "See also cplane_use_prefsrc_as_local module option.");
 
 #ifdef EFRM_DO_USER_NS
 /* The code in this function and below are based on the kernel's
@@ -570,21 +571,9 @@ static int __init onload_module_init(void)
 
   oo_mm_tbl_init();
 
-#if CI_CFG_BPF
-#ifndef NO_BPF
-  rc = oo_bpf_ctor();
-  if( rc < 0 )
-    goto fail_bpf;
-#endif
-#endif
-
   rc = efab_tcp_driver_ctor();
   if( rc != 0 )
     goto fail_ip_ctor;
-
-  rc = oo_driverlink_register();
-  if( rc < 0 )
-    goto failed_driverlink;
 
   rc = ci_install_proc_entries();
   if( rc < 0 ) {
@@ -623,9 +612,17 @@ static int __init onload_module_init(void)
     goto failed_cp_ctor;
   }
 
+  /* Now cplane is ready to handle hwport announcements.
+   * Let's register in driverlink. */
+  rc = oo_driverlink_register();
+  if( rc < 0 )
+    goto failed_driverlink;
+
   OO_DEBUG_LOAD(ci_log("Onload module initialised successfully."));
   return 0;
 
+  oo_driverlink_unregister();
+ failed_driverlink:
   oo_cp_driver_dtor();
  failed_cp_ctor:
   oo_epoll_chrdev_dtor();
@@ -642,20 +639,12 @@ static int __init onload_module_init(void)
  failed_trampoline:
   ci_uninstall_proc_entries();
  fail_proc:
-  oo_driverlink_unregister();
- failed_driverlink:
-  /* Remove all NICs when driverlink is gone.
+  /* Remove all NICs.
    * It is possible that efx_dl_register_driver() call was successful, so
    * we have to shut down all NICs even if oo_driverlink_register() failed. */
   oo_nic_shutdown();
   efab_tcp_driver_dtor();
  fail_ip_ctor:
-#if CI_CFG_BPF
-#ifndef NO_BPF
-  oo_bpf_dtor();
- fail_bpf:
-#endif
-#endif
  fail_sanity:
   return rc;
 }
@@ -681,26 +670,22 @@ static void onload_module_exit(void)
    * It should be done early, as soon as User API is not available. */
   efab_tcp_driver_stop();
 
+  /* Remove driverlink hook before cplane. */
+  oo_driverlink_unregister();
+
   /* By reverse order of creation, we should have destroyed the cplane driver
    * earlier than this, but because stacks have references to cplanes, we need
    * to have flushed the global workqueue in efab_tcp_driver_stop() before
    * calling oo_cp_driver_ctor(). */
   oo_cp_driver_dtor();
 
-  /* Remove external interfaces to efab_tcp_driver. */
+  /* Remove the rest of external interfaces to efab_tcp_driver. */
   ci_uninstall_proc_entries();
-  oo_driverlink_unregister();
 
   /* Remove all NICs when driverlink is gone. */
   oo_nic_shutdown();
 
   efab_tcp_driver_dtor();
-
-#if CI_CFG_BPF
-#ifndef NO_BPF
-  oo_bpf_dtor();
-#endif
-#endif
 
   OO_DEBUG_LOAD(ci_log("Onload module unloaded"));
 }

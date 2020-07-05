@@ -373,7 +373,7 @@ tcp_helper_endpoint_set_filters(tcp_helper_endpoint_t* ep,
   else if( OO_SP_NOT_NULL(from_tcp_id) )
     rc = oof_socket_share(oo_filter_ns_to_manager(ep->thr->filter_ns),
                           &ep->oofilter, &listen_ep->oofilter,
-                          af_space, laddr, raddr, rport);
+                          af_space, laddr, raddr, lport, rport);
   else {
     int flags;
     ci_assert( ! in_atomic() );

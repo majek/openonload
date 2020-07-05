@@ -1483,6 +1483,13 @@ static inline struct sk_buff *
 	}
 #endif
 
+#ifdef EFX_HAVE_IOREMAP_NOCACHE
+	/* On old kernels ioremap_nocache() differs from ioremap() */
+	#define efx_ioremap(phys,size)	ioremap_nocache(phys,size)
+#else
+	#define efx_ioremap(phys,size)	ioremap(phys,size)
+#endif
+
 #ifdef EFX_NEED_SKB_TRANSPORT_HEADER_WAS_SET
 	#ifdef EFX_HAVE_OLD_SKB_HEADER_FIELDS
 		#define skb_transport_header_was_set(skb) (!!(skb)->h.raw)
@@ -1597,6 +1604,17 @@ static inline struct tcphdr *inner_tcp_hdr(const struct sk_buff *skb)
  * work with both this and a real link_mode_mask.
  */
 #define __ETHTOOL_DECLARE_LINK_MODE_MASK(name)  unsigned long name[1]
+#endif
+
+#ifdef EFX_NEED_MOD_DELAYED_WORK
+static inline bool mod_delayed_work(struct workqueue_struct *wq,
+				    struct delayed_work *dwork,
+				    unsigned long delay)
+{
+	cancel_delayed_work(dwork);
+	queue_delayed_work(wq, dwork, delay);
+	return true;
+}
 #endif
 
 /**************************************************************************
