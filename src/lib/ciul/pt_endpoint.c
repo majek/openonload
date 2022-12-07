@@ -92,11 +92,13 @@ static int check_nic_compatibility(unsigned vi_flags, unsigned ef_vi_arch)
       return -EOPNOTSUPP;
     }
     return 0;
-    
+
   case EFHW_ARCH_EF10:
     return 0;
-    
+
   default:
+    LOGVV(ef_log("%s: ERROR: architecture not supported by onload version",
+                 __FUNCTION__));
     return -EINVAL;
   }
 }
